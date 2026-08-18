@@ -132,7 +132,7 @@ impl MCodeIr {
 
     fn operations(&self) -> Vec<MCodeOp> {
         self.inner
-            .operations()
+            .ops()
             .iter()
             .enumerate()
             .map(|(index, operation)| MCodeOp::from_core(&self.inner, index, operation))
@@ -141,7 +141,7 @@ impl MCodeIr {
 
     fn operations_for_source(&self, address: &Address) -> Vec<MCodeOp> {
         self.inner
-            .operations_for_source(address.inner())
+            .ops_for_source(address.inner())
             .map(|(index, operation)| MCodeOp::from_core(&self.inner, index.index(), operation))
             .collect()
     }
@@ -236,7 +236,7 @@ impl MCodeValue {
     fn from_core(index: usize, value: CoreMCodeValue) -> Self {
         let (definition_kind, definition_index) = match value.definition() {
             CoreIlSsaDef::BlockArg(arg) => ("block_arg", arg.index()),
-            CoreIlSsaDef::Operation(operation) => ("operation", operation.index()),
+            CoreIlSsaDef::Op(operation) => ("operation", operation.index()),
         };
         let binding = value.binding();
         Self {
@@ -404,7 +404,7 @@ impl MCodeOp {
     fn from_core(ir: &CoreMCodeIr, index: usize, operation: &CoreMCodeOp) -> Self {
         let results = (operation.results().start()..operation.results().end()).collect();
         let operands = ir
-            .operation_operands_for(operation)
+            .op_operands_for(operation)
             .iter()
             .map(|operand| operand.index())
             .collect();

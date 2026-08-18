@@ -26,11 +26,11 @@ impl<'a> PCodeIrDisplay<'a> {
 
 impl fmt::Display for PCodeIrDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (index, operation) in self.ir.operations().iter().enumerate() {
+        for (index, operation) in self.ir.ops().iter().enumerate() {
             let display = PCodeOpDisplay::new(self.ir, index, operation);
             write!(f, "{display}")?;
 
-            if index + 1 < self.ir.operations().len() {
+            if index + 1 < self.ir.ops().len() {
                 writeln!(f)?;
             }
         }
@@ -55,7 +55,7 @@ impl fmt::Display for PCodeSourceDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut first = true;
 
-        for (index, operation) in self.ir.operations_for_source(self.address) {
+        for (index, operation) in self.ir.ops_for_source(self.address) {
             if !first {
                 writeln!(f)?;
             }
@@ -127,7 +127,7 @@ impl<'a> PCodeOpDisplay<'a> {
     }
 
     fn write_operands(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let operands = self.ir.operation_operands_for(self.operation);
+        let operands = self.ir.op_operands_for(self.operation);
 
         for (index, operand) in operands.iter().enumerate() {
             if index == 0 {
@@ -301,7 +301,7 @@ mod test {
             .unwrap();
 
         let ir = builder.build(&CancellationToken::default()).unwrap();
-        let operations = ir.operations_for_source(second).collect::<Vec<_>>();
+        let operations = ir.ops_for_source(second).collect::<Vec<_>>();
 
         assert_eq!(operations.len(), 1);
         assert_eq!(operations[0].0, IlOpId::try_from_index(1).unwrap());

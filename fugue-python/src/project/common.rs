@@ -65,7 +65,8 @@ impl IlGraph {
     }
 
     fn predecessors(&self) -> PyResult<Vec<IlBlockPredecessors>> {
-        let predecessors = self.inner.predecessors();
+        let predecessors =
+            CoreIlBlockPredecessors::new(self.inner.blocks(), self.inner.successors());
 
         self.inner
             .blocks()
@@ -106,8 +107,8 @@ impl IlBlock {
 
         Self {
             index,
-            operation_start: block.operations().start(),
-            operation_end: block.operations().end(),
+            operation_start: block.ops().start(),
+            operation_end: block.ops().end(),
             successor_start: block.successors().start(),
             successor_end: block.successors().end(),
             successors,

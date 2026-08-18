@@ -98,7 +98,7 @@ impl IlSourceSpan {
         find_destination_span(spans, node, Self::destination)
     }
 
-    pub fn operations<'a, T>(
+    pub fn ops<'a, T>(
         spans: &'a [Self],
         operations: &'a [T],
         address: Address,

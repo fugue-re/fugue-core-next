@@ -175,7 +175,7 @@ impl MCodeStackModel {
             .find(|&value| {
                 ir.value_domain(value) == Some(ECodeDomain::Register(stack_pointer))
                     && ir
-                        .defining_operation(value)
+                        .defining_op(value)
                         .is_some_and(|operation| operation.opcode() == ECodeOpcode::Undefined)
             });
         let mut this = Self {
@@ -213,7 +213,7 @@ impl MCodeStackModel {
             this.offsets[index] = next;
 
             for use_site in uses.uses_for(value) {
-                let user = &ir.operations()[use_site.user().index()];
+                let user = &ir.ops()[use_site.user().index()];
                 worklist.extend(user.results().start()..user.results().end());
             }
             worklist.extend(dependents.row(index));
@@ -335,7 +335,7 @@ impl MCodeStackModel {
 
     fn collect_intervals(&self, ir: &ECodeIr) -> Vec<StackObjectInterval> {
         let mut intervals = Vec::new();
-        for (index, operation) in ir.operations().iter().enumerate() {
+        for (index, operation) in ir.ops().iter().enumerate() {
             if !matches!(operation.opcode(), ECodeOpcode::Load | ECodeOpcode::Store) {
                 continue;
             }
@@ -348,7 +348,7 @@ impl MCodeStackModel {
             let width = match operation.opcode() {
                 ECodeOpcode::Load => operation.width(),
                 _ => ir
-                    .operation_operands_for(operation)
+                    .op_operands_for(operation)
                     .get(1)
                     .and_then(|value| ir.value_width(*value))
                     .unwrap_or(0),
@@ -375,7 +375,7 @@ impl MCodeStackModel {
                 continue;
             };
             let exposed_here = uses.uses_for(value).iter().any(|site| {
-                let user = &ir.operations()[site.user().index()];
+                let user = &ir.ops()[site.user().index()];
                 match user.opcode() {
                     ECodeOpcode::Load | ECodeOpcode::Store if site.operand_index() == 0 => false,
                     ECodeOpcode::Copy
@@ -409,7 +409,7 @@ impl MCodeStackModel {
         stack_pointer: RegisterId,
         entry_stack_pointer: Option<IlValueId>,
     ) -> StackOffset {
-        let Some(operation) = ir.defining_operation(value) else {
+        let Some(operation) = ir.defining_op(value) else {
             return StackOffset::Unvisited;
         };
 
@@ -423,7 +423,7 @@ impl MCodeStackModel {
             };
         }
 
-        let operands = ir.operation_operands_for(operation);
+        let operands = ir.op_operands_for(operation);
         let offset = |index: usize| {
             operands
                 .get(index)

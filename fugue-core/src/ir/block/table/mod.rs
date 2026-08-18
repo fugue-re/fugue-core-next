@@ -203,7 +203,7 @@ impl CodeBlockTable {
     pub fn flush(&self) -> Result<(), EntityStorageError> {
         match self {
             Self::Persistent(table) => table.flush(),
-            Self::Transient(table) => table.flush(),
+            Self::Transient(_) => Ok(()),
         }
     }
 
@@ -371,21 +371,21 @@ impl CodeBlockTable {
         }
     }
 
-    pub fn overlaps(&self, addr: Address) -> Box<dyn Iterator<Item = CodeBlockRef<'_>> + '_> {
+    pub fn overlaps_address(&self, addr: Address) -> Box<dyn Iterator<Item = CodeBlockRef<'_>> + '_> {
         match self {
-            Self::Persistent(table) => Box::new(table.overlaps(addr).map(EntityRef::cached)),
-            Self::Transient(table) => Box::new(table.overlaps(addr).map(EntityRef::borrowed)),
+            Self::Persistent(table) => Box::new(table.overlaps_address(addr).map(EntityRef::cached)),
+            Self::Transient(table) => Box::new(table.overlaps_address(addr).map(EntityRef::borrowed)),
         }
     }
 
-    pub fn overlaps_range<'a>(
+    pub fn overlaps<'a>(
         &'a self,
         range: &'a AddressRange,
     ) -> Box<dyn Iterator<Item = CodeBlockRef<'a>> + 'a> {
         match self {
-            Self::Persistent(table) => Box::new(table.overlaps_range(range).map(EntityRef::cached)),
+            Self::Persistent(table) => Box::new(table.overlaps(range).map(EntityRef::cached)),
             Self::Transient(table) => {
-                Box::new(table.overlaps_range(range).map(EntityRef::borrowed))
+                Box::new(table.overlaps(range).map(EntityRef::borrowed))
             }
         }
     }

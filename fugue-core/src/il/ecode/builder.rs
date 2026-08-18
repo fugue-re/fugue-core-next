@@ -65,13 +65,13 @@ impl ECodeBuilder {
         Ok(value)
     }
 
-    fn push_operation(&mut self, operation: ECodeOp) -> Result<IlOpId, IlError> {
+    fn push_op(&mut self, operation: ECodeOp) -> Result<IlOpId, IlError> {
         let id = IlOpId::try_from_index(self.operations.len())?;
         self.operations.push(operation);
         Ok(id)
     }
 
-    fn operation_count(&self) -> usize {
+    fn op_count(&self) -> usize {
         self.operations.len()
     }
 
@@ -179,8 +179,8 @@ pub struct ECodeEmitter<'a> {
 }
 
 impl ECodeEmitter<'_> {
-    pub fn operation_count(&self) -> usize {
-        self.builder.operation_count()
+    pub fn op_count(&self) -> usize {
+        self.builder.op_count()
     }
 
     pub fn intern_constant(&mut self, value: &BitVec) -> u64 {
@@ -204,7 +204,7 @@ impl ECodeEmitter<'_> {
         for _ in 0..result_count {
             self.builder
                 .values
-                .push(ECodeValue::operation_result(spec.width(), operation));
+                .push(ECodeValue::op_result(spec.width(), operation));
             self.builder.value_domains.push(None);
         }
         let results = IlIndexRange::new(result_start, self.builder.values.len())?;
@@ -220,7 +220,7 @@ impl ECodeEmitter<'_> {
             }
             record.set_address_space(address_space);
         }
-        self.builder.push_operation(record)?;
+        self.builder.push_op(record)?;
 
         Ok((operation, results))
     }

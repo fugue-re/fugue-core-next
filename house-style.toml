@@ -27,16 +27,16 @@ reason = "IL type names abbreviate identifier to Id"
 [[vocabulary.term]]
 reject = "operation"
 prefer = "op"
-roles = ["type"]
+roles = ["type", "variant"]
 modules = ["crate::il"]
 reason = "IL type names abbreviate operation to Op"
 
 [[vocabulary.term]]
-reject = "op"
-prefer = "operation"
+reject = "operation"
+prefer = "op"
 roles = ["function", "method"]
 modules = ["crate::il"]
-reason = "IL function and method names spell out operation"
+reason = "IL function and method names pair op with type-level Op, matching Arg and arg"
 
 [[vocabulary.term]]
 reject = "ssa"
@@ -104,6 +104,16 @@ modules = ["crate::il::ecode::optimise::required", "crate::il::mcode::optimise::
 [[family]]
 name = "ecode-mcode-values"
 modules = ["crate::il::ecode::value", "crate::il::mcode::value"]
+
+[[family]]
+name = "ir-entity-tables"
+modules = [
+    "crate::ir::block::table",
+    "crate::ir::function::table",
+    "crate::ir::problem::table",
+    "crate::ir::switch::table",
+    "crate::ir::symbol::table",
+]
 
 [[family]]
 name = "ecode-mcode-verification"
@@ -232,21 +242,6 @@ reason = "MCode is scheduled to change; leave its mechanics alone until the new 
 
 [[exception]]
 rule = "repeated_mechanics"
-item = "defining_operation"
-reason = "one side lives in MCode, which is scheduled to change; leave its mechanics alone until the new form lands"
-
-[[exception]]
-rule = "repeated_mechanics"
-item = "evaluate"
-reason = "the opcode families stay separate; MCode's opcode set is scheduled to change and consolidation now would be premature"
-
-[[exception]]
-rule = "repeated_mechanics"
-item = "rollback"
-reason = "one side lives in MCode, which is scheduled to change; leave its mechanics alone until the new form lands"
-
-[[exception]]
-rule = "repeated_mechanics"
 item = "define"
 reason = "one side lives in MCode, which is scheduled to change; leave its mechanics alone until the new form lands"
 
@@ -256,11 +251,46 @@ path = "fugue-core/src/il/ecode/optimise/required.rs"
 reason = "ECode's required defs arrive through the analysis trait while MCode's take recovery inputs directly; the constructors are not corresponding operations"
 
 [[exception]]
-rule = "repeated_mechanics"
-item = "write_operands"
-reason = "dialect display adapters mirror deliberately; the shared shape is a separator loop over dialect-specific writers"
-
-[[exception]]
 rule = "index_conversion_churn"
 item = "evaluate"
 reason = "the scalar evaluator bridges bit-width, shift-amount and byte-count domains at the BitVec boundary; each conversion is the boundary"
+
+[[exception]]
+rule = "family_visibility_drift"
+path = "fugue-core/src/il/mcode/optimise/required.rs"
+item = "MCodeRequiredDefs::new"
+reason = "justified asymmetry: ECode reaches required defs through the analyse trait while MCode constructs its defs directly"
+
+[[exception]]
+rule = "repeated_mechanics"
+path = "fugue-core/src/ir/symbol/table/transient.rs"
+reason = "get_by_id and get_by_id_mut are API-symmetry twins; the mutable form mirrors the immutable body deliberately"
+
+[[exception]]
+rule = "repeated_mechanics"
+path = "fugue-core/src/ir/symbol/table/persistent.rs"
+reason = "ids_by_address and ids_by_name are parallel per-index scans; the shared shape is the index walk"
+
+[[exception]]
+rule = "family_visibility_drift"
+path = "fugue-core/src/ir/function/table/mod.rs"
+item = "publish_prepared"
+reason = "publish visibility follows the caller: function materialises internally while the transaction layer drives the other tables"
+
+[[exception]]
+rule = "family_visibility_drift"
+path = "fugue-core/src/ir/function/table/mod.rs"
+item = "publish_upsert"
+reason = "publish visibility follows the caller: function materialises internally while the transaction layer drives the other tables"
+
+[[exception]]
+rule = "family_visibility_drift"
+path = "fugue-core/src/ir/function/table/mod.rs"
+item = "publish_remove"
+reason = "publish visibility follows the caller: function materialises internally while the transaction layer drives the other tables"
+
+[[exception]]
+rule = "family_visibility_drift"
+path = "fugue-core/src/ir/symbol/table/mod.rs"
+item = "publish_prepared"
+reason = "publish visibility follows the caller: the prepared half-tie mirrors function's internal materialisation"

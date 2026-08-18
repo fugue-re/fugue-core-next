@@ -16,7 +16,7 @@ impl ECodeValue {
         Self { width, definition }
     }
 
-    pub const fn operation_result(width: u32, operation: IlOpId) -> Self {
+    pub const fn op_result(width: u32, operation: IlOpId) -> Self {
         Self::new(width, IlSsaDef::Op(operation))
     }
 

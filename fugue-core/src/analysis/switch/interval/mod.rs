@@ -96,10 +96,10 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
     ) -> Option<RecoveredSwitch> {
         let target = self
             .ssa
-            .operations_for_source(branch)
+            .ops_for_source(branch)
             .find(|(_, operation)| operation.opcode() == ECodeOpcode::BranchIndirect)
             .and_then(|(_, operation)| {
-                self.ssa.operation_operands_for(operation).first().copied()
+                self.ssa.op_operands_for(operation).first().copied()
             })?;
         context.apply(branch, insn_resolver.context_mut());
         if let Some(layout) = self.table_layout(target) {
@@ -253,10 +253,10 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
     }
 
     fn label_offset(&self, index: IlValueId) -> i64 {
-        let Some(operation) = self.ssa.defining_operation(index) else {
+        let Some(operation) = self.ssa.defining_op(index) else {
             return 0;
         };
-        let operands = self.ssa.operation_operands_for(operation);
+        let operands = self.ssa.op_operands_for(operation);
         match operation.opcode() {
             ECodeOpcode::Sub => operands
                 .get(1)
@@ -297,7 +297,7 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
         if let Some(&block) = self.blocks_by_source.get(&address) {
             return Some(block);
         }
-        let (operation, _) = self.ssa.operations_for_source(address).next()?;
-        self.ssa.block_for_operation(operation)
+        let (operation, _) = self.ssa.ops_for_source(address).next()?;
+        self.ssa.block_for_op(operation)
     }
 }

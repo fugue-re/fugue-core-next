@@ -92,7 +92,7 @@ impl ProjectTransaction<'_> {
         let mut branches = self
             .project
             .switches
-            .branches_of_function(function)
+            .branches_for_function(function)
             .collect::<BTreeSet<_>>();
         for (&branch, switch) in &self.staged_switches {
             match switch {

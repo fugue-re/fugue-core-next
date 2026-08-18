@@ -19,7 +19,7 @@ impl IlRewrite<MCodeIr> for MCodeConstantFolding {
         let mut folded = vec![None::<BitVec>; ir.values().len()];
         let mut worklist = Vec::new();
 
-        for operation in ir.operations() {
+        for operation in ir.ops() {
             if operation.results().len() != 1 || operation.opcode() != MCodeOpcode::Constant {
                 continue;
             }
@@ -35,7 +35,7 @@ impl IlRewrite<MCodeIr> for MCodeConstantFolding {
                 .expect("value count fits the value id space");
             for usage in uses.uses_for(defined) {
                 let user = usage.user();
-                let operation = &ir.operations()[user.index()];
+                let operation = &ir.ops()[user.index()];
                 if operation.results().len() != 1 || operation.opcode() == MCodeOpcode::Constant {
                     continue;
                 }
@@ -43,7 +43,7 @@ impl IlRewrite<MCodeIr> for MCodeConstantFolding {
                 if folded[result].is_some() || ir.values()[result].width() != operation.width() {
                     continue;
                 }
-                let operation_operands = ir.operation_operands_for(operation);
+                let operation_operands = ir.op_operands_for(operation);
                 let mut operands = SmallVec::<[&BitVec; 4]>::new();
                 for operand in operation_operands {
                     let Some(constant) = folded[operand.index()].as_ref() else {
@@ -94,8 +94,8 @@ impl IlRewrite<MCodeIr> for MCodeConstantFolding {
         }
 
         let mut rewriter = ir.rewriter();
-        for index in 0..rewriter.operations().len() {
-            let operation = &rewriter.operations()[index];
+        for index in 0..rewriter.ops().len() {
+            let operation = &rewriter.ops()[index];
             if operation.opcode() == MCodeOpcode::Constant || operation.results().len() != 1 {
                 continue;
             }

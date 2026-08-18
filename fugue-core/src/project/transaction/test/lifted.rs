@@ -61,7 +61,7 @@ fn lifted_materialise_and_read() -> Result<(), Box<dyn std::error::Error>> {
         .pcode(FunctionId::default())?
         .expect("PCode IR should be materialised");
 
-    assert_eq!(read.operations(), body.operations());
+    assert_eq!(read.ops(), body.ops());
     assert_eq!(
         read.metadata().input_revision(),
         project.semantic_revision()

@@ -52,7 +52,7 @@ fn every_recovered_function_lifts(fixture: &str) -> Result<(), Box<dyn Error>> {
             let value = IlValueId::try_from_index(index).expect("value index is representable");
             ecode.value_domain(value) == Some(ECodeDomain::Register(stack_pointer))
                 && ecode
-                    .defining_operation(value)
+                    .defining_op(value)
                     .is_some_and(|operation| operation.opcode() == ECodeOpcode::Undefined)
         });
         let mcode = reader
@@ -64,11 +64,11 @@ fn every_recovered_function_lifts(fixture: &str) -> Result<(), Box<dyn Error>> {
             .iter()
             .any(|arg| mcode.binding(arg.value()).is_some());
         memory_merge |= mcode.block_args().iter().any(|arg| arg.width() == 0);
-        for operation in mcode.operations() {
+        for operation in mcode.ops() {
             if operation.opcode() != MCodeOpcode::Call {
                 continue;
             }
-            call_args |= mcode.operation_operands_for(operation).len() > 1;
+            call_args |= mcode.op_operands_for(operation).len() > 1;
             call_outputs |= operation.results().len() > 1
                 && operation
                     .results()
@@ -123,7 +123,7 @@ fn an_external_consumer_can_supply_function_scoped_facts() -> Result<(), Box<dyn
         .find_map(|function| {
             let source = reader.lifted::<ECodeIr>(function).ok().flatten()?;
             let site = source
-                .operations()
+                .ops()
                 .iter()
                 .position(|operation| operation.opcode() == ECodeOpcode::Call)
                 .and_then(|index| IlOpId::try_from_index(index).ok())?;

@@ -42,11 +42,11 @@ impl SwitchTable {
         Ok(Self { index, entries })
     }
 
-    pub(crate) fn branches_of_function(
+    pub(crate) fn branches_for_function(
         &self,
         function: FunctionId,
     ) -> impl Iterator<Item = Address> + '_ {
-        self.index.branches_of_function(function)
+        self.index.branches_for_function(function)
     }
 
     pub(crate) fn flush(&self) -> Result<(), EntityStorageError> {

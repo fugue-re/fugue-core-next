@@ -66,7 +66,7 @@ impl MCodeStackDefs {
         operation_blocks: &[Option<IlBlockId>],
     ) -> Result<Self, IlError> {
         let mut definitions = BTreeMap::<MCodeVarId, Vec<IlBlockId>>::new();
-        for (index, operation) in ir.operations().iter().enumerate() {
+        for (index, operation) in ir.ops().iter().enumerate() {
             if operation.opcode() != ECodeOpcode::Store {
                 continue;
             }
@@ -285,7 +285,7 @@ impl<'a> MCodeCallOutputSolver<'a> {
 
     fn collect_linear_call_outputs(&mut self) -> Result<(), IlError> {
         let mut candidates = MCodeCallOutputCandidates::default();
-        for index in 0..self.source.operations().len() {
+        for index in 0..self.source.ops().len() {
             self.collect_call_output_at(IlOpId::try_from_index(index)?, &mut candidates)?;
         }
         Ok(())
@@ -314,7 +314,7 @@ impl<'a> MCodeCallOutputSolver<'a> {
         for (site, _) in self
             .source
             .graph()
-            .operations_for_block(block, self.source.operations())
+            .ops_for_block(block, self.source.ops())
         {
             self.collect_call_output_at(site, candidates)?;
         }
@@ -326,7 +326,7 @@ impl<'a> MCodeCallOutputSolver<'a> {
         site: IlOpId,
         candidates: &mut MCodeCallOutputCandidates,
     ) -> Result<(), IlError> {
-        let operation = &self.source.operations()[site.index()];
+        let operation = &self.source.ops()[site.index()];
         if matches!(
             operation.opcode(),
             ECodeOpcode::Call | ECodeOpcode::CallIndirect

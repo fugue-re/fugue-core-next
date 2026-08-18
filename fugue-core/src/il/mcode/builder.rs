@@ -81,7 +81,7 @@ impl MCodeBuilder {
         let operation = IlOpId::try_from_index(self.operations.len())?;
         for width in widths {
             self.values
-                .push(MCodeValue::operation_result(width, operation));
+                .push(MCodeValue::op_result(width, operation));
         }
 
         IlIndexRange::new(start, self.values.len())
@@ -113,13 +113,13 @@ impl MCodeBuilder {
         Ok(())
     }
 
-    fn push_operation(&mut self, operation: MCodeOp) -> Result<IlOpId, IlError> {
+    fn push_op(&mut self, operation: MCodeOp) -> Result<IlOpId, IlError> {
         let id = IlOpId::try_from_index(self.operations.len())?;
         self.operations.push(operation);
         Ok(id)
     }
 
-    fn operation_count(&self) -> usize {
+    fn op_count(&self) -> usize {
         self.operations.len()
     }
 
@@ -239,8 +239,8 @@ pub struct MCodeEmitter<'a> {
 }
 
 impl MCodeEmitter<'_> {
-    pub fn operation_count(&self) -> usize {
-        self.builder.operation_count()
+    pub fn op_count(&self) -> usize {
+        self.builder.op_count()
     }
 
     pub fn intern_constant(&mut self, value: &BitVec) -> u64 {
@@ -278,7 +278,7 @@ impl MCodeEmitter<'_> {
             }
             record.set_address_space(address_space);
         }
-        self.builder.push_operation(record)?;
+        self.builder.push_op(record)?;
 
         Ok((operation, results))
     }

@@ -364,7 +364,7 @@ fn ecode_verifier_bounds_wide_constant_at_pool_edge() {
         let metadata = IlMetadata::new(FunctionId::default(), 0);
         ECodeFixture::default()
             .with_values(
-                vec![ECodeValue::operation_result(
+                vec![ECodeValue::op_result(
                     128,
                     IlOpId::try_from_index(0).unwrap(),
                 )],
@@ -402,7 +402,7 @@ fn ecode_verifier_rejects_non_dominating_linear_use() {
     let operands = IlIndexRange::new(0, 1).unwrap();
     let ir = ECodeFixture::default()
         .with_values(
-            vec![ECodeValue::operation_result(
+            vec![ECodeValue::op_result(
                 32,
                 IlOpId::try_from_index(1).unwrap(),
             )],
@@ -453,7 +453,7 @@ fn ecode_verifier_rejects_non_dominating_block_use() {
     );
     let ir = ECodeFixture::default()
         .with_values(
-            vec![ECodeValue::operation_result(
+            vec![ECodeValue::op_result(
                 32,
                 IlOpId::try_from_index(0).unwrap(),
             )],
@@ -586,7 +586,7 @@ fn ecode_verifier_rejects_non_dominating_edge_arg() {
     let ir = ECodeFixture::default()
         .with_values(
             vec![
-                ECodeValue::operation_result(32, IlOpId::try_from_index(0).unwrap()),
+                ECodeValue::op_result(32, IlOpId::try_from_index(0).unwrap()),
                 ECodeValue::block_arg(32, IlBlockArgId::try_from_index(0).unwrap()),
             ],
             vec![ECodeBlockArg::new(right, arg_value, 32)],
@@ -633,7 +633,7 @@ fn ecode_verifier_rejects_duplicate_operation_placement() {
     );
     let ir = ECodeFixture::default()
         .with_values(
-            vec![ECodeValue::operation_result(
+            vec![ECodeValue::op_result(
                 32,
                 IlOpId::try_from_index(0).unwrap(),
             )],

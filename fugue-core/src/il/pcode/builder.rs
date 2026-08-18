@@ -57,11 +57,11 @@ impl PCodeBuilder {
         self.operands.append(operands)
     }
 
-    fn push_operation(&mut self, operation: PCodeOp) {
+    fn push_op(&mut self, operation: PCodeOp) {
         self.operations.push(operation);
     }
 
-    fn operation_count(&self) -> usize {
+    fn op_count(&self) -> usize {
         self.operations.len()
     }
 
@@ -117,8 +117,8 @@ pub struct PCodeEmitter<'a> {
 }
 
 impl PCodeEmitter<'_> {
-    pub fn operation_count(&self) -> usize {
-        self.builder.operation_count()
+    pub fn op_count(&self) -> usize {
+        self.builder.op_count()
     }
 
     pub fn intern_location(&mut self, location: PCodeLocation) -> Result<PCodeLocationId, IlError> {
@@ -138,7 +138,7 @@ impl PCodeEmitter<'_> {
         let id = IlOpId::try_from_index(self.builder.operations.len())?;
         let operands = self.builder.push_operands(operands)?;
         self.builder
-            .push_operation(PCodeOp::new(spec, output, operands));
+            .push_op(PCodeOp::new(spec, output, operands));
         Ok(id)
     }
 }
@@ -181,7 +181,7 @@ mod test {
         let ir = builder.build(&CancellationToken::default()).unwrap();
 
         assert!(ir.verify().is_ok());
-        assert_eq!(ir.operations().len(), 1);
+        assert_eq!(ir.ops().len(), 1);
         assert_eq!(ir.locations().len(), 1);
     }
 

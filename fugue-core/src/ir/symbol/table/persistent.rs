@@ -322,7 +322,6 @@ impl SymbolTable {
     }
 
     pub(crate) fn append_prepared_writes(
-        &self,
         id: SymbolId,
         entry: Option<&SymbolEntry>,
         previous: Option<&SymbolIndexState>,
@@ -440,7 +439,7 @@ impl SymbolTable {
             encoded,
         ));
         let previous_state = previous.map(SymbolIndexState::new);
-        self.append_prepared_writes(id, Some(&entry), previous_state.as_ref(), &mut writes)?;
+        Self::append_prepared_writes(id, Some(&entry), previous_state.as_ref(), &mut writes)?;
         let added = if is_new { 1 } else { 0 };
         let reservations = is_new
             .then_some(id)
@@ -733,7 +732,7 @@ impl SymbolTable {
         drop(entry);
         let mut writes = EntityWriteBatch::new();
         writes.remove_entity::<_, SymbolEntry>(&id);
-        self.append_prepared_writes(id, None, Some(&previous), &mut writes)?;
+        Self::append_prepared_writes(id, None, Some(&previous), &mut writes)?;
         self.allocator
             .append_transition(&[], &[id], 0, 1, &mut writes)?;
         self.entries.flush()?;

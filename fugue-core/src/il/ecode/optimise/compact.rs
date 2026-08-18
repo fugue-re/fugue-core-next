@@ -12,8 +12,8 @@ impl IlRewrite<ECodeIr> for ECodeCompaction {
     fn rewrite(&mut self, ir: &mut ECodeIr) {
         let required = ir.analyse::<ECodeRequiredDefs>();
 
-        let operation_map = IlIndexMapper::from_kept(ir.operations().len(), |index| {
-            required.operation_is_required(index)
+        let operation_map = IlIndexMapper::from_kept(ir.ops().len(), |index| {
+            required.op_is_required(index)
         });
         let block_arg_map = IlIndexMapper::from_kept(ir.block_args().len(), |index| {
             required.block_arg_is_required(index)
@@ -23,7 +23,7 @@ impl IlRewrite<ECodeIr> for ECodeCompaction {
         for (index, value) in ir.values().iter().enumerate() {
             value_kept[index] = match value.definition() {
                 IlSsaDef::BlockArg(arg) => required.block_arg_is_required(arg.index()),
-                IlSsaDef::Op(operation) => required.operation_is_required(operation.index()),
+                IlSsaDef::Op(operation) => required.op_is_required(operation.index()),
             };
         }
         let value_map = IlIndexMapper::from_kept(ir.values().len(), |index| value_kept[index]);
@@ -70,12 +70,12 @@ impl IlRewrite<ECodeIr> for ECodeCompaction {
 
         let mut operations = Vec::new();
         let mut value_operands = Vec::new();
-        for (index, operation) in ir.operations().iter().enumerate() {
-            if !required.operation_is_required(index) {
+        for (index, operation) in ir.ops().iter().enumerate() {
+            if !required.op_is_required(index) {
                 continue;
             }
             let operand_start = value_operands.len();
-            for &operand in ir.operation_operands_for(operation) {
+            for &operand in ir.op_operands_for(operation) {
                 value_operands.push(remap_value(operand));
             }
             let operands = IlIndexRange::new(operand_start, value_operands.len())
@@ -139,7 +139,7 @@ impl IlRewrite<ECodeIr> for ECodeCompaction {
 
         let mut graph = ir.take_graph();
         graph
-            .remap_operation_ranges(&operation_map)
+            .remap_op_ranges(&operation_map)
             .expect("graph operation ranges use the compaction source domain");
 
         let metadata = *ir.metadata();

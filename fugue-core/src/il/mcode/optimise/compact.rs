@@ -15,8 +15,8 @@ pub(crate) struct MCodeCompaction<'a> {
 impl IlRewrite<MCodeIr> for MCodeCompaction<'_> {
     fn rewrite(&mut self, ir: &mut MCodeIr) {
         let required = MCodeRequiredDefs::new(ir, self.required_values);
-        let operation_map = IlIndexMapper::from_kept(ir.operations().len(), |index| {
-            required.operation_is_required(index)
+        let operation_map = IlIndexMapper::from_kept(ir.ops().len(), |index| {
+            required.op_is_required(index)
         });
         let block_arg_map = IlIndexMapper::from_kept(ir.block_args().len(), |index| {
             required.block_arg_is_required(index)
@@ -27,7 +27,7 @@ impl IlRewrite<MCodeIr> for MCodeCompaction<'_> {
             .iter()
             .map(|value| match value.definition() {
                 IlSsaDef::BlockArg(arg) => required.block_arg_is_required(arg.index()),
-                IlSsaDef::Op(operation) => required.operation_is_required(operation.index()),
+                IlSsaDef::Op(operation) => required.op_is_required(operation.index()),
             })
             .collect::<Vec<_>>();
         let value_map = IlIndexMapper::from_kept(ir.values().len(), |index| value_kept[index]);
@@ -40,8 +40,8 @@ impl IlRewrite<MCodeIr> for MCodeCompaction<'_> {
                 variable_kept[variable.index()] = true;
             }
         }
-        for (index, operation) in ir.operations().iter().enumerate() {
-            if required.operation_is_required(index)
+        for (index, operation) in ir.ops().iter().enumerate() {
+            if required.op_is_required(index)
                 && let Some(variable) = operation.variable()
             {
                 variable_kept[variable.index()] = true;
@@ -112,13 +112,13 @@ impl IlRewrite<MCodeIr> for MCodeCompaction<'_> {
 
         let mut operations = Vec::new();
         let mut value_operands = Vec::new();
-        for (index, operation) in ir.operations().iter().enumerate() {
-            if !required.operation_is_required(index) {
+        for (index, operation) in ir.ops().iter().enumerate() {
+            if !required.op_is_required(index) {
                 continue;
             }
             let start = value_operands.len();
             value_operands.extend(
-                ir.operation_operands_for(operation)
+                ir.op_operands_for(operation)
                     .iter()
                     .copied()
                     .map(remap_value),
@@ -185,7 +185,7 @@ impl IlRewrite<MCodeIr> for MCodeCompaction<'_> {
 
         let mut graph = ir.take_graph();
         graph
-            .remap_operation_ranges(&operation_map)
+            .remap_op_ranges(&operation_map)
             .expect("graph operation ranges use the compaction source domain");
 
         let variables = ir

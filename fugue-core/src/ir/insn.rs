@@ -4,8 +4,9 @@ use std::mem::size_of;
 use smallvec::SmallVec;
 use thiserror::Error;
 
-use crate::ir::{Address, FlowTarget, Id, Location, Reference, ReferenceOrigin, ToRawAddress};
-use crate::lifter::{Language, Op, RawPCodeOp};
+use crate::il::pcode::{RawPCodeFlow, RawPCodeFlows};
+use crate::ir::{Address, FlowTarget, Id, Location, Reference, ReferenceOrigin};
+use crate::lifter::{Language, RawPCodeOp};
 use crate::types::EstimateSize;
 use crate::types::common::archived_bitflags;
 
@@ -104,7 +105,7 @@ impl Insn {
             address,
             properties,
             targets,
-            size: Self::checked_size(size)?,
+            size: size.try_into().map_err(|_| InsnError::insn_too_large(size))?,
         })
     }
 
@@ -114,8 +115,46 @@ impl Insn {
         size: usize,
         operations: &[RawPCodeOp],
     ) -> Result<Self, InsnError> {
+        let operation_count = operations.len() as u16;
+        let next_address = address + size;
+        let is_local = |location: &Location| location.address() == address;
+        let is_fall_through = |location: &Location| location.address() == next_address;
+
         let mut targets = SmallVec::new();
-        Self::push_targets_for_operations(language, address, size, operations, &mut targets);
+        for (index, flow) in RawPCodeFlows::new(language, address, size, operations).iter() {
+            let target = match flow {
+                RawPCodeFlow::Branch(Some(location)) => {
+                    if is_local(location) {
+                        InsnTarget::IntraIns(*location, false)
+                    } else if is_fall_through(location) {
+                        InsnTarget::IntraBlk(*location, false)
+                    } else {
+                        InsnTarget::InterBlk(location.address())
+                    }
+                }
+                RawPCodeFlow::Branch(None) => InsnTarget::Unresolved,
+                RawPCodeFlow::Call(Some(location)) => {
+                    if location.position() != 0 {
+                        InsnTarget::IntraIns(*location, false)
+                    } else {
+                        InsnTarget::InterSub(Some(location.address()))
+                    }
+                }
+                RawPCodeFlow::Call(None) => InsnTarget::InterSub(None),
+                RawPCodeFlow::FallThrough(location) => {
+                    if is_local(location) {
+                        InsnTarget::IntraIns(*location, true)
+                    } else {
+                        InsnTarget::IntraBlk(*location, true)
+                    }
+                }
+                RawPCodeFlow::Intrinsic => InsnTarget::Intrinsic,
+                RawPCodeFlow::Return(return_address) => {
+                    InsnTarget::InterRet(*return_address, index + 1 == operation_count)
+                }
+            };
+            targets.push((index, target));
+        }
         let mut properties = InsnProperties::from_targets(&targets);
         if operations.is_empty() {
             properties |= InsnProperties::NOP;
@@ -127,7 +166,7 @@ impl Insn {
             address,
             properties,
             targets,
-            size: Self::checked_size(size)?,
+            size: size.try_into().map_err(|_| InsnError::insn_too_large(size))?,
         })
     }
 
@@ -150,132 +189,8 @@ impl Insn {
             address,
             properties,
             targets: SmallVec::new(),
-            size: Self::checked_size(size)?,
+            size: size.try_into().map_err(|_| InsnError::insn_too_large(size))?,
         })
-    }
-
-    fn checked_size(size: usize) -> Result<u8, InsnError> {
-        size.try_into().map_err(|_| InsnError::insn_too_large(size))
-    }
-
-    pub(crate) fn push_targets_for_operations(
-        language: &'static Language,
-        address: Address,
-        size: usize,
-        operations: &[RawPCodeOp],
-        targets: &mut SmallVec<[(u16, InsnTarget); 1]>,
-    ) {
-        let op_count = operations.len() as u16;
-        let next_address = address + size;
-
-        let is_local = |location: &Location| -> bool { location.address() == address };
-        let is_fall_through = |location: &Location| -> bool { location.address() == next_address };
-
-        let next_location = |index: u16| -> Location {
-            if index >= op_count {
-                Location::new(next_address, index - op_count)
-            } else {
-                Location::new(address, index)
-            }
-        };
-
-        let push_call = |index: u16,
-                         location: Option<Location>,
-                         targets: &mut SmallVec<[(u16, InsnTarget); 1]>| {
-            let Some(location) = location else {
-                targets.push((index, InsnTarget::InterSub(None)));
-                return;
-            };
-
-            if location.position() != 0 {
-                targets.push((index, InsnTarget::IntraIns(location, false)));
-            } else {
-                targets.push((index, InsnTarget::InterSub(Some(location.address()))));
-            }
-        };
-
-        let push_branch =
-            |index: u16,
-             location: Option<Location>,
-             targets: &mut SmallVec<[(u16, InsnTarget); 1]>| {
-                let Some(location) = location else {
-                    targets.push((index, InsnTarget::Unresolved));
-                    return;
-                };
-
-                if is_local(&location) {
-                    targets.push((index, InsnTarget::IntraIns(location, false)));
-                } else if is_fall_through(&location) {
-                    targets.push((index, InsnTarget::IntraBlk(location, false)));
-                } else {
-                    targets.push((index, InsnTarget::InterBlk(location.address())));
-                }
-            };
-
-        let push_fall_through =
-            |index: u16, fall_through: Location, targets: &mut SmallVec<[(u16, InsnTarget); 1]>| {
-                targets.push((
-                    index,
-                    if is_local(&fall_through) {
-                        InsnTarget::IntraIns(fall_through, true)
-                    } else {
-                        InsnTarget::IntraBlk(fall_through, true)
-                    },
-                ));
-            };
-
-        if op_count == 0 {
-            push_fall_through(0, next_location(1), targets);
-            return;
-        }
-
-        for (index, operation) in operations.iter().enumerate() {
-            let index = index as u16;
-            let next = next_location(index + 1);
-            let inputs = operation.inputs();
-
-            match operation.op() {
-                Op::Branch => {
-                    let location = Location::absolute_from(language, address, inputs[0], index);
-                    push_branch(index, location, targets);
-                }
-                Op::CBranch => {
-                    let location = Location::absolute_from(language, address, inputs[0], index);
-                    push_branch(index, location, targets);
-                    push_fall_through(index, next, targets);
-                }
-                Op::IBranch => {
-                    push_branch(index, None, targets);
-                }
-                Op::Call => {
-                    let location = Location::absolute_from(language, address, inputs[0], index);
-                    push_call(index, location, targets);
-                    push_fall_through(index, next, targets);
-                }
-                Op::ICall => {
-                    push_call(index, None, targets);
-                    push_fall_through(index, next, targets);
-                }
-                Op::Return => {
-                    let return_address = inputs[0]
-                        .to_address(language)
-                        .map(|address_offset| Address::new(address.space(), address_offset));
-                    targets.push((
-                        index,
-                        InsnTarget::InterRet(return_address, index + 1 == op_count),
-                    ));
-                }
-                Op::UserOp(_, _) => {
-                    targets.push((index, InsnTarget::Intrinsic));
-                    push_fall_through(index, next, targets);
-                }
-                _ => {
-                    if index + 1 == op_count {
-                        push_fall_through(index, next, targets);
-                    }
-                }
-            }
-        }
     }
 
     pub fn address(&self) -> Address {
@@ -444,7 +359,7 @@ impl Insn {
         &'a self,
     ) -> impl Iterator<Item = (&'a InsnTarget, InsnTargetKind, Address)> + 'a {
         self.targets.iter().filter_map(|(_, target)| {
-            Self::resolved_target(target).map(|(kind, to)| (target, kind, to))
+            target.resolved().map(|(kind, to)| (target, kind, to))
         })
     }
 
@@ -470,17 +385,6 @@ impl Insn {
         })
     }
 
-    fn resolved_target(target: &InsnTarget) -> Option<(InsnTargetKind, Address)> {
-        use InsnTarget::*;
-        use InsnTargetKind::*;
-
-        match *target {
-            IntraBlk(taken, _) if taken.position() == 0 => Some((Local, taken.address())),
-            InterBlk(taken) => Some((Local, taken)),
-            InterSub(Some(taken)) | InterRet(Some(taken), _) => Some((Global, taken)),
-            _ => None,
-        }
-    }
 }
 
 impl EstimateSize for Insn {
@@ -657,6 +561,18 @@ impl InsnTarget {
             Self::InterSub(None) | Self::InterRet(None, _) | Self::Intrinsic | Self::Unresolved => {
                 None
             }
+        }
+    }
+
+    fn resolved(&self) -> Option<(InsnTargetKind, Address)> {
+        use InsnTarget::*;
+        use InsnTargetKind::*;
+
+        match *self {
+            IntraBlk(taken, _) if taken.position() == 0 => Some((Local, taken.address())),
+            InterBlk(taken) => Some((Local, taken)),
+            InterSub(Some(taken)) | InterRet(Some(taken), _) => Some((Global, taken)),
+            _ => None,
         }
     }
 }

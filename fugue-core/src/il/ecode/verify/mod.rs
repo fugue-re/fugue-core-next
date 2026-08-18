@@ -147,7 +147,7 @@ impl ECodeVerifier<'_> {
         self.ir.verify_structure::<VerifyError>(
             self.ir.source_spans(),
             Some(self.ir.parent_spans()),
-            self.ir.operations().len(),
+            self.ir.ops().len(),
         )?;
         SsaVerifier::new(self.ir).verify_memory_domains()?;
         self.verify_value_domains()?;
@@ -170,12 +170,12 @@ impl ECodeVerifier<'_> {
             }
         }
 
-        for (operation_index, operation) in self.ir.operations().iter().enumerate() {
+        for (operation_index, operation) in self.ir.ops().iter().enumerate() {
             let operation_id = IlOpId::try_from_index(operation_index)?;
             operation.results().verify_bounds(self.ir.values().len())?;
             operation
                 .operands()
-                .verify_bounds(self.ir.operation_operands().len())?;
+                .verify_bounds(self.ir.op_operands().len())?;
 
             for result_index in operation.results().start()..operation.results().end() {
                 let value = self.ir.values()[result_index];
@@ -209,7 +209,7 @@ impl ECodeVerifier<'_> {
             let uniform_operand_width = operation.opcode().has_uniform_operand_width();
             for operand in operation
                 .operands()
-                .checked_slice(self.ir.operation_operands())?
+                .checked_slice(self.ir.op_operands())?
             {
                 let value = self.ir.values().get(operand.index()).ok_or_else(|| {
                     IlError::range_out_of_bounds(operand.index(), self.ir.values().len())
@@ -229,7 +229,7 @@ impl ECodeVerifier<'_> {
                     return Err(IlError::missing_component(ECodeIr::FORM, "memory domain").into());
                 }
 
-                self.verify_memory_operation(operation_id, operation)?;
+                self.verify_memory_op(operation_id, operation)?;
             }
         }
 
@@ -238,7 +238,7 @@ impl ECodeVerifier<'_> {
 
             match value.definition() {
                 IlSsaDef::Op(operation) => {
-                    let Some(operation) = self.ir.operations().get(operation.index()) else {
+                    let Some(operation) = self.ir.ops().get(operation.index()) else {
                         return Err(VerifyError::invalid_value_definition());
                     };
 
@@ -290,7 +290,7 @@ impl ECodeVerifier<'_> {
                     }
                 }
                 IlSsaDef::Op(operation) => {
-                    let operation = self.ir.operations().get(operation.index());
+                    let operation = self.ir.ops().get(operation.index());
                     match (domain, operation) {
                         (ECodeDomain::Flag(storage), Some(operation)) => {
                             value.width() != 0
@@ -366,7 +366,7 @@ impl ECodeVerifier<'_> {
         Ok(())
     }
 
-    fn verify_memory_operation(
+    fn verify_memory_op(
         &self,
         operation_id: IlOpId,
         operation: &ECodeOp,

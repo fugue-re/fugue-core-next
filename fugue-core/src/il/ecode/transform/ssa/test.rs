@@ -47,14 +47,14 @@ impl PCodeToECodeBufferFixtureBuilder {
     }
 
     fn push_statement(&mut self, operation: PCodeToECodeEffect) -> Result<IlOpId, IlError> {
-        self.fixture.buffer.push_operation(operation)
+        self.fixture.buffer.push_op(operation)
     }
 
     fn push_effect_operands(
         &mut self,
         operands: impl IntoIterator<Item = IlExprId>,
     ) -> Result<IlIndexRange, IlError> {
-        self.fixture.buffer.push_operation_operands(operands)
+        self.fixture.buffer.push_op_operands(operands)
     }
 
     fn set_call_preserved_registers(&mut self, registers: Vec<RegisterId>) {
@@ -121,7 +121,7 @@ fn empty_ecode_constructs_empty_body() {
     let ir = transform.build(source, &cancellation).unwrap();
 
     assert_eq!(ir.metadata().input_revision().value(), 11);
-    assert!(ir.operations().is_empty());
+    assert!(ir.ops().is_empty());
 }
 
 #[test]
@@ -181,13 +181,13 @@ fn register_read_after_write_uses_current_value() {
     let mut transform = ECodeFixtureBuilder::default();
     let ir = transform.build(source, &cancellation).unwrap();
 
-    assert_eq!(ir.operations()[0].opcode(), ECodeOpcode::Constant);
-    assert_eq!(ir.operations()[1].opcode(), ECodeOpcode::WriteRegister);
-    assert_eq!(ir.operations()[2].opcode(), ECodeOpcode::Return);
-    assert_eq!(ir.operation_operands().len(), 2);
+    assert_eq!(ir.ops()[0].opcode(), ECodeOpcode::Constant);
+    assert_eq!(ir.ops()[1].opcode(), ECodeOpcode::WriteRegister);
+    assert_eq!(ir.ops()[2].opcode(), ECodeOpcode::Return);
+    assert_eq!(ir.op_operands().len(), 2);
     assert_eq!(
-        ir.operation_operands_for(&ir.operations()[2]),
-        &[IlValueId::try_from_index(ir.operations()[1].results().start()).unwrap()]
+        ir.op_operands_for(&ir.ops()[2]),
+        &[IlValueId::try_from_index(ir.ops()[1].results().start()).unwrap()]
     );
     assert_eq!(
         ir.parent_spans(),
@@ -290,18 +290,18 @@ fn call_preserves_only_declared_register_state() {
         .build(source, &CancellationToken::default())
         .unwrap();
 
-    assert_eq!(ir.operations()[0].opcode(), ECodeOpcode::Constant);
-    assert_eq!(ir.operations()[1].opcode(), ECodeOpcode::WriteRegister);
-    assert_eq!(ir.operations()[2].opcode(), ECodeOpcode::Constant);
-    assert_eq!(ir.operations()[3].opcode(), ECodeOpcode::WriteRegister);
-    assert_eq!(ir.operations()[4].opcode(), ECodeOpcode::Call);
-    assert_eq!(ir.operations()[5].opcode(), ECodeOpcode::Undefined);
-    assert_eq!(ir.operations()[6].opcode(), ECodeOpcode::Return);
+    assert_eq!(ir.ops()[0].opcode(), ECodeOpcode::Constant);
+    assert_eq!(ir.ops()[1].opcode(), ECodeOpcode::WriteRegister);
+    assert_eq!(ir.ops()[2].opcode(), ECodeOpcode::Constant);
+    assert_eq!(ir.ops()[3].opcode(), ECodeOpcode::WriteRegister);
+    assert_eq!(ir.ops()[4].opcode(), ECodeOpcode::Call);
+    assert_eq!(ir.ops()[5].opcode(), ECodeOpcode::Undefined);
+    assert_eq!(ir.ops()[6].opcode(), ECodeOpcode::Return);
     assert_eq!(
-        ir.operation_operands_for(&ir.operations()[6]),
+        ir.op_operands_for(&ir.ops()[6]),
         &[
-            IlValueId::try_from_index(ir.operations()[1].results().start()).unwrap(),
-            IlValueId::try_from_index(ir.operations()[5].results().start()).unwrap(),
+            IlValueId::try_from_index(ir.ops()[1].results().start()).unwrap(),
+            IlValueId::try_from_index(ir.ops()[5].results().start()).unwrap(),
         ]
     );
 }
@@ -384,7 +384,7 @@ fn insn_wide_expression_is_not_rebuilt_after_register_write() {
         .build(source, &CancellationToken::default())
         .unwrap();
     let subtracts = ir
-        .operations()
+        .ops()
         .iter()
         .enumerate()
         .filter(|(_, operation)| operation.opcode() == ECodeOpcode::Sub)
@@ -393,11 +393,11 @@ fn insn_wide_expression_is_not_rebuilt_after_register_write() {
     let address_value =
         IlValueId::try_from_index(subtracts[0].1.results().start()).expect("result must exist");
     let store = ir
-        .operations()
+        .ops()
         .iter()
         .find(|operation| operation.opcode() == ECodeOpcode::Store)
         .expect("store must exist");
-    assert_eq!(ir.operation_operands_for(store)[0], address_value);
+    assert_eq!(ir.op_operands_for(store)[0], address_value);
 }
 
 #[test]
@@ -430,10 +430,10 @@ fn register_read_without_write_becomes_undefined() {
     let mut transform = ECodeFixtureBuilder::default();
     let ir = transform.build(source, &cancellation).unwrap();
 
-    assert_eq!(ir.operations()[0].opcode(), ECodeOpcode::Undefined);
-    assert_eq!(ir.operations()[0].width(), 32);
-    assert_eq!(ir.operations()[0].immediate(), 9);
-    assert_eq!(ir.operations()[1].opcode(), ECodeOpcode::Return);
+    assert_eq!(ir.ops()[0].opcode(), ECodeOpcode::Undefined);
+    assert_eq!(ir.ops()[0].width(), 32);
+    assert_eq!(ir.ops()[0].immediate(), 9);
+    assert_eq!(ir.ops()[1].opcode(), ECodeOpcode::Return);
 }
 
 #[test]
@@ -478,17 +478,17 @@ fn load_preserves_fugue_address_space() {
     let ir = transform.build(source, &cancellation).unwrap();
 
     let load_index = ir
-        .operations()
+        .ops()
         .iter()
         .position(|operation| operation.opcode() == ECodeOpcode::Load)
         .unwrap();
 
-    assert_eq!(ir.operations()[load_index].address_space(), Some(space));
+    assert_eq!(ir.ops()[load_index].address_space(), Some(space));
     assert_eq!(ir.memory_domains().len(), 1);
     assert_eq!(ir.memory_domains()[0].space(), space);
 
     let memory = ir.values()[ir
-        .memory_operand(&ir.operations()[load_index])
+        .memory_operand(&ir.ops()[load_index])
         .unwrap()
         .index()];
 
@@ -568,18 +568,18 @@ fn load_after_store_uses_store_memory_result() {
     let mut transform = ECodeFixtureBuilder::default();
     let ir = transform.build(source, &cancellation).unwrap();
     let store_index = ir
-        .operations()
+        .ops()
         .iter()
         .position(|operation| operation.opcode() == ECodeOpcode::Store)
         .unwrap();
     let load_index = ir
-        .operations()
+        .ops()
         .iter()
         .position(|operation| operation.opcode() == ECodeOpcode::Load)
         .unwrap();
     let store_memory =
-        IlValueId::try_from_index(ir.operations()[store_index].results().start()).unwrap();
-    let load_operands = ir.operation_operands_for(&ir.operations()[load_index]);
+        IlValueId::try_from_index(ir.ops()[store_index].results().start()).unwrap();
+    let load_operands = ir.op_operands_for(&ir.ops()[load_index]);
 
     assert_eq!(ir.memory_domains().len(), 1);
     assert_eq!(ir.memory_domains()[0].space(), space);
@@ -676,8 +676,8 @@ fn direct_branch_preserves_fugue_address() {
     let mut transform = ECodeFixtureBuilder::default();
     let ir = transform.build(source, &cancellation).unwrap();
 
-    assert_eq!(ir.operations()[2].opcode(), ECodeOpcode::ConditionalBranch);
-    assert_eq!(ir.operations()[2].address(), Some(target));
+    assert_eq!(ir.ops()[2].opcode(), ECodeOpcode::ConditionalBranch);
+    assert_eq!(ir.ops()[2].address(), Some(target));
 }
 
 #[test]
@@ -746,7 +746,7 @@ fn deep_dominance_chain_constructs_iteratively() {
 
     assert_eq!(ir.graph().blocks().len(), block_count);
     assert_eq!(ir.graph().successors().len(), block_count - 1);
-    assert_eq!(ir.operations().len(), block_count * 2);
+    assert_eq!(ir.ops().len(), block_count * 2);
     assert!(ir.block_args().is_empty());
 }
 
@@ -854,20 +854,20 @@ fn branch_heavy_ssa_restores_live_domains_between_siblings() {
         .build(source, &CancellationToken::default())
         .unwrap();
     let returned = ir
-        .operations()
+        .ops()
         .iter()
         .find(|operation| operation.opcode() == ECodeOpcode::Return)
-        .map(|operation| ir.operation_operands_for(operation))
+        .map(|operation| ir.op_operands_for(operation))
         .expect("the right sibling retains its return");
 
     assert_eq!(returned.len(), DOMAIN_COUNT);
     for (register, value) in returned.iter().copied().enumerate() {
         let write = ir
-            .defining_operation(value)
+            .defining_op(value)
             .expect("each returned register has a reaching definition");
-        let source = ir.operation_operands_for(write)[0];
+        let source = ir.op_operands_for(write)[0];
         let constant = ir
-            .defining_operation(source)
+            .defining_op(source)
             .expect("each reaching definition has a constant source");
         assert_eq!(constant.immediate(), register as u64);
     }
@@ -983,12 +983,12 @@ fn merge_block_register_read_becomes_block_arg() {
         IlBlockId::try_from_index(3).unwrap()
     );
     let return_operation = ir
-        .operations()
+        .ops()
         .iter()
         .find(|operation| operation.opcode() == ECodeOpcode::Return)
         .unwrap();
     assert_eq!(
-        ir.operation_operands_for(return_operation),
+        ir.op_operands_for(return_operation),
         &[ir.block_args()[0].value()]
     );
     assert_eq!(ir.edge_args().len(), 4);
@@ -1105,11 +1105,11 @@ fn merge_block_load_uses_memory_block_arg() {
     let mut transform = ECodeFixtureBuilder::default();
     let ir = transform.build(source, &cancellation).unwrap();
     let load_index = ir
-        .operations()
+        .ops()
         .iter()
         .position(|operation| operation.opcode() == ECodeOpcode::Load)
         .unwrap();
-    let load_operands = ir.operation_operands_for(&ir.operations()[load_index]);
+    let load_operands = ir.op_operands_for(&ir.ops()[load_index]);
 
     assert_eq!(ir.memory_domains().len(), 1);
     assert_eq!(ir.memory_domains()[0].space(), space);
@@ -1205,7 +1205,7 @@ fn loop_carried_register_uses_header_block_arg() {
 
     assert_eq!(ir.block_args().len(), 1);
     assert_eq!(ir.block_args()[0].block(), loop_header);
-    assert_eq!(ir.operation_operands()[0], ir.block_args()[0].value());
+    assert_eq!(ir.op_operands()[0], ir.block_args()[0].value());
     assert_eq!(ir.args_for_edge(0).len(), 1);
     assert_eq!(ir.args_for_edge(2).len(), 1);
 
@@ -1213,11 +1213,11 @@ fn loop_carried_register_uses_header_block_arg() {
     let back_edge_value = ir.args_for_edge(2)[0];
 
     assert_eq!(
-        ir.defining_operation(entry_value).unwrap().opcode(),
+        ir.defining_op(entry_value).unwrap().opcode(),
         ECodeOpcode::Undefined
     );
     assert_eq!(
-        ir.defining_operation(back_edge_value).unwrap().opcode(),
+        ir.defining_op(back_edge_value).unwrap().opcode(),
         ECodeOpcode::WriteRegister
     );
 }
@@ -1320,15 +1320,15 @@ fn value_domains_create_distinct_register_and_flag_definitions() {
         .build_optimised(source, &CancellationToken::default())
         .unwrap();
 
-    assert_eq!(ir.operations()[0].opcode(), ECodeOpcode::Constant);
-    assert_eq!(ir.operations()[1].opcode(), ECodeOpcode::WriteRegister);
-    assert_eq!(ir.operations()[2].opcode(), ECodeOpcode::WriteRegister);
-    assert_eq!(ir.operations()[3].opcode(), ECodeOpcode::WriteFlag);
-    assert_eq!(ir.operations()[4].opcode(), ECodeOpcode::Return);
+    assert_eq!(ir.ops()[0].opcode(), ECodeOpcode::Constant);
+    assert_eq!(ir.ops()[1].opcode(), ECodeOpcode::WriteRegister);
+    assert_eq!(ir.ops()[2].opcode(), ECodeOpcode::WriteRegister);
+    assert_eq!(ir.ops()[3].opcode(), ECodeOpcode::WriteFlag);
+    assert_eq!(ir.ops()[4].opcode(), ECodeOpcode::Return);
 
-    let register_seven = IlValueId::try_from_index(ir.operations()[1].results().start()).unwrap();
-    let register_eight = IlValueId::try_from_index(ir.operations()[2].results().start()).unwrap();
-    let flag = IlValueId::try_from_index(ir.operations()[3].results().start()).unwrap();
+    let register_seven = IlValueId::try_from_index(ir.ops()[1].results().start()).unwrap();
+    let register_eight = IlValueId::try_from_index(ir.ops()[2].results().start()).unwrap();
+    let flag = IlValueId::try_from_index(ir.ops()[3].results().start()).unwrap();
 
     assert_eq!(
         ir.value_domain(register_seven),
@@ -1348,7 +1348,7 @@ fn value_domains_create_distinct_register_and_flag_definitions() {
         Some(0x2a)
     );
     assert_eq!(
-        ir.operation_operands_for(&ir.operations()[4]),
+        ir.op_operands_for(&ir.ops()[4]),
         &[register_seven, register_eight, flag]
     );
 

@@ -864,7 +864,7 @@ impl FunctionTableStaging {
         reference: Reference,
     ) -> Result<Option<Reference>, IncompleteFunctionError> {
         let mut supported = None::<Reference>;
-        for block in blocks.overlaps(reference.from()) {
+        for block in blocks.overlaps_address(reference.from()) {
             let functions = self
                 .by_block
                 .get(&block.id())
@@ -1302,7 +1302,7 @@ impl FunctionTable {
     pub fn flush(&self) -> Result<(), EntityStorageError> {
         match self {
             Self::Persistent(table) => table.flush(),
-            Self::Transient(table) => table.flush(),
+            Self::Transient(_) => Ok(()),
         }
     }
 
@@ -1634,7 +1634,7 @@ impl FunctionTable {
         range: &'a AddressRange,
     ) -> impl Iterator<Item = Id<Function>> + 'a {
         let mut functions = SmallVec::<[FunctionId; 8]>::new();
-        for block in blocks.overlaps_range(range) {
+        for block in blocks.overlaps(range) {
             for function in self.get_by_block_id(block.id()).iter() {
                 if let Err(index) = functions.binary_search(&function) {
                     functions.insert(index, function);
@@ -1658,7 +1658,7 @@ impl FunctionTable {
     ) -> SmallVec<[FunctionId; 4]> {
         let mut functions = SmallVec::new();
 
-        for block in blocks.overlaps(address) {
+        for block in blocks.overlaps_address(address) {
             for function in self.get_by_block_id(block.id()).iter() {
                 if let Err(index) = functions.binary_search(&function) {
                     functions.insert(index, function);

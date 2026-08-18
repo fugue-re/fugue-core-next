@@ -48,7 +48,7 @@ impl IlAnalysis<ECodeIr> for ECodeStridedIntervals {
             this.intervals[index] = next;
 
             for use_site in uses.uses_for(value) {
-                let user = &ir.operations()[use_site.user().index()];
+                let user = &ir.ops()[use_site.user().index()];
                 worklist.extend(user.results().start()..user.results().end());
             }
             worklist.extend(dependents.row(index));
@@ -72,10 +72,10 @@ impl ECodeStridedIntervals {
             return StridedInterval::single(constant);
         }
 
-        let Some(operation) = ir.defining_operation(value) else {
+        let Some(operation) = ir.defining_op(value) else {
             return StridedInterval::full(width);
         };
-        let operands = ir.operation_operands_for(operation);
+        let operands = ir.op_operands_for(operation);
         let operand = |index: usize| {
             operands
                 .get(index)

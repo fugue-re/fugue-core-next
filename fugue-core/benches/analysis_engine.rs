@@ -785,7 +785,7 @@ fn bench_call_heavy_mcode(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn 
             continue;
         };
         let calls = source
-            .operations()
+            .ops()
             .iter()
             .filter(|operation| {
                 matches!(

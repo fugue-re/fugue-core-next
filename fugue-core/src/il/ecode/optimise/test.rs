@@ -109,7 +109,7 @@ fn fold_constants_materialises_wide_result_in_pool() {
 
     ir.rewrite(ECodeConstantFolding);
 
-    let folded = ir.defining_operation(widened).unwrap();
+    let folded = ir.defining_op(widened).unwrap();
     assert_eq!(folded.opcode(), ECodeOpcode::Constant);
     assert_eq!(folded.operands().len(), 0);
     assert_eq!(
@@ -198,7 +198,7 @@ fn fold_constants_propagates_through_block_arg() {
 
     ir.rewrite(ECodeConstantFolding);
 
-    let folded = ir.defining_operation(sum).unwrap();
+    let folded = ir.defining_op(sum).unwrap();
     assert_eq!(folded.opcode(), ECodeOpcode::Constant);
     assert_eq!(ir.constant_value(sum), Some(BitVec::from_u64(14, 32)));
 }
@@ -282,7 +282,7 @@ fn fold_constants_leaves_disagreeing_block_arg_unfolded() {
     ir.rewrite(ECodeConstantFolding);
 
     assert_eq!(
-        ir.defining_operation(sum).unwrap().opcode(),
+        ir.defining_op(sum).unwrap().opcode(),
         ECodeOpcode::Add
     );
     assert_eq!(ir.constant_value(sum), None);
@@ -319,7 +319,7 @@ fn fold_constants_leaves_sourceless_block_arg_unfolded() {
     ir.rewrite(ECodeConstantFolding);
 
     assert_eq!(
-        ir.defining_operation(copied).unwrap().opcode(),
+        ir.defining_op(copied).unwrap().opcode(),
         ECodeOpcode::Copy
     );
     assert_eq!(ir.constant_value(copied), None);
@@ -383,7 +383,7 @@ fn fold_constants_leaves_self_referential_loop_arg_unfolded() {
     ir.rewrite(ECodeConstantFolding);
 
     assert_eq!(
-        ir.defining_operation(sum).unwrap().opcode(),
+        ir.defining_op(sum).unwrap().opcode(),
         ECodeOpcode::Add
     );
     assert_eq!(ir.constant_value(sum), None);
@@ -428,26 +428,26 @@ fn compact_removes_dead_operations_and_remaps_indices() {
     let mut ir = builder
         .build_unchecked(&CancellationToken::default())
         .unwrap();
-    assert_eq!(ir.operations().len(), 5);
+    assert_eq!(ir.ops().len(), 5);
     assert_eq!(ir.values().len(), 4);
 
     ir.rewrite(ECodeCompaction);
 
-    assert_eq!(ir.operations().len(), 4);
+    assert_eq!(ir.ops().len(), 4);
     assert_eq!(ir.values().len(), 3);
     assert!(
-        ir.operations()
+        ir.ops()
             .iter()
             .all(|operation| operation.opcode() != ECodeOpcode::Copy)
     );
     ir.verify().unwrap();
 
     let add = ir
-        .operations()
+        .ops()
         .iter()
         .find(|operation| operation.opcode() == ECodeOpcode::Add)
         .unwrap();
-    let operands = ir.operation_operands_for(add);
+    let operands = ir.op_operands_for(add);
     assert_eq!(
         ir.constant_value(operands[0]),
         Some(BitVec::from_u64(5, 64))
@@ -501,7 +501,7 @@ fn compact_preserves_sources_for_operation_empty_blocks() {
         .unwrap();
     ir.rewrite(ECodeCompaction);
 
-    assert!(ir.graph().blocks()[entry.index()].operations().is_empty());
+    assert!(ir.graph().blocks()[entry.index()].ops().is_empty());
     assert_eq!(ir.graph().block_source(entry), Some(entry_source));
     assert_eq!(ir.graph().block_source(exit), Some(exit_source));
     ir.verify().unwrap();
@@ -574,8 +574,8 @@ fn compact_drops_dead_loop_phi_and_sources() {
     ir.rewrite(ECodeCompaction);
     ir.verify().unwrap();
 
-    assert_eq!(ir.operations().len(), 1);
-    assert_eq!(ir.operations()[0].opcode(), ECodeOpcode::Return);
+    assert_eq!(ir.ops().len(), 1);
+    assert_eq!(ir.ops()[0].opcode(), ECodeOpcode::Return);
     assert_eq!(ir.block_args().len(), 0);
     assert_eq!(ir.values().len(), 0);
     assert!(ir.args_for_edge(0).is_empty());
@@ -656,18 +656,18 @@ fn compact_preserves_live_phi_and_remaps_edge_args() {
     ir.rewrite(ECodeCompaction);
     ir.verify().unwrap();
 
-    assert_eq!(ir.operations().len(), 3);
+    assert_eq!(ir.ops().len(), 3);
     assert_eq!(ir.block_args().len(), 1);
     assert_eq!(ir.values().len(), 3);
     assert_eq!(ir.args_for_edge(2).len(), 1);
     assert_eq!(ir.args_for_edge(3).len(), 1);
 
     let return_op = ir
-        .operations()
+        .ops()
         .iter()
         .find(|operation| operation.opcode() == ECodeOpcode::Return)
         .unwrap();
-    let consumed = ir.operation_operands_for(return_op)[0];
+    let consumed = ir.op_operands_for(return_op)[0];
     assert!(matches!(
         ir.values()[consumed.index()].definition(),
         IlSsaDef::BlockArg(_)
@@ -803,14 +803,14 @@ fn fold_then_compact_collapses_constant_expression() {
     ir.rewrite(ECodeConstantFolding);
     ir.rewrite(ECodeCompaction);
 
-    assert_eq!(ir.operations().len(), 2);
+    assert_eq!(ir.ops().len(), 2);
     ir.verify().unwrap();
 
     let returned = ir
-        .operations()
+        .ops()
         .iter()
         .find(|operation| operation.opcode() == ECodeOpcode::Return)
         .unwrap();
-    let sum_value = ir.operation_operands_for(returned)[0];
+    let sum_value = ir.op_operands_for(returned)[0];
     assert_eq!(ir.constant_value(sum_value), Some(BitVec::from_u64(12, 64)));
 }

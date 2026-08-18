@@ -109,7 +109,7 @@ impl IlRenderer {
         for span in ir.source_spans() {
             let range = span.destination();
             for index in range.start()..range.end() {
-                let Some(operation) = ir.operations().get(index) else {
+                let Some(operation) = ir.ops().get(index) else {
                     continue;
                 };
                 let mut tokens = Vec::new();
@@ -130,7 +130,7 @@ impl IlRenderer {
         }
         out.push(opcode(operation.opcode().mnemonic()));
 
-        for (index, operand) in ir.operation_operands_for(operation).iter().enumerate() {
+        for (index, operand) in ir.op_operands_for(operation).iter().enumerate() {
             out.push(punct(if index == 0 { " " } else { ", " }));
             self.pcode_location(ir, *operand, out);
         }
@@ -184,7 +184,7 @@ impl IlRenderer {
     pub fn ecode(&self, ir: &ECodeIr) -> Vec<IlLine> {
         let mut lines = Vec::new();
         for address in ordered_addresses(ir.source_spans()) {
-            for (_, operation) in ir.operations_for_source(address) {
+            for (_, operation) in ir.ops_for_source(address) {
                 let mut tokens = Vec::new();
                 self.ecode_operation(ir, operation, &mut tokens);
                 lines.push(IlLine {
@@ -229,7 +229,7 @@ impl IlRenderer {
 
     fn memory_state_title(&self, ir: &ECodeIr, id: IlValueId) -> String {
         let space = ir
-            .defining_operation(id)
+            .defining_op(id)
             .and_then(|operation| match operation.opcode() {
                 ECodeOpcode::Undefined => usize::try_from(operation.immediate())
                     .ok()
@@ -308,7 +308,7 @@ impl IlRenderer {
             _ => {}
         }
 
-        for operand in ir.operation_operands_for(operation) {
+        for operand in ir.op_operands_for(operation) {
             out.push(punct(" "));
             out.push(self.ecode_value(ir, *operand));
         }
@@ -338,7 +338,7 @@ impl IlRenderer {
     pub fn mcode(&self, ir: &MCodeIr) -> Vec<IlLine> {
         let mut lines = Vec::new();
         for address in ordered_addresses(ir.source_spans()) {
-            for (_, operation) in ir.operations_for_source(address) {
+            for (_, operation) in ir.ops_for_source(address) {
                 let mut tokens = Vec::new();
                 self.mcode_operation(ir, operation, &mut tokens);
                 lines.push(IlLine {
@@ -428,7 +428,7 @@ impl IlRenderer {
 
     fn mcode_memory_state_title(&self, ir: &MCodeIr, id: IlValueId) -> String {
         let space = ir
-            .defining_operation(id)
+            .defining_op(id)
             .and_then(|operation| match operation.opcode() {
                 MCodeOpcode::Undefined => usize::try_from(operation.immediate())
                     .ok()
@@ -498,7 +498,7 @@ impl IlRenderer {
             out.push(punct(" "));
             out.push(self.mcode_variable(ir, variable, None, operation.width()));
         }
-        for operand in ir.operation_operands_for(operation) {
+        for operand in ir.op_operands_for(operation) {
             out.push(punct(" "));
             out.push(self.mcode_value(ir, *operand));
         }

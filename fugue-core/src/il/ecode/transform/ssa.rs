@@ -114,8 +114,8 @@ impl ECodeDomains {
         for (block_index, block) in graph.blocks().iter().enumerate() {
             let block_id = IlBlockId::try_from_index(block_index)?;
 
-            for operation_index in block.operations().start()..block.operations().end() {
-                let operation = &source.operations()[operation_index];
+            for operation_index in block.ops().start()..block.ops().end() {
+                let operation = &source.ops()[operation_index];
 
                 match operation.opcode() {
                     ECodeOpcode::WriteRegister | ECodeOpcode::WriteFlag => {
@@ -211,7 +211,7 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
         scratch: &'a mut PCodeToECodeSsaScratch,
     ) -> Self {
         let expression_count = source.expressions().len();
-        let operation_count = source.operations().len();
+        let operation_count = source.ops().len();
         let block_count = graph.blocks().len();
         let edge_count = graph.successors().len();
 
@@ -248,7 +248,7 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
     fn lift_linear(&mut self, cancellation: &CancellationToken) -> Result<(), IlError> {
         let mut current = ECodeRenameState::default();
 
-        for index in 0..self.source.operations().len() {
+        for index in 0..self.source.ops().len() {
             cancellation.check()?;
             self.lift_statement_at(index, &mut current)?;
         }
@@ -302,7 +302,7 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
             .collect::<Option<Vec<_>>>()
             .expect("every block is constructed before the graph is replaced");
         let graph = mem::take(&mut self.graph)
-            .with_operation_ranges(blocks.into_iter().map(|block| block.operations()))?;
+            .with_op_ranges(blocks.into_iter().map(|block| block.ops()))?;
         self.builder.set_graph(graph);
         self.builder.set_source_spans(
             self.statement_ranges
@@ -364,7 +364,7 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
                     block.index(),
                     self.graph.blocks().len(),
                 ))?;
-        let start = self.builder.emitter().operation_count();
+        let start = self.builder.emitter().op_count();
 
         if self.entry_block == Some(block) {
             self.allocate_input_values(current)?;
@@ -372,14 +372,14 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
 
         self.reset_expression_cache();
 
-        for statement_index in source_block.operations().start()..source_block.operations().end() {
+        for statement_index in source_block.ops().start()..source_block.ops().end() {
             cancellation.check()?;
             self.lift_statement_at(statement_index, current)?;
         }
 
         self.lift_edge_args(source_block, current)?;
 
-        let end = self.builder.emitter().operation_count();
+        let end = self.builder.emitter().op_count();
         self.blocks[block.index()] = Some(IlBlock::new(
             IlIndexRange::new(start, end)?,
             source_block.successors(),
@@ -451,12 +451,12 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
         {
             self.reset_expression_cache();
         }
-        let start = self.builder.emitter().operation_count();
-        let statement = self.source.operations()[index];
+        let start = self.builder.emitter().op_count();
+        let statement = self.source.ops()[index];
 
         self.lift_statement(&statement, current)?;
 
-        let end = self.builder.emitter().operation_count();
+        let end = self.builder.emitter().op_count();
         self.statement_ranges
             .set_range(index, IlIndexRange::new(start, end)?)?;
 
@@ -564,9 +564,9 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
             self.scratch.effect_operands.push(value);
         }
 
-        let operand_count = self.source.operation_operands_for(statement).len();
+        let operand_count = self.source.op_operands_for(statement).len();
         for index in 0..operand_count {
-            let operand = self.source.operation_operands_for(statement)[index];
+            let operand = self.source.op_operands_for(statement)[index];
             let operand = self.lift_expression(operand, current)?;
             self.scratch.effect_operands.push(operand);
         }

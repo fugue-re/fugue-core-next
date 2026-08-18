@@ -155,10 +155,10 @@ impl<'a, 'b> PCodeToECodeLifter<'a, 'b> {
         platform: &Platform,
         cancellation: &CancellationToken,
     ) -> Result<(PCodeToECodeBuffer, IlIndexMapper), IlError> {
-        let mut operation_map = Vec::with_capacity(self.source.operations().len() + 1);
+        let mut operation_map = Vec::with_capacity(self.source.ops().len() + 1);
         let mut source_span = 0usize;
 
-        for (index, operation) in self.source.operations().iter().enumerate() {
+        for (index, operation) in self.source.ops().iter().enumerate() {
             cancellation.check()?;
             while let Some(span) = self
                 .source
@@ -175,7 +175,7 @@ impl<'a, 'b> PCodeToECodeLifter<'a, 'b> {
                 source_span += 1;
             }
             operation_map.push(self.effects);
-            self.lift_operation(operation)?;
+            self.lift_op(operation)?;
         }
 
         operation_map.push(self.effects);
@@ -190,7 +190,7 @@ impl<'a, 'b> PCodeToECodeLifter<'a, 'b> {
         Ok((self.buffer, operation_map))
     }
 
-    fn lift_operation(&mut self, operation: &PCodeOp) -> Result<(), IlError> {
+    fn lift_op(&mut self, operation: &PCodeOp) -> Result<(), IlError> {
         match operation.opcode() {
             PCodeOpcode::Store => self.lift_store(operation),
             PCodeOpcode::Branch => self.lift_direct_flow(operation, ECodeOpcode::Branch),
@@ -202,7 +202,7 @@ impl<'a, 'b> PCodeToECodeLifter<'a, 'b> {
             PCodeOpcode::ICall => self.lift_indirect_flow(operation, ECodeOpcode::CallIndirect),
             PCodeOpcode::Return => self.lift_indirect_flow(operation, ECodeOpcode::Return),
             PCodeOpcode::UserOp if operation.output().is_none() => self.lift_intrinsic(operation),
-            opcode => self.lift_expression_operation(operation, opcode),
+            opcode => self.lift_expression_op(operation, opcode),
         }
     }
 
@@ -222,7 +222,7 @@ impl<'a, 'b> PCodeToECodeLifter<'a, 'b> {
 
     fn is_trap_intrinsic(&mut self, operation: &PCodeOp) -> bool {
         self.scratch.intrinsic_args.clear();
-        for operand in self.source.operation_operands_for(operation) {
+        for operand in self.source.op_operands_for(operation) {
             let location = self.location(*operand);
             self.scratch.intrinsic_args.push(Varnode::new(
                 location.lifter_space().value(),
@@ -237,7 +237,7 @@ impl<'a, 'b> PCodeToECodeLifter<'a, 'b> {
         )
     }
 
-    fn lift_expression_operation(
+    fn lift_expression_op(
         &mut self,
         operation: &PCodeOp,
         opcode: PCodeOpcode,
@@ -248,8 +248,8 @@ impl<'a, 'b> PCodeToECodeLifter<'a, 'b> {
         let output_width = self.location(output).bits();
         let mut immediate = u64::from(operation.immediate());
         if opcode == PCodeOpcode::Subpiece {
-            let source = self.source.operation_operands_for(operation)[0];
-            let offset = self.source.operation_operands_for(operation)[1];
+            let source = self.source.op_operands_for(operation)[0];
+            let offset = self.source.op_operands_for(operation)[1];
             let source = self.lift_location(source, LocationRole::Value)?;
             let location = *self.location(offset);
             if !location.is_constant() {
@@ -354,8 +354,8 @@ impl<'a, 'b> PCodeToECodeLifter<'a, 'b> {
         opcode: ECodeOpcode,
     ) -> Result<(), IlError> {
         self.scratch.operands.clear();
-        for operand_index in 1..self.source.operation_operands_for(operation).len() {
-            let operand = self.source.operation_operands_for(operation)[operand_index];
+        for operand_index in 1..self.source.op_operands_for(operation).len() {
+            let operand = self.source.op_operands_for(operation)[operand_index];
             let operand = self.lift_location(operand, LocationRole::Value)?;
             self.scratch.operands.push(operand);
         }
@@ -394,8 +394,8 @@ impl<'a, 'b> PCodeToECodeLifter<'a, 'b> {
         address_operand: Option<usize>,
     ) -> Result<(), IlError> {
         self.scratch.operands.clear();
-        for operand_index in 0..self.source.operation_operands_for(operation).len() {
-            let operand = self.source.operation_operands_for(operation)[operand_index];
+        for operand_index in 0..self.source.op_operands_for(operation).len() {
+            let operand = self.source.op_operands_for(operation)[operand_index];
             let role = if address_operand == Some(operand_index) {
                 LocationRole::Address
             } else {

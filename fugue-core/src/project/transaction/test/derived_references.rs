@@ -450,12 +450,12 @@ fn project_ensure_pcode_builds_from_recovered_instruction_bytes()
                 form: ECodeIr::FORM,
             })
     );
-    assert!(!pcode.operations().is_empty());
+    assert!(!pcode.ops().is_empty());
     assert_eq!(pcode.source_spans().len(), 1);
     assert_eq!(pcode.source_spans()[0].address(), entry);
     assert!(
         ecode
-            .operations()
+            .ops()
             .iter()
             .any(|operation| operation.opcode() == ECodeOpcode::WriteRegister)
     );
@@ -487,7 +487,7 @@ fn project_ensure_pcode_records_zero_operation_source_gap() -> Result<(), Box<dy
         .expect("PCode should be materialised");
     let source_spans = pcode.source_spans();
 
-    assert!(pcode.operations().is_empty());
+    assert!(pcode.ops().is_empty());
     assert_eq!(source_spans.len(), 1);
     assert_eq!(source_spans[0].address(), entry);
     assert!(source_spans[0].destination().is_empty());
@@ -524,7 +524,7 @@ fn project_ensure_pcode_resolves_default_space_load() -> Result<(), Box<dyn std:
     let project = reader.project()?;
     let pcode = project.pcode(function)?.expect("PCode is materialised");
     let load = pcode
-        .operations()
+        .ops()
         .iter()
         .find(|operation| operation.opcode() == PCodeOpcode::Load)
         .expect("load survives canonicalisation");

@@ -64,7 +64,7 @@ impl<'context, 'analysis> SwitchTargetEvaluator<'context, 'analysis> {
                             continue;
                         }
 
-                        let Some(operation) = self.context.ssa.defining_operation(value) else {
+                        let Some(operation) = self.context.ssa.defining_op(value) else {
                             if let Some(input) = self.context.common_block_arg_input(value) {
                                 self.stack.push(EvaluationStep::Forward { value, input });
                                 if !self.memo.contains_key(&input) {
@@ -82,19 +82,19 @@ impl<'context, 'analysis> SwitchTargetEvaluator<'context, 'analysis> {
                             }
                             continue;
                         }
-                        for &operand in self.context.ssa.operation_operands_for(operation) {
+                        for &operand in self.context.ssa.op_operands_for(operation) {
                             if !self.memo.contains_key(&operand) {
                                 self.stack.push(EvaluationStep::Evaluate(operand));
                             }
                         }
                     }
                     EvaluationStep::Apply(value) => {
-                        let operation = self.context.ssa.defining_operation(value)?;
+                        let operation = self.context.ssa.defining_op(value)?;
                         let result = self.apply(value, operation, &mut read_memory)?;
                         if self
                             .context
                             .ssa
-                            .operation_operands_for(operation)
+                            .op_operands_for(operation)
                             .iter()
                             .any(|operand| self.dependent.contains(operand))
                         {
@@ -135,12 +135,12 @@ impl<'context, 'analysis> SwitchTargetEvaluator<'context, 'analysis> {
                 self.load(operation, &pointer, read_memory)
             }
             ECodeOpcode::WriteFlag | ECodeOpcode::WriteRegister => {
-                let input = self.context.ssa.operation_operands_for(operation).first()?;
+                let input = self.context.ssa.op_operands_for(operation).first()?;
                 Some(self.memo.get(input)?.clone().cast(operation.width()))
             }
             opcode => {
                 let mut operands = SmallVec::<[&BitVec; 4]>::new();
-                for value in self.context.ssa.operation_operands_for(operation) {
+                for value in self.context.ssa.op_operands_for(operation) {
                     operands.push(self.memo.get(value)?);
                 }
                 opcode.evaluate(operation.width(), &operands)

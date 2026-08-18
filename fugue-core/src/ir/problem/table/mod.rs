@@ -184,7 +184,7 @@ impl ProblemTable {
     pub fn flush(&self) -> Result<(), EntityStorageError> {
         match self {
             Self::Persistent(table) => table.flush(),
-            Self::Transient(table) => table.flush(),
+            Self::Transient(_) => Ok(()),
         }
     }
 

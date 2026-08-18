@@ -6,7 +6,6 @@ use smallvec::SmallVec;
 use super::{CodeBlockIds, CodeBlockIdsByStart, CodeBlockIndex};
 use crate::ir::{Address, AddressRange, CodeBlock, Id, IdAllocator, IdSet};
 use crate::lifter::ContextSet;
-use crate::storage::EntityStorageError;
 
 pub struct CodeBlockTable {
     index: CodeBlockIndex,
@@ -29,10 +28,6 @@ impl CodeBlockTable {
             },
             entries: Vec::new(),
         }
-    }
-
-    pub fn flush(&self) -> Result<(), EntityStorageError> {
-        Ok(())
     }
 
     pub(crate) fn pending_id(&self, offset: usize) -> Id<CodeBlock> {
@@ -242,7 +237,7 @@ impl CodeBlockTable {
             .is_some_and(|bounds| bounds.has_overlap(raw..=raw))
     }
 
-    pub fn overlaps(&self, addr: Address) -> impl Iterator<Item = &CodeBlock> + '_ {
+    pub fn overlaps_address(&self, addr: Address) -> impl Iterator<Item = &CodeBlock> + '_ {
         let space = addr.space();
         let raw = addr.raw_address();
 
@@ -254,7 +249,7 @@ impl CodeBlockTable {
             .flat_map(move |id_set| id_set.iter().filter_map(move |id| self.get_raw(id)))
     }
 
-    pub fn overlaps_range(&self, range: &AddressRange) -> impl Iterator<Item = &CodeBlock> + '_ {
+    pub fn overlaps(&self, range: &AddressRange) -> impl Iterator<Item = &CodeBlock> + '_ {
         let space = range.space();
         let start = range.start();
         let end = range.end();

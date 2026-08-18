@@ -288,7 +288,7 @@ impl<'a> Snapshot<'a> {
 
             let mut addresses = spans
                 .iter()
-                .filter(|span| Self::ranges_overlap(span.destination(), block.operations()))
+                .filter(|span| Self::ranges_overlap(span.destination(), block.ops()))
                 .map(IlSourceSpan::address)
                 .collect::<Vec<_>>();
             addresses.sort_by_key(Address::offset);

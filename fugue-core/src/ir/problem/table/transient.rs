@@ -1,7 +1,6 @@
 use super::{ProblemIndex, ProblemTableError};
 use crate::ir::problem::{Problem, ProblemId, ProblemKey, ProblemKind, ProblemScope};
 use crate::ir::{Address, AddressRange};
-use crate::storage::EntityStorageError;
 
 pub struct ProblemTable {
     index: ProblemIndex,
@@ -20,10 +19,6 @@ impl ProblemTable {
             index: ProblemIndex::new(),
             entries: Vec::new(),
         }
-    }
-
-    pub fn flush(&self) -> Result<(), EntityStorageError> {
-        Ok(())
     }
 
     pub(crate) fn pending_id(&self, offset: usize) -> ProblemId {

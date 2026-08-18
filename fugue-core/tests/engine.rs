@@ -2006,7 +2006,7 @@ fn every_recovered_function_lifts_to_mcode() -> Result<(), Box<dyn Error>> {
         if function == restored_function {
             saw_rbp_restore =
                 mcode
-                    .operations_for_source(Address::from(0x10bdau64))
+                    .ops_for_source(Address::from(0x10bdau64))
                     .any(|(_, operation)| {
                         operation.opcode() == MCodeOpcode::SetVar
                             && operation
@@ -2017,7 +2017,7 @@ fn every_recovered_function_lifts_to_mcode() -> Result<(), Box<dyn Error>> {
                                 })
                     });
         }
-        for operation in mcode.operations() {
+        for operation in mcode.ops() {
             saw_address_of |= matches!(
                 operation.opcode(),
                 MCodeOpcode::AddressOf | MCodeOpcode::AddressOfField
@@ -2041,7 +2041,7 @@ fn every_recovered_function_lifts_to_mcode() -> Result<(), Box<dyn Error>> {
             ) {
                 saw_call = true;
                 let memory = mcode
-                    .operation_operands_for(operation)
+                    .op_operands_for(operation)
                     .last()
                     .expect("a call has a memory operand");
                 assert_eq!(mcode.values()[memory.index()].width(), 0);

@@ -97,11 +97,11 @@ where
         }
 
         let dominance = self.ir.analyse::<IlDominance>();
-        let operation_blocks = self.ir.graph().operation_blocks(self.ir.operation_count());
+        let operation_blocks = self.ir.graph().op_blocks(self.ir.op_count());
 
         self.verify_edge_uses(&dominance, &operation_blocks, &mut verify_edge_arg)?;
 
-        for operation_index in 0..self.ir.operation_count() {
+        for operation_index in 0..self.ir.op_count() {
             let operation = IlOpId::try_from_index(operation_index)
                 .map_err(SsaVerifyError::from)
                 .map_err(E::from)?;
@@ -117,14 +117,14 @@ where
                 continue;
             }
 
-            let operands = self.ir.operation_operands(operation).ok_or_else(|| {
+            let operands = self.ir.op_operands(operation).ok_or_else(|| {
                 E::from(SsaVerifyError::InvalidOpPlacement {
                     operation: operation.value(),
                 })
             })?;
             for &operand in operands {
                 if !self
-                    .value_dominates_operation(
+                    .value_dominates_op(
                         operand,
                         user_block,
                         operation_index,
@@ -243,7 +243,7 @@ where
     }
 
     fn verify_linear_uses(&self) -> Result<(), SsaVerifyError> {
-        for operation_index in 0..self.ir.operation_count() {
+        for operation_index in 0..self.ir.op_count() {
             let operation = IlOpId::try_from_index(operation_index)?;
             self.verify_operands_precede(operation, operation_index)?;
         }
@@ -256,7 +256,7 @@ where
         operation: IlOpId,
         operation_index: usize,
     ) -> Result<(), SsaVerifyError> {
-        let operands = self.ir.operation_operands(operation).ok_or(
+        let operands = self.ir.op_operands(operation).ok_or(
             SsaVerifyError::InvalidOpPlacement {
                 operation: operation.value(),
             },
@@ -279,7 +279,7 @@ where
         Ok(())
     }
 
-    fn value_dominates_operation(
+    fn value_dominates_op(
         &self,
         value: IlValueId,
         user_block: IlBlockId,
@@ -461,11 +461,11 @@ mod test {
             None
         }
 
-        fn operation_count(&self) -> usize {
+        fn op_count(&self) -> usize {
             0
         }
 
-        fn operation_operands(&self, _operation: IlOpId) -> Option<&[IlValueId]> {
+        fn op_operands(&self, _operation: IlOpId) -> Option<&[IlValueId]> {
             None
         }
 

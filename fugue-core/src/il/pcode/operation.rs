@@ -212,7 +212,7 @@ pub enum PCodeOpcode {
 }
 
 impl PCodeOpcode {
-    pub(crate) fn from_operation(operation: Op) -> Option<Self> {
+    pub(crate) fn from_op(operation: Op) -> Option<Self> {
         Some(match operation {
             Op::Copy => Self::Copy,
             Op::Load(_) => Self::Load,

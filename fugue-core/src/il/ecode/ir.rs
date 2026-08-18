@@ -166,11 +166,11 @@ impl ECodeIr {
         &self.edge_arg_values
     }
 
-    pub fn operations(&self) -> &[ECodeOp] {
+    pub fn ops(&self) -> &[ECodeOp] {
         &self.operations
     }
 
-    pub fn operation_operands(&self) -> &[IlValueId] {
+    pub fn op_operands(&self) -> &[IlValueId] {
         &self.value_operands
     }
 
@@ -188,28 +188,28 @@ impl ECodeIr {
             .find(|domain| domain.space() == space)
     }
 
-    pub fn operation_operands_for(&self, operation: &ECodeOp) -> &[IlValueId] {
+    pub fn op_operands_for(&self, operation: &ECodeOp) -> &[IlValueId] {
         operation.operands().slice(&self.value_operands)
     }
 
-    pub fn block_for_operation(&self, operation: IlOpId) -> Option<IlBlockId> {
-        self.graph.block_for_operation(operation)
+    pub fn block_for_op(&self, operation: IlOpId) -> Option<IlBlockId> {
+        self.graph.block_for_op(operation)
     }
 
-    pub(crate) fn operation_blocks(&self) -> Vec<Option<IlBlockId>> {
-        self.graph.operation_blocks(self.operations.len())
+    pub(crate) fn op_blocks(&self) -> Vec<Option<IlBlockId>> {
+        self.graph.op_blocks(self.operations.len())
     }
 
     pub(crate) fn block_address(&self, block: IlBlockId) -> Option<Address> {
         if let Some(address) = self.graph.block_source(block) {
             return Some(address);
         }
-        let range = self.graph.blocks().get(block.index())?.operations();
+        let range = self.graph.blocks().get(block.index())?.ops();
         self.source_span_for(range.start())
             .map(|span| span.address())
     }
 
-    pub fn defining_operation(&self, value: IlValueId) -> Option<&ECodeOp> {
+    pub fn defining_op(&self, value: IlValueId) -> Option<&ECodeOp> {
         let record = self.values.get(value.index())?;
         let IlSsaDef::Op(operation) = record.definition() else {
             return None;
@@ -222,7 +222,7 @@ impl ECodeIr {
             return None;
         }
 
-        self.operation_operands_for(operation).last().copied()
+        self.op_operands_for(operation).last().copied()
     }
 
     pub fn pointer_operand(&self, operation: &ECodeOp) -> Option<IlValueId> {
@@ -230,13 +230,13 @@ impl ECodeIr {
             return None;
         }
 
-        self.operation_operands_for(operation).first().copied()
+        self.op_operands_for(operation).first().copied()
     }
 
     pub fn underlying_value(&self, value: IlValueId) -> IlValueId {
         let mut current = value;
         for _ in 0..self.values.len() {
-            let Some(operation) = self.defining_operation(current) else {
+            let Some(operation) = self.defining_op(current) else {
                 return current;
             };
             match operation.opcode() {
@@ -246,7 +246,7 @@ impl ECodeIr {
                 | ECodeOpcode::WriteFlag
                 | ECodeOpcode::WriteRegister
                 | ECodeOpcode::ZeroExtend => {
-                    let Some(inner) = self.operation_operands_for(operation).first().copied()
+                    let Some(inner) = self.op_operands_for(operation).first().copied()
                     else {
                         return current;
                     };
@@ -259,17 +259,17 @@ impl ECodeIr {
     }
 
     pub(crate) fn extract_source(&self, value: IlValueId) -> Option<IlValueId> {
-        let extract = self.defining_operation(value)?;
+        let extract = self.defining_op(value)?;
         if extract.opcode() != ECodeOpcode::Extract {
             return None;
         }
-        let &source = self.operation_operands_for(extract).first()?;
+        let &source = self.op_operands_for(extract).first()?;
         let offset = extract.immediate();
 
-        if let Some(insert) = self.defining_operation(source)
+        if let Some(insert) = self.defining_op(source)
             && insert.opcode() == ECodeOpcode::Insert
             && insert.immediate() == offset
-            && let Some(&inserted) = self.operation_operands_for(insert).get(1)
+            && let Some(&inserted) = self.op_operands_for(insert).get(1)
             && self.value_width(inserted) == Some(extract.width())
         {
             return Some(inserted);
@@ -285,28 +285,28 @@ impl ECodeIr {
     pub fn constant_value(&self, value: IlValueId) -> Option<BitVec> {
         let mut current = value;
         for _ in 0..self.values.len() {
-            let operation = self.defining_operation(current)?;
+            let operation = self.defining_op(current)?;
             if !matches!(
                 operation.opcode(),
                 ECodeOpcode::WriteFlag | ECodeOpcode::WriteRegister
             ) {
                 return operation.constant(&self.constant_storage);
             }
-            current = *self.operation_operands_for(operation).first()?;
+            current = *self.op_operands_for(operation).first()?;
         }
         None
     }
 
     pub fn memory_access_range(&self, operation: &ECodeOp) -> Option<AddressRange> {
         let space = operation.address_space()?;
-        let pointer = self.defining_operation(self.pointer_operand(operation)?)?;
+        let pointer = self.defining_op(self.pointer_operand(operation)?)?;
         if pointer.opcode() != ECodeOpcode::Address {
             return None;
         }
         let width = match operation.opcode() {
             ECodeOpcode::Load => operation.width(),
             ECodeOpcode::Store => self
-                .operation_operands_for(operation)
+                .op_operands_for(operation)
                 .get(1)
                 .copied()
                 .and_then(|value| self.value_width(value))?,
@@ -325,11 +325,11 @@ impl ECodeIr {
             .slice(&self.edge_arg_values)
     }
 
-    pub fn operations_for_source(
+    pub fn ops_for_source(
         &self,
         address: Address,
     ) -> impl Iterator<Item = (IlOpId, &ECodeOp)> + '_ {
-        IlSourceSpan::operations(&self.source_spans, &self.operations, address)
+        IlSourceSpan::ops(&self.source_spans, &self.operations, address)
     }
 
     pub fn shrink_to_fit(&mut self) {
@@ -355,7 +355,7 @@ pub(crate) struct ECodeRewriter<'a> {
 }
 
 impl ECodeRewriter<'_> {
-    pub(crate) fn operations(&self) -> &[ECodeOp] {
+    pub(crate) fn ops(&self) -> &[ECodeOp] {
         self.operations
     }
 
@@ -413,14 +413,14 @@ impl SsaIl for ECodeIr {
         self.block_args.get(arg.index()).map(ECodeBlockArg::width)
     }
 
-    fn operation_count(&self) -> usize {
+    fn op_count(&self) -> usize {
         self.operations.len()
     }
 
-    fn operation_operands(&self, operation: IlOpId) -> Option<&[IlValueId]> {
+    fn op_operands(&self, operation: IlOpId) -> Option<&[IlValueId]> {
         self.operations
             .get(operation.index())
-            .map(|operation| self.operation_operands_for(operation))
+            .map(|operation| self.op_operands_for(operation))
     }
 
     fn edge_args(&self) -> &[IlIndexRange] {

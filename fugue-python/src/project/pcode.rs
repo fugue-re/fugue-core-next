@@ -65,7 +65,7 @@ impl PCodeIr {
 
     fn operations(&self) -> Vec<PCodeOp> {
         self.inner
-            .operations()
+            .ops()
             .iter()
             .enumerate()
             .map(|(index, operation)| PCodeOp::from_core(&self.inner, index, operation))
@@ -74,7 +74,7 @@ impl PCodeIr {
 
     fn operations_for_source(&self, address: &Address) -> Vec<PCodeOp> {
         self.inner
-            .operations_for_source(address.inner())
+            .ops_for_source(address.inner())
             .map(|(index, operation)| PCodeOp::from_core(&self.inner, index.index(), operation))
             .collect()
     }
@@ -168,7 +168,7 @@ pub(crate) struct PCodeOp {
 impl PCodeOp {
     fn from_core(ir: &CorePCodeIr, index: usize, operation: &CorePCodeOp) -> Self {
         let operands = ir
-            .operation_operands_for(operation)
+            .op_operands_for(operation)
             .iter()
             .map(|operand| operand.index())
             .collect();

@@ -102,13 +102,13 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
             for (_, operation) in self
                 .ssa
                 .graph()
-                .operations_for_block(block, self.ssa.operations())
+                .ops_for_block(block, self.ssa.ops())
                 .rev()
             {
                 if operation.opcode() != ECodeOpcode::ConditionalBranch {
                     continue;
                 }
-                let Some(&condition) = self.ssa.operation_operands_for(operation).first() else {
+                let Some(&condition) = self.ssa.op_operands_for(operation).first() else {
                     continue;
                 };
                 let Some(taken) = operation
@@ -172,7 +172,7 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
         let width = self.ssa.value_width(index)?;
         let ceiling = BitVec::max_value_with(width, false);
         let operation = self.conditional_branch_within_instruction(branch)?;
-        let condition = *self.ssa.operation_operands_for(operation).first()?;
+        let condition = *self.ssa.op_operands_for(operation).first()?;
         let interval = self.index_interval_from_condition(
             condition,
             index,
@@ -190,7 +190,7 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
 
     fn conditional_branch_within_instruction(&self, branch: Address) -> Option<&ECodeOp> {
         let mut conditional = None;
-        for (_, operation) in self.ssa.operations_for_source(branch) {
+        for (_, operation) in self.ssa.ops_for_source(branch) {
             match operation.opcode() {
                 ECodeOpcode::ConditionalBranch => conditional = Some(operation),
                 ECodeOpcode::BranchIndirect => break,
@@ -222,13 +222,13 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
                     depth,
                 } => {
                     let Some(operation) = (depth > 0)
-                        .then(|| self.ssa.defining_operation(condition))
+                        .then(|| self.ssa.defining_op(condition))
                         .flatten()
                     else {
                         intervals.push(None);
                         continue;
                     };
-                    let operands = self.ssa.operation_operands_for(operation);
+                    let operands = self.ssa.op_operands_for(operation);
 
                     match operation.opcode() {
                         ECodeOpcode::WriteFlag | ECodeOpcode::WriteRegister => {
@@ -314,7 +314,7 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
             ECodeOpcode::IntNotEqual => Relation::NotEqual,
             _ => return None,
         };
-        let operands = self.ssa.operation_operands_for(operation);
+        let operands = self.ssa.op_operands_for(operation);
         let (&a, &b) = (operands.first()?, operands.get(1)?);
 
         let (relation, offset, constant) =
@@ -349,8 +349,8 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
         if self.matches_index(value, index) {
             return Some(BitVec::zero(width));
         }
-        let operation = self.ssa.defining_operation(value)?;
-        let operands = self.ssa.operation_operands_for(operation);
+        let operation = self.ssa.defining_op(value)?;
+        let operands = self.ssa.op_operands_for(operation);
         let (&a, &b) = (operands.first()?, operands.get(1)?);
         match operation.opcode() {
             ECodeOpcode::Sub if self.matches_index(a, index) => {
@@ -383,8 +383,8 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
             steps += 1;
 
             let (Some(oa), Some(ob)) = (
-                self.ssa.defining_operation(a),
-                self.ssa.defining_operation(b),
+                self.ssa.defining_op(a),
+                self.ssa.defining_op(b),
             ) else {
                 return false;
             };
@@ -433,8 +433,8 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
                 return false;
             }
 
-            let a_operands = self.ssa.operation_operands_for(oa);
-            let b_operands = self.ssa.operation_operands_for(ob);
+            let a_operands = self.ssa.op_operands_for(oa);
+            let b_operands = self.ssa.op_operands_for(ob);
             if a_operands.len() != b_operands.len() {
                 return false;
             }
@@ -480,7 +480,7 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
             if state == to {
                 return true;
             }
-            let Some(operation) = self.ssa.defining_operation(state) else {
+            let Some(operation) = self.ssa.defining_op(state) else {
                 return false;
             };
             if operation.opcode() != ECodeOpcode::Store {

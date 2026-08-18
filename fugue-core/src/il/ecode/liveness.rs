@@ -74,7 +74,7 @@ impl<'a> ECodeLivenessSolver<'a> {
         }
 
         self.collect_block_args();
-        self.collect_operation_uses();
+        self.collect_op_uses();
         self.collect_edge_uses();
 
         let block_count = self.ir.graph().blocks().len();
@@ -137,10 +137,10 @@ impl<'a> ECodeLivenessSolver<'a> {
         }
     }
 
-    fn collect_operation_uses(&mut self) {
+    fn collect_op_uses(&mut self) {
         for (block_index, block) in self.ir.graph().blocks().iter().enumerate() {
-            for operation in block.operations().slice(self.ir.operations()) {
-                for operand in self.ir.operation_operands_for(operation) {
+            for operation in block.ops().slice(self.ir.ops()) {
+                for operand in self.ir.op_operands_for(operation) {
                     if !self
                         .block_definitions
                         .contains(block_index, operand.index())

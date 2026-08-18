@@ -94,7 +94,7 @@ fn compaction_removes_a_dead_pure_definition() {
 
     ir.rewrite(MCodeCompaction::new(&[]));
 
-    assert!(ir.operations().is_empty());
+    assert!(ir.ops().is_empty());
     assert!(ir.values().is_empty());
 }
 
@@ -130,8 +130,8 @@ fn compaction_preserves_an_explicitly_required_value() {
 
     ir.rewrite(MCodeCompaction::new(&[required]));
 
-    assert_eq!(ir.operations().len(), 2);
-    assert_eq!(ir.operations()[1].opcode(), MCodeOpcode::SetVar);
+    assert_eq!(ir.ops().len(), 2);
+    assert_eq!(ir.ops()[1].opcode(), MCodeOpcode::SetVar);
     assert!(ir.values()[1].variable().is_some());
 }
 
@@ -174,7 +174,7 @@ fn compaction_preserves_variable_definitions_for_required_addresses() {
 
     ir.rewrite(MCodeCompaction::new(&required));
 
-    assert_eq!(ir.operations().len(), 512);
+    assert_eq!(ir.ops().len(), 512);
     assert_eq!(ir.variables().len(), 256);
 }
 
@@ -214,7 +214,7 @@ fn folding_preserves_a_bound_value() {
 
     ir.rewrite(MCodeOptimiser::new(&[]));
 
-    assert_eq!(ir.operations()[0].opcode(), MCodeOpcode::Constant);
+    assert_eq!(ir.ops()[0].opcode(), MCodeOpcode::Constant);
     assert_eq!(ir.values()[0].binding().unwrap().variable(), variable);
     assert!(ir.verify().is_ok());
 }

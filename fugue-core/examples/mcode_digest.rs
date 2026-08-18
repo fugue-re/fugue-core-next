@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 continue;
             };
             lifted += 1;
-            operations += mcode.operations().len();
+            operations += mcode.ops().len();
             values += mcode.values().len();
             variables += mcode.variables().len();
             let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(mcode.as_ref())?;

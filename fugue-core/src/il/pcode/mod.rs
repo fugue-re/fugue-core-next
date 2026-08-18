@@ -4,6 +4,7 @@ mod error;
 mod format;
 mod ir;
 mod operation;
+mod raw;
 mod transform;
 mod verify;
 
@@ -15,4 +16,5 @@ pub use operation::{
     PCodeLifterSpaceHandle, PCodeLocation, PCodeLocationId, PCodeLocationProperties, PCodeOp,
     PCodeOpSpec, PCodeOpcode, PCodeTargetId,
 };
+pub use raw::{RawPCodeDefs, RawPCodeFlow, RawPCodeFlows};
 pub use transform::{PCodeCanonicaliser, PCodeFunctionInput};

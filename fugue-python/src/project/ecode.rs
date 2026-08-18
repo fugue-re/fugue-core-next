@@ -204,7 +204,7 @@ impl ECodeIr {
 
     fn operations(&self) -> Vec<ECodeOp> {
         self.inner
-            .operations()
+            .ops()
             .iter()
             .enumerate()
             .map(|(index, operation)| ECodeOp::from_core(&self.inner, index, operation))
@@ -213,7 +213,7 @@ impl ECodeIr {
 
     fn operations_for_source(&self, address: &Address) -> Vec<ECodeOp> {
         self.inner
-            .operations_for_source(address.inner())
+            .ops_for_source(address.inner())
             .map(|(index, operation)| ECodeOp::from_core(&self.inner, index.index(), operation))
             .collect()
     }
@@ -238,7 +238,7 @@ impl ECodeValue {
     fn from_core(index: usize, value: CoreECodeValue, domain: Option<CoreECodeDomain>) -> Self {
         let (definition_kind, definition_index) = match value.definition() {
             CoreIlSsaDef::BlockArg(arg) => ("block_arg", arg.index()),
-            CoreIlSsaDef::Operation(operation) => ("operation", operation.index()),
+            CoreIlSsaDef::Op(operation) => ("operation", operation.index()),
         };
 
         Self {
@@ -560,7 +560,7 @@ impl ECodeOp {
         let results = operation.results().start()..operation.results().end();
         let results = results.collect();
         let operands = ir
-            .operation_operands_for(operation)
+            .op_operands_for(operation)
             .iter()
             .map(|operand| operand.index())
             .collect();

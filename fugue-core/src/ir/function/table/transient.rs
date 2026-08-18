@@ -6,7 +6,6 @@ use smallvec::SmallVec;
 
 use super::{FunctionIndex, FunctionTableError};
 use crate::ir::{Address, CodeBlockId, Function, FunctionId, Id, IdAllocator, IdSet, RawAddress};
-use crate::storage::EntityStorageError;
 use crate::storage::segments::space::AddressSpaceId;
 
 pub struct FunctionTable {
@@ -26,10 +25,6 @@ impl FunctionTable {
             index: FunctionIndex::new(IdAllocator::new(), BTreeMap::new()),
             entries: Vec::new(),
         }
-    }
-
-    pub fn flush(&self) -> Result<(), EntityStorageError> {
-        Ok(())
     }
 
     pub(crate) fn pending_id(&self, offset: usize) -> FunctionId {

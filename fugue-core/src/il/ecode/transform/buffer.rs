@@ -35,7 +35,7 @@ impl PCodeToECodeBuffer {
         &self.expressions
     }
 
-    pub(crate) fn operations(&self) -> &[PCodeToECodeEffect] {
+    pub(crate) fn ops(&self) -> &[PCodeToECodeEffect] {
         &self.operations
     }
 
@@ -49,7 +49,7 @@ impl PCodeToECodeBuffer {
             .slice(self.expression_operands.values())
     }
 
-    pub(crate) fn operation_operands_for(&self, operation: &PCodeToECodeEffect) -> &[IlExprId] {
+    pub(crate) fn op_operands_for(&self, operation: &PCodeToECodeEffect) -> &[IlExprId] {
         operation.operands().slice(self.operation_operands.values())
     }
 
@@ -75,7 +75,7 @@ impl PCodeToECodeBuffer {
         self.expression_operands.append(operands)
     }
 
-    pub(crate) fn push_operation(
+    pub(crate) fn push_op(
         &mut self,
         operation: PCodeToECodeEffect,
     ) -> Result<IlOpId, IlError> {
@@ -84,7 +84,7 @@ impl PCodeToECodeBuffer {
         Ok(id)
     }
 
-    pub(crate) fn push_operation_operands(
+    pub(crate) fn push_op_operands(
         &mut self,
         operands: impl IntoIterator<Item = IlExprId>,
     ) -> Result<IlIndexRange, IlError> {
@@ -165,7 +165,7 @@ impl PCodeToECodeBuffer {
         register: RegisterId,
         value: IlExprId,
     ) -> Result<(), IlError> {
-        self.push_operation(
+        self.push_op(
             PCodeToECodeEffect::new(
                 ECodeOpcode::WriteRegister,
                 IlIndexRange::EMPTY,
@@ -179,7 +179,7 @@ impl PCodeToECodeBuffer {
     }
 
     pub(crate) fn write_flag(&mut self, flag: FlagId, value: IlExprId) -> Result<(), IlError> {
-        self.push_operation(
+        self.push_op(
             PCodeToECodeEffect::new(
                 ECodeOpcode::WriteFlag,
                 IlIndexRange::EMPTY,
@@ -197,8 +197,8 @@ impl PCodeToECodeBuffer {
         operands: &[IlExprId],
         address_space: Option<AddressSpaceId>,
     ) -> Result<(), IlError> {
-        let operands = self.push_operation_operands(operands.iter().copied())?;
-        self.push_operation(PCodeToECodeEffect::new(
+        let operands = self.push_op_operands(operands.iter().copied())?;
+        self.push_op(PCodeToECodeEffect::new(
             ECodeOpcode::Store,
             operands,
             None,
@@ -214,8 +214,8 @@ impl PCodeToECodeBuffer {
         target: Address,
         operands: &[IlExprId],
     ) -> Result<(), IlError> {
-        let operands = self.push_operation_operands(operands.iter().copied())?;
-        self.push_operation(PCodeToECodeEffect::new(
+        let operands = self.push_op_operands(operands.iter().copied())?;
+        self.push_op(PCodeToECodeEffect::new(
             opcode,
             operands,
             None,
@@ -231,8 +231,8 @@ impl PCodeToECodeBuffer {
         operands: &[IlExprId],
         address_space: Option<AddressSpaceId>,
     ) -> Result<(), IlError> {
-        let operands = self.push_operation_operands(operands.iter().copied())?;
-        self.push_operation(PCodeToECodeEffect::new(
+        let operands = self.push_op_operands(operands.iter().copied())?;
+        self.push_op(PCodeToECodeEffect::new(
             opcode,
             operands,
             None,
@@ -248,8 +248,8 @@ impl PCodeToECodeBuffer {
         operands: &[IlExprId],
         address_space: Option<AddressSpaceId>,
     ) -> Result<(), IlError> {
-        let operands = self.push_operation_operands(operands.iter().copied())?;
-        self.push_operation(
+        let operands = self.push_op_operands(operands.iter().copied())?;
+        self.push_op(
             PCodeToECodeEffect::new(ECodeOpcode::Intrinsic, operands, None, None, address_space)
                 .with_immediate(intrinsic),
         )?;
@@ -261,7 +261,7 @@ impl PCodeToECodeBuffer {
         intrinsic: u64,
         address_space: Option<AddressSpaceId>,
     ) -> Result<(), IlError> {
-        self.push_operation(
+        self.push_op(
             PCodeToECodeEffect::new(
                 ECodeOpcode::Trap,
                 IlIndexRange::EMPTY,

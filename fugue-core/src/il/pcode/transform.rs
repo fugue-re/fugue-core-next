@@ -11,38 +11,17 @@ use crate::il::common::{
 };
 use crate::il::pcode::{
     PCodeAddressAnnotationRole, PCodeBuilder, PCodeError, PCodeIr, PCodeLocation, PCodeLocationId,
-    PCodeOpSpec, PCodeOpcode,
+    PCodeOpSpec, PCodeOpcode, RawPCodeFlow, RawPCodeFlows,
 };
+use crate::il::pcode::raw::remap_target_position;
 use crate::ir::{
     Address, CodeBlockId, CodeBlockTable, FlowTarget, FunctionId, FunctionTable,
-    IncompleteFunction, Insn, InsnTarget, Location,
+    IncompleteFunction, Location,
 };
 use crate::lifter::{ContextSet, Language, Lifter, Op, RawPCodeOp, Varnode};
 use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::segments::{SegmentMappingCache, SegmentStorage};
 use crate::types::common::Revision;
-
-fn remap_target_position(
-    operations: &[RawPCodeOp],
-    address: Address,
-    target: Location,
-) -> Option<Location> {
-    if target.address() != address {
-        return Some(target);
-    }
-
-    let raw_target = usize::from(target.position());
-    let mut raw_index = 0usize;
-    let mut semantic_index = 0u16;
-
-    while raw_index < raw_target {
-        let operation = operations.get(raw_index)?;
-        raw_index += operation.spill() + 1;
-        semantic_index = semantic_index.checked_add(1)?;
-    }
-
-    (raw_index == raw_target).then(|| Location::new(target.address(), semantic_index))
-}
 
 #[derive(Debug, Default)]
 pub struct PCodeCanonicaliser {
@@ -476,7 +455,7 @@ impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
             "each successor edge carries exactly one kind"
         );
 
-        let operation_start = self.builder.emitter().operation_count();
+        let operation_start = self.builder.emitter().op_count();
         context.apply(source, self.lifter.context_mut());
         let view = self
             .mapping_cache
@@ -502,7 +481,7 @@ impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
         }
 
         self.blocks.push(IlBlock::new(
-            IlIndexRange::new(operation_start, self.builder.emitter().operation_count())?,
+            IlIndexRange::new(operation_start, self.builder.emitter().op_count())?,
             IlIndexRange::new(successor_start, self.successors.len())?,
             properties,
         ));
@@ -526,20 +505,20 @@ impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
                     remaining,
                 ));
             }
-            let source_start = self.builder.emitter().operation_count();
+            let source_start = self.builder.emitter().op_count();
 
             self.annotations.clear();
             let emitted = self.push_address_annotations(address, lifted_size, source_start)?;
             let annotations = mem::take(&mut self.annotations);
             let mut context = PCodeAddressContext::new(&annotations);
-            let result = self.lift_operations(&mut context);
+            let result = self.lift_ops(&mut context);
             self.annotations = annotations;
             result?;
 
             let emitted = u32::try_from(emitted)
                 .map_err(|_| IlError::integer_overflow("instruction PCode count"))?;
             self.source_spans.push(IlSourceSpan::new(
-                IlIndexRange::new(source_start, self.builder.emitter().operation_count())?,
+                IlIndexRange::new(source_start, self.builder.emitter().op_count())?,
                 address,
                 0,
                 emitted,
@@ -558,14 +537,7 @@ impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
         length: usize,
         starting_ordinal: usize,
     ) -> Result<usize, PCodeError> {
-        let mut targets = SmallVec::<[(u16, InsnTarget); 1]>::new();
-        Insn::push_targets_for_operations(
-            self.language,
-            address,
-            length,
-            &self.operations,
-            &mut targets,
-        );
+        let flows = RawPCodeFlows::new(self.language, address, length, &self.operations);
         let mut semantic_count = 0usize;
         let mut index = 0usize;
 
@@ -577,24 +549,24 @@ impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
                 return Err(PCodeError::misplaced_arg(ordinal.value()));
             }
 
-            let opcode = PCodeOpcode::from_operation(operation.op())
+            let opcode = PCodeOpcode::from_op(operation.op())
                 .ok_or_else(|| PCodeError::invalid_opcode(ordinal.value()))?;
 
             if opcode.requires_address() {
-                if let Some(target) = targets
-                    .iter()
-                    .find(|(target_index, _)| usize::from(*target_index) == index)
-                    .and_then(|(_, target)| match target {
-                        InsnTarget::IntraIns(location, _) | InsnTarget::IntraBlk(location, _) => {
-                            Some(*location)
+                if let Some(target) = u16::try_from(index)
+                    .ok()
+                    .and_then(|index| flows.flow_for(index))
+                    .and_then(|flow| match flow {
+                        RawPCodeFlow::Branch(Some(location))
+                        | RawPCodeFlow::Call(Some(location))
+                        | RawPCodeFlow::FallThrough(location) => Some(*location),
+                        RawPCodeFlow::Return(Some(return_address)) => {
+                            Some((*return_address).into())
                         }
-                        InsnTarget::InterBlk(address)
-                        | InsnTarget::InterSub(Some(address))
-                        | InsnTarget::InterRet(Some(address), _) => Some((*address).into()),
-                        InsnTarget::InterSub(None)
-                        | InsnTarget::InterRet(None, _)
-                        | InsnTarget::Intrinsic
-                        | InsnTarget::Unresolved => None,
+                        RawPCodeFlow::Branch(None)
+                        | RawPCodeFlow::Call(None)
+                        | RawPCodeFlow::Return(None)
+                        | RawPCodeFlow::Intrinsic => None,
                     })
                 {
                     let target = remap_target_position(&self.operations, address, target)
@@ -620,8 +592,8 @@ impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
         Ok(semantic_count)
     }
 
-    fn lift_operations(&mut self, context: &mut PCodeAddressContext<'_>) -> Result<(), PCodeError> {
-        let mut ordinal = self.builder.emitter().operation_count();
+    fn lift_ops(&mut self, context: &mut PCodeAddressContext<'_>) -> Result<(), PCodeError> {
+        let mut ordinal = self.builder.emitter().op_count();
         let mut index = 0usize;
 
         while let Some(operation) = self.operations.get(index).copied() {
@@ -630,7 +602,7 @@ impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
                 return Err(PCodeError::misplaced_arg(operation_id.value()));
             }
 
-            let opcode = PCodeOpcode::from_operation(operation.op())
+            let opcode = PCodeOpcode::from_op(operation.op())
                 .ok_or_else(|| PCodeError::invalid_opcode(operation_id.value()))?;
             self.inputs.clear();
             self.inputs.extend(operation.inputs().iter().copied());
@@ -820,7 +792,7 @@ mod test {
 
         let ir = builder.build(&CancellationToken::default()).unwrap();
 
-        assert!(ir.operations().is_empty());
+        assert!(ir.ops().is_empty());
         assert_eq!(ir.metadata().input_revision().value(), 3);
     }
 }

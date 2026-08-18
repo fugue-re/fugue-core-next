@@ -82,7 +82,7 @@ impl SwitchIndex {
         }
     }
 
-    fn branches_of_function(&self, function: FunctionId) -> impl Iterator<Item = Address> + '_ {
+    fn branches_for_function(&self, function: FunctionId) -> impl Iterator<Item = Address> + '_ {
         self.by_function
             .get(&function)
             .into_iter()
@@ -219,7 +219,7 @@ impl SwitchTable {
     pub fn flush(&self) -> Result<(), EntityStorageError> {
         match self {
             Self::Persistent(table) => table.flush(),
-            Self::Transient(table) => table.flush(),
+            Self::Transient(_) => Ok(()),
         }
     }
 
@@ -260,13 +260,13 @@ impl SwitchTable {
         }
     }
 
-    pub fn branches_of_function(
+    pub fn branches_for_function(
         &self,
         function: FunctionId,
     ) -> Box<dyn Iterator<Item = Address> + '_> {
         match self {
-            Self::Persistent(table) => Box::new(table.branches_of_function(function)),
-            Self::Transient(table) => Box::new(table.branches_of_function(function)),
+            Self::Persistent(table) => Box::new(table.branches_for_function(function)),
+            Self::Transient(table) => Box::new(table.branches_for_function(function)),
         }
     }
 
@@ -427,29 +427,29 @@ mod test {
                     .unwrap();
             }
 
-            let mut owned = table.branches_of_function(owner).collect::<Vec<_>>();
+            let mut owned = table.branches_for_function(owner).collect::<Vec<_>>();
             owned.sort();
             assert_eq!(
                 owned,
                 vec![Address::from(0x1000u64), Address::from(0x2000u64)]
             );
             assert_eq!(
-                table.branches_of_function(other).collect::<Vec<_>>(),
+                table.branches_for_function(other).collect::<Vec<_>>(),
                 vec![Address::from(0x3000u64)]
             );
 
             table.remove_by_branch(Address::from(0x1000u64));
             assert_eq!(
-                table.branches_of_function(owner).collect::<Vec<_>>(),
+                table.branches_for_function(owner).collect::<Vec<_>>(),
                 vec![Address::from(0x2000u64)]
             );
 
             table.modify_by_branch(Address::from(0x2000u64), |switch| {
                 switch.set_function(other);
             });
-            assert!(table.branches_of_function(owner).next().is_none());
+            assert!(table.branches_for_function(owner).next().is_none());
             assert_eq!(
-                table.branches_of_function(other).collect::<Vec<_>>(),
+                table.branches_for_function(other).collect::<Vec<_>>(),
                 vec![Address::from(0x2000u64), Address::from(0x3000u64)]
             );
         }

@@ -45,11 +45,11 @@ impl fmt::Display for ECodeIrDisplay<'_> {
             writeln!(f, "{display}")?;
         }
 
-        for (index, operation) in self.ir.operations().iter().enumerate() {
+        for (index, operation) in self.ir.ops().iter().enumerate() {
             let display = ECodeOpDisplay::new(self.ir, index, operation);
             write!(f, "{display}")?;
 
-            if index + 1 < self.ir.operations().len() {
+            if index + 1 < self.ir.ops().len() {
                 writeln!(f)?;
             }
         }
@@ -72,7 +72,7 @@ impl<'a> ECodeSourceDisplay<'a> {
 
 impl fmt::Display for ECodeSourceDisplay<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut operations = self.ir.operations_for_source(self.address).peekable();
+        let mut operations = self.ir.ops_for_source(self.address).peekable();
 
         while let Some((id, operation)) = operations.next() {
             let display = ECodeOpDisplay::new(self.ir, id.index(), operation);
@@ -210,7 +210,7 @@ impl<'a> ECodeOpDisplay<'a> {
     }
 
     fn write_operands(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let operands = self.ir.operation_operands_for(self.operation);
+        let operands = self.ir.op_operands_for(self.operation);
 
         for (index, operand) in operands.iter().enumerate() {
             if index == 0 {

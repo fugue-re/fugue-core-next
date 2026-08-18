@@ -32,7 +32,7 @@ fn merge_live_ranges(
             values.remove(&result);
         }
     }
-    for &operand in ir.operation_operands_for(operation) {
+    for &operand in ir.op_operands_for(operation) {
         let Some(domain) = ir
             .value_domain(operand)
             .filter(ECodeDomain::is_register_or_flag)
@@ -44,11 +44,11 @@ fn merge_live_ranges(
 }
 
 fn merge_derived_values(ir: &ECodeIr, components: &mut DisjointSet, transparent: &mut DisjointSet) {
-    for (operation, index) in ir.operations().iter().flat_map(|operation| {
+    for (operation, index) in ir.ops().iter().flat_map(|operation| {
         (operation.results().start()..operation.results().end())
             .map(move |index| (operation, index))
     }) {
-        let operands = ir.operation_operands_for(operation);
+        let operands = ir.op_operands_for(operation);
         let result = IlValueId::try_from_index(index).expect("value id is representable");
         if ir.value_domain(result).is_some() {
             continue;
@@ -69,11 +69,11 @@ fn merge_derived_values(ir: &ECodeIr, components: &mut DisjointSet, transparent:
                 representatives.insert((root, domain), value);
             }
         };
-    for (operation, index) in ir.operations().iter().flat_map(|operation| {
+    for (operation, index) in ir.ops().iter().flat_map(|operation| {
         (operation.results().start()..operation.results().end())
             .map(move |index| (operation, index))
     }) {
-        let operands = ir.operation_operands_for(operation);
+        let operands = ir.op_operands_for(operation);
         let result = IlValueId::try_from_index(index).expect("value id is representable");
         let result_domain = ir.value_domain(result);
         match result_domain.filter(ECodeDomain::is_register_or_flag) {
@@ -137,7 +137,7 @@ impl MCodeVariableModel {
         let liveness = ir.analyse::<ECodeLiveness>();
         let mut live = FxHashMap::<ECodeDomain, FxHashSet<IlValueId>>::default();
         if ir.graph().blocks().is_empty() {
-            for operation in ir.operations().iter().rev() {
+            for operation in ir.ops().iter().rev() {
                 merge_live_ranges(ir, operation, &mut live, &mut components);
             }
         } else {
@@ -155,7 +155,7 @@ impl MCodeVariableModel {
                 }
                 for (_, operation) in ir
                     .graph()
-                    .operations_for_block(block, ir.operations())
+                    .ops_for_block(block, ir.ops())
                     .rev()
                 {
                     merge_live_ranges(ir, operation, &mut live, &mut components);

@@ -90,10 +90,10 @@ impl SwitchIntervalRecovery<'_> {
             if !visited.insert(value.index()) {
                 continue;
             }
-            let Some(operation) = self.ssa.defining_operation(value) else {
+            let Some(operation) = self.ssa.defining_op(value) else {
                 continue;
             };
-            let operands = self.ssa.operation_operands_for(operation);
+            let operands = self.ssa.op_operands_for(operation);
             match operation.opcode() {
                 ECodeOpcode::Load => {
                     if let Some(pointer) = self.ssa.pointer_operand(operation) {
@@ -138,10 +138,10 @@ impl SwitchIntervalRecovery<'_> {
 
     pub(crate) fn inline_table_layout(&self, target: IlValueId) -> Option<SwitchInlineTableLayout> {
         let mut target = self.canonical_value(target);
-        if let Some(operation) = self.ssa.defining_operation(target)
+        if let Some(operation) = self.ssa.defining_op(target)
             && operation.opcode() == ECodeOpcode::And
         {
-            let operands = self.ssa.operation_operands_for(operation);
+            let operands = self.ssa.op_operands_for(operation);
             let (&a, &b) = (operands.first()?, operands.get(1)?);
             let (mask, unmasked) = self.constant_and_value(a, b)?;
             let width = self.ssa.value_width(target)?;
@@ -167,16 +167,16 @@ impl SwitchIntervalRecovery<'_> {
 
     fn base_scale_index(&self, value: IlValueId) -> Option<BaseScaleIndex> {
         let value = self.canonical_value(value);
-        let operation = self.ssa.defining_operation(value)?;
+        let operation = self.ssa.defining_op(value)?;
         if operation.opcode() != ECodeOpcode::Add {
             return None;
         }
-        let operands = self.ssa.operation_operands_for(operation);
+        let operands = self.ssa.op_operands_for(operation);
         let (&a, &b) = (operands.first()?, operands.get(1)?);
         let (base, scaled) = self.constant_and_value(a, b)?;
         let base = RawAddress::from(base.to_u64()?);
         let scaled = self.canonical_value(scaled);
-        let Some(operation) = self.ssa.defining_operation(scaled) else {
+        let Some(operation) = self.ssa.defining_op(scaled) else {
             return Some(BaseScaleIndex::new(base, None, scaled));
         };
         if !matches!(
@@ -185,7 +185,7 @@ impl SwitchIntervalRecovery<'_> {
         ) {
             return Some(BaseScaleIndex::new(base, None, scaled));
         }
-        let operands = self.ssa.operation_operands_for(operation);
+        let operands = self.ssa.op_operands_for(operation);
         let (&a, &b) = (operands.first()?, operands.get(1)?);
         let (scale, index) = match operation.opcode() {
             ECodeOpcode::Mul => self.constant_and_value(a, b)?,

@@ -346,8 +346,8 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             block_args: vec![Vec::new(); ir.graph().blocks().len()],
             blocks: vec![None; ir.graph().blocks().len()],
             edge_args: vec![Vec::new(); ir.graph().successors().len()],
-            operation_blocks: ir.operation_blocks(),
-            operation_ranges: IlIndexRangeMap::unmapped(ir.operations().len()),
+            operation_blocks: ir.op_blocks(),
+            operation_ranges: IlIndexRangeMap::unmapped(ir.ops().len()),
         })
     }
 
@@ -404,9 +404,9 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
 
     fn lift_linear(&mut self, cancellation: &CancellationToken) -> Result<(), IlError> {
         let mut current = ECodeToMCodeRenameState::default();
-        for index in 0..self.source.operations().len() {
+        for index in 0..self.source.ops().len() {
             cancellation.check()?;
-            self.lift_operation_at(index, &mut current)?;
+            self.lift_op_at(index, &mut current)?;
         }
 
         self.finish_graph(
@@ -414,7 +414,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                 .graph()
                 .blocks()
                 .iter()
-                .map(|block| block.operations()),
+                .map(|block| block.ops()),
         )
     }
 
@@ -448,7 +448,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             .into_iter()
             .collect::<Option<Vec<_>>>()
             .expect("every MCode block is constructed before graph replacement");
-        self.finish_graph(blocks.into_iter().map(|block| block.operations()))
+        self.finish_graph(blocks.into_iter().map(|block| block.ops()))
     }
 
     fn lift_block_tree(
@@ -510,14 +510,14 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         let source_block = *self.source.graph().blocks().get(block.index()).ok_or(
             IlError::range_out_of_bounds(block.index(), self.source.graph().blocks().len()),
         )?;
-        let start = self.builder.emitter().operation_count();
+        let start = self.builder.emitter().op_count();
         self.allocate_missing_stack_arg_values(source_block, current)?;
 
-        let terminator = (source_block.operations().start()..source_block.operations().end())
+        let terminator = (source_block.ops().start()..source_block.ops().end())
             .rev()
             .find(|index| {
                 matches!(
-                    self.source.operations()[*index].opcode(),
+                    self.source.ops()[*index].opcode(),
                     ECodeOpcode::Branch
                         | ECodeOpcode::BranchIndirect
                         | ECodeOpcode::ConditionalBranch
@@ -525,20 +525,20 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                         | ECodeOpcode::Trap
                 )
             });
-        for index in source_block.operations().start()..source_block.operations().end() {
+        for index in source_block.ops().start()..source_block.ops().end() {
             if Some(index) == terminator {
                 continue;
             }
             cancellation.check()?;
-            self.lift_operation_at(index, current)?;
+            self.lift_op_at(index, current)?;
         }
         if let Some(index) = terminator {
             cancellation.check()?;
-            self.lift_operation_at(index, current)?;
+            self.lift_op_at(index, current)?;
         }
 
         self.lift_edge_args(source_block, current)?;
-        let end = self.builder.emitter().operation_count();
+        let end = self.builder.emitter().op_count();
         self.blocks[block.index()] = Some(IlBlock::new(
             IlIndexRange::new(start, end)?,
             source_block.successors(),
@@ -622,7 +622,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         operation_ranges: impl ExactSizeIterator<Item = IlIndexRange>,
     ) -> Result<(), IlError> {
         let source = self.source.graph();
-        let graph = source.clone().with_operation_ranges(operation_ranges)?;
+        let graph = source.clone().with_op_ranges(operation_ranges)?;
         let source_spans = self
             .operation_ranges
             .remap_source_spans(self.source.source_spans())?;
@@ -634,14 +634,14 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         Ok(())
     }
 
-    fn lift_operation_at(
+    fn lift_op_at(
         &mut self,
         index: usize,
         current: &mut ECodeToMCodeRenameState,
     ) -> Result<(), IlError> {
-        let start = self.builder.emitter().operation_count();
+        let start = self.builder.emitter().op_count();
         let site = IlOpId::try_from_index(index)?;
-        let operation = self.source.operations()[index];
+        let operation = self.source.ops()[index];
 
         for &requirement in self.recovery.abi().exit_requirements(site) {
             let value = match requirement {
@@ -698,7 +698,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             _ => self.lift_carried(site, operation, current)?,
         }
 
-        let end = self.builder.emitter().operation_count();
+        let end = self.builder.emitter().op_count();
         self.operation_ranges
             .set_range(index, IlIndexRange::new(start, end)?)?;
 
@@ -789,18 +789,18 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         let variable = self.target_variable_for_value(result)?;
         let source_operand = self
             .source
-            .operation_operands_for(&operation)
+            .op_operands_for(&operation)
             .first()
             .copied()
             .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "variable value"))?;
 
         let (_, results) = match self
             .source
-            .defining_operation(source_operand)
+            .defining_op(source_operand)
             .filter(|insert| insert.opcode() == ECodeOpcode::Insert)
         {
             Some(insert) => {
-                let insert_operands = self.source.operation_operands_for(insert);
+                let insert_operands = self.source.op_operands_for(insert);
                 let previous_source = insert_operands
                     .first()
                     .copied()
@@ -943,7 +943,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "stack variable"))?;
         let variable = self.target_variable(recovered);
         let full_width = self.variable_widths.width(variable)?;
-        let source_operands = self.source.operation_operands_for(&operation);
+        let source_operands = self.source.op_operands_for(&operation);
         let source_value = source_operands
             .get(1)
             .copied()
@@ -1169,7 +1169,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         if operation.opcode() == ECodeOpcode::CallIndirect {
             let destination = self
                 .source
-                .operation_operands_for(&operation)
+                .op_operands_for(&operation)
                 .first()
                 .copied()
                 .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "call target"))?;
@@ -1294,7 +1294,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         if operation.opcode() == ECodeOpcode::BranchIndirect {
             let destination = self
                 .source
-                .operation_operands_for(&operation)
+                .op_operands_for(&operation)
                 .first()
                 .copied()
                 .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "tail-call target"))?;
@@ -1501,7 +1501,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         }
 
         self.scratch.operands.clear();
-        for operand in self.source.operation_operands_for(&operation) {
+        for operand in self.source.op_operands_for(&operation) {
             self.scratch.operands.push(self.target_value(*operand)?);
         }
         let opcode = self.lift_opcode(site, operation.opcode())?;

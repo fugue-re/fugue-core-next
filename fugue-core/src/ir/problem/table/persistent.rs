@@ -128,7 +128,7 @@ impl ProblemTable {
     }
 
     pub(crate) fn try_modify_by_id<R>(
-        &mut self,
+        &self,
         id: ProblemId,
         f: impl FnOnce(&mut Problem) -> R,
     ) -> Result<Option<R>, EntityStorageError> {

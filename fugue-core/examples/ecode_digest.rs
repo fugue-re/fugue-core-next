@@ -43,7 +43,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 continue;
             };
             lifted += 1;
-            operations += ecode.operations().len();
+            operations += ecode.ops().len();
             values += ecode.values().len();
             let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(ecode.as_ref())?;
             digest.update(bytes.as_slice());

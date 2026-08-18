@@ -67,7 +67,7 @@ impl BlockSuccessors {
             .filter(|index| *index >= range.start())
             .and_then(|index| {
                 source
-                    .operations()
+                    .ops()
                     .get(index)
                     .map(|operation| (index, operation))
             });
@@ -89,7 +89,7 @@ impl BlockSuccessors {
                 let taken_arm = mapper
                     .internal_target(
                         source,
-                        source_block.operations(),
+                        source_block.ops(),
                         operation_index,
                         operation,
                     )
@@ -210,13 +210,13 @@ impl PCodeToECodeGraphMapper {
         }
 
         for block in source.graph().blocks() {
-            let operations = block.operations();
+            let operations = block.ops();
             boundaries.clear();
             boundaries.push(operations.start());
             boundaries.push(operations.end());
 
             for operation_index in operations.start()..operations.end() {
-                let operation = &source.operations()[operation_index];
+                let operation = &source.ops()[operation_index];
                 if matches!(
                     operation.opcode(),
                     PCodeOpcode::Branch
@@ -438,12 +438,12 @@ mod test {
             self.buffer.expressions()
         }
 
-        fn operations(&self) -> &[PCodeToECodeEffect] {
-            self.buffer.operations()
+        fn ops(&self) -> &[PCodeToECodeEffect] {
+            self.buffer.ops()
         }
 
-        fn operation_operands_for(&self, operation: &PCodeToECodeEffect) -> &[IlExprId] {
-            self.buffer.operation_operands_for(operation)
+        fn op_operands_for(&self, operation: &PCodeToECodeEffect) -> &[IlExprId] {
+            self.buffer.op_operands_for(operation)
         }
 
         fn build(self, cancellation: &CancellationToken) -> Result<ECodeIr, IlError> {
@@ -497,7 +497,7 @@ mod test {
             lift_buffer(&mut transform, &source, &arch(), &platform(), &cancellation).unwrap();
 
         assert_eq!(lifted.metadata().input_revision().value(), 11);
-        assert!(lifted.operations().is_empty());
+        assert!(lifted.ops().is_empty());
     }
 
     #[test]
@@ -592,9 +592,9 @@ mod test {
             lifted.expressions()[1].kind(),
             PCodeToECodeExprKind::Op(ECodeOpcode::Copy)
         );
-        assert_eq!(lifted.operations().len(), 1);
-        assert_eq!(lifted.operations()[0].opcode(), ECodeOpcode::WriteRegister);
-        assert_eq!(lifted.operations()[0].immediate(), 8);
+        assert_eq!(lifted.ops().len(), 1);
+        assert_eq!(lifted.ops()[0].opcode(), ECodeOpcode::WriteRegister);
+        assert_eq!(lifted.ops()[0].immediate(), 8);
         assert_eq!(
             lifted.parent_spans(),
             &[IlParentSpan::new(
@@ -759,9 +759,9 @@ mod test {
                 .collect::<Vec<_>>(),
             vec![8, 16]
         );
-        assert_eq!(lifted.operations().len(), 1);
-        assert_eq!(lifted.operations()[0].opcode(), ECodeOpcode::WriteRegister);
-        assert_eq!(lifted.operations()[0].immediate(), rax.offset());
+        assert_eq!(lifted.ops().len(), 1);
+        assert_eq!(lifted.ops()[0].opcode(), ECodeOpcode::WriteRegister);
+        assert_eq!(lifted.ops()[0].immediate(), rax.offset());
 
         let ir = lifted.build(&CancellationToken::default()).unwrap();
         ir.verify().unwrap();
@@ -863,7 +863,7 @@ mod test {
                 .count(),
             2
         );
-        assert!(lifted.operations().iter().any(|statement| {
+        assert!(lifted.ops().iter().any(|statement| {
             statement.opcode() == ECodeOpcode::WriteFlag && statement.immediate() == cf.offset()
         }));
         assert!(
@@ -940,9 +940,9 @@ mod test {
         .unwrap();
 
         assert!(lifted.expressions().is_empty());
-        assert_eq!(lifted.operations().len(), 1);
-        assert_eq!(lifted.operations()[0].opcode(), ECodeOpcode::Trap);
-        assert_eq!(lifted.operations()[0].immediate(), u64::from(trap));
+        assert_eq!(lifted.ops().len(), 1);
+        assert_eq!(lifted.ops()[0].opcode(), ECodeOpcode::Trap);
+        assert_eq!(lifted.ops()[0].immediate(), u64::from(trap));
     }
 
     #[test]
@@ -955,7 +955,7 @@ mod test {
             lift_buffer(&mut transform, &source, &arch(), &platform(), &cancellation).unwrap();
 
         assert_eq!(lifted.expressions().len(), 2);
-        assert!(lifted.operations().is_empty());
+        assert!(lifted.ops().is_empty());
         assert!(lifted.parent_spans().is_empty());
     }
 
@@ -1017,9 +1017,9 @@ mod test {
         let lifted =
             lift_buffer(&mut transform, &source, &arch(), &platform(), &cancellation).unwrap();
 
-        assert_eq!(lifted.operations().len(), 1);
-        assert_eq!(lifted.operations()[0].opcode(), ECodeOpcode::Store);
-        let operands = lifted.operation_operands_for(&lifted.operations()[0]);
+        assert_eq!(lifted.ops().len(), 1);
+        assert_eq!(lifted.ops()[0].opcode(), ECodeOpcode::Store);
+        let operands = lifted.op_operands_for(&lifted.ops()[0]);
         assert_eq!(
             lifted.expressions()[operands[0].index()].kind(),
             PCodeToECodeExprKind::Op(ECodeOpcode::Address)
@@ -1029,7 +1029,7 @@ mod test {
             PCodeToECodeExprKind::Op(ECodeOpcode::Constant)
         );
         assert_eq!(
-            lifted.operations()[0].address_space(),
+            lifted.ops()[0].address_space(),
             Some(AddressSpaceId::new(7))
         );
     }
@@ -1064,7 +1064,7 @@ mod test {
             &CancellationToken::default(),
         )
         .unwrap();
-        let operands = lifted.operation_operands_for(&lifted.operations()[0]);
+        let operands = lifted.op_operands_for(&lifted.ops()[0]);
 
         assert_ne!(operands[0], operands[1]);
         assert_eq!(
@@ -1087,9 +1087,9 @@ mod test {
         let lifted =
             lift_buffer(&mut transform, &source, &arch(), &platform(), &cancellation).unwrap();
 
-        assert_eq!(lifted.operations().len(), 1);
-        assert_eq!(lifted.operations()[0].opcode(), ECodeOpcode::Branch);
-        assert_eq!(lifted.operations()[0].address(), Some(target));
+        assert_eq!(lifted.ops().len(), 1);
+        assert_eq!(lifted.ops()[0].opcode(), ECodeOpcode::Branch);
+        assert_eq!(lifted.ops()[0].address(), Some(target));
     }
 
     #[test]
@@ -1157,15 +1157,15 @@ mod test {
         let lifted =
             lift_buffer(&mut transform, &source, &arch(), &platform(), &cancellation).unwrap();
 
-        assert_eq!(lifted.operations().len(), 1);
-        assert_eq!(lifted.operations()[0].opcode(), ECodeOpcode::Return);
-        let target = lifted.operation_operands_for(&lifted.operations()[0])[0];
+        assert_eq!(lifted.ops().len(), 1);
+        assert_eq!(lifted.ops()[0].opcode(), ECodeOpcode::Return);
+        let target = lifted.op_operands_for(&lifted.ops()[0])[0];
         assert_eq!(
             lifted.expressions()[target.index()].kind(),
             PCodeToECodeExprKind::Op(ECodeOpcode::Address)
         );
         assert_eq!(
-            lifted.operations()[0].address_space(),
+            lifted.ops()[0].address_space(),
             Some(AddressSpaceId::new(9))
         );
     }
@@ -1192,7 +1192,7 @@ mod test {
                 &CancellationToken::default(),
             )
             .unwrap();
-            seen.extend(lifted.operations().iter().map(PCodeToECodeEffect::opcode));
+            seen.extend(lifted.ops().iter().map(PCodeToECodeEffect::opcode));
         }
 
         for opcode in [

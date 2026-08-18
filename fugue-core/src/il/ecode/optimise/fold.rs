@@ -20,7 +20,7 @@ impl IlRewrite<ECodeIr> for ECodeConstantFolding {
         let mut folded = vec![None::<BitVec>; ir.values().len()];
         let mut worklist = Vec::new();
 
-        for operation in ir.operations() {
+        for operation in ir.ops() {
             if operation.results().len() != 1
                 || !matches!(operation.opcode(), ECodeOpcode::Constant)
             {
@@ -38,7 +38,7 @@ impl IlRewrite<ECodeIr> for ECodeConstantFolding {
                 IlValueId::try_from_index(value_index).expect("value id is representable");
 
             for used in uses.uses_for(defined) {
-                let operation = &ir.operations()[used.user().index()];
+                let operation = &ir.ops()[used.user().index()];
                 if operation.results().len() != 1
                     || matches!(operation.opcode(), ECodeOpcode::Constant)
                 {
@@ -48,7 +48,7 @@ impl IlRewrite<ECodeIr> for ECodeConstantFolding {
                 if folded[result].is_some() {
                     continue;
                 }
-                let operation_operands = ir.operation_operands_for(operation);
+                let operation_operands = ir.op_operands_for(operation);
                 let mut operands = SmallVec::<[&BitVec; 4]>::new();
                 for operand in operation_operands {
                     let Some(constant) = folded[operand.index()].as_ref() else {
@@ -92,8 +92,8 @@ impl IlRewrite<ECodeIr> for ECodeConstantFolding {
         }
 
         let mut rewriter = ir.rewriter();
-        for index in 0..rewriter.operations().len() {
-            let operation = &rewriter.operations()[index];
+        for index in 0..rewriter.ops().len() {
+            let operation = &rewriter.ops()[index];
             if matches!(operation.opcode(), ECodeOpcode::Constant) || operation.results().len() != 1
             {
                 continue;

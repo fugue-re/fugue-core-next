@@ -190,11 +190,11 @@ impl MCodeIr {
         &self.edge_arg_values
     }
 
-    pub fn operations(&self) -> &[MCodeOp] {
+    pub fn ops(&self) -> &[MCodeOp] {
         &self.operations
     }
 
-    pub fn operation_operands(&self) -> &[IlValueId] {
+    pub fn op_operands(&self) -> &[IlValueId] {
         &self.value_operands
     }
 
@@ -212,12 +212,12 @@ impl MCodeIr {
             .find(|domain| domain.space() == space)
     }
 
-    pub fn operation_operands_for(&self, operation: &MCodeOp) -> &[IlValueId] {
+    pub fn op_operands_for(&self, operation: &MCodeOp) -> &[IlValueId] {
         operation.operands().slice(&self.value_operands)
     }
 
-    pub fn block_for_operation(&self, operation: IlOpId) -> Option<IlBlockId> {
-        self.graph.block_for_operation(operation)
+    pub fn block_for_op(&self, operation: IlOpId) -> Option<IlBlockId> {
+        self.graph.block_for_op(operation)
     }
 
     pub fn memory_operand(&self, operation: &MCodeOp) -> Option<IlValueId> {
@@ -225,7 +225,7 @@ impl MCodeIr {
             return None;
         }
 
-        self.operation_operands_for(operation).last().copied()
+        self.op_operands_for(operation).last().copied()
     }
 
     pub fn pointer_operand(&self, operation: &MCodeOp) -> Option<IlValueId> {
@@ -233,10 +233,10 @@ impl MCodeIr {
             return None;
         }
 
-        self.operation_operands_for(operation).first().copied()
+        self.op_operands_for(operation).first().copied()
     }
 
-    pub fn defining_operation(&self, value: IlValueId) -> Option<&MCodeOp> {
+    pub fn defining_op(&self, value: IlValueId) -> Option<&MCodeOp> {
         let record = self.values.get(value.index())?;
         let IlSsaDef::Op(operation) = record.definition() else {
             return None;
@@ -251,7 +251,7 @@ impl MCodeIr {
     pub fn underlying_value(&self, value: IlValueId) -> IlValueId {
         let mut current = value;
         for _ in 0..self.values.len() {
-            let Some(operation) = self.defining_operation(current) else {
+            let Some(operation) = self.defining_op(current) else {
                 return current;
             };
             match operation.opcode() {
@@ -260,7 +260,7 @@ impl MCodeIr {
                 | MCodeOpcode::SignExtend
                 | MCodeOpcode::Truncate
                 | MCodeOpcode::ZeroExtend => {
-                    let Some(inner) = self.operation_operands_for(operation).first().copied()
+                    let Some(inner) = self.op_operands_for(operation).first().copied()
                     else {
                         return current;
                     };
@@ -275,25 +275,25 @@ impl MCodeIr {
     pub fn constant_value(&self, value: IlValueId) -> Option<BitVec> {
         let mut current = value;
         for _ in 0..self.values.len() {
-            let operation = self.defining_operation(current)?;
+            let operation = self.defining_op(current)?;
             if operation.opcode() != MCodeOpcode::SetVar {
                 return operation.constant(self.constant_storage());
             }
-            current = *self.operation_operands_for(operation).first()?;
+            current = *self.op_operands_for(operation).first()?;
         }
         None
     }
 
     pub fn memory_access_range(&self, operation: &MCodeOp) -> Option<AddressRange> {
         let space = operation.address_space()?;
-        let pointer = self.defining_operation(self.pointer_operand(operation)?)?;
+        let pointer = self.defining_op(self.pointer_operand(operation)?)?;
         if pointer.opcode() != MCodeOpcode::Address {
             return None;
         }
         let width = match operation.opcode() {
             MCodeOpcode::Load => operation.width(),
             MCodeOpcode::Store => self
-                .operation_operands_for(operation)
+                .op_operands_for(operation)
                 .get(1)
                 .copied()
                 .and_then(|value| self.value_width(value))?,
@@ -312,11 +312,11 @@ impl MCodeIr {
             .slice(&self.edge_arg_values)
     }
 
-    pub fn operations_for_source(
+    pub fn ops_for_source(
         &self,
         address: Address,
     ) -> impl Iterator<Item = (IlOpId, &MCodeOp)> + '_ {
-        IlSourceSpan::operations(&self.source_spans, &self.operations, address)
+        IlSourceSpan::ops(&self.source_spans, &self.operations, address)
     }
 
     pub fn shrink_to_fit(&mut self) {
@@ -343,7 +343,7 @@ pub(crate) struct MCodeRewriter<'a> {
 }
 
 impl MCodeRewriter<'_> {
-    pub(crate) fn operations(&self) -> &[MCodeOp] {
+    pub(crate) fn ops(&self) -> &[MCodeOp] {
         self.operations
     }
 
@@ -401,14 +401,14 @@ impl SsaIl for MCodeIr {
         self.block_args.get(arg.index()).map(MCodeBlockArg::width)
     }
 
-    fn operation_count(&self) -> usize {
+    fn op_count(&self) -> usize {
         self.operations.len()
     }
 
-    fn operation_operands(&self, operation: IlOpId) -> Option<&[IlValueId]> {
+    fn op_operands(&self, operation: IlOpId) -> Option<&[IlValueId]> {
         self.operations
             .get(operation.index())
-            .map(|operation| self.operation_operands_for(operation))
+            .map(|operation| self.op_operands_for(operation))
     }
 
     fn edge_args(&self) -> &[IlIndexRange] {

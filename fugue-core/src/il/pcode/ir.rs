@@ -88,11 +88,11 @@ impl PCodeIr {
         &self.locations
     }
 
-    pub fn operations(&self) -> &[PCodeOp] {
+    pub fn ops(&self) -> &[PCodeOp] {
         &self.operations
     }
 
-    pub fn operation_operands(&self) -> &[PCodeLocationId] {
+    pub fn op_operands(&self) -> &[PCodeLocationId] {
         &self.operands
     }
 
@@ -108,15 +108,15 @@ impl PCodeIr {
         self.locations.get(id.index())
     }
 
-    pub fn operation_operands_for(&self, operation: &PCodeOp) -> &[PCodeLocationId] {
+    pub fn op_operands_for(&self, operation: &PCodeOp) -> &[PCodeLocationId] {
         operation.operands().slice(&self.operands)
     }
 
-    pub fn operations_for_source(
+    pub fn ops_for_source(
         &self,
         address: Address,
     ) -> impl Iterator<Item = (IlOpId, &PCodeOp)> + '_ {
-        IlSourceSpan::operations(&self.source_spans, &self.operations, address)
+        IlSourceSpan::ops(&self.source_spans, &self.operations, address)
     }
 
     pub fn data_references(&self) -> impl Iterator<Item = Reference> + '_ {
@@ -130,7 +130,7 @@ impl PCodeIr {
                     _ => return None,
                 };
                 let source = self.source_span_for(index)?;
-                let pointer = self.operation_operands_for(operation).first().copied()?;
+                let pointer = self.op_operands_for(operation).first().copied()?;
                 let pointer = self.location(pointer)?;
                 if !pointer.is_constant() {
                     return None;

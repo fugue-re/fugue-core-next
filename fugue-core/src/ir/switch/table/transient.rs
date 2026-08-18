@@ -1,7 +1,6 @@
 use super::{SwitchIndex, SwitchTableError};
 use crate::ir::switch::{Switch, SwitchId};
 use crate::ir::{Address, FunctionId};
-use crate::storage::EntityStorageError;
 
 pub struct SwitchTable {
     index: SwitchIndex,
@@ -22,12 +21,8 @@ impl SwitchTable {
         }
     }
 
-    pub fn flush(&self) -> Result<(), EntityStorageError> {
-        Ok(())
-    }
-
-    pub fn branches_of_function(&self, function: FunctionId) -> impl Iterator<Item = Address> + '_ {
-        self.index.branches_of_function(function)
+    pub fn branches_for_function(&self, function: FunctionId) -> impl Iterator<Item = Address> + '_ {
+        self.index.branches_for_function(function)
     }
 
     pub(crate) fn pending_id(&self, offset: usize) -> SwitchId {

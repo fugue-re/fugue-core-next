@@ -38,8 +38,8 @@ impl From<&PCodeIr> for PCodeShape {
         Self {
             graph: pcode.graph().clone(),
             locations: pcode.locations().to_vec(),
-            operands: pcode.operation_operands().to_vec(),
-            operations: pcode.operations().to_vec(),
+            operands: pcode.op_operands().to_vec(),
+            operations: pcode.ops().to_vec(),
             source_spans: pcode.source_spans().to_vec(),
             targets: pcode.targets().to_vec(),
         }

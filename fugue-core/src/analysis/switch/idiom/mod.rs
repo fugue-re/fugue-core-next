@@ -1,6 +1,6 @@
 use fugue_bv::BitVec;
-use rustc_hash::FxHashMap;
 
+use crate::il::pcode::RawPCodeDefs;
 use crate::ir::RawAddress;
 use crate::lifter::{Op, RawPCodeOp, Varnode};
 
@@ -89,7 +89,7 @@ impl SwitchIdiomMatch {
 
 pub(crate) struct SwitchIdiomMatcher<'a> {
     operations: &'a [RawPCodeOp],
-    definitions: FxHashMap<Varnode, Vec<usize>>,
+    definitions: RawPCodeDefs<'a>,
     branch: usize,
     max_trace_depth: u32,
 }
@@ -99,15 +99,9 @@ impl<'a> SwitchIdiomMatcher<'a> {
         let branch = operations
             .iter()
             .rposition(|operation| matches!(operation.op(), Op::IBranch))?;
-        let mut definitions = FxHashMap::<Varnode, Vec<usize>>::default();
-        for (index, operation) in operations[..branch].iter().enumerate() {
-            if let Some(output) = operation.output() {
-                definitions.entry(*output).or_default().push(index);
-            }
-        }
         Some(Self {
             operations,
-            definitions,
+            definitions: RawPCodeDefs::new(&operations[..branch]),
             branch,
             max_trace_depth,
         })
@@ -125,21 +119,11 @@ impl<'a> SwitchIdiomMatcher<'a> {
         })
     }
 
-    fn defining_operation(&self, varnode: &Varnode, before: usize) -> Option<(usize, &RawPCodeOp)> {
-        let index = *self
-            .definitions
-            .get(varnode)?
-            .iter()
-            .rev()
-            .find(|&&index| index < before)?;
-        Some((index, &self.operations[index]))
-    }
-
     fn match_table(&self) -> Option<SwitchTableMatch> {
         let mut target = self.operations[self.branch].inputs().first().copied()?;
         let mut before = self.branch;
         for _ in 0..self.max_trace_depth {
-            let (index, defining) = self.defining_operation(&target, before)?;
+            let (index, defining) = self.definitions.defining_op(&target, before)?;
             match defining.op() {
                 Op::Load(_) => {
                     let pointer = defining.inputs().first().copied()?;
@@ -175,7 +159,7 @@ impl<'a> SwitchIdiomMatcher<'a> {
         pointer: &Varnode,
         before: usize,
     ) -> Option<(RawAddress, Varnode, usize)> {
-        let (index, defining) = self.defining_operation(pointer, before)?;
+        let (index, defining) = self.definitions.defining_op(pointer, before)?;
         if !matches!(defining.op(), Op::IntAdd) {
             return None;
         }
@@ -190,7 +174,7 @@ impl<'a> SwitchIdiomMatcher<'a> {
         let mut current = *scaled;
         let mut before = before;
         for _ in 0..self.max_trace_depth {
-            let Some((index, defining)) = self.defining_operation(&current, before) else {
+            let Some((index, defining)) = self.definitions.defining_op(&current, before) else {
                 return (current, before);
             };
             match defining.op() {
@@ -258,7 +242,7 @@ impl<'a> SwitchIdiomMatcher<'a> {
         let mut signed = false;
         let mut shift = 0u8;
         for _ in 0..self.max_trace_depth {
-            let (index, defining) = self.defining_operation(&current, before)?;
+            let (index, defining) = self.definitions.defining_op(&current, before)?;
             match defining.op() {
                 Op::SignExt => {
                     signed = true;
@@ -316,7 +300,7 @@ impl<'a> SwitchIdiomMatcher<'a> {
             if current.is_constant() {
                 return Some(accumulated + RawAddress::from(current.offset()));
             }
-            let (index, defining) = self.defining_operation(&current, before)?;
+            let (index, defining) = self.definitions.defining_op(&current, before)?;
             match defining.op() {
                 Op::Copy => {
                     current = defining.inputs().first().copied()?;
@@ -344,7 +328,7 @@ impl<'a> SwitchIdiomMatcher<'a> {
             let Some(condition) = branch.inputs().get(1) else {
                 continue;
             };
-            let Some((_, operation)) = self.defining_operation(condition, branch_index) else {
+            let Some((_, operation)) = self.definitions.defining_op(condition, branch_index) else {
                 continue;
             };
             let inclusive = match operation.op() {
@@ -373,7 +357,7 @@ impl<'a> SwitchIdiomMatcher<'a> {
     }
 
     fn label_offset(&self, index: Varnode, before: usize) -> i64 {
-        let Some((_, operation)) = self.defining_operation(&index, before) else {
+        let Some((_, operation)) = self.definitions.defining_op(&index, before) else {
             return 0;
         };
         let (Some(a), Some(b)) = (

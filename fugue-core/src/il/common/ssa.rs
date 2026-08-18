@@ -28,9 +28,9 @@ pub trait SsaIl: ControlFlowIl {
 
     fn block_arg_width(&self, arg: IlBlockArgId) -> Option<u32>;
 
-    fn operation_count(&self) -> usize;
+    fn op_count(&self) -> usize;
 
-    fn operation_operands(&self, operation: IlOpId) -> Option<&[IlValueId]>;
+    fn op_operands(&self, operation: IlOpId) -> Option<&[IlValueId]>;
 
     fn edge_args(&self) -> &[IlIndexRange];
 
@@ -66,7 +66,7 @@ impl IlRequiredDefs {
         self.block_args.contains(index)
     }
 
-    pub fn operation_is_required(&self, index: usize) -> bool {
+    pub fn op_is_required(&self, index: usize) -> bool {
         self.operations.contains(index)
     }
 }
@@ -178,7 +178,7 @@ mod test {
         assert!(required.mark(IlSsaDef::Op(operation)));
         assert!(!required.mark(IlSsaDef::Op(operation)));
         assert!(required.block_arg_is_required(arg.index()));
-        assert!(required.operation_is_required(operation.index()));
+        assert!(required.op_is_required(operation.index()));
     }
 
     #[test]

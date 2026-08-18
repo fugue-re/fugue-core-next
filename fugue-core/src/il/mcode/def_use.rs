@@ -44,9 +44,9 @@ impl IlAnalysis<MCodeIr> for MCodeUses {
         Self {
             uses: collect_ssa_uses(
                 ir.values().len(),
-                ir.operations()
+                ir.ops()
                     .iter()
-                    .map(|operation| ir.operation_operands_for(operation)),
+                    .map(|operation| ir.op_operands_for(operation)),
                 MCodeUse::new,
             ),
         }

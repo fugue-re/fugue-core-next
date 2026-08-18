@@ -144,8 +144,8 @@ impl SymbolTable {
         previous: Option<&SymbolIndexState>,
         writes: &mut EntityWriteBatch,
     ) -> Result<(), EntityStorageError> {
-        if let Self::Persistent(table) = self {
-            table.append_prepared_writes(id, entry, previous, writes)?;
+        if matches!(self, Self::Persistent(_)) {
+            PersistentSymbolTable::append_prepared_writes(id, entry, previous, writes)?;
         }
         Ok(())
     }
@@ -236,7 +236,7 @@ impl SymbolTable {
         }
     }
 
-    pub fn get(
+    pub fn get_by_name(
         &self,
         symbol: impl AsRef<str>,
     ) -> Box<dyn Iterator<Item = (SymbolId, SymbolRef<'_>)> + '_> {
@@ -495,12 +495,15 @@ impl SymbolTable {
         }
     }
 
-    pub fn remove(&mut self, symbol: impl AsRef<str>) -> usize {
-        self.try_remove(symbol)
+    pub fn remove_by_name(&mut self, symbol: impl AsRef<str>) -> usize {
+        self.try_remove_by_name(symbol)
             .unwrap_or_else(|error| error.into_fatal())
     }
 
-    pub fn try_remove(&mut self, symbol: impl AsRef<str>) -> Result<usize, EntityStorageError> {
+    pub fn try_remove_by_name(
+        &mut self,
+        symbol: impl AsRef<str>,
+    ) -> Result<usize, EntityStorageError> {
         match self {
             Self::Persistent(table) => table.remove(symbol),
             Self::Transient(table) => Ok(table.remove(symbol)),
@@ -650,7 +653,7 @@ mod test {
         assert!(insertion.is_new());
         assert_eq!(table.len(), 3);
 
-        assert_eq!(table.remove("symbol3"), 1);
+        assert_eq!(table.remove_by_name("symbol3"), 1);
         assert_eq!(table.len(), 2);
         assert_eq!(table.remove_by_address(Address::from(0x3000u32)), 1);
         assert_eq!(table.len(), 1);

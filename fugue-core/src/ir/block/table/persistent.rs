@@ -577,14 +577,14 @@ impl CodeBlockTable {
         Ok(ids)
     }
 
-    pub(crate) fn overlaps(&self, address: Address) -> Iter<'_> {
+    pub(crate) fn overlaps_address(&self, address: Address) -> Iter<'_> {
         let ids = self
             .overlap_ids(address)
             .unwrap_or_else(|error| error.into_fatal());
         Box::new(ids.into_iter().filter_map(move |id| self.entries.get(&id)))
     }
 
-    pub(crate) fn overlaps_range(&self, range: &AddressRange) -> Iter<'_> {
+    pub(crate) fn overlaps(&self, range: &AddressRange) -> Iter<'_> {
         let mut ids = self
             .overlap_ids(range.start_address())
             .unwrap_or_else(|error| error.into_fatal());

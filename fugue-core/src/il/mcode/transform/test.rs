@@ -294,7 +294,7 @@ fn memory_domain_identifiers_round_trip_through_ecode_and_mcode() {
     else {
         panic!("the ECode memory value is operation-defined");
     };
-    let encoded = source.operations()[memory_definition.index()].immediate();
+    let encoded = source.ops()[memory_definition.index()].immediate();
     assert_eq!(encoded, u64::from(space.value()));
     assert_eq!(
         AddressSpaceId::try_new(usize::try_from(encoded).unwrap()).unwrap(),
@@ -306,7 +306,7 @@ fn memory_domain_identifiers_round_trip_through_ecode_and_mcode() {
     let recovery = MCodeRecovery::new(&source, &config(), &registers).unwrap();
     let mcode = lift_recovered(&source, &recovery);
     let encoded = mcode
-        .operations()
+        .ops()
         .iter()
         .find(|operation| operation.opcode() == MCodeOpcode::Undefined && operation.width() == 0)
         .expect("the MCode memory input is retained")
@@ -344,7 +344,7 @@ fn a_register_write_becomes_a_bound_variable_definition() {
     mcode.verify().unwrap();
     assert!(
         mcode
-            .operations()
+            .ops()
             .iter()
             .any(|operation| operation.opcode() == MCodeOpcode::Constant)
     );
@@ -370,11 +370,11 @@ fn a_partial_register_write_uses_the_immediate_predecessor() {
 
     let mcode = transform_with_config(builder, &config());
     let field = mcode
-        .operations()
+        .ops()
         .iter()
         .find(|operation| operation.opcode() == MCodeOpcode::SetVarField)
         .expect("the partial write is retained");
-    let operands = mcode.operation_operands_for(field);
+    let operands = mcode.op_operands_for(field);
     let previous = mcode.binding(operands[0]).unwrap();
     let result = mcode
         .binding(IlValueId::try_from_index(field.results().start()).unwrap())
@@ -434,21 +434,21 @@ fn sibling_partial_writes_materialise_a_non_adjacent_predecessor() {
 
     let mcode = transform_with_config(builder, &config());
     let field_count = mcode
-        .operations()
+        .ops()
         .iter()
         .filter(|operation| operation.opcode() == MCodeOpcode::SetVarField)
         .count();
     let full = mcode
-        .operations()
+        .ops()
         .iter()
         .find(|operation| operation.opcode() == MCodeOpcode::SetVar)
         .expect("one sibling materialises a full assignment");
-    let materialised = mcode.operation_operands_for(full)[0];
+    let materialised = mcode.op_operands_for(full)[0];
 
     assert_eq!(field_count, 1);
     assert_eq!(
         mcode
-            .defining_operation(materialised)
+            .defining_op(materialised)
             .map(|operation| operation.opcode()),
         Some(MCodeOpcode::Insert)
     );
@@ -475,7 +475,7 @@ fn a_fixed_stack_slot_promotes_store_and_load() {
 
     let mcode = transform_with_config(builder, &config());
     let assignment = mcode
-        .operations()
+        .ops()
         .iter()
         .find(|operation| {
             operation.opcode() == MCodeOpcode::SetVar
@@ -487,16 +487,16 @@ fn a_fixed_stack_slot_promotes_store_and_load() {
         .expect("the stack store is promoted");
     let assigned = IlValueId::try_from_index(assignment.results().start()).unwrap();
     let returned = mcode
-        .operations()
+        .ops()
         .iter()
         .find(|operation| operation.opcode() == MCodeOpcode::Return)
-        .and_then(|operation| mcode.operation_operands_for(operation).first())
+        .and_then(|operation| mcode.op_operands_for(operation).first())
         .copied();
 
     assert_eq!(returned, Some(assigned));
     assert!(
         !mcode
-            .operations()
+            .ops()
             .iter()
             .any(|operation| matches!(operation.opcode(), MCodeOpcode::Load | MCodeOpcode::Store))
     );
@@ -525,10 +525,10 @@ fn whole_and_partial_unaliased_stack_outputs_survive_return_compaction() {
 
         assert_eq!(mcode.variable(variable).unwrap().stack_offset(), Some(-16));
         assert!(!mcode.is_aliased(variable));
-        assert!(mcode.defining_operation(value).is_some());
+        assert!(mcode.defining_op(value).is_some());
         assert!(
             mcode
-                .operations()
+                .ops()
                 .iter()
                 .any(|operation| operation.opcode() == MCodeOpcode::Return)
         );
@@ -540,7 +540,7 @@ fn an_aliased_stack_output_survives_return_compaction() {
     let output = MCodeStorageFact::new(MCodeStorageLocation::Stack { offset: -12 }, 32);
     let mcode = lift_stack_return_case(output, MCodeAliasOverride::Aliased);
     let assignment = mcode
-        .operations()
+        .ops()
         .iter()
         .find(|operation| operation.opcode() == MCodeOpcode::SetVarAliased)
         .expect("the live aliased stack output retains its assignment");
@@ -554,7 +554,7 @@ fn an_aliased_stack_output_survives_return_compaction() {
     assert!(mcode.is_aliased(variable));
     assert!(
         mcode
-            .operations()
+            .ops()
             .iter()
             .any(|operation| operation.opcode() == MCodeOpcode::Return)
     );
@@ -582,7 +582,7 @@ fn an_address_taken_stack_slot_uses_aliased_operations() {
 
     let mcode = transform_with_config(builder, &config());
 
-    assert!(mcode.operations().iter().any(|operation| {
+    assert!(mcode.ops().iter().any(|operation| {
         operation.opcode() == MCodeOpcode::SetVarAliased
             && operation
                 .variable()
@@ -590,13 +590,13 @@ fn an_address_taken_stack_slot_uses_aliased_operations() {
     }));
     assert!(
         mcode
-            .operations()
+            .ops()
             .iter()
             .any(|operation| operation.opcode() == MCodeOpcode::AddressOf)
     );
     assert!(
         mcode
-            .operations()
+            .ops()
             .iter()
             .any(|operation| operation.opcode() == MCodeOpcode::VarAliased)
     );
@@ -648,43 +648,43 @@ fn call_outputs_bind_the_post_call_register_definition() {
     push_return(&mut builder, [loaded]);
     let mcode = transform_with_config(builder, &config);
     let call = mcode
-        .operations()
+        .ops()
         .iter()
         .find(|operation| operation.opcode() == MCodeOpcode::Call)
         .expect("the call survives optimisation");
     let output = IlValueId::try_from_index(call.results().start() + 1).unwrap();
     let binding = mcode.binding(output).expect("the call output is bound");
     let returned = mcode
-        .operations()
+        .ops()
         .iter()
         .find(|operation| operation.opcode() == MCodeOpcode::Return)
-        .and_then(|operation| mcode.operation_operands_for(operation).first())
+        .and_then(|operation| mcode.op_operands_for(operation).first())
         .copied();
     let split = mcode
-        .operations()
+        .ops()
         .iter()
         .find(|operation| operation.opcode() == MCodeOpcode::VarSplit)
         .expect("the register-pair argument is reconstructed");
     let stored_memory = mcode
-        .operations()
+        .ops()
         .iter()
         .find(|operation| operation.opcode() == MCodeOpcode::Store)
         .and_then(|operation| IlValueId::try_from_index(operation.results().start()).ok())
         .expect("the general store is retained");
     let load = mcode
-        .operations()
+        .ops()
         .iter()
         .find(|operation| operation.opcode() == MCodeOpcode::Load)
         .expect("the general load is retained");
     let loaded_memory = mcode.memory_operand(load).unwrap();
-    let call_operands = mcode.operation_operands_for(call);
+    let call_operands = mcode.op_operands_for(call);
 
     mcode.verify().unwrap();
     assert_eq!(call.results().len(), 2);
     assert_eq!(mcode.values()[call.results().start()].width(), 0);
     assert!(
         mcode
-            .operation_operands_for(split)
+            .op_operands_for(split)
             .iter()
             .all(|&value| mcode.value_width(value) == Some(64))
     );
@@ -810,13 +810,13 @@ fn exact_stack_call_facts_materialise_stack_inputs_and_outputs() {
     let recovery = MCodeRecovery::new(&source, &config, &registers).unwrap();
     let mcode = lift_recovered(&source, &recovery);
     let call = mcode
-        .operations()
+        .ops()
         .iter()
         .find(|operation| operation.opcode() == MCodeOpcode::Call)
         .expect("the stack call survives optimisation");
     let output = IlValueId::try_from_index(call.results().start() + 1).unwrap();
     let materialisation = mcode
-        .operations()
+        .ops()
         .iter()
         .find(|operation| operation.opcode() == MCodeOpcode::SetVarAliased)
         .expect("the complete aliased output is materialised");
@@ -833,7 +833,7 @@ fn exact_stack_call_facts_materialise_stack_inputs_and_outputs() {
     assert_eq!(mcode.binding(output), None);
     assert_eq!(mcode.values()[variable_output.index()].width(), 192);
     assert_eq!(
-        mcode.operation_operands_for(materialisation)[1].index(),
+        mcode.op_operands_for(materialisation)[1].index(),
         call.results().start()
     );
     assert_eq!(
@@ -882,12 +882,12 @@ fn exact_call_inputs_keep_descending_register_order_in_mcode() {
     let recovery = MCodeRecovery::new(&source, &config, &registers).unwrap();
     let mcode = lift_recovered(&source, &recovery);
     let call = mcode
-        .operations()
+        .ops()
         .iter()
         .find(|operation| operation.opcode() == MCodeOpcode::Call)
         .expect("the call survives optimisation");
     let variables = mcode
-        .operation_operands_for(call)
+        .op_operands_for(call)
         .iter()
         .take(2)
         .map(|&value| {
@@ -955,7 +955,7 @@ fn exact_call_outputs_keep_register_pair_and_stack_order_in_mcode() {
     let recovery = MCodeRecovery::new(&source, &config, &registers).unwrap();
     let mcode = lift_recovered(&source, &recovery);
     let call = mcode
-        .operations()
+        .ops()
         .iter()
         .find(|operation| operation.opcode() == MCodeOpcode::Call)
         .expect("the call survives optimisation");
@@ -983,7 +983,7 @@ fn exact_call_outputs_keep_register_pair_and_stack_order_in_mcode() {
         ]
     );
     let stack_output = mcode
-        .operations()
+        .ops()
         .iter()
         .find(|operation| operation.opcode() == MCodeOpcode::SetVarAliased)
         .and_then(|operation| {
@@ -1030,11 +1030,11 @@ fn a_reused_transformer_does_not_retain_function_facts() {
         .unwrap();
     let operand_count = |ir: &MCodeIr| {
         let call = ir
-            .operations()
+            .ops()
             .iter()
             .find(|operation| operation.opcode() == MCodeOpcode::Call)
             .expect("the call survives optimisation");
-        ir.operation_operands_for(call).len()
+        ir.op_operands_for(call).len()
     };
 
     assert_eq!(operand_count(&first), 1);
@@ -1051,7 +1051,7 @@ fn transform_rejects_mismatched_and_out_of_range_function_facts() {
     let mismatched = MCodeFunctionFacts::new(FunctionId::from_index(1));
     let mut out_of_range = MCodeFunctionFacts::new(source.metadata().function());
     out_of_range.insert_call(MCodeCallFacts::new(
-        IlOpId::try_from_index(source.operations().len()).unwrap(),
+        IlOpId::try_from_index(source.ops().len()).unwrap(),
     ));
     let non_call_site = IlOpId::try_from_index(0).unwrap();
     let mut non_call = MCodeCallFacts::new(non_call_site);
@@ -1099,12 +1099,12 @@ fn a_partial_unaliased_call_output_materialises_a_full_merged_object() {
     let output = MCodeStorageFact::new(MCodeStorageLocation::Stack { offset: -12 }, 32);
     let mcode = lift_stack_call_case(&inputs, output, MCodeAliasOverride::Unaliased);
     let call_index = mcode
-        .operations()
+        .ops()
         .iter()
         .position(|operation| operation.opcode() == MCodeOpcode::Call)
         .expect("the call survives optimisation");
-    let call = mcode.operations()[call_index];
-    let field = mcode.operations()[call_index + 1];
+    let call = mcode.ops()[call_index];
+    let field = mcode.ops()[call_index + 1];
     let call_output = IlValueId::try_from_index(call.results().start() + 1).unwrap();
     let full_output = IlValueId::try_from_index(field.results().start()).unwrap();
     let variable = mcode
@@ -1137,12 +1137,12 @@ fn a_partial_aliased_call_output_advances_memory_and_the_full_object() {
     let output = MCodeStorageFact::new(MCodeStorageLocation::Stack { offset: -12 }, 32);
     let mcode = lift_stack_call_case(&inputs, output, MCodeAliasOverride::Aliased);
     let call_index = mcode
-        .operations()
+        .ops()
         .iter()
         .position(|operation| operation.opcode() == MCodeOpcode::Call)
         .expect("the call survives optimisation");
-    let call = mcode.operations()[call_index];
-    let field = mcode.operations()[call_index + 1];
+    let call = mcode.ops()[call_index];
+    let field = mcode.ops()[call_index + 1];
     let call_output = IlValueId::try_from_index(call.results().start() + 1).unwrap();
     let memory_output = IlValueId::try_from_index(field.results().start()).unwrap();
     let full_output = IlValueId::try_from_index(field.results().start() + 1).unwrap();
@@ -1159,7 +1159,7 @@ fn a_partial_aliased_call_output_advances_memory_and_the_full_object() {
     assert_eq!(mcode.values()[full_output.index()].width(), 96);
     assert_eq!(variable.stack_offset(), Some(-16));
     assert_eq!(
-        mcode.operation_operands_for(&field),
+        mcode.op_operands_for(&field),
         &[
             call_output,
             IlValueId::try_from_index(call.results().start()).unwrap(),
@@ -1175,11 +1175,11 @@ fn zero_offset_narrow_and_complete_stack_outputs_use_distinct_forms() {
     let narrow = MCodeStorageFact::new(MCodeStorageLocation::Stack { offset: -16 }, 32);
     let partial = lift_stack_call_case(&[complete], narrow, MCodeAliasOverride::Unaliased);
     let partial_call = partial
-        .operations()
+        .ops()
         .iter()
         .position(|operation| operation.opcode() == MCodeOpcode::Call)
         .expect("the partial call survives optimisation");
-    let field = partial.operations()[partial_call + 1];
+    let field = partial.ops()[partial_call + 1];
 
     assert_eq!(field.opcode(), MCodeOpcode::SetVarField);
     assert_eq!(field.immediate(), 0);
@@ -1189,7 +1189,7 @@ fn zero_offset_narrow_and_complete_stack_outputs_use_distinct_forms() {
 
     let complete = lift_stack_call_case(&[], complete, MCodeAliasOverride::Unaliased);
     let call = complete
-        .operations()
+        .ops()
         .iter()
         .find(|operation| operation.opcode() == MCodeOpcode::Call)
         .expect("the complete call survives optimisation");
@@ -1271,11 +1271,11 @@ fn exact_register_pair_and_stack_facts_survive_tail_call_lifting() {
     let recovery = MCodeRecovery::new(&source, &config, &registers).unwrap();
     let mcode = lift_recovered(&source, &recovery);
     let tail_call = mcode
-        .operations()
+        .ops()
         .iter()
         .find(|operation| operation.opcode() == MCodeOpcode::TailCall)
         .expect("the tail call survives optimisation");
-    let operands = mcode.operation_operands_for(tail_call);
+    let operands = mcode.op_operands_for(tail_call);
     let stack_output = mcode
         .values()
         .iter()
@@ -1291,7 +1291,7 @@ fn exact_register_pair_and_stack_facts_survive_tail_call_lifting() {
         panic!("the stack live output has an operation definition");
     };
     let tail_call_index = mcode
-        .operations()
+        .ops()
         .iter()
         .position(|operation| operation == tail_call)
         .unwrap();
@@ -1301,7 +1301,7 @@ fn exact_register_pair_and_stack_facts_survive_tail_call_lifting() {
     assert!(stack_definition.index() < tail_call_index);
     assert!(
         mcode
-            .operations()
+            .ops()
             .iter()
             .any(|operation| operation.opcode() == MCodeOpcode::VarSplit)
     );
@@ -1350,7 +1350,7 @@ fn a_resolved_indirect_branch_becomes_a_switch() {
     mcode.verify().unwrap();
     assert!(
         mcode
-            .operations()
+            .ops()
             .iter()
             .any(|operation| operation.opcode() == MCodeOpcode::Switch)
     );
@@ -1383,10 +1383,10 @@ fn transform_copies_only_emitted_wide_constants() {
     let recovery = MCodeRecovery::new(&source, &config, &registers).unwrap();
     let mcode = lift_recovered(&source, &recovery);
     let returned = mcode
-        .operations()
+        .ops()
         .iter()
         .find(|operation| operation.opcode() == MCodeOpcode::Return)
-        .and_then(|operation| mcode.operation_operands_for(operation).first())
+        .and_then(|operation| mcode.op_operands_for(operation).first())
         .copied()
         .expect("the wide constant is returned");
 

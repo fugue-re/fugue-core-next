@@ -81,7 +81,7 @@ impl IlBlock {
         }
     }
 
-    pub const fn operations(&self) -> IlIndexRange {
+    pub const fn ops(&self) -> IlIndexRange {
         self.operations
     }
 
@@ -229,19 +229,19 @@ impl IlGraph {
         self.block_sources.get(block.index()).copied()
     }
 
-    pub fn block_for_operation(&self, operation: IlOpId) -> Option<IlBlockId> {
+    pub fn block_for_op(&self, operation: IlOpId) -> Option<IlBlockId> {
         self.blocks
             .iter()
-            .position(|block| block.operations().contains_index(operation.index()))
+            .position(|block| block.ops().contains_index(operation.index()))
             .and_then(|index| IlBlockId::try_from_index(index).ok())
     }
 
-    pub fn operation_blocks(&self, operation_count: usize) -> Vec<Option<IlBlockId>> {
+    pub fn op_blocks(&self, operation_count: usize) -> Vec<Option<IlBlockId>> {
         let mut operation_blocks = vec![None; operation_count];
         for (index, block) in self.blocks.iter().enumerate() {
             let block_id =
                 IlBlockId::try_from_index(index).expect("block count fits the block id space");
-            for operation in block.operations().start()..block.operations().end() {
+            for operation in block.ops().start()..block.ops().end() {
                 if let Some(entry) = operation_blocks.get_mut(operation) {
                     *entry = Some(block_id);
                 }
@@ -250,7 +250,7 @@ impl IlGraph {
         operation_blocks
     }
 
-    pub fn operations_for_block<'a, T>(
+    pub fn ops_for_block<'a, T>(
         &'a self,
         block: IlBlockId,
         operations: &'a [T],
@@ -259,8 +259,8 @@ impl IlGraph {
             .get(block.index())
             .into_iter()
             .flat_map(|block| {
-                let start = block.operations().start();
-                block.operations().slice(operations).iter().enumerate().map(
+                let start = block.ops().start();
+                block.ops().slice(operations).iter().enumerate().map(
                     move |(index, operation)| {
                         (
                             IlOpId::try_from_index(start + index)
@@ -272,7 +272,7 @@ impl IlGraph {
             })
     }
 
-    pub fn set_operation_ranges(
+    pub fn set_op_ranges(
         &mut self,
         operation_ranges: impl ExactSizeIterator<Item = IlIndexRange>,
     ) -> Result<(), IlError> {
@@ -290,15 +290,15 @@ impl IlGraph {
         Ok(())
     }
 
-    pub fn with_operation_ranges(
+    pub fn with_op_ranges(
         mut self,
         operation_ranges: impl ExactSizeIterator<Item = IlIndexRange>,
     ) -> Result<Self, IlError> {
-        self.set_operation_ranges(operation_ranges)?;
+        self.set_op_ranges(operation_ranges)?;
         Ok(self)
     }
 
-    pub fn remap_operation_ranges(&mut self, operation_map: &IlIndexMapper) -> Result<(), IlError> {
+    pub fn remap_op_ranges(&mut self, operation_map: &IlIndexMapper) -> Result<(), IlError> {
         for block in &self.blocks {
             operation_map.checked_map_range(block.operations)?;
         }
@@ -331,11 +331,11 @@ impl IlGraph {
 
         for (index, block) in self.blocks.iter().enumerate() {
             let block_id = IlBlockId::try_from_index(index)?;
-            block.operations().verify_bounds(usize::MAX)?;
+            block.ops().verify_bounds(usize::MAX)?;
             self.verify_successors(block, block_id)?;
 
-            if !block.operations().is_empty() {
-                operation_ranges.push((block.operations(), block_id));
+            if !block.ops().is_empty() {
+                operation_ranges.push((block.ops(), block_id));
             }
 
             for successor in block.successors().checked_slice(&self.successors)? {
@@ -378,7 +378,7 @@ impl IlGraph {
 
     pub(crate) fn verify_node_bounds(&self, node_count: usize) -> Result<(), StructureError> {
         for block in &self.blocks {
-            block.operations().verify_bounds(node_count)?;
+            block.ops().verify_bounds(node_count)?;
         }
 
         Ok(())
@@ -482,7 +482,7 @@ impl IlGraphBuilder {
     }
 
     pub fn build(self, operation_count: usize) -> Result<IlGraph, IlError> {
-        self.verify_operation_ranges(operation_count)?;
+        self.verify_op_ranges(operation_count)?;
 
         let mut successors = IlPool::new();
         let mut successor_kinds = Vec::new();
@@ -522,7 +522,7 @@ impl IlGraphBuilder {
         Ok(id)
     }
 
-    fn verify_operation_ranges(&self, operation_count: usize) -> Result<(), IlError> {
+    fn verify_op_ranges(&self, operation_count: usize) -> Result<(), IlError> {
         let mut ranges = self
             .blocks
             .iter()
@@ -557,7 +557,7 @@ pub struct IlBlockPredecessors {
 }
 
 impl IlBlockPredecessors {
-    pub(crate) fn new(blocks: &[IlBlock], successors: &[IlBlockId]) -> Self {
+    pub fn new(blocks: &[IlBlock], successors: &[IlBlockId]) -> Self {
         let entries = blocks.iter().enumerate().flat_map(|(block_index, block)| {
             let block_id = IlBlockId::try_from_index(block_index)
                 .expect("block count fits the block id space");
@@ -741,18 +741,18 @@ mod test {
         let source_storage = graph.block_sources.as_ptr();
         let mapper = IlIndexMapper::from_kept(4, |index| index != 1);
 
-        graph.remap_operation_ranges(&mapper).unwrap();
+        graph.remap_op_ranges(&mapper).unwrap();
 
         assert_eq!(graph.blocks.as_ptr(), block_storage);
         assert_eq!(graph.successors.as_ptr(), successor_storage);
         assert_eq!(graph.successor_kinds.as_ptr(), kind_storage);
         assert_eq!(graph.block_sources.as_ptr(), source_storage);
         assert_eq!(
-            graph.blocks[entry.index()].operations(),
+            graph.blocks[entry.index()].ops(),
             IlIndexRange::new(0, 1).unwrap()
         );
         assert_eq!(
-            graph.blocks[exit.index()].operations(),
+            graph.blocks[exit.index()].ops(),
             IlIndexRange::new(1, 3).unwrap()
         );
     }
@@ -779,7 +779,7 @@ mod test {
         let mapper = IlIndexMapper::new(vec![0, 2, 3]).unwrap();
 
         assert!(matches!(
-            graph.remap_operation_ranges(&mapper),
+            graph.remap_op_ranges(&mapper),
             Err(IlError::RangeOutOfBounds { .. })
         ));
         assert_eq!(graph, original);

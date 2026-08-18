@@ -187,7 +187,7 @@ impl SsaIl for AcmeCfg {
         let operation = IlOpId::try_from_index(value.index()).ok()?;
         self.operations
             .get(operation.index())
-            .map(|_| IlSsaDef::Operation(operation))
+            .map(|_| IlSsaDef::Op(operation))
     }
 
     fn value_width(&self, value: IlValueId) -> Option<u32> {
@@ -210,11 +210,11 @@ impl SsaIl for AcmeCfg {
         None
     }
 
-    fn operation_count(&self) -> usize {
+    fn op_count(&self) -> usize {
         self.operations.len()
     }
 
-    fn operation_operands(&self, operation: IlOpId) -> Option<&[IlValueId]> {
+    fn op_operands(&self, operation: IlOpId) -> Option<&[IlValueId]> {
         self.operations.get(operation.index()).map(|_| &[][..])
     }
 
@@ -426,7 +426,7 @@ fn built_in_dialects_have_target_native_external_build_apis() {
             .expect("the PCode branch is emitted");
     }
     let pcode = pcode.build(&cancellation).expect("the PCode is valid");
-    assert_eq!(pcode.operations().len(), 2);
+    assert_eq!(pcode.ops().len(), 2);
     assert_eq!(pcode.targets().len(), 1);
     assert!(pcode.display().to_string().contains("copy"));
 
@@ -464,7 +464,7 @@ fn built_in_dialects_have_target_native_external_build_apis() {
             .expect("the ECode block-argument domain is assigned");
         (written, arg)
     };
-    let ecode_operation_count = ecode.emitter().operation_count();
+    let ecode_operation_count = ecode.emitter().op_count();
     let ecode_operations =
         IlIndexRange::new(0, ecode_operation_count).expect("the ECode operation range is valid");
     let mut ecode_graph = IlGraphBuilder::new();
@@ -490,7 +490,7 @@ fn built_in_dialects_have_target_native_external_build_apis() {
     ]);
     ecode.set_parent_spans(vec![IlParentSpan::new(ecode_operations, ecode_operations)]);
     let ecode = ecode.build(&cancellation).expect("the ECode is valid");
-    assert_eq!(ecode.operations().len(), 2);
+    assert_eq!(ecode.ops().len(), 2);
     assert_eq!(ecode.graph().blocks().len(), 1);
     assert_eq!(ecode.block_args().len(), 1);
     assert_eq!(ecode.block_args()[0].value(), arg);
@@ -540,7 +540,7 @@ fn built_in_dialects_have_target_native_external_build_apis() {
         (bound, variable, aliased)
     };
     mcode.set_aliased_variables(vec![aliased]);
-    let mcode_operation_count = mcode.emitter().operation_count();
+    let mcode_operation_count = mcode.emitter().op_count();
     let mcode_operations =
         IlIndexRange::new(0, mcode_operation_count).expect("the MCode operation range is valid");
     let mut mcode_graph = IlGraphBuilder::new();
@@ -566,7 +566,7 @@ fn built_in_dialects_have_target_native_external_build_apis() {
     ]);
     mcode.set_parent_spans(vec![IlParentSpan::new(mcode_operations, mcode_operations)]);
     let mcode = mcode.build(&cancellation).expect("the MCode is valid");
-    assert_eq!(mcode.operations().len(), 2);
+    assert_eq!(mcode.ops().len(), 2);
     assert_eq!(mcode.graph().blocks().len(), 1);
     assert_eq!(
         mcode

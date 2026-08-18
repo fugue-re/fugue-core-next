@@ -123,7 +123,7 @@ impl VerifyError {
         }
     }
 
-    const fn invalid_operation_placement(operation: IlOpId) -> Self {
+    const fn invalid_op_placement(operation: IlOpId) -> Self {
         Self::InvalidOpPlacement {
             operation: operation.value(),
         }
@@ -238,7 +238,7 @@ impl MCodeVerifier<'_> {
         self.ir.verify_structure::<VerifyError>(
             self.ir.source_spans(),
             Some(self.ir.parent_spans()),
-            self.ir.operations().len(),
+            self.ir.ops().len(),
         )?;
         SsaVerifier::new(self.ir).verify_memory_domains()?;
         SsaVerifier::new(self.ir).verify_edge_args()?;
@@ -260,13 +260,13 @@ impl MCodeVerifier<'_> {
             }
         }
 
-        for (operation_index, operation) in self.ir.operations().iter().enumerate() {
+        for (operation_index, operation) in self.ir.ops().iter().enumerate() {
             let operation_id = IlOpId::try_from_index(operation_index)?;
             operation.results().verify_bounds(self.ir.values().len())?;
             operation
                 .operands()
-                .verify_bounds(self.ir.operation_operands().len())?;
-            self.verify_operation_shape(operation_id, operation)?;
+                .verify_bounds(self.ir.op_operands().len())?;
+            self.verify_op_shape(operation_id, operation)?;
 
             for result_index in operation.results().start()..operation.results().end() {
                 let value = self.ir.values()[result_index];
@@ -294,7 +294,7 @@ impl MCodeVerifier<'_> {
             let uniform_operand_width = operation.opcode().has_uniform_operand_width();
             for operand in operation
                 .operands()
-                .checked_slice(self.ir.operation_operands())?
+                .checked_slice(self.ir.op_operands())?
             {
                 let value = self.ir.values().get(operand.index()).ok_or_else(|| {
                     IlError::range_out_of_bounds(operand.index(), self.ir.values().len())
@@ -314,7 +314,7 @@ impl MCodeVerifier<'_> {
                     return Err(IlError::missing_component(MCodeIr::FORM, "memory domain").into());
                 }
 
-                self.verify_memory_operation(operation_id, operation)?;
+                self.verify_memory_op(operation_id, operation)?;
             }
         }
 
@@ -323,7 +323,7 @@ impl MCodeVerifier<'_> {
 
             match value.definition() {
                 IlSsaDef::Op(operation) => {
-                    let Some(operation) = self.ir.operations().get(operation.index()) else {
+                    let Some(operation) = self.ir.ops().get(operation.index()) else {
                         return Err(VerifyError::invalid_value_definition());
                     };
 
@@ -419,7 +419,7 @@ impl MCodeVerifier<'_> {
         let operation_index = operation_id.index();
         let operation = self
             .ir
-            .operations()
+            .ops()
             .get(operation_index)
             .ok_or_else(VerifyError::invalid_value_definition)?;
         let result_index = value_id.index() - operation.results().start();
@@ -441,7 +441,7 @@ impl MCodeVerifier<'_> {
         Ok(())
     }
 
-    fn verify_operation_shape(
+    fn verify_op_shape(
         &self,
         operation_id: IlOpId,
         operation: &MCodeOp,
@@ -521,7 +521,7 @@ impl MCodeVerifier<'_> {
         Ok(())
     }
 
-    fn verify_memory_operation(
+    fn verify_memory_op(
         &self,
         operation_id: IlOpId,
         operation: &MCodeOp,
@@ -581,7 +581,7 @@ impl MCodeVerifier<'_> {
             previous = Some(*id);
         }
 
-        for (operation_index, operation) in self.ir.operations().iter().enumerate() {
+        for (operation_index, operation) in self.ir.ops().iter().enumerate() {
             let operation_id = IlOpId::try_from_index(operation_index)?;
             let opcode = operation.opcode();
 
@@ -604,7 +604,7 @@ impl MCodeVerifier<'_> {
                 }
             }
 
-            self.verify_operation_bindings(operation)?;
+            self.verify_op_bindings(operation)?;
             self.verify_variable_widths(operation, variable_widths)?;
 
             match opcode {
@@ -634,7 +634,7 @@ impl MCodeVerifier<'_> {
             return Ok(());
         };
         let width = variable_widths.get(&variable).copied().unwrap_or(0);
-        let operands = self.ir.operation_operands_for(operation);
+        let operands = self.ir.op_operands_for(operation);
         let matches = match operation.opcode() {
             MCodeOpcode::SetVar | MCodeOpcode::SetVarAliased => {
                 operation.width() == width && self.ir.values()[operands[0].index()].width() == width
@@ -649,7 +649,7 @@ impl MCodeVerifier<'_> {
         Ok(())
     }
 
-    fn verify_operation_bindings(&self, operation: &MCodeOp) -> Result<(), VerifyError> {
+    fn verify_op_bindings(&self, operation: &MCodeOp) -> Result<(), VerifyError> {
         for result_index in operation.results().start()..operation.results().end() {
             let result = self.ir.values()[result_index];
             let offset = result_index - operation.results().start();
@@ -677,7 +677,7 @@ impl MCodeVerifier<'_> {
     }
 
     fn verify_split(&self, operation_id: IlOpId, operation: &MCodeOp) -> Result<(), VerifyError> {
-        let operands = self.ir.operation_operands_for(operation);
+        let operands = self.ir.op_operands_for(operation);
         if operands.len() != 2 || operation.results().len() != 1 {
             return Err(VerifyError::invalid_split(operation_id));
         }
@@ -702,7 +702,7 @@ impl MCodeVerifier<'_> {
             .variable()
             .expect("field operation has been checked for a variable");
         if operation.opcode() == MCodeOpcode::SetVarField {
-            let previous_id = self.ir.operation_operands_for(operation)[0];
+            let previous_id = self.ir.op_operands_for(operation)[0];
             let previous = self.ir.values()[previous_id.index()];
             let result_id = IlValueId::try_from_index(operation.results().start())?;
             let result = self.ir.values()[result_id.index()];
@@ -715,7 +715,7 @@ impl MCodeVerifier<'_> {
         }
 
         let width = variable_widths.get(&variable).copied().unwrap_or(0);
-        let operands = self.ir.operation_operands_for(operation);
+        let operands = self.ir.op_operands_for(operation);
         let widths_match = match operation.opcode() {
             MCodeOpcode::SetVarField => {
                 self.ir.values()[operands[0].index()].width() == width
@@ -761,14 +761,14 @@ impl MCodeVerifier<'_> {
             let value = IlValueId::try_from_index(result_index)?;
             let materialised = !uses.uses_for(value).is_empty()
                 && uses.uses_for(value).iter().all(|usage| {
-                    let user = &self.ir.operations()[usage.user().index()];
+                    let user = &self.ir.ops()[usage.user().index()];
                     match user.opcode() {
                         MCodeOpcode::SetVarAliased | MCodeOpcode::SetVarAliasedField => {
                             usage.operand_index() == 0
                         }
                         MCodeOpcode::SetVarField => usage.operand_index() == 1,
                         MCodeOpcode::Insert if usage.operand_index() == 1 => {
-                            let operands = self.ir.operation_operands_for(user);
+                            let operands = self.ir.op_operands_for(user);
                             self.ir.values()[operands[0].index()].width() == user.width()
                                 && self.ir.values()[user.results().start()].width() == user.width()
                                 && user
@@ -789,12 +789,12 @@ impl MCodeVerifier<'_> {
 
     fn verify_terminators(&self) -> Result<(), VerifyError> {
         if self.ir.graph().blocks().is_empty() {
-            for (operation_index, operation) in self.ir.operations().iter().enumerate() {
+            for (operation_index, operation) in self.ir.ops().iter().enumerate() {
                 if operation.opcode().is_terminator()
-                    && operation_index + 1 != self.ir.operations().len()
+                    && operation_index + 1 != self.ir.ops().len()
                 {
                     let operation_id = IlOpId::try_from_index(operation_index)?;
-                    return Err(VerifyError::invalid_operation_placement(operation_id));
+                    return Err(VerifyError::invalid_op_placement(operation_id));
                 }
             }
             return Ok(());
@@ -802,13 +802,13 @@ impl MCodeVerifier<'_> {
 
         for (block_index, block) in self.ir.graph().blocks().iter().enumerate() {
             let block_id = IlBlockId::try_from_index(block_index)?;
-            for operation_index in block.operations().start()..block.operations().end() {
-                let operation = self.ir.operations()[operation_index];
+            for operation_index in block.ops().start()..block.ops().end() {
+                let operation = self.ir.ops()[operation_index];
                 if operation.opcode().is_terminator()
-                    && operation_index + 1 != block.operations().end()
+                    && operation_index + 1 != block.ops().end()
                 {
                     let operation_id = IlOpId::try_from_index(operation_index)?;
-                    return Err(VerifyError::invalid_operation_placement(operation_id));
+                    return Err(VerifyError::invalid_op_placement(operation_id));
                 }
             }
             self.verify_edge_kinds(block, block_id)?;
@@ -818,9 +818,9 @@ impl MCodeVerifier<'_> {
     }
 
     fn verify_edge_kinds(&self, block: &IlBlock, block_id: IlBlockId) -> Result<(), VerifyError> {
-        let terminator = (!block.operations().is_empty())
-            .then(|| block.operations().end() - 1)
-            .and_then(|index| self.ir.operations().get(index))
+        let terminator = (!block.ops().is_empty())
+            .then(|| block.ops().end() - 1)
+            .and_then(|index| self.ir.ops().get(index))
             .map(MCodeOp::opcode);
         let permitted = match terminator {
             Some(MCodeOpcode::Branch) => IlEdgeKinds::UNCONDITIONAL,

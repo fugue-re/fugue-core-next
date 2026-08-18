@@ -8,10 +8,10 @@ pub(crate) struct ECodeRequiredDefs {
 impl ECodeRequiredDefs {
     fn new(ir: &ECodeIr) -> Self {
         let mut required = Self {
-            definitions: IlRequiredDefs::new(ir.block_args().len(), ir.operations().len()),
+            definitions: IlRequiredDefs::new(ir.block_args().len(), ir.ops().len()),
         };
         let mut worklist = Vec::new();
-        for (index, operation) in ir.operations().iter().enumerate() {
+        for (index, operation) in ir.ops().iter().enumerate() {
             if operation.opcode().has_side_effect() {
                 let definition = IlSsaDef::Op(
                     IlOpId::try_from_index(index).expect("operation id is representable"),
@@ -42,8 +42,8 @@ impl ECodeRequiredDefs {
         while let Some(entity) = worklist.pop() {
             match entity {
                 IlSsaDef::Op(operation) => {
-                    let operation = &ir.operations()[operation.index()];
-                    for &operand in ir.operation_operands_for(operation) {
+                    let operation = &ir.ops()[operation.index()];
+                    for &operand in ir.op_operands_for(operation) {
                         let Some(definition) = ir
                             .values()
                             .get(operand.index())
@@ -84,8 +84,8 @@ impl ECodeRequiredDefs {
         self.definitions.block_arg_is_required(index)
     }
 
-    pub(crate) fn operation_is_required(&self, index: usize) -> bool {
-        self.definitions.operation_is_required(index)
+    pub(crate) fn op_is_required(&self, index: usize) -> bool {
+        self.definitions.op_is_required(index)
     }
 }
 

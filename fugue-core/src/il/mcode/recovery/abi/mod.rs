@@ -227,19 +227,19 @@ impl MCodeCallFacts {
     }
 
     fn validate(&self, ir: &ECodeIr, registers: &RegisterBank) -> Result<(), IlError> {
-        let operation = ir.operations().get(self.site.index()).ok_or_else(|| {
-            IlError::range_out_of_bounds(self.site.index() + 1, ir.operations().len())
+        let operation = ir.ops().get(self.site.index()).ok_or_else(|| {
+            IlError::range_out_of_bounds(self.site.index() + 1, ir.ops().len())
         })?;
         let is_tail_call = matches!(
             operation.opcode(),
             ECodeOpcode::Branch | ECodeOpcode::BranchIndirect
         ) && ir
-            .block_for_operation(self.site)
+            .block_for_op(self.site)
             .and_then(|block| ir.graph().blocks().get(block.index()))
             .is_some_and(|block| {
                 block.is_exit()
                     && block.successors().is_empty()
-                    && block.operations().end() == self.site.index() + 1
+                    && block.ops().end() == self.site.index() + 1
             });
         if !is_tail_call
             && !matches!(
@@ -537,7 +537,7 @@ impl MCodeReachingDefs {
         }
     }
 
-    fn apply_operation(&mut self, ir: &ECodeIr, operation: &ECodeOp) {
+    fn apply_op(&mut self, ir: &ECodeIr, operation: &ECodeOp) {
         for index in operation.results().start()..operation.results().end() {
             self.define_value(
                 ir,
@@ -604,7 +604,7 @@ impl<'a> MCodeAbiSolver<'a> {
             };
             if seen.insert(domain)
                 && ir
-                    .defining_operation(value)
+                    .defining_op(value)
                     .is_some_and(|operation| operation.opcode() == ECodeOpcode::Undefined)
             {
                 entry_live_inputs.insert(value);
@@ -627,10 +627,10 @@ impl<'a> MCodeAbiSolver<'a> {
     fn solve(mut self) -> Result<MCodeAbiModel, IlError> {
         if self.ir.graph().blocks().is_empty() {
             let mut definitions = MCodeReachingDefs::default();
-            for (index, operation) in self.ir.operations().iter().enumerate() {
+            for (index, operation) in self.ir.ops().iter().enumerate() {
                 let site = IlOpId::try_from_index(index).expect("operation id is representable");
-                self.recover_operation(&definitions, site, operation, false)?;
-                definitions.apply_operation(self.ir, operation);
+                self.recover_op(&definitions, site, operation, false)?;
+                definitions.apply_op(self.ir, operation);
             }
             return Ok(self.model);
         }
@@ -686,7 +686,7 @@ impl<'a> MCodeAbiSolver<'a> {
         for (site, operation) in self
             .ir
             .graph()
-            .operations_for_block(block, self.ir.operations())
+            .ops_for_block(block, self.ir.ops())
         {
             let tail_call = block_record.is_exit()
                 && block_record.successors().is_empty()
@@ -694,13 +694,13 @@ impl<'a> MCodeAbiSolver<'a> {
                     operation.opcode(),
                     ECodeOpcode::Branch | ECodeOpcode::BranchIndirect
                 );
-            self.recover_operation(definitions, site, operation, tail_call)?;
-            definitions.apply_operation(self.ir, operation);
+            self.recover_op(definitions, site, operation, tail_call)?;
+            definitions.apply_op(self.ir, operation);
         }
         Ok(())
     }
 
-    fn recover_operation(
+    fn recover_op(
         &mut self,
         definitions: &MCodeReachingDefs,
         site: IlOpId,
@@ -748,7 +748,7 @@ impl<'a> MCodeAbiSolver<'a> {
     }
 
     fn is_reaching_input(&self, value: IlValueId) -> bool {
-        self.ir.defining_operation(value).is_none_or(|operation| {
+        self.ir.defining_op(value).is_none_or(|operation| {
             operation.opcode() != ECodeOpcode::Undefined || self.entry_live_inputs.contains(&value)
         })
     }
