@@ -26,28 +26,6 @@ struct ECodeRenameState {
 }
 
 impl ECodeRenameState {
-    fn checkpoint(&mut self) -> usize {
-        self.tracking = true;
-        self.undo.len()
-    }
-
-    fn rollback(&mut self, checkpoint: usize) {
-        while self.undo.len() > checkpoint {
-            let (domain, previous) = self
-                .undo
-                .pop()
-                .expect("a rename checkpoint is within the undo log");
-            match previous {
-                Some(value) => {
-                    self.values.insert(domain, value);
-                }
-                None => {
-                    self.values.remove(&domain);
-                }
-            }
-        }
-    }
-
     fn value(&self, domain: ECodeDomain) -> Option<IlValueId> {
         self.values.get(&domain).copied()
     }
@@ -74,6 +52,29 @@ impl ECodeRenameState {
             retained
         });
     }
+
+    fn checkpoint(&mut self) -> usize {
+        self.tracking = true;
+        self.undo.len()
+    }
+
+    fn rollback(&mut self, checkpoint: usize) {
+        while self.undo.len() > checkpoint {
+            let (domain, previous) = self
+                .undo
+                .pop()
+                .expect("a rename checkpoint is within the undo log");
+            match previous {
+                Some(value) => {
+                    self.values.insert(domain, value);
+                }
+                None => {
+                    self.values.remove(&domain);
+                }
+            }
+        }
+    }
+
 }
 
 #[derive(Debug)]

@@ -48,18 +48,6 @@ impl PCodeIr {
         }
     }
 
-    pub(crate) fn verify(&self) -> Result<(), VerifyError> {
-        verify(self)
-    }
-
-    pub const fn display(&self) -> PCodeIrDisplay<'_> {
-        PCodeIrDisplay::new(self)
-    }
-
-    pub const fn display_source(&self, address: Address) -> PCodeSourceDisplay<'_> {
-        PCodeSourceDisplay::new(self, address)
-    }
-
     pub const fn metadata(&self) -> &IlMetadata {
         &self.metadata
     }
@@ -161,6 +149,19 @@ impl PCodeIr {
             coverage.insert_range(AddressRange::point(span.address()));
         }
     }
+
+    pub(crate) fn verify(&self) -> Result<(), VerifyError> {
+        verify(self)
+    }
+
+    pub const fn display(&self) -> PCodeIrDisplay<'_> {
+        PCodeIrDisplay::new(self)
+    }
+
+    pub const fn display_source(&self, address: Address) -> PCodeSourceDisplay<'_> {
+        PCodeSourceDisplay::new(self, address)
+    }
+
 }
 
 impl IlArtefact for PCodeIr {

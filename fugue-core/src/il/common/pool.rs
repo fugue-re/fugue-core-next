@@ -334,14 +334,6 @@ impl<T> IlPool<T> {
         Self { values: Vec::new() }
     }
 
-    pub fn append(&mut self, values: impl IntoIterator<Item = T>) -> Result<IlIndexRange, IlError> {
-        let start = self.values.len();
-        self.values.extend(values);
-        let end = self.values.len();
-
-        IlIndexRange::new(start, end)
-    }
-
     pub fn len(&self) -> usize {
         self.values.len()
     }
@@ -352,6 +344,14 @@ impl<T> IlPool<T> {
 
     pub fn values(&self) -> &[T] {
         &self.values
+    }
+
+    pub fn append(&mut self, values: impl IntoIterator<Item = T>) -> Result<IlIndexRange, IlError> {
+        let start = self.values.len();
+        self.values.extend(values);
+        let end = self.values.len();
+
+        IlIndexRange::new(start, end)
     }
 
     pub fn into_values(self) -> Vec<T> {

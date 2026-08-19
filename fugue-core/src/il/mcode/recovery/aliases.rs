@@ -13,16 +13,16 @@ pub(crate) enum MCodeAliasOverride {
 pub(crate) struct MCodeAliasOverrides(FxHashMap<MCodeVar, MCodeAliasOverride>);
 
 impl MCodeAliasOverrides {
+    fn get(&self, variable: &MCodeVar) -> Option<MCodeAliasOverride> {
+        self.0.get(variable).copied()
+    }
+
     pub(crate) fn insert(&mut self, variable: MCodeVar, override_: MCodeAliasOverride) {
         self.0.insert(variable, override_);
     }
 
     pub(crate) fn remove(&mut self, variable: MCodeVar) {
         self.0.remove(&variable);
-    }
-
-    fn get(&self, variable: &MCodeVar) -> Option<MCodeAliasOverride> {
-        self.0.get(variable).copied()
     }
 }
 

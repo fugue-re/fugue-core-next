@@ -310,6 +310,10 @@ impl MCodeFunctionFacts {
         self.tail_call_live_outputs = Some(outputs);
     }
 
+    pub fn call(&self, site: IlOpId) -> Option<&MCodeCallFacts> {
+        self.calls.get(&site)
+    }
+
     pub fn insert_return_live_output(&mut self, output: MCodeStorageFact) {
         let outputs = self.return_live_outputs.get_or_insert_with(Vec::new);
         if let Err(index) = outputs.binary_search(&output) {
@@ -322,10 +326,6 @@ impl MCodeFunctionFacts {
         if let Err(index) = outputs.binary_search(&output) {
             outputs.insert(index, output);
         }
-    }
-
-    pub fn call(&self, site: IlOpId) -> Option<&MCodeCallFacts> {
-        self.calls.get(&site)
     }
 
     pub fn insert_call(&mut self, call: MCodeCallFacts) -> Option<MCodeCallFacts> {
@@ -506,6 +506,10 @@ struct MCodeReachingDefs {
 }
 
 impl MCodeReachingDefs {
+    fn value(&self, register: RegisterId) -> Option<IlValueId> {
+        self.values.get(&register).copied()
+    }
+
     fn checkpoint(&mut self) -> usize {
         self.tracking = true;
         self.undo.len()
@@ -544,10 +548,6 @@ impl MCodeReachingDefs {
                 IlValueId::try_from_index(index).expect("value id is representable"),
             );
         }
-    }
-
-    fn value(&self, register: RegisterId) -> Option<IlValueId> {
-        self.values.get(&register).copied()
     }
 }
 

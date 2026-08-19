@@ -28,6 +28,14 @@ impl LivenessMatrix {
         self.rows[row].contains(value)
     }
 
+    fn row(&self, row: usize) -> &FixedBitSet {
+        &self.rows[row]
+    }
+
+    fn row_mut(&mut self, row: usize) -> &mut FixedBitSet {
+        &mut self.rows[row]
+    }
+
     fn insert(&mut self, row: usize, value: usize) {
         self.rows[row].insert(value);
     }
@@ -38,14 +46,6 @@ impl LivenessMatrix {
                 IlValueId::try_from_index(value).expect("value count fits the value id space")
             })
         }))
-    }
-
-    fn row(&self, row: usize) -> &FixedBitSet {
-        &self.rows[row]
-    }
-
-    fn row_mut(&mut self, row: usize) -> &mut FixedBitSet {
-        &mut self.rows[row]
     }
 }
 

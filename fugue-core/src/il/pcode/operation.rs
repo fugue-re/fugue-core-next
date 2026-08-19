@@ -556,16 +556,16 @@ impl PCodeOpSpec {
         self.immediate
     }
 
+    pub const fn address_space(&self) -> Option<AddressSpaceId> {
+        self.address_space
+    }
+
     pub const fn target(&self) -> Option<PCodeTargetId> {
         if self.opcode.requires_address() {
             PCodeTargetId::from_value(self.immediate)
         } else {
             None
         }
-    }
-
-    pub const fn address_space(&self) -> Option<AddressSpaceId> {
-        self.address_space
     }
 }
 
@@ -612,16 +612,16 @@ impl PCodeOp {
         self.immediate
     }
 
+    pub const fn address_space(&self) -> Option<AddressSpaceId> {
+        self.address_space
+    }
+
     pub const fn target(&self) -> Option<PCodeTargetId> {
         if self.opcode.requires_address() {
             PCodeTargetId::from_value(self.immediate)
         } else {
             None
         }
-    }
-
-    pub const fn address_space(&self) -> Option<AddressSpaceId> {
-        self.address_space
     }
 }
 

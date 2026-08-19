@@ -53,15 +53,6 @@ impl MCodeStackObject {
         Self::new(interval.start, interval.end, interval.address_taken)
     }
 
-    fn merge_interval(&mut self, interval: StackObjectInterval) -> bool {
-        if interval.start >= self.end {
-            return false;
-        }
-        self.end = self.end.max(interval.end);
-        self.address_taken |= interval.address_taken;
-        true
-    }
-
     pub(crate) const fn start(&self) -> i64 {
         self.start
     }
@@ -75,6 +66,15 @@ impl MCodeStackObject {
             .checked_sub(self.start)
             .and_then(|bytes| bytes.checked_mul(8))
             .and_then(|bits| u32::try_from(bits).ok())
+    }
+
+    fn merge_interval(&mut self, interval: StackObjectInterval) -> bool {
+        if interval.start >= self.end {
+            return false;
+        }
+        self.end = self.end.max(interval.end);
+        self.address_taken |= interval.address_taken;
+        true
     }
 }
 
@@ -224,13 +224,6 @@ impl MCodeStackModel {
         this
     }
 
-    pub(crate) fn offset_of(&self, value: IlValueId) -> Option<i64> {
-        match self.offsets.get(value.index()) {
-            Some(StackOffset::Fixed(displacement)) => Some(*displacement),
-            _ => None,
-        }
-    }
-
     pub(crate) fn objects(&self) -> &[MCodeStackObject] {
         &self.objects
     }
@@ -241,6 +234,13 @@ impl MCodeStackModel {
 
     pub(crate) fn address_for(&self, value: IlValueId) -> Option<MCodeStackAccess> {
         self.addresses.get(&value).copied()
+    }
+
+    pub(crate) fn offset_of(&self, value: IlValueId) -> Option<i64> {
+        match self.offsets.get(value.index()) {
+            Some(StackOffset::Fixed(displacement)) => Some(*displacement),
+            _ => None,
+        }
     }
 
     pub(crate) fn storage_access(&self, offset: i64, width: u32) -> Option<MCodeStackAccess> {

@@ -80,17 +80,17 @@ impl MCodeValue {
         self.definition
     }
 
-    pub fn binding(&self) -> Option<MCodeBinding> {
-        self.variable
-            .map(|variable| MCodeBinding::new(variable, self.version))
-    }
-
     pub(crate) const fn variable(&self) -> Option<MCodeVarId> {
         self.variable
     }
 
     pub(crate) const fn version(&self) -> MCodeVersion {
         self.version
+    }
+
+    pub fn binding(&self) -> Option<MCodeBinding> {
+        self.variable
+            .map(|variable| MCodeBinding::new(variable, self.version))
     }
 }
 

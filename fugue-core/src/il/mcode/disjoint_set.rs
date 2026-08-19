@@ -9,6 +9,10 @@ impl DisjointSet {
         }
     }
 
+    pub(crate) fn len(&self) -> usize {
+        self.parents.len()
+    }
+
     pub(crate) fn find(&mut self, mut index: usize) -> usize {
         while self.parents[index] as usize != index {
             let parent = self.parents[index] as usize;
@@ -25,9 +29,5 @@ impl DisjointSet {
         if left != right {
             self.parents[left.max(right)] = left.min(right) as u32;
         }
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.parents.len()
     }
 }

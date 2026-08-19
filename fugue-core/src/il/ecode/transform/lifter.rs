@@ -150,6 +150,12 @@ impl<'a, 'b> PCodeToECodeLifter<'a, 'b> {
         })
     }
 
+    fn location(&self, id: PCodeLocationId) -> &PCodeLocation {
+        self.source
+            .location(id)
+            .expect("location id is within the location pool")
+    }
+
     pub(crate) fn lift(
         mut self,
         platform: &Platform,
@@ -524,9 +530,4 @@ impl<'a, 'b> PCodeToECodeLifter<'a, 'b> {
         Ok(value)
     }
 
-    fn location(&self, id: PCodeLocationId) -> &PCodeLocation {
-        self.source
-            .location(id)
-            .expect("location id is within the location pool")
-    }
 }

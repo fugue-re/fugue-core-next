@@ -67,6 +67,21 @@ impl IlSourceSpan {
         }
     }
 
+    pub fn find(spans: &[Self], node: usize) -> Option<Self> {
+        find_destination_span(spans, node, Self::destination)
+    }
+
+    pub fn find_all(
+        spans: &[Self],
+        address: Address,
+        source_index: u32,
+    ) -> impl Iterator<Item = Self> + '_ {
+        spans
+            .iter()
+            .copied()
+            .filter(move |span| span.contains_source(address, source_index))
+    }
+
     pub const fn destination(&self) -> IlIndexRange {
         self.destination
     }
@@ -83,19 +98,15 @@ impl IlSourceSpan {
         self.source_count
     }
 
+    pub const fn contains_destination(&self, node: usize) -> bool {
+        self.destination.start() <= node && node < self.destination.end()
+    }
+
     pub fn contains_source(&self, address: Address, source_index: u32) -> bool {
         self.address == address
             && source_index
                 .checked_sub(self.first_source_index)
                 .is_some_and(|offset| offset < self.source_count)
-    }
-
-    pub const fn contains_destination(&self, node: usize) -> bool {
-        self.destination.start() <= node && node < self.destination.end()
-    }
-
-    pub fn find(spans: &[Self], node: usize) -> Option<Self> {
-        find_destination_span(spans, node, Self::destination)
     }
 
     pub fn ops<'a, T>(
@@ -120,15 +131,22 @@ impl IlSourceSpan {
             })
     }
 
-    pub fn find_all(
-        spans: &[Self],
-        address: Address,
-        source_index: u32,
-    ) -> impl Iterator<Item = Self> + '_ {
-        spans
-            .iter()
-            .copied()
-            .filter(move |span| span.contains_source(address, source_index))
+    pub(crate) fn verify(spans: &[Self], node_count: usize) -> Result<(), StructureError> {
+        let mut previous_end = 0usize;
+
+        for span in spans {
+            span.destination.verify_bounds(node_count)?;
+
+            if span.destination.start() < previous_end {
+                return Err(StructureError::OverlappingSourceSpan {
+                    node: span.destination.start(),
+                });
+            }
+
+            previous_end = span.destination.end();
+        }
+
+        Ok(())
     }
 
     pub fn try_merge(&mut self, span: IlSourceSpan) -> Result<bool, IlError> {
@@ -151,24 +169,6 @@ impl IlSourceSpan {
 
         Ok(true)
     }
-
-    pub(crate) fn verify(spans: &[Self], node_count: usize) -> Result<(), StructureError> {
-        let mut previous_end = 0usize;
-
-        for span in spans {
-            span.destination.verify_bounds(node_count)?;
-
-            if span.destination.start() < previous_end {
-                return Err(StructureError::OverlappingSourceSpan {
-                    node: span.destination.start(),
-                });
-            }
-
-            previous_end = span.destination.end();
-        }
-
-        Ok(())
-    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -186,6 +186,17 @@ impl IlParentSpan {
         }
     }
 
+    pub fn find(spans: &[Self], node: usize) -> Option<Self> {
+        find_destination_span(spans, node, Self::destination)
+    }
+
+    pub fn find_all(spans: &[Self], node: usize) -> impl Iterator<Item = Self> + '_ {
+        spans
+            .iter()
+            .copied()
+            .filter(move |span| span.contains_source(node))
+    }
+
     pub const fn destination(&self) -> IlIndexRange {
         self.destination
     }
@@ -196,6 +207,10 @@ impl IlParentSpan {
 
     pub const fn contains_destination(&self, node: usize) -> bool {
         self.destination.start() <= node && node < self.destination.end()
+    }
+
+    pub const fn contains_source(&self, node: usize) -> bool {
+        self.source.start() <= node && node < self.source.end()
     }
 
     pub(crate) fn verify(spans: &[Self], node_count: usize) -> Result<(), StructureError> {
@@ -215,21 +230,6 @@ impl IlParentSpan {
         }
 
         Ok(())
-    }
-
-    pub const fn contains_source(&self, node: usize) -> bool {
-        self.source.start() <= node && node < self.source.end()
-    }
-
-    pub fn find(spans: &[Self], node: usize) -> Option<Self> {
-        find_destination_span(spans, node, Self::destination)
-    }
-
-    pub fn find_all(spans: &[Self], node: usize) -> impl Iterator<Item = Self> + '_ {
-        spans
-            .iter()
-            .copied()
-            .filter(move |span| span.contains_source(node))
     }
 
     pub fn try_merge(&mut self, span: IlParentSpan) -> Result<bool, IlError> {

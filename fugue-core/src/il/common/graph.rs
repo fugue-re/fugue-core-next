@@ -191,22 +191,8 @@ impl IlGraph {
         &self.successors
     }
 
-    pub fn successors_for(&self, block: IlBlockId) -> &[IlBlockId] {
-        let Some(block) = self.blocks.get(block.index()) else {
-            return &[];
-        };
-        block.successors().slice(&self.successors)
-    }
-
     pub fn successor_kinds(&self) -> &[IlEdgeKinds] {
         &self.successor_kinds
-    }
-
-    pub fn successor_kinds_for(&self, block: IlBlockId) -> &[IlEdgeKinds] {
-        let Some(block) = self.blocks.get(block.index()) else {
-            return &[];
-        };
-        block.successors().slice(&self.successor_kinds)
     }
 
     pub fn block_sources(&self) -> &[Address] {
@@ -234,20 +220,6 @@ impl IlGraph {
             .iter()
             .position(|block| block.ops().contains_index(operation.index()))
             .and_then(|index| IlBlockId::try_from_index(index).ok())
-    }
-
-    pub fn op_blocks(&self, operation_count: usize) -> Vec<Option<IlBlockId>> {
-        let mut operation_blocks = vec![None; operation_count];
-        for (index, block) in self.blocks.iter().enumerate() {
-            let block_id =
-                IlBlockId::try_from_index(index).expect("block count fits the block id space");
-            for operation in block.ops().start()..block.ops().end() {
-                if let Some(entry) = operation_blocks.get_mut(operation) {
-                    *entry = Some(block_id);
-                }
-            }
-        }
-        operation_blocks
     }
 
     pub fn ops_for_block<'a, T>(
@@ -296,6 +268,20 @@ impl IlGraph {
     ) -> Result<Self, IlError> {
         self.set_op_ranges(operation_ranges)?;
         Ok(self)
+    }
+
+    pub fn op_blocks(&self, operation_count: usize) -> Vec<Option<IlBlockId>> {
+        let mut operation_blocks = vec![None; operation_count];
+        for (index, block) in self.blocks.iter().enumerate() {
+            let block_id =
+                IlBlockId::try_from_index(index).expect("block count fits the block id space");
+            for operation in block.ops().start()..block.ops().end() {
+                if let Some(entry) = operation_blocks.get_mut(operation) {
+                    *entry = Some(block_id);
+                }
+            }
+        }
+        operation_blocks
     }
 
     pub fn remap_op_ranges(&mut self, operation_map: &IlIndexMapper) -> Result<(), IlError> {
@@ -401,6 +387,20 @@ impl IlGraph {
         }
 
         Ok(())
+    }
+
+    pub fn successors_for(&self, block: IlBlockId) -> &[IlBlockId] {
+        let Some(block) = self.blocks.get(block.index()) else {
+            return &[];
+        };
+        block.successors().slice(&self.successors)
+    }
+
+    pub fn successor_kinds_for(&self, block: IlBlockId) -> &[IlEdgeKinds] {
+        let Some(block) = self.blocks.get(block.index()) else {
+            return &[];
+        };
+        block.successors().slice(&self.successor_kinds)
     }
 }
 

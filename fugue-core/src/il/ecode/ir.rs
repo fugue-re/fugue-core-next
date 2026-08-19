@@ -84,46 +84,12 @@ impl ECodeIr {
         }
     }
 
-    pub(crate) fn rewriter(&mut self) -> ECodeRewriter<'_> {
-        let mut constants = IlConstantInterner::new();
-        for operation in &self.operations {
-            if let Some(bytes) = operation.constant_bytes(&self.constant_storage) {
-                constants.index_existing(operation.immediate(), bytes);
-            }
-        }
-        ECodeRewriter {
-            operations: &mut self.operations,
-            constant_storage: &mut self.constant_storage,
-            constants,
-        }
-    }
-
-    pub(crate) fn verify(&self) -> Result<(), VerifyError> {
-        verify(self)
-    }
-
-    pub const fn display(&self) -> ECodeIrDisplay<'_> {
-        ECodeIrDisplay::new(self)
-    }
-
-    pub const fn display_source(&self, address: Address) -> ECodeSourceDisplay<'_> {
-        ECodeSourceDisplay::new(self, address)
-    }
-
     pub const fn metadata(&self) -> &IlMetadata {
         &self.metadata
     }
 
     pub const fn graph(&self) -> &IlGraph {
         &self.graph
-    }
-
-    pub(crate) fn take_graph(&mut self) -> IlGraph {
-        mem::take(&mut self.graph)
-    }
-
-    pub(crate) fn take_memory_domains(&mut self) -> Vec<ECodeMemoryDomain> {
-        mem::take(&mut self.memory_domains)
     }
 
     pub fn source_spans(&self) -> &[IlSourceSpan] {
@@ -196,6 +162,32 @@ impl ECodeIr {
         self.graph.block_for_op(operation)
     }
 
+    pub fn value_width(&self, value: IlValueId) -> Option<u32> {
+        self.values.get(value.index()).map(ECodeValue::width)
+    }
+
+    pub fn args_for_edge(&self, edge: usize) -> &[IlValueId] {
+        self.edge_args
+            .get(edge)
+            .expect("edge index is within the edge argument table")
+            .slice(&self.edge_arg_values)
+    }
+
+    pub fn shrink_to_fit(&mut self) {
+        self.graph.shrink_to_fit();
+        self.source_spans.shrink_to_fit();
+        self.parent_spans.shrink_to_fit();
+        self.values.shrink_to_fit();
+        self.value_domains.shrink_to_fit();
+        self.block_args.shrink_to_fit();
+        self.edge_args.shrink_to_fit();
+        self.edge_arg_values.shrink_to_fit();
+        self.operations.shrink_to_fit();
+        self.value_operands.shrink_to_fit();
+        self.memory_domains.shrink_to_fit();
+        self.constant_storage.shrink_to_fit();
+    }
+
     pub(crate) fn op_blocks(&self) -> Vec<Option<IlBlockId>> {
         self.graph.op_blocks(self.operations.len())
     }
@@ -207,6 +199,49 @@ impl ECodeIr {
         let range = self.graph.blocks().get(block.index())?.ops();
         self.source_span_for(range.start())
             .map(|span| span.address())
+    }
+
+    pub fn constant_value(&self, value: IlValueId) -> Option<BitVec> {
+        let mut current = value;
+        for _ in 0..self.values.len() {
+            let operation = self.defining_op(current)?;
+            if !matches!(
+                operation.opcode(),
+                ECodeOpcode::WriteFlag | ECodeOpcode::WriteRegister
+            ) {
+                return operation.constant(&self.constant_storage);
+            }
+            current = *self.op_operands_for(operation).first()?;
+        }
+        None
+    }
+
+    pub fn memory_access_range(&self, operation: &ECodeOp) -> Option<AddressRange> {
+        let space = operation.address_space()?;
+        let pointer = self.defining_op(self.pointer_operand(operation)?)?;
+        if pointer.opcode() != ECodeOpcode::Address {
+            return None;
+        }
+        let width = match operation.opcode() {
+            ECodeOpcode::Load => operation.width(),
+            ECodeOpcode::Store => self
+                .op_operands_for(operation)
+                .get(1)
+                .copied()
+                .and_then(|value| self.value_width(value))?,
+            _ => return None,
+        };
+        AddressRange::from_size(
+            Address::new(space, pointer.immediate()),
+            u64::from(width.div_ceil(8)),
+        )
+    }
+
+    pub fn ops_for_source(
+        &self,
+        address: Address,
+    ) -> impl Iterator<Item = (IlOpId, &ECodeOp)> + '_ {
+        IlSourceSpan::ops(&self.source_spans, &self.operations, address)
     }
 
     pub fn defining_op(&self, value: IlValueId) -> Option<&ECodeOp> {
@@ -278,74 +313,40 @@ impl ECodeIr {
         (offset == 0).then_some(source)
     }
 
-    pub fn value_width(&self, value: IlValueId) -> Option<u32> {
-        self.values.get(value.index()).map(ECodeValue::width)
+    pub const fn display(&self) -> ECodeIrDisplay<'_> {
+        ECodeIrDisplay::new(self)
     }
 
-    pub fn constant_value(&self, value: IlValueId) -> Option<BitVec> {
-        let mut current = value;
-        for _ in 0..self.values.len() {
-            let operation = self.defining_op(current)?;
-            if !matches!(
-                operation.opcode(),
-                ECodeOpcode::WriteFlag | ECodeOpcode::WriteRegister
-            ) {
-                return operation.constant(&self.constant_storage);
+    pub const fn display_source(&self, address: Address) -> ECodeSourceDisplay<'_> {
+        ECodeSourceDisplay::new(self, address)
+    }
+
+    pub(crate) fn take_graph(&mut self) -> IlGraph {
+        mem::take(&mut self.graph)
+    }
+
+    pub(crate) fn take_memory_domains(&mut self) -> Vec<ECodeMemoryDomain> {
+        mem::take(&mut self.memory_domains)
+    }
+
+    pub(crate) fn rewriter(&mut self) -> ECodeRewriter<'_> {
+        let mut constants = IlConstantInterner::new();
+        for operation in &self.operations {
+            if let Some(bytes) = operation.constant_bytes(&self.constant_storage) {
+                constants.index_existing(operation.immediate(), bytes);
             }
-            current = *self.op_operands_for(operation).first()?;
         }
-        None
-    }
-
-    pub fn memory_access_range(&self, operation: &ECodeOp) -> Option<AddressRange> {
-        let space = operation.address_space()?;
-        let pointer = self.defining_op(self.pointer_operand(operation)?)?;
-        if pointer.opcode() != ECodeOpcode::Address {
-            return None;
+        ECodeRewriter {
+            operations: &mut self.operations,
+            constant_storage: &mut self.constant_storage,
+            constants,
         }
-        let width = match operation.opcode() {
-            ECodeOpcode::Load => operation.width(),
-            ECodeOpcode::Store => self
-                .op_operands_for(operation)
-                .get(1)
-                .copied()
-                .and_then(|value| self.value_width(value))?,
-            _ => return None,
-        };
-        AddressRange::from_size(
-            Address::new(space, pointer.immediate()),
-            u64::from(width.div_ceil(8)),
-        )
     }
 
-    pub fn args_for_edge(&self, edge: usize) -> &[IlValueId] {
-        self.edge_args
-            .get(edge)
-            .expect("edge index is within the edge argument table")
-            .slice(&self.edge_arg_values)
+    pub(crate) fn verify(&self) -> Result<(), VerifyError> {
+        verify(self)
     }
 
-    pub fn ops_for_source(
-        &self,
-        address: Address,
-    ) -> impl Iterator<Item = (IlOpId, &ECodeOp)> + '_ {
-        IlSourceSpan::ops(&self.source_spans, &self.operations, address)
-    }
-
-    pub fn shrink_to_fit(&mut self) {
-        self.graph.shrink_to_fit();
-        self.source_spans.shrink_to_fit();
-        self.parent_spans.shrink_to_fit();
-        self.values.shrink_to_fit();
-        self.value_domains.shrink_to_fit();
-        self.block_args.shrink_to_fit();
-        self.edge_args.shrink_to_fit();
-        self.edge_arg_values.shrink_to_fit();
-        self.operations.shrink_to_fit();
-        self.value_operands.shrink_to_fit();
-        self.memory_domains.shrink_to_fit();
-        self.constant_storage.shrink_to_fit();
-    }
 }
 
 pub(crate) struct ECodeRewriter<'a> {

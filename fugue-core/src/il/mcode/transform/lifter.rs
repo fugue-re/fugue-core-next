@@ -111,6 +111,18 @@ struct MCodeBindings {
 }
 
 impl MCodeBindings {
+    fn iter(&self) -> impl Iterator<Item = (IlValueId, MCodeVarId)> + '_ {
+        self.ordered.iter().copied()
+    }
+
+    fn latest(&self, variable: MCodeVarId) -> Option<IlValueId> {
+        self.latest.get(&variable).copied()
+    }
+
+    fn variable_for(&self, value: IlValueId) -> Option<MCodeVarId> {
+        self.variables.get(&value).copied()
+    }
+
     fn insert(&mut self, value: IlValueId, variable: MCodeVarId) -> Result<(), IlError> {
         match self.variables.insert(value, variable) {
             Some(existing) if existing != variable => Err(IlError::missing_component(
@@ -126,67 +138,9 @@ impl MCodeBindings {
         }
     }
 
-    fn iter(&self) -> impl Iterator<Item = (IlValueId, MCodeVarId)> + '_ {
-        self.ordered.iter().copied()
-    }
-
-    fn latest(&self, variable: MCodeVarId) -> Option<IlValueId> {
-        self.latest.get(&variable).copied()
-    }
-
-    fn variable_for(&self, value: IlValueId) -> Option<MCodeVarId> {
-        self.variables.get(&value).copied()
-    }
 }
 
 impl ECodeToMCodeRenameState {
-    fn checkpoint(&mut self) -> usize {
-        self.tracking = true;
-        self.undo.len()
-    }
-
-    fn rollback(&mut self, checkpoint: usize) {
-        while self.undo.len() > checkpoint {
-            match self
-                .undo
-                .pop()
-                .expect("a rename checkpoint is within the undo log")
-            {
-                ECodeToMCodeRenameChange::Stack(variable, previous) => match previous {
-                    Some(value) => {
-                        self.stack.insert(variable, value);
-                    }
-                    None => {
-                        self.stack.remove(&variable);
-                    }
-                },
-                ECodeToMCodeRenameChange::Memory(space, previous) => match previous {
-                    Some(value) => {
-                        self.memory.insert(space, value);
-                    }
-                    None => {
-                        self.memory.remove(&space);
-                    }
-                },
-                ECodeToMCodeRenameChange::UnmatchedCallMemory(space, previous) => {
-                    if previous {
-                        self.unmatched_call_memory.insert(space);
-                    } else {
-                        self.unmatched_call_memory.remove(&space);
-                    }
-                }
-                ECodeToMCodeRenameChange::UnmatchedCallOutput(root, previous) => match previous {
-                    Some(value) => {
-                        self.unmatched_call_outputs.insert(root, value);
-                    }
-                    None => {
-                        self.unmatched_call_outputs.remove(&root);
-                    }
-                },
-            }
-        }
-    }
-
     fn stack_value(&self, variable: MCodeVarId) -> Option<IlValueId> {
         self.stack.get(&variable).copied()
     }
@@ -195,16 +149,20 @@ impl ECodeToMCodeRenameState {
         self.stack.contains_key(&variable)
     }
 
+    fn memory_value(&self, space: AddressSpaceId) -> Option<IlValueId> {
+        self.memory.get(&space).copied()
+    }
+
+    fn contains_unmatched_call_output(&self, root: RegisterId) -> bool {
+        self.unmatched_call_outputs.contains_key(&root)
+    }
+
     fn insert_stack(&mut self, variable: MCodeVarId, value: IlValueId) {
         let previous = self.stack.insert(variable, value);
         if self.tracking {
             self.undo
                 .push(ECodeToMCodeRenameChange::Stack(variable, previous));
         }
-    }
-
-    fn memory_value(&self, space: AddressSpaceId) -> Option<IlValueId> {
-        self.memory.get(&space).copied()
     }
 
     fn insert_memory(&mut self, space: AddressSpaceId, value: IlValueId) {
@@ -255,10 +213,6 @@ impl ECodeToMCodeRenameState {
         }
     }
 
-    fn contains_unmatched_call_output(&self, root: RegisterId) -> bool {
-        self.unmatched_call_outputs.contains_key(&root)
-    }
-
     fn remove_unmatched_call_output(&mut self, root: RegisterId) -> Option<IlValueId> {
         let previous = self.unmatched_call_outputs.remove(&root);
         if let Some(value) = previous.filter(|_| self.tracking) {
@@ -295,6 +249,53 @@ impl ECodeToMCodeRenameState {
     fn clear_unmatched_call_output(&mut self, domain: Option<ECodeDomain>) {
         if let Some(ECodeDomain::Register(root)) = domain {
             self.remove_unmatched_call_output(root);
+        }
+    }
+
+    fn checkpoint(&mut self) -> usize {
+        self.tracking = true;
+        self.undo.len()
+    }
+
+    fn rollback(&mut self, checkpoint: usize) {
+        while self.undo.len() > checkpoint {
+            match self
+                .undo
+                .pop()
+                .expect("a rename checkpoint is within the undo log")
+            {
+                ECodeToMCodeRenameChange::Stack(variable, previous) => match previous {
+                    Some(value) => {
+                        self.stack.insert(variable, value);
+                    }
+                    None => {
+                        self.stack.remove(&variable);
+                    }
+                },
+                ECodeToMCodeRenameChange::Memory(space, previous) => match previous {
+                    Some(value) => {
+                        self.memory.insert(space, value);
+                    }
+                    None => {
+                        self.memory.remove(&space);
+                    }
+                },
+                ECodeToMCodeRenameChange::UnmatchedCallMemory(space, previous) => {
+                    if previous {
+                        self.unmatched_call_memory.insert(space);
+                    } else {
+                        self.unmatched_call_memory.remove(&space);
+                    }
+                }
+                ECodeToMCodeRenameChange::UnmatchedCallOutput(root, previous) => match previous {
+                    Some(value) => {
+                        self.unmatched_call_outputs.insert(root, value);
+                    }
+                    None => {
+                        self.unmatched_call_outputs.remove(&root);
+                    }
+                },
+            }
         }
     }
 }
@@ -355,20 +356,20 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         self.target_variables[variable.index()]
     }
 
-    fn target_variable_for_value(&self, value: IlValueId) -> Result<MCodeVarId, IlError> {
-        self.recovery
-            .variables()
-            .variable_for_value(value)
-            .map(|variable| self.target_variable(variable))
-            .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "variable binding"))
-    }
-
     fn target_value(&self, value: IlValueId) -> Result<IlValueId, IlError> {
         self.target_values
             .get(value.index())
             .copied()
             .flatten()
             .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "operand"))
+    }
+
+    fn target_variable_for_value(&self, value: IlValueId) -> Result<MCodeVarId, IlError> {
+        self.recovery
+            .variables()
+            .variable_for_value(value)
+            .map(|variable| self.target_variable(variable))
+            .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "variable binding"))
     }
 
     pub(crate) fn lift(mut self, cancellation: &CancellationToken) -> Result<MCodeIr, IlError> {

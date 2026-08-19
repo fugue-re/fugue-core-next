@@ -190,6 +190,16 @@ pub struct IlDominanceFrontier {
 }
 
 impl IlDominanceFrontier {
+    fn from_frontiers(mut frontiers: Vec<Vec<IlBlockId>>) -> Self {
+        for frontier in &mut frontiers {
+            frontier.sort();
+        }
+
+        Self {
+            frontiers: IlCsr::from_rows(frontiers),
+        }
+    }
+
     pub fn frontier_for(&self, block: IlBlockId) -> &[IlBlockId] {
         self.frontiers
             .checked_row(block.index())
@@ -240,15 +250,6 @@ impl IlDominanceFrontier {
         Ok(IlPhiPlacement::new(phis))
     }
 
-    fn from_frontiers(mut frontiers: Vec<Vec<IlBlockId>>) -> Self {
-        for frontier in &mut frontiers {
-            frontier.sort();
-        }
-
-        Self {
-            frontiers: IlCsr::from_rows(frontiers),
-        }
-    }
 }
 
 impl<I: ControlFlowIl> IlAnalysis<I> for IlDominanceFrontier {

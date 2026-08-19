@@ -101,17 +101,6 @@ impl GeneratedIl {
         }
     }
 
-    pub(crate) fn into_artefacts(self) -> Vec<GeneratedArtefact> {
-        self.artefacts
-    }
-
-    pub(crate) fn into_requested(self) -> Option<IlProduced> {
-        self.artefacts
-            .into_iter()
-            .next_back()
-            .map(GeneratedArtefact::into_value)
-    }
-
     fn last(&self) -> Option<&(dyn Any + Send + Sync)> {
         self.artefacts
             .last()
@@ -120,6 +109,18 @@ impl GeneratedIl {
 
     fn push(&mut self, form: IlFormId, artefact: IlProduced) {
         self.artefacts.push(GeneratedArtefact::new(form, artefact));
+    }
+
+    pub(crate) fn into_artefacts(self) -> Vec<GeneratedArtefact> {
+        self.artefacts
+    }
+
+
+    pub(crate) fn into_requested(self) -> Option<IlProduced> {
+        self.artefacts
+            .into_iter()
+            .next_back()
+            .map(GeneratedArtefact::into_value)
     }
 }
 

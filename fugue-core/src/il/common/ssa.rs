@@ -55,19 +55,19 @@ impl IlRequiredDefs {
         }
     }
 
-    pub fn mark(&mut self, definition: IlSsaDef) -> bool {
-        match definition {
-            IlSsaDef::BlockArg(arg) => !self.block_args.put(arg.index()),
-            IlSsaDef::Op(operation) => !self.operations.put(operation.index()),
-        }
-    }
-
     pub fn block_arg_is_required(&self, index: usize) -> bool {
         self.block_args.contains(index)
     }
 
     pub fn op_is_required(&self, index: usize) -> bool {
         self.operations.contains(index)
+    }
+
+    pub fn mark(&mut self, definition: IlSsaDef) -> bool {
+        match definition {
+            IlSsaDef::BlockArg(arg) => !self.block_args.put(arg.index()),
+            IlSsaDef::Op(operation) => !self.operations.put(operation.index()),
+        }
     }
 }
 
@@ -78,24 +78,6 @@ pub(crate) struct IlSsaBlockArgInputs {
 }
 
 impl IlSsaBlockArgInputs {
-    pub(crate) fn inputs_for(&self, arg: IlValueId) -> Option<&[IlValueId]> {
-        self.args
-            .contains(arg.index())
-            .then(|| self.inputs.row(arg.index()))
-    }
-
-    pub(crate) fn iter(&self) -> impl Clone + Iterator<Item = (IlValueId, &[IlValueId])> {
-        (0..self.inputs.len())
-            .filter(|index| self.args.contains(*index))
-            .map(|index| {
-                (
-                    IlValueId::try_from_index(index)
-                        .expect("value count fits the value identifier space"),
-                    self.inputs.row(index),
-                )
-            })
-    }
-
     pub(crate) fn new<'a>(
         value_count: usize,
         graph: &IlGraph,
@@ -137,7 +119,26 @@ impl IlSsaBlockArgInputs {
             inputs: IlCsr::from_entries(value_count, entries.into_iter()),
         }
     }
+
+    pub(crate) fn inputs_for(&self, arg: IlValueId) -> Option<&[IlValueId]> {
+        self.args
+            .contains(arg.index())
+            .then(|| self.inputs.row(arg.index()))
+    }
+
+    pub(crate) fn iter(&self) -> impl Clone + Iterator<Item = (IlValueId, &[IlValueId])> {
+        (0..self.inputs.len())
+            .filter(|index| self.args.contains(*index))
+            .map(|index| {
+                (
+                    IlValueId::try_from_index(index)
+                        .expect("value count fits the value identifier space"),
+                    self.inputs.row(index),
+                )
+            })
+    }
 }
+
 
 pub(crate) fn collect_ssa_uses<'a, T>(
     value_count: usize,

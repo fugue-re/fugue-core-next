@@ -74,6 +74,10 @@ impl MCodeVar {
         self.kind
     }
 
+    pub const fn index(&self) -> u32 {
+        self.index
+    }
+
     pub const fn flag_id(&self) -> Option<FlagId> {
         match self.kind {
             MCodeVarKind::Flag => Some(FlagId::new(self.storage)),
@@ -95,9 +99,6 @@ impl MCodeVar {
         }
     }
 
-    pub const fn index(&self) -> u32 {
-        self.index
-    }
 }
 
 il_id!(MCodeVarId, "MCode variable");

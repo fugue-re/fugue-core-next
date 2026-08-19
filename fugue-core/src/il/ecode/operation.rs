@@ -168,6 +168,14 @@ impl ECodeOp {
         self.address_space
     }
 
+    pub(crate) fn set_results(&mut self, results: IlIndexRange) {
+        self.results = results;
+    }
+
+    pub(crate) fn set_operands(&mut self, operands: IlIndexRange) {
+        self.operands = operands;
+    }
+
     pub(crate) fn constant(&self, constants: &[u8]) -> Option<BitVec> {
         if !matches!(self.opcode, ECodeOpcode::Constant) {
             return None;
@@ -195,12 +203,5 @@ impl ECodeOp {
         self.address = None;
         self.address_space = None;
     }
-
-    pub(crate) fn set_results(&mut self, results: IlIndexRange) {
-        self.results = results;
-    }
-
-    pub(crate) fn set_operands(&mut self, operands: IlIndexRange) {
-        self.operands = operands;
-    }
 }
+

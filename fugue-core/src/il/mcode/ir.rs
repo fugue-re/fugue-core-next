@@ -88,46 +88,12 @@ impl MCodeIr {
         }
     }
 
-    pub(crate) fn rewriter(&mut self) -> MCodeRewriter<'_> {
-        let mut constants = IlConstantInterner::new();
-        for operation in &self.operations {
-            if let Some(bytes) = operation.constant_bytes(&self.constant_storage) {
-                constants.index_existing(operation.immediate(), bytes);
-            }
-        }
-        MCodeRewriter {
-            operations: &mut self.operations,
-            constant_storage: &mut self.constant_storage,
-            constants,
-        }
-    }
-
-    pub(crate) fn verify(&self) -> Result<(), VerifyError> {
-        verify(self)
-    }
-
-    pub const fn display(&self) -> MCodeIrDisplay<'_> {
-        MCodeIrDisplay::new(self)
-    }
-
-    pub const fn display_source(&self, address: Address) -> MCodeSourceDisplay<'_> {
-        MCodeSourceDisplay::new(self, address)
-    }
-
     pub const fn metadata(&self) -> &IlMetadata {
         &self.metadata
     }
 
     pub const fn graph(&self) -> &IlGraph {
         &self.graph
-    }
-
-    pub(crate) fn take_graph(&mut self) -> IlGraph {
-        mem::take(&mut self.graph)
-    }
-
-    pub(crate) fn take_memory_domains(&mut self) -> Vec<MCodeMemoryDomain> {
-        mem::take(&mut self.memory_domains)
     }
 
     pub fn source_spans(&self) -> &[IlSourceSpan] {
@@ -220,30 +186,6 @@ impl MCodeIr {
         self.graph.block_for_op(operation)
     }
 
-    pub fn memory_operand(&self, operation: &MCodeOp) -> Option<IlValueId> {
-        if !operation.opcode().requires_memory_domain() {
-            return None;
-        }
-
-        self.op_operands_for(operation).last().copied()
-    }
-
-    pub fn pointer_operand(&self, operation: &MCodeOp) -> Option<IlValueId> {
-        if !matches!(operation.opcode(), MCodeOpcode::Load | MCodeOpcode::Store) {
-            return None;
-        }
-
-        self.op_operands_for(operation).first().copied()
-    }
-
-    pub fn defining_op(&self, value: IlValueId) -> Option<&MCodeOp> {
-        let record = self.values.get(value.index())?;
-        let IlSsaDef::Op(operation) = record.definition() else {
-            return None;
-        };
-        self.operations.get(operation.index())
-    }
-
     pub fn value_width(&self, value: IlValueId) -> Option<u32> {
         self.values.get(value.index()).map(MCodeValue::width)
     }
@@ -270,6 +212,63 @@ impl MCodeIr {
             }
         }
         current
+    }
+
+    pub fn args_for_edge(&self, edge: usize) -> &[IlValueId] {
+        self.edge_args
+            .get(edge)
+            .expect("edge index is within the edge argument table")
+            .slice(&self.edge_arg_values)
+    }
+
+    pub fn shrink_to_fit(&mut self) {
+        self.graph.shrink_to_fit();
+        self.source_spans.shrink_to_fit();
+        self.parent_spans.shrink_to_fit();
+        self.variables.shrink_to_fit();
+        self.aliased_variables.shrink_to_fit();
+        self.values.shrink_to_fit();
+        self.block_args.shrink_to_fit();
+        self.edge_args.shrink_to_fit();
+        self.edge_arg_values.shrink_to_fit();
+        self.operations.shrink_to_fit();
+        self.value_operands.shrink_to_fit();
+        self.memory_domains.shrink_to_fit();
+        self.constant_storage.shrink_to_fit();
+    }
+
+    pub(crate) fn take_graph(&mut self) -> IlGraph {
+        mem::take(&mut self.graph)
+    }
+
+    pub(crate) fn take_memory_domains(&mut self) -> Vec<MCodeMemoryDomain> {
+        mem::take(&mut self.memory_domains)
+    }
+
+    pub(crate) fn rewriter(&mut self) -> MCodeRewriter<'_> {
+        let mut constants = IlConstantInterner::new();
+        for operation in &self.operations {
+            if let Some(bytes) = operation.constant_bytes(&self.constant_storage) {
+                constants.index_existing(operation.immediate(), bytes);
+            }
+        }
+        MCodeRewriter {
+            operations: &mut self.operations,
+            constant_storage: &mut self.constant_storage,
+            constants,
+        }
+    }
+
+    pub(crate) fn verify(&self) -> Result<(), VerifyError> {
+        verify(self)
+    }
+
+    pub fn memory_operand(&self, operation: &MCodeOp) -> Option<IlValueId> {
+        if !operation.opcode().requires_memory_domain() {
+            return None;
+        }
+
+        self.op_operands_for(operation).last().copied()
     }
 
     pub fn constant_value(&self, value: IlValueId) -> Option<BitVec> {
@@ -305,13 +304,6 @@ impl MCodeIr {
         )
     }
 
-    pub fn args_for_edge(&self, edge: usize) -> &[IlValueId] {
-        self.edge_args
-            .get(edge)
-            .expect("edge index is within the edge argument table")
-            .slice(&self.edge_arg_values)
-    }
-
     pub fn ops_for_source(
         &self,
         address: Address,
@@ -319,21 +311,30 @@ impl MCodeIr {
         IlSourceSpan::ops(&self.source_spans, &self.operations, address)
     }
 
-    pub fn shrink_to_fit(&mut self) {
-        self.graph.shrink_to_fit();
-        self.source_spans.shrink_to_fit();
-        self.parent_spans.shrink_to_fit();
-        self.variables.shrink_to_fit();
-        self.aliased_variables.shrink_to_fit();
-        self.values.shrink_to_fit();
-        self.block_args.shrink_to_fit();
-        self.edge_args.shrink_to_fit();
-        self.edge_arg_values.shrink_to_fit();
-        self.operations.shrink_to_fit();
-        self.value_operands.shrink_to_fit();
-        self.memory_domains.shrink_to_fit();
-        self.constant_storage.shrink_to_fit();
+    pub fn pointer_operand(&self, operation: &MCodeOp) -> Option<IlValueId> {
+        if !matches!(operation.opcode(), MCodeOpcode::Load | MCodeOpcode::Store) {
+            return None;
+        }
+
+        self.op_operands_for(operation).first().copied()
     }
+
+    pub fn defining_op(&self, value: IlValueId) -> Option<&MCodeOp> {
+        let record = self.values.get(value.index())?;
+        let IlSsaDef::Op(operation) = record.definition() else {
+            return None;
+        };
+        self.operations.get(operation.index())
+    }
+
+    pub const fn display(&self) -> MCodeIrDisplay<'_> {
+        MCodeIrDisplay::new(self)
+    }
+
+    pub const fn display_source(&self, address: Address) -> MCodeSourceDisplay<'_> {
+        MCodeSourceDisplay::new(self, address)
+    }
+
 }
 
 pub(crate) struct MCodeRewriter<'a> {

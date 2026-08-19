@@ -35,6 +35,29 @@ impl PCodeBuilder {
         }
     }
 
+    fn op_count(&self) -> usize {
+        self.operations.len()
+    }
+
+    pub fn set_graph(&mut self, graph: IlGraph) {
+        self.graph = graph;
+    }
+
+    pub fn with_graph(mut self, graph: IlGraph) -> Self {
+        self.set_graph(graph);
+        self
+    }
+
+    pub fn set_source_spans(&mut self, source_spans: Vec<IlSourceSpan>) {
+        self.source_spans = source_spans;
+    }
+
+    pub fn with_source_spans(mut self, source_spans: Vec<IlSourceSpan>) -> Self {
+        self.set_source_spans(source_spans);
+        self
+    }
+
+
     pub fn emitter(&mut self) -> PCodeEmitter<'_> {
         PCodeEmitter { builder: self }
     }
@@ -59,28 +82,6 @@ impl PCodeBuilder {
 
     fn push_op(&mut self, operation: PCodeOp) {
         self.operations.push(operation);
-    }
-
-    fn op_count(&self) -> usize {
-        self.operations.len()
-    }
-
-    pub fn set_graph(&mut self, graph: IlGraph) {
-        self.graph = graph;
-    }
-
-    pub fn with_graph(mut self, graph: IlGraph) -> Self {
-        self.set_graph(graph);
-        self
-    }
-
-    pub fn set_source_spans(&mut self, source_spans: Vec<IlSourceSpan>) {
-        self.source_spans = source_spans;
-    }
-
-    pub fn with_source_spans(mut self, source_spans: Vec<IlSourceSpan>) -> Self {
-        self.set_source_spans(source_spans);
-        self
     }
 
     fn push_target(&mut self, target: Location) -> Result<PCodeTargetId, IlError> {

@@ -15,34 +15,6 @@ struct BlockSuccessors {
 }
 
 impl BlockSuccessors {
-    fn push(&mut self, target: IlBlockId, kind: IlEdgeKinds) {
-        match self.targets.iter().position(|entry| *entry == target) {
-            Some(index) => self.kinds[index] |= kind,
-            None => {
-                self.targets.push(target);
-                self.kinds.push(kind);
-            }
-        }
-    }
-
-    fn extend_mapped_within(
-        &mut self,
-        additions: &[IlBlockId],
-        addition_kinds: &[IlEdgeKinds],
-        first_blocks: &[IlBlockId],
-        permitted: IlEdgeKinds,
-    ) {
-        for (successor, kind) in additions.iter().zip(addition_kinds) {
-            let narrowed = *kind & permitted;
-            let kind = if narrowed.is_empty() {
-                permitted
-            } else {
-                narrowed
-            };
-            self.push(first_blocks[successor.index()], kind);
-        }
-    }
-
     fn from_partition(
         mapper: &PCodeToECodeGraphMapper,
         source: &PCodeIr,
@@ -147,6 +119,34 @@ impl BlockSuccessors {
         }
 
         successors
+    }
+
+    fn extend_mapped_within(
+        &mut self,
+        additions: &[IlBlockId],
+        addition_kinds: &[IlEdgeKinds],
+        first_blocks: &[IlBlockId],
+        permitted: IlEdgeKinds,
+    ) {
+        for (successor, kind) in additions.iter().zip(addition_kinds) {
+            let narrowed = *kind & permitted;
+            let kind = if narrowed.is_empty() {
+                permitted
+            } else {
+                narrowed
+            };
+            self.push(first_blocks[successor.index()], kind);
+        }
+    }
+
+    fn push(&mut self, target: IlBlockId, kind: IlEdgeKinds) {
+        match self.targets.iter().position(|entry| *entry == target) {
+            Some(index) => self.kinds[index] |= kind,
+            None => {
+                self.targets.push(target);
+                self.kinds.push(kind);
+            }
+        }
     }
 }
 

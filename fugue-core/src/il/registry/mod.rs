@@ -7,7 +7,6 @@ use std::sync::{Arc, LazyLock};
 use rustc_hash::FxHashMap;
 use thiserror::Error as ThisError;
 
-use self::runtime::IlRecipe;
 use crate::extension::{self, Registration};
 use crate::il::common::{
     DialectId, IlArtefact, IlError, IlFormId, IlProducer, IlSchemaVersion, IlTransformer,
@@ -23,6 +22,7 @@ use crate::types::EstimateSize;
 use crate::types::common::Revision;
 
 mod runtime;
+use runtime::IlRecipe;
 
 pub(crate) use self::runtime::{GeneratedArtefact, IlGenerationSession};
 
@@ -283,20 +283,6 @@ fn descendants(dependants: &BTreeMap<IlFormId, Vec<IlFormId>>, form: &IlFormId) 
     ordered
 }
 
-fn canonical_path(
-    forms: &BTreeMap<IlFormId, IlFormRegistration>,
-    form: &IlFormId,
-) -> Vec<IlFormId> {
-    let mut path = Vec::new();
-    let mut current = forms.get(form);
-    while let Some(registration) = current {
-        path.push(registration.form().clone());
-        current = registration.source().and_then(|source| forms.get(source));
-    }
-    path.reverse();
-    path
-}
-
 fn report_recipe_cycles(
     forms: &BTreeMap<IlFormId, IlFormRegistration>,
     duplicates: &BTreeSet<IlFormId>,
@@ -544,10 +530,6 @@ impl Default for IlRegistry {
 }
 
 impl IlRegistry {
-    pub fn standard() -> &'static Arc<Self> {
-        &STANDARD
-    }
-
     pub fn descendants(&self, form: &IlFormId) -> &[IlFormId] {
         self.descendants.get(form).map_or(&[], Vec::as_slice)
     }
@@ -562,6 +544,18 @@ impl IlRegistry {
 
     pub fn form(&self, form: &IlFormId) -> Option<&IlFormRegistration> {
         self.forms.get(form)
+    }
+
+    pub fn contains(&self, form: &IlFormId) -> bool {
+        self.forms.contains_key(form)
+    }
+
+    pub fn dependants(&self, form: &IlFormId) -> impl Iterator<Item = &IlFormId> {
+        self.dependants.get(form).into_iter().flatten()
+    }
+
+    pub fn canonical_path(&self, form: &IlFormId) -> &[IlFormId] {
+        self.canonical_paths.get(form).map_or(&[], Vec::as_slice)
     }
 
     pub fn form_of<T: IlArtefact>(&self) -> Option<&IlFormRegistration> {
@@ -579,17 +573,23 @@ impl IlRegistry {
         Ok(registration)
     }
 
-    pub fn contains(&self, form: &IlFormId) -> bool {
-        self.forms.contains_key(form)
+    pub fn standard() -> &'static Arc<Self> {
+        &STANDARD
     }
+}
 
-    pub fn dependants(&self, form: &IlFormId) -> impl Iterator<Item = &IlFormId> {
-        self.dependants.get(form).into_iter().flatten()
+fn canonical_path(
+    forms: &BTreeMap<IlFormId, IlFormRegistration>,
+    form: &IlFormId,
+) -> Vec<IlFormId> {
+    let mut path = Vec::new();
+    let mut current = forms.get(form);
+    while let Some(registration) = current {
+        path.push(registration.form().clone());
+        current = registration.source().and_then(|source| forms.get(source));
     }
-
-    pub fn canonical_path(&self, form: &IlFormId) -> &[IlFormId] {
-        self.canonical_paths.get(form).map_or(&[], Vec::as_slice)
-    }
+    path.reverse();
+    path
 }
 
 #[cfg(test)]

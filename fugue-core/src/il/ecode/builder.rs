@@ -49,28 +49,6 @@ impl ECodeBuilder {
         }
     }
 
-    pub fn emitter(&mut self) -> ECodeEmitter<'_> {
-        ECodeEmitter { builder: self }
-    }
-
-    fn push_block_arg_value(&mut self, block: IlBlockId, width: u32) -> Result<IlValueId, IlError> {
-        let arg = IlBlockArgId::try_from_index(self.block_args.len())?;
-        let value = IlValueId::try_from_index(self.values.len())?;
-
-        self.values.push(ECodeValue::block_arg(width, arg));
-        self.value_domains.push(None);
-        self.block_args
-            .push(ECodeBlockArg::new(block, value, width));
-
-        Ok(value)
-    }
-
-    fn push_op(&mut self, operation: ECodeOp) -> Result<IlOpId, IlError> {
-        let id = IlOpId::try_from_index(self.operations.len())?;
-        self.operations.push(operation);
-        Ok(id)
-    }
-
     fn op_count(&self) -> usize {
         self.operations.len()
     }
@@ -100,6 +78,29 @@ impl ECodeBuilder {
     pub fn with_parent_spans(mut self, parent_spans: Vec<IlParentSpan>) -> Self {
         self.set_parent_spans(parent_spans);
         self
+    }
+
+
+    pub fn emitter(&mut self) -> ECodeEmitter<'_> {
+        ECodeEmitter { builder: self }
+    }
+
+    fn push_block_arg_value(&mut self, block: IlBlockId, width: u32) -> Result<IlValueId, IlError> {
+        let arg = IlBlockArgId::try_from_index(self.block_args.len())?;
+        let value = IlValueId::try_from_index(self.values.len())?;
+
+        self.values.push(ECodeValue::block_arg(width, arg));
+        self.value_domains.push(None);
+        self.block_args
+            .push(ECodeBlockArg::new(block, value, width));
+
+        Ok(value)
+    }
+
+    fn push_op(&mut self, operation: ECodeOp) -> Result<IlOpId, IlError> {
+        let id = IlOpId::try_from_index(self.operations.len())?;
+        self.operations.push(operation);
+        Ok(id)
     }
 
     fn push_value_operands(
@@ -183,6 +184,27 @@ impl ECodeEmitter<'_> {
         self.builder.op_count()
     }
 
+    pub fn set_value_domain(
+        &mut self,
+        value: IlValueId,
+        domain: ECodeDomain,
+    ) -> Result<(), IlError> {
+        let value_count = self.builder.value_domains.len();
+        let slot = self
+            .builder
+            .value_domains
+            .get_mut(value.index())
+            .ok_or_else(|| IlError::range_out_of_bounds(value.index(), value_count))?;
+        if slot.is_some() {
+            return Err(IlError::invalid_artefact(ECodeIr::FORM));
+        }
+        *slot = Some(domain);
+        if let ECodeDomain::Memory(space) = domain {
+            self.builder.intern_memory_domain(space);
+        }
+        Ok(())
+    }
+
     pub fn intern_constant(&mut self, value: &BitVec) -> u64 {
         self.builder
             .constants
@@ -227,27 +249,6 @@ impl ECodeEmitter<'_> {
 
     pub fn emit_block_arg(&mut self, block: IlBlockId, width: u32) -> Result<IlValueId, IlError> {
         self.builder.push_block_arg_value(block, width)
-    }
-
-    pub fn set_value_domain(
-        &mut self,
-        value: IlValueId,
-        domain: ECodeDomain,
-    ) -> Result<(), IlError> {
-        let value_count = self.builder.value_domains.len();
-        let slot = self
-            .builder
-            .value_domains
-            .get_mut(value.index())
-            .ok_or_else(|| IlError::range_out_of_bounds(value.index(), value_count))?;
-        if slot.is_some() {
-            return Err(IlError::invalid_artefact(ECodeIr::FORM));
-        }
-        *slot = Some(domain);
-        if let ECodeDomain::Memory(space) = domain {
-            self.builder.intern_memory_domain(space);
-        }
-        Ok(())
     }
 
     pub fn emit_edge_args(

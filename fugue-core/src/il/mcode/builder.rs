@@ -55,6 +55,49 @@ impl MCodeBuilder {
         }
     }
 
+    fn op_count(&self) -> usize {
+        self.operations.len()
+    }
+
+    pub fn set_graph(&mut self, graph: IlGraph) {
+        self.graph = graph;
+    }
+
+    pub fn with_graph(mut self, graph: IlGraph) -> Self {
+        self.set_graph(graph);
+        self
+    }
+
+    pub fn set_source_spans(&mut self, source_spans: Vec<IlSourceSpan>) {
+        self.source_spans = source_spans;
+    }
+
+    pub fn with_source_spans(mut self, source_spans: Vec<IlSourceSpan>) -> Self {
+        self.set_source_spans(source_spans);
+        self
+    }
+
+    pub fn set_parent_spans(&mut self, parent_spans: Vec<IlParentSpan>) {
+        self.parent_spans = parent_spans;
+    }
+
+    pub fn with_parent_spans(mut self, parent_spans: Vec<IlParentSpan>) -> Self {
+        self.set_parent_spans(parent_spans);
+        self
+    }
+
+    pub fn set_aliased_variables(&mut self, mut aliased_variables: Vec<MCodeVarId>) {
+        aliased_variables.sort_unstable();
+        aliased_variables.dedup();
+        self.aliased_variables = aliased_variables;
+    }
+
+    pub fn with_aliased_variables(mut self, aliased_variables: Vec<MCodeVarId>) -> Self {
+        self.set_aliased_variables(aliased_variables);
+        self
+    }
+
+
     pub fn emitter(&mut self) -> MCodeEmitter<'_> {
         MCodeEmitter { builder: self }
     }
@@ -117,48 +160,6 @@ impl MCodeBuilder {
         let id = IlOpId::try_from_index(self.operations.len())?;
         self.operations.push(operation);
         Ok(id)
-    }
-
-    fn op_count(&self) -> usize {
-        self.operations.len()
-    }
-
-    pub fn set_graph(&mut self, graph: IlGraph) {
-        self.graph = graph;
-    }
-
-    pub fn with_graph(mut self, graph: IlGraph) -> Self {
-        self.set_graph(graph);
-        self
-    }
-
-    pub fn set_source_spans(&mut self, source_spans: Vec<IlSourceSpan>) {
-        self.source_spans = source_spans;
-    }
-
-    pub fn with_source_spans(mut self, source_spans: Vec<IlSourceSpan>) -> Self {
-        self.set_source_spans(source_spans);
-        self
-    }
-
-    pub fn set_parent_spans(&mut self, parent_spans: Vec<IlParentSpan>) {
-        self.parent_spans = parent_spans;
-    }
-
-    pub fn with_parent_spans(mut self, parent_spans: Vec<IlParentSpan>) -> Self {
-        self.set_parent_spans(parent_spans);
-        self
-    }
-
-    pub fn set_aliased_variables(&mut self, mut aliased_variables: Vec<MCodeVarId>) {
-        aliased_variables.sort_unstable();
-        aliased_variables.dedup();
-        self.aliased_variables = aliased_variables;
-    }
-
-    pub fn with_aliased_variables(mut self, aliased_variables: Vec<MCodeVarId>) -> Self {
-        self.set_aliased_variables(aliased_variables);
-        self
     }
 
     fn push_value_operands(
