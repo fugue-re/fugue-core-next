@@ -347,13 +347,13 @@ impl Project {
         let revisions = revision_record
             .unwrap_or_else(|| ProjectRevisionState::new(Revision::default(), Revision::default()));
 
-        let call_graph = match storage.write_back() {
+        let mut call_graph = match storage.write_back() {
             Some(worker) => CallGraphIndex::new(storage.entities().clone(), Some(worker.clone()))?,
             None => CallGraphIndex::new_transient(),
         };
         call_graph.ensure_current(functions.iter(), &blocks, revisions.revision())?;
 
-        let references = match storage.write_back() {
+        let mut references = match storage.write_back() {
             Some(worker) => ReferenceIndex::new(storage.entities().clone(), Some(worker.clone()))?,
             None => ReferenceIndex::new_transient(),
         };

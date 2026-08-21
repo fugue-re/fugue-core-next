@@ -207,10 +207,7 @@ impl ECodeVerifier<'_> {
             self.verify_domain_write(operation_id, operation)?;
 
             let uniform_operand_width = operation.opcode().has_uniform_operand_width();
-            for operand in operation
-                .operands()
-                .checked_slice(self.ir.op_operands())?
-            {
+            for operand in operation.operands().checked_slice(self.ir.op_operands())? {
                 let value = self.ir.values().get(operand.index()).ok_or_else(|| {
                     IlError::range_out_of_bounds(operand.index(), self.ir.values().len())
                 })?;

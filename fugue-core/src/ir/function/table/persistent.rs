@@ -111,6 +111,83 @@ impl FunctionTable {
         })
     }
 
+    pub(crate) fn flush(&self) -> Result<(), EntityStorageError> {
+        self.entries.flush()
+    }
+
+    pub(crate) fn pending_id(&self, offset: usize) -> FunctionId {
+        self.allocator
+            .pending_id(offset)
+            .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub(crate) fn publish_upsert(&self, function: Function, encoded_size: usize) {
+        self.entries
+            .publish_insert(function.id(), function, encoded_size);
+    }
+
+    pub(crate) fn publish_remove(&self, id: FunctionId) {
+        self.entries.publish_remove(&id);
+    }
+
+    pub(crate) fn try_get_by_id(
+        &self,
+        id: Id<Function>,
+    ) -> Result<Option<Ref<'_>>, EntityStorageError> {
+        self.entries.try_get(&id)
+    }
+
+    pub(crate) fn try_get_by_id_mut(
+        &mut self,
+        id: Id<Function>,
+    ) -> Result<Option<RefMut<'_>>, EntityStorageError> {
+        self.entries.try_get_mut(&id)
+    }
+
+    pub(crate) fn try_get_by_address_mut(
+        &mut self,
+        address: Address,
+    ) -> Result<Option<RefMut<'_>>, EntityStorageError> {
+        let Some(record) = self.storage.get::<Address, FunctionEntryRecord>(&address)? else {
+            return Ok(None);
+        };
+        self.entries.try_get_mut(&record.id)
+    }
+
+    pub(crate) fn contains(&self, address: Address) -> bool {
+        self.storage
+            .contains::<Address, FunctionEntryRecord>(&address)
+            .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub(crate) fn addresses(&self) -> impl Iterator<Item = Address> + '_ {
+        self.storage
+            .iter::<Address, FunctionEntryRecord>()
+            .unwrap_or_else(|error| error.into_fatal())
+            .map(|entry| entry.unwrap_or_else(|error| error.into_fatal()).0)
+    }
+
+    pub(crate) fn try_iter(
+        &self,
+    ) -> Result<impl Iterator<Item = Result<Ref<'_>, EntityStorageError>>, EntityStorageError> {
+        Ok(self
+            .entries
+            .try_iter()?
+            .map(|entry| entry.map(|(_, function)| function)))
+    }
+
+    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = RefMut<'_>> + '_ {
+        self.entries.iter_mut()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.allocator.len() == 0
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.allocator.len()
+    }
+
     fn rebuild_indexes(
         storage: &EntityStorage,
         entries: &EntityCache<Id<Function>, Function>,
@@ -145,16 +222,6 @@ impl FunctionTable {
             next_index,
             live,
         )
-    }
-
-    pub(crate) fn flush(&self) -> Result<(), EntityStorageError> {
-        self.entries.flush()
-    }
-
-    pub(crate) fn pending_id(&self, offset: usize) -> FunctionId {
-        self.allocator
-            .pending_id(offset)
-            .unwrap_or_else(|error| error.into_fatal())
     }
 
     pub(crate) fn append_prepared_writes(
@@ -228,15 +295,6 @@ impl FunctionTable {
     ) {
         self.allocator
             .publish_transition(reservations, added, removed);
-    }
-
-    pub(crate) fn publish_upsert(&self, function: Function, encoded_size: usize) {
-        self.entries
-            .publish_insert(function.id(), function, encoded_size);
-    }
-
-    pub(crate) fn publish_remove(&self, id: FunctionId) {
-        self.entries.publish_remove(&id);
     }
 
     pub(crate) fn insert_with<R, F>(
@@ -314,13 +372,6 @@ impl FunctionTable {
         Ok((id, value))
     }
 
-    pub(crate) fn try_get_by_id(
-        &self,
-        id: Id<Function>,
-    ) -> Result<Option<Ref<'_>>, EntityStorageError> {
-        self.entries.try_get(&id)
-    }
-
     pub(crate) fn try_get_by_address(
         &self,
         address: Address,
@@ -348,23 +399,6 @@ impl FunctionTable {
             return Ok(None);
         };
         self.entries.try_modify(&record.id, f)
-    }
-
-    pub(crate) fn try_get_by_id_mut(
-        &mut self,
-        id: Id<Function>,
-    ) -> Result<Option<RefMut<'_>>, EntityStorageError> {
-        self.entries.try_get_mut(&id)
-    }
-
-    pub(crate) fn try_get_by_address_mut(
-        &mut self,
-        address: Address,
-    ) -> Result<Option<RefMut<'_>>, EntityStorageError> {
-        let Some(record) = self.storage.get::<Address, FunctionEntryRecord>(&address)? else {
-            return Ok(None);
-        };
-        self.entries.try_get_mut(&record.id)
     }
 
     pub(crate) fn try_remove_by_id(
@@ -409,19 +443,6 @@ impl FunctionTable {
         self.try_remove_by_id(record.id)
     }
 
-    pub(crate) fn contains(&self, address: Address) -> bool {
-        self.storage
-            .contains::<Address, FunctionEntryRecord>(&address)
-            .unwrap_or_else(|error| error.into_fatal())
-    }
-
-    pub(crate) fn addresses(&self) -> impl Iterator<Item = Address> + '_ {
-        self.storage
-            .iter::<Address, FunctionEntryRecord>()
-            .unwrap_or_else(|error| error.into_fatal())
-            .map(|entry| entry.unwrap_or_else(|error| error.into_fatal()).0)
-    }
-
     pub(crate) fn addresses_in_range<R>(
         &self,
         space: AddressSpaceId,
@@ -464,26 +485,5 @@ impl FunctionTable {
         self.try_iter()
             .unwrap_or_else(|error| error.into_fatal())
             .map(|entry| entry.unwrap_or_else(|error| error.into_fatal()))
-    }
-
-    pub(crate) fn try_iter(
-        &self,
-    ) -> Result<impl Iterator<Item = Result<Ref<'_>, EntityStorageError>>, EntityStorageError> {
-        Ok(self
-            .entries
-            .try_iter()?
-            .map(|entry| entry.map(|(_, function)| function)))
-    }
-
-    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = RefMut<'_>> + '_ {
-        self.entries.iter_mut()
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.allocator.len() == 0
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.allocator.len()
     }
 }

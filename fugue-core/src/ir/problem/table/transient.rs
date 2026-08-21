@@ -25,6 +25,37 @@ impl ProblemTable {
         self.index.allocator.pending_id(offset)
     }
 
+    pub fn get_by_id(&self, id: ProblemId) -> Option<&Problem> {
+        self.entries
+            .get(id.index())?
+            .as_ref()
+            .filter(|problem| problem.id() == id)
+    }
+
+    pub fn contains(&self, address: Address) -> bool {
+        self.index.contains(address)
+    }
+
+    pub(crate) fn for_each_key_in_range(&self, range: AddressRange, f: impl FnMut(ProblemKey)) {
+        self.index.for_each_key_in_range(range, f);
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = ProblemKey> + '_ {
+        self.index.keys()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Problem> + '_ {
+        self.entries.iter().filter_map(Option::as_ref)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.index.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.index.len()
+    }
+
     pub(crate) fn publish_upsert(&mut self, problem: Problem, is_new: bool) {
         let id = problem.id();
         let key = problem.key();
@@ -89,13 +120,6 @@ impl ProblemTable {
         Ok(id)
     }
 
-    pub fn get_by_id(&self, id: ProblemId) -> Option<&Problem> {
-        self.entries
-            .get(id.index())?
-            .as_ref()
-            .filter(|problem| problem.id() == id)
-    }
-
     pub fn get(&self, address: Address, kind: ProblemKind) -> Option<&Problem> {
         self.get_by_key(ProblemKey::new(address, kind))
     }
@@ -103,14 +127,6 @@ impl ProblemTable {
     pub fn get_by_key(&self, key: ProblemKey) -> Option<&Problem> {
         let id = self.index.id(key)?;
         self.get_by_id(id)
-    }
-
-    pub fn contains(&self, address: Address) -> bool {
-        self.index.contains(address)
-    }
-
-    pub(crate) fn for_each_address_key_in(&self, range: AddressRange, f: impl FnMut(ProblemKey)) {
-        self.index.for_each_address_key_in(range, f);
     }
 
     pub fn modify_by_id<R>(
@@ -150,25 +166,9 @@ impl ProblemTable {
         self.remove_by_id(id)
     }
 
-    pub fn keys(&self) -> impl Iterator<Item = ProblemKey> + '_ {
-        self.index.keys()
-    }
-
     pub fn entries_after(&self, after: Option<ProblemKey>) -> impl Iterator<Item = &Problem> + '_ {
         self.index
             .entries_after(after)
             .filter_map(|(_, id)| self.get_by_id(id))
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &Problem> + '_ {
-        self.entries.iter().filter_map(Option::as_ref)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.index.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.index.len()
     }
 }

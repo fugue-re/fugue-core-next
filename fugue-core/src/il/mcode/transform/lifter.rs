@@ -137,7 +137,6 @@ impl MCodeBindings {
             }
         }
     }
-
 }
 
 impl ECodeToMCodeRenameState {
@@ -410,13 +409,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             self.lift_op_at(index, &mut current)?;
         }
 
-        self.finish_graph(
-            self.source
-                .graph()
-                .blocks()
-                .iter()
-                .map(|block| block.ops()),
-        )
+        self.finish_graph(self.source.graph().blocks().iter().map(|block| block.ops()))
     }
 
     fn lift_blocks(

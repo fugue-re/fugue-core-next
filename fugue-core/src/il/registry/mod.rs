@@ -20,9 +20,9 @@ use crate::ir::FunctionId;
 use crate::storage::StorageContainer;
 use crate::types::EstimateSize;
 use crate::types::common::Revision;
+use runtime::IlRecipe;
 
 mod runtime;
-use runtime::IlRecipe;
 
 pub(crate) use self::runtime::{GeneratedArtefact, IlGenerationSession};
 

@@ -8,12 +8,12 @@ use std::{fmt, mem, slice};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
-use crate::ir::function::NormalisedFunctionRecord;
+use crate::ir::function::FunctionRecord;
 use crate::ir::{
     Address, AddressRange, AddressRangeSet, CodeBlock, CodeBlockId, CodeBlockIdsByStart,
-    CodeBlockTable, Function, FunctionId, FunctionProperties, Id, IdAllocator, IdSet,
-    IncompleteFunctionError, NormalisedCodeBlockRecord, PreparedCodeBlockRecord, RawAddress,
-    Reference, ReferenceOrigin,
+    CodeBlockRecord, CodeBlockTable, Function, FunctionId, FunctionProperties, Id, IdAllocator,
+    IdSet, IncompleteFunctionError, PreparedCodeBlockRecord, RawAddress, Reference,
+    ReferenceOrigin,
 };
 use crate::storage::entities::schema::ENTITY_FUNCTION_TABLE_ID;
 use crate::storage::entities::{
@@ -30,9 +30,9 @@ pub(crate) const ATTRIBUTE_FUNCTION_CACHE_SIZE: &str = "storage.entities.functio
 pub(crate) const DEFAULT_FUNCTION_CACHE_BYTES: usize = 8 * 1024 * 1024;
 
 mod persistent;
-mod transient;
-
 use persistent::FunctionTable as PersistentFunctionTable;
+
+mod transient;
 use transient::FunctionTable as TransientFunctionTable;
 
 pub type FunctionRef<'a> = EntityRef<'a, Function>;
@@ -42,7 +42,7 @@ const FUNCTION_TABLE_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 struct FunctionTableHeader {
-    version: u32,
+    format_version: u32,
 }
 
 impl Entity for FunctionTableHeader {
@@ -62,6 +62,10 @@ impl FunctionIndex {
             addresses,
             by_block: FxHashMap::default(),
         }
+    }
+
+    fn get_by_block_id(&self, block: CodeBlockId) -> IdSet<Function> {
+        self.by_block.get(&block).cloned().unwrap_or_default()
     }
 
     fn insert_membership(&mut self, function: &Function) {
@@ -99,10 +103,6 @@ impl FunctionIndex {
         }
     }
 
-    fn get_by_block_id(&self, block: CodeBlockId) -> IdSet<Function> {
-        self.by_block.get(&block).cloned().unwrap_or_default()
-    }
-
     fn publish_membership(&mut self, mut by_block: FxHashMap<CodeBlockId, IdSet<Function>>) {
         if self.by_block.is_empty() {
             by_block.retain(|_, functions| !functions.is_empty());
@@ -138,6 +138,14 @@ impl<T, V> Default for StagedEntityRecords<T, V> {
 }
 
 impl<T, V> StagedEntityRecords<T, V> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Empty { .. } => 0,
+            Self::Ordered { entries, .. } => entries.len(),
+            Self::Sparse(entries) => entries.len(),
+        }
+    }
+
     fn reserve(&mut self, additional: usize) {
         match self {
             Self::Empty { capacity } => {
@@ -184,7 +192,8 @@ impl<T, V> StagedEntityRecords<T, V> {
         match self {
             Self::Empty { .. } => None,
             Self::Ordered { first, entries } => {
-                let offset = Self::ordered_offset(*first, *id)?;
+                let offset = (first.generation() == id.generation() && id.index() >= first.index())
+                    .then(|| id.index() - first.index())?;
                 entries
                     .get(offset)
                     .filter(|(entry_id, _)| entry_id == id)
@@ -205,14 +214,6 @@ impl<T, V> StagedEntityRecords<T, V> {
         }
     }
 
-    fn len(&self) -> usize {
-        match self {
-            Self::Empty { .. } => 0,
-            Self::Ordered { entries, .. } => entries.len(),
-            Self::Sparse(entries) => entries.len(),
-        }
-    }
-
     fn iter(&self) -> StagedEntityRecordIter<'_, T, V> {
         match self {
             Self::Empty { .. } => StagedEntityRecordIter::Empty,
@@ -221,24 +222,19 @@ impl<T, V> StagedEntityRecords<T, V> {
         }
     }
 
+    fn promote_to_sparse(&mut self) {
+        let Self::Ordered { entries, .. } = mem::replace(self, Self::Empty { capacity: 0 }) else {
+            return;
+        };
+        *self = Self::Sparse(entries.into_iter().collect());
+    }
+
     fn into_entries(self) -> (Vec<(Id<T>, V)>, bool) {
         match self {
             Self::Empty { .. } => (Vec::new(), true),
             Self::Ordered { entries, .. } => (entries, true),
             Self::Sparse(entries) => (entries.into_iter().collect(), false),
         }
-    }
-
-    fn ordered_offset(first: Id<T>, id: Id<T>) -> Option<usize> {
-        (first.generation() == id.generation() && id.index() >= first.index())
-            .then(|| id.index() - first.index())
-    }
-
-    fn promote_to_sparse(&mut self) {
-        let Self::Ordered { entries, .. } = mem::replace(self, Self::Empty { capacity: 0 }) else {
-            return;
-        };
-        *self = Self::Sparse(entries.into_iter().collect());
     }
 }
 
@@ -325,12 +321,16 @@ impl StagedFunctionRemovalRecord {
 }
 
 impl StagedFunctionChangeRecord {
-    pub(crate) fn take_call_targets(&mut self) -> BTreeSet<Address> {
-        mem::take(&mut self.call_targets)
-    }
-
     pub(crate) fn id(&self) -> FunctionId {
         self.id
+    }
+
+    pub(crate) fn replaces_existing(&self) -> bool {
+        self.replaces_existing
+    }
+
+    pub(crate) fn take_call_targets(&mut self) -> BTreeSet<Address> {
+        mem::take(&mut self.call_targets)
     }
 
     pub(crate) fn take_coverage(&mut self) -> AddressRangeSet {
@@ -344,10 +344,6 @@ impl StagedFunctionChangeRecord {
     pub(crate) fn take_references(&mut self) -> Vec<Reference> {
         mem::take(&mut self.references)
     }
-
-    pub(crate) fn replaces_existing(&self) -> bool {
-        self.replaces_existing
-    }
 }
 
 pub(crate) struct PreparedFunctionRecord {
@@ -358,6 +354,77 @@ pub(crate) struct PreparedFunctionRecord {
 }
 
 impl FunctionTableStaging {
+    fn set_properties(
+        &mut self,
+        functions: &FunctionTable,
+        blocks: &CodeBlockTable,
+        entry: Address,
+        properties: FunctionProperties,
+        input_revision: Revision,
+    ) -> Result<Option<AddressRangeSet>, IncompleteFunctionError> {
+        let Some(mut function) = self.function_by_address(functions, entry)? else {
+            return Ok(None);
+        };
+        if function.properties() == properties {
+            return Ok(None);
+        }
+
+        let coverage = self.coverage(blocks, function.blocks().map(|(_, block)| block))?;
+        let id = function.id();
+        function.set_properties(properties);
+        function.set_input_revision(input_revision);
+        self.stage_function(functions, blocks, id, Some(function))?;
+        Ok(Some(coverage))
+    }
+
+    fn with_block<R>(
+        &self,
+        blocks: &CodeBlockTable,
+        id: CodeBlockId,
+        f: impl FnOnce(&CodeBlock) -> R,
+    ) -> Result<Option<R>, IncompleteFunctionError> {
+        match self.staged_code_blocks.get(&id) {
+            Some(StagedCodeBlockRecord {
+                block: Some(block), ..
+            }) => Ok(Some(f(block))),
+            Some(StagedCodeBlockRecord { block: None, .. }) => Ok(None),
+            None => blocks
+                .try_get_by_id(id)
+                .map(|block| block.map(|block| f(&block)))
+                .map_err(IncompleteFunctionError::block_creation),
+        }
+    }
+
+    fn by_block_mut<'a>(
+        &'a mut self,
+        functions: &FunctionTable,
+        block: CodeBlockId,
+    ) -> &'a mut IdSet<Function> {
+        let is_new = self.new_block(block);
+        let original_by_block = &mut self.original_by_block;
+        self.by_block.entry(block).or_insert_with(|| {
+            if is_new {
+                IdSet::new()
+            } else {
+                let current = functions.get_by_block_id(block);
+                original_by_block.insert(block, current.clone());
+                current
+            }
+        })
+    }
+
+    fn new_function(&self, id: FunctionId) -> bool {
+        self.staged_functions
+            .get(&id)
+            .is_some_and(|record| record.is_new)
+    }
+
+    fn new_block(&self, id: CodeBlockId) -> bool {
+        self.staged_code_blocks
+            .get(&id)
+            .is_some_and(|record| record.is_new)
+    }
+
     fn reserve_blocks(&mut self, additional: usize) {
         self.block_locations.reserve(additional);
         self.staged_code_blocks.reserve(additional);
@@ -375,7 +442,7 @@ impl FunctionTableStaging {
         &mut self,
         functions: &FunctionTable,
         blocks: &CodeBlockTable,
-        mut function: NormalisedFunctionRecord,
+        mut function: FunctionRecord,
     ) -> Result<StagedFunctionChangeRecord, IncompleteFunctionError> {
         self.reserve_blocks(function.block_count());
         self.load_existing_block_locations(blocks, &function)?;
@@ -522,29 +589,6 @@ impl FunctionTableStaging {
         Ok(record)
     }
 
-    fn set_properties(
-        &mut self,
-        functions: &FunctionTable,
-        blocks: &CodeBlockTable,
-        entry: Address,
-        properties: FunctionProperties,
-        input_revision: Revision,
-    ) -> Result<Option<AddressRangeSet>, IncompleteFunctionError> {
-        let Some(mut function) = self.function_by_address(functions, entry)? else {
-            return Ok(None);
-        };
-        if function.properties() == properties {
-            return Ok(None);
-        }
-
-        let coverage = self.coverage(blocks, function.blocks().map(|(_, block)| block))?;
-        let id = function.id();
-        function.set_properties(properties);
-        function.set_input_revision(input_revision);
-        self.stage_function(functions, blocks, id, Some(function))?;
-        Ok(Some(coverage))
-    }
-
     fn remove(
         &mut self,
         functions: &FunctionTable,
@@ -609,7 +653,7 @@ impl FunctionTableStaging {
     fn resolve_block(
         &mut self,
         blocks: &CodeBlockTable,
-        materialisation: NormalisedCodeBlockRecord,
+        materialisation: CodeBlockRecord,
     ) -> Result<CodeBlockId, IncompleteFunctionError> {
         if self.block_locations.contains(materialisation.address()) {
             for id in self.block_locations.ids(materialisation.address()) {
@@ -680,7 +724,7 @@ impl FunctionTableStaging {
     fn load_existing_block_locations(
         &mut self,
         blocks: &CodeBlockTable,
-        function: &NormalisedFunctionRecord,
+        function: &FunctionRecord,
     ) -> Result<(), IncompleteFunctionError> {
         if !blocks.is_persistent() {
             return Ok(());
@@ -802,24 +846,6 @@ impl FunctionTableStaging {
             self.with_block(blocks, id, |block| block.coverage_into(&mut coverage))?;
         }
         Ok(coverage)
-    }
-
-    fn with_block<R>(
-        &self,
-        blocks: &CodeBlockTable,
-        id: CodeBlockId,
-        f: impl FnOnce(&CodeBlock) -> R,
-    ) -> Result<Option<R>, IncompleteFunctionError> {
-        match self.staged_code_blocks.get(&id) {
-            Some(StagedCodeBlockRecord {
-                block: Some(block), ..
-            }) => Ok(Some(f(block))),
-            Some(StagedCodeBlockRecord { block: None, .. }) => Ok(None),
-            None => blocks
-                .try_get_by_id(id)
-                .map(|block| block.map(|block| f(&block)))
-                .map_err(IncompleteFunctionError::block_creation),
-        }
     }
 
     fn functions_containing(
@@ -970,36 +996,6 @@ impl FunctionTableStaging {
             }
         }
         Ok(false)
-    }
-
-    fn by_block_mut<'a>(
-        &'a mut self,
-        functions: &FunctionTable,
-        block: CodeBlockId,
-    ) -> &'a mut IdSet<Function> {
-        let is_new = self.new_block(block);
-        let original_by_block = &mut self.original_by_block;
-        self.by_block.entry(block).or_insert_with(|| {
-            if is_new {
-                IdSet::new()
-            } else {
-                let current = functions.get_by_block_id(block);
-                original_by_block.insert(block, current.clone());
-                current
-            }
-        })
-    }
-
-    fn new_function(&self, id: FunctionId) -> bool {
-        self.staged_functions
-            .get(&id)
-            .is_some_and(|record| record.is_new)
-    }
-
-    fn new_block(&self, id: CodeBlockId) -> bool {
-        self.staged_code_blocks
-            .get(&id)
-            .is_some_and(|record| record.is_new)
     }
 
     pub(crate) fn prepare(
@@ -1299,6 +1295,66 @@ impl FunctionTable {
         Self::Transient(TransientFunctionTable::new())
     }
 
+    pub fn get_by_id_mut(&mut self, id: Id<Function>) -> Option<FunctionMut<'_>> {
+        self.try_get_by_id_mut(id)
+            .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub fn try_get_by_id_mut(
+        &mut self,
+        id: Id<Function>,
+    ) -> Result<Option<FunctionMut<'_>>, EntityStorageError> {
+        match self {
+            Self::Persistent(table) => Ok(table.try_get_by_id_mut(id)?.map(EntityMut::cached)),
+            Self::Transient(table) => Ok(table.get_by_id_mut(id).map(EntityMut::borrowed)),
+        }
+    }
+
+    pub fn get_by_address_mut(&mut self, addr: Address) -> Option<FunctionMut<'_>> {
+        self.try_get_by_address_mut(addr)
+            .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub fn try_get_by_address_mut(
+        &mut self,
+        addr: Address,
+    ) -> Result<Option<FunctionMut<'_>>, EntityStorageError> {
+        match self {
+            Self::Persistent(table) => {
+                Ok(table.try_get_by_address_mut(addr)?.map(EntityMut::cached))
+            }
+            Self::Transient(table) => Ok(table.get_by_address_mut(addr).map(EntityMut::borrowed)),
+        }
+    }
+
+    pub fn contains(&self, addr: Address) -> bool {
+        match self {
+            Self::Persistent(table) => table.contains(addr),
+            Self::Transient(table) => table.contains(addr),
+        }
+    }
+
+    pub fn iter_mut(&mut self) -> Box<dyn Iterator<Item = FunctionMut<'_>> + '_> {
+        match self {
+            Self::Persistent(table) => Box::new(table.iter_mut().map(EntityMut::cached)),
+            Self::Transient(table) => Box::new(table.iter_mut().map(EntityMut::borrowed)),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Persistent(table) => table.is_empty(),
+            Self::Transient(table) => table.is_empty(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Persistent(table) => table.len(),
+            Self::Transient(table) => table.len(),
+        }
+    }
+
     pub fn flush(&self) -> Result<(), EntityStorageError> {
         match self {
             Self::Persistent(table) => table.flush(),
@@ -1317,7 +1373,7 @@ impl FunctionTable {
         &self,
         blocks: &CodeBlockTable,
         staging: &mut FunctionTableStaging,
-        function: NormalisedFunctionRecord,
+        function: FunctionRecord,
     ) -> Result<StagedFunctionChangeRecord, IncompleteFunctionError> {
         staging.stage_materialisation(self, blocks, function)
     }
@@ -1495,38 +1551,6 @@ impl FunctionTable {
         }
     }
 
-    pub fn get_by_id_mut(&mut self, id: Id<Function>) -> Option<FunctionMut<'_>> {
-        self.try_get_by_id_mut(id)
-            .unwrap_or_else(|error| error.into_fatal())
-    }
-
-    pub fn try_get_by_id_mut(
-        &mut self,
-        id: Id<Function>,
-    ) -> Result<Option<FunctionMut<'_>>, EntityStorageError> {
-        match self {
-            Self::Persistent(table) => Ok(table.try_get_by_id_mut(id)?.map(EntityMut::cached)),
-            Self::Transient(table) => Ok(table.get_by_id_mut(id).map(EntityMut::borrowed)),
-        }
-    }
-
-    pub fn get_by_address_mut(&mut self, addr: Address) -> Option<FunctionMut<'_>> {
-        self.try_get_by_address_mut(addr)
-            .unwrap_or_else(|error| error.into_fatal())
-    }
-
-    pub fn try_get_by_address_mut(
-        &mut self,
-        addr: Address,
-    ) -> Result<Option<FunctionMut<'_>>, EntityStorageError> {
-        match self {
-            Self::Persistent(table) => {
-                Ok(table.try_get_by_address_mut(addr)?.map(EntityMut::cached))
-            }
-            Self::Transient(table) => Ok(table.get_by_address_mut(addr).map(EntityMut::borrowed)),
-        }
-    }
-
     pub fn modify_by_id<R>(
         &mut self,
         id: Id<Function>,
@@ -1588,13 +1612,6 @@ impl FunctionTable {
         match self {
             Self::Persistent(table) => table.try_remove_by_address(addr),
             Self::Transient(table) => Ok(table.remove_by_address(addr)),
-        }
-    }
-
-    pub fn contains(&self, addr: Address) -> bool {
-        match self {
-            Self::Persistent(table) => table.contains(addr),
-            Self::Transient(table) => table.contains(addr),
         }
     }
 
@@ -1668,31 +1685,11 @@ impl FunctionTable {
 
         functions
     }
+
     pub fn iter(&self) -> Box<dyn Iterator<Item = FunctionRef<'_>> + '_> {
         match self {
             Self::Persistent(table) => Box::new(table.iter().map(EntityRef::cached)),
             Self::Transient(table) => Box::new(table.iter().map(EntityRef::borrowed)),
-        }
-    }
-
-    pub fn iter_mut(&mut self) -> Box<dyn Iterator<Item = FunctionMut<'_>> + '_> {
-        match self {
-            Self::Persistent(table) => Box::new(table.iter_mut().map(EntityMut::cached)),
-            Self::Transient(table) => Box::new(table.iter_mut().map(EntityMut::borrowed)),
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        match self {
-            Self::Persistent(table) => table.is_empty(),
-            Self::Transient(table) => table.is_empty(),
-        }
-    }
-
-    pub fn len(&self) -> usize {
-        match self {
-            Self::Persistent(table) => table.len(),
-            Self::Transient(table) => table.len(),
         }
     }
 }
@@ -1703,7 +1700,7 @@ impl PersistableProjectEntity for FunctionTable {
             Self::Persistent(_) => storage.insert(
                 &ProjectEntity::FunctionTable,
                 &FunctionTableHeader {
-                    version: FUNCTION_TABLE_VERSION,
+                    format_version: FUNCTION_TABLE_VERSION,
                 },
             ),
             Self::Transient(_) => Ok(()),

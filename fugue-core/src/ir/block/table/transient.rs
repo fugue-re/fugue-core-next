@@ -34,6 +34,35 @@ impl CodeBlockTable {
         self.index.allocator.pending_id(offset)
     }
 
+    fn get_raw(&self, id: Id<CodeBlock>) -> Option<&CodeBlock> {
+        self.entries
+            .get(id.index())?
+            .as_ref()
+            .filter(|block| block.id() == id)
+    }
+
+    pub fn contains(&self, addr: Address) -> bool {
+        let space = addr.space();
+        let raw = addr.raw_address();
+
+        self.index
+            .bounds
+            .get(&space)
+            .is_some_and(|bounds| bounds.has_overlap(raw..=raw))
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &CodeBlock> + '_ {
+        self.entries.iter().filter_map(Option::as_ref)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.index.live == 0
+    }
+
+    pub fn len(&self) -> usize {
+        self.index.live
+    }
+
     pub(crate) fn publish_reservations(&mut self, reservations: &[Id<CodeBlock>]) {
         let mut required = self.entries.len();
         for &id in reservations {
@@ -148,13 +177,6 @@ impl CodeBlockTable {
         self.index.live -= 1;
     }
 
-    fn get_raw(&self, id: Id<CodeBlock>) -> Option<&CodeBlock> {
-        self.entries
-            .get(id.index())?
-            .as_ref()
-            .filter(|block| block.id() == id)
-    }
-
     pub fn get_by_id(&self, id: Id<CodeBlock>) -> Option<&CodeBlock> {
         self.get_raw(id)
     }
@@ -227,16 +249,6 @@ impl CodeBlockTable {
         locations
     }
 
-    pub fn contains(&self, addr: Address) -> bool {
-        let space = addr.space();
-        let raw = addr.raw_address();
-
-        self.index
-            .bounds
-            .get(&space)
-            .is_some_and(|bounds| bounds.has_overlap(raw..=raw))
-    }
-
     pub fn overlaps_address(&self, addr: Address) -> impl Iterator<Item = &CodeBlock> + '_ {
         let space = addr.space();
         let raw = addr.raw_address();
@@ -259,17 +271,5 @@ impl CodeBlockTable {
             .into_iter()
             .flat_map(move |bounds| bounds.values(start..=end))
             .flat_map(move |ids| ids.iter().filter_map(move |id| self.get_raw(id)))
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &CodeBlock> + '_ {
-        self.entries.iter().filter_map(Option::as_ref)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.index.live == 0
-    }
-
-    pub fn len(&self) -> usize {
-        self.index.live
     }
 }

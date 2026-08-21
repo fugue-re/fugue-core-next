@@ -70,11 +70,6 @@ impl FunctionFrame {
         }
     }
 
-    pub fn add_change_point(&mut self, address: impl Into<Address>, delta: i64) {
-        self.change_points
-            .push(StackChangePoint::new(address, delta));
-    }
-
     pub fn locals_size(&self) -> usize {
         self.locals_size
     }
@@ -89,5 +84,10 @@ impl FunctionFrame {
 
     pub fn change_points(&self) -> &[StackChangePoint] {
         &self.change_points
+    }
+
+    pub fn add_change_point(&mut self, address: impl Into<Address>, delta: i64) {
+        self.change_points
+            .push(StackChangePoint::new(address, delta));
     }
 }

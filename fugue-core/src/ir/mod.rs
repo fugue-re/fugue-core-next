@@ -22,7 +22,7 @@ pub use block::{
     CodeBlock, CodeBlockId, CodeBlockProperties, CodeBlockRef, CodeBlockTable, IncompleteCodeBlock,
     IncompleteCodeBlockId,
 };
-pub(crate) use block::{CodeBlockIdsByStart, NormalisedCodeBlockRecord, PreparedCodeBlockRecord};
+pub(crate) use block::{CodeBlockIdsByStart, CodeBlockRecord, PreparedCodeBlockRecord};
 
 pub(crate) mod call_graph;
 pub(crate) use call_graph::CallGraphStaging;
@@ -36,9 +36,7 @@ pub use function::{
     Function, FunctionId, FunctionMut, FunctionProperties, FunctionRef, FunctionTable,
     FunctionTableError, IncompleteFunction, IncompleteFunctionError, InsnEntry, StackChangePoint,
 };
-pub(crate) use function::{
-    FunctionTableStaging, NormalisedFunctionRecord, StagedFunctionChangeRecord,
-};
+pub(crate) use function::{FunctionRecord, FunctionTableStaging, StagedFunctionChangeRecord};
 
 pub(crate) mod insn;
 pub use insn::{Insn, InsnError, InsnId, InsnProperties, InsnTarget, InsnTargetKind};
@@ -185,23 +183,13 @@ impl<T> Id<T> {
         Self::new(index as u32)
     }
 
-    pub(crate) const fn index(&self) -> usize {
-        assert!(self.id < u32::MAX, "invalid index");
-        self.id as usize
+    #[inline(always)]
+    const fn from_key(key: u64) -> Self {
+        Self::with_generation(key as u32, (key >> 32) as u32)
     }
 
     pub(crate) const fn generation(&self) -> u32 {
         self.generation
-    }
-
-    pub(crate) const fn next_generation(&self) -> Self {
-        assert!(self.generation < u32::MAX - 1, "invalid generation");
-        Self::with_generation(self.id, self.generation + 1)
-    }
-
-    #[inline(always)]
-    pub const fn is_valid(&self) -> bool {
-        !self.is_invalid()
     }
 
     #[inline(always)]
@@ -215,8 +203,18 @@ impl<T> Id<T> {
     }
 
     #[inline(always)]
-    const fn from_key(key: u64) -> Self {
-        Self::with_generation(key as u32, (key >> 32) as u32)
+    pub const fn is_valid(&self) -> bool {
+        !self.is_invalid()
+    }
+
+    pub(crate) const fn index(&self) -> usize {
+        assert!(self.id < u32::MAX, "invalid index");
+        self.id as usize
+    }
+
+    pub(crate) const fn next_generation(&self) -> Self {
+        assert!(self.generation < u32::MAX - 1, "invalid generation");
+        Self::with_generation(self.id, self.generation + 1)
     }
 }
 
@@ -252,6 +250,10 @@ impl<T> IdAllocator<T> {
             free_ids: Vec::new(),
             next_index: 0,
         }
+    }
+
+    pub(crate) fn free_count(&self) -> usize {
+        self.free_ids.len()
     }
 
     pub(crate) fn next_id(&self) -> Id<T> {
@@ -300,10 +302,6 @@ impl<T> IdAllocator<T> {
         self.free_ids
             .retain(|free_id| free_id.index() != id.index());
     }
-
-    pub(crate) fn free_count(&self) -> usize {
-        self.free_ids.len()
-    }
 }
 
 #[repr(transparent)]
@@ -349,16 +347,8 @@ impl<T> IdSet<T> {
         }
     }
 
-    pub fn insert(&mut self, id: Id<T>) -> bool {
-        self.set.insert(id.key())
-    }
-
     pub fn contains(&self, id: Id<T>) -> bool {
         self.set.contains(id.key())
-    }
-
-    pub fn remove(&mut self, id: Id<T>) -> bool {
-        self.set.remove(id.key())
     }
 
     pub fn iter(&self) -> impl Iterator<Item = Id<T>> + '_ {
@@ -371,6 +361,14 @@ impl<T> IdSet<T> {
 
     pub fn is_empty(&self) -> bool {
         self.set.is_empty()
+    }
+
+    pub fn insert(&mut self, id: Id<T>) -> bool {
+        self.set.insert(id.key())
+    }
+
+    pub fn remove(&mut self, id: Id<T>) -> bool {
+        self.set.remove(id.key())
     }
 }
 
@@ -441,8 +439,8 @@ impl<T> rkyv::Archive for IdSet<T> {
 impl<S: rkyv::rancor::Fallible + rkyv::ser::Writer + rkyv::ser::Allocator + ?Sized, T>
     rkyv::Serialize<S> for IdSet<T>
 {
-    fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
-        self.set.serialize(serializer)
+    fn serialize(&self, serialiser: &mut S) -> Result<Self::Resolver, S::Error> {
+        self.set.serialize(serialiser)
     }
 }
 
@@ -450,8 +448,8 @@ impl<D: rkyv::rancor::Fallible + ?Sized, T> rkyv::Deserialize<IdSet<T>, D> for A
 where
     D::Error: rkyv::rancor::Source,
 {
-    fn deserialize(&self, deserializer: &mut D) -> Result<IdSet<T>, D::Error> {
-        let set = rkyv::Deserialize::<SetU64, D>::deserialize(&self.0, deserializer)?;
+    fn deserialize(&self, deserialiser: &mut D) -> Result<IdSet<T>, D::Error> {
+        let set = rkyv::Deserialize::<SetU64, D>::deserialize(&self.0, deserialiser)?;
         Ok(IdSet {
             set,
             _marker: PhantomData,

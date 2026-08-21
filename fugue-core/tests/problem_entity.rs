@@ -74,7 +74,7 @@ fn problem_survives_reopen_and_is_queryable() -> Result<(), Box<dyn Error>> {
         .ok_or("problem must survive reopen")?;
 
     assert_eq!(problem.kind(), ProblemKind::SwitchUnresolved);
-    assert_eq!(problem.attempts(), 1);
+    assert_eq!(problem.attempt_count(), 1);
     assert!(
         reopened
             .problems()
@@ -101,7 +101,7 @@ fn repeated_problems_accumulate_attempts() -> Result<(), Box<dyn Error>> {
         .problems()
         .get(address, ProblemKind::DecodeFailed)
         .ok_or("problem must exist")?;
-    assert_eq!(problem.attempts(), 3);
+    assert_eq!(problem.attempt_count(), 3);
     assert_eq!(project.problems().len(), 1);
 
     Ok(())
@@ -149,7 +149,7 @@ fn semantic_input_change_starts_a_fresh_attempt_budget() -> Result<(), Box<dyn E
             .problems()
             .get(address, ProblemKind::DecodeFailed)
             .ok_or("problem must exist")?
-            .attempts(),
+            .attempt_count(),
         1
     );
 
@@ -180,7 +180,7 @@ fn unrelated_input_changes_do_not_reset_attempts() -> Result<(), Box<dyn Error>>
             .problems()
             .get(address, ProblemKind::DecodeFailed)
             .ok_or("problem must remain current")?
-            .attempts(),
+            .attempt_count(),
         4
     );
 
@@ -203,7 +203,7 @@ fn different_problem_kinds_at_one_address_remain_independent() -> Result<(), Box
             .problems()
             .get(address, ProblemKind::DecodeFailed)
             .ok_or("decode problem must exist")?
-            .attempts(),
+            .attempt_count(),
         1
     );
     assert_eq!(
@@ -211,7 +211,7 @@ fn different_problem_kinds_at_one_address_remain_independent() -> Result<(), Box
             .problems()
             .get(address, ProblemKind::WorkCausesMerged)
             .ok_or("work-cause problem must exist")?
-            .attempts(),
+            .attempt_count(),
         1
     );
 
@@ -224,7 +224,7 @@ fn different_problem_kinds_at_one_address_remain_independent() -> Result<(), Box
             .problems()
             .get(address, ProblemKind::DecodeFailed)
             .ok_or("decode problem must exist")?
-            .attempts(),
+            .attempt_count(),
         2
     );
     assert_eq!(
@@ -232,9 +232,9 @@ fn different_problem_kinds_at_one_address_remain_independent() -> Result<(), Box
             .problems()
             .get(address, ProblemKind::WorkCausesMerged)
             .ok_or("work-cause problem must exist")?
-            .attempts(),
+            .attempt_count(),
         1,
-        "recording a semantic failure must not consume an operational problem's attempts"
+        "recording a semantic failure must not consume an operational problem's attempt_count"
     );
 
     Ok(())

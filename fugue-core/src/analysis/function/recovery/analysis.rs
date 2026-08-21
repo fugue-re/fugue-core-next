@@ -451,7 +451,7 @@ impl FunctionRecoveryProblems {
             };
             let exclusion = if kind == ProblemKind::HinderedByAssertedFact {
                 CandidateExclusionReason::AssertedFact
-            } else if problem.attempts() >= DEFAULT_FUNCTION_RECOVERY_MAX_ATTEMPTS {
+            } else if problem.attempt_count() >= DEFAULT_FUNCTION_RECOVERY_MAX_ATTEMPTS {
                 CandidateExclusionReason::RetriesExhausted(kind)
             } else {
                 CandidateExclusionReason::ProblemCurrent(kind)
@@ -1830,7 +1830,7 @@ mod test {
                 .problems()
                 .get(address, ProblemKind::DecodeFailed)
                 .ok_or("problem must remain current")?
-                .attempts(),
+                .attempt_count(),
             DEFAULT_FUNCTION_RECOVERY_MAX_ATTEMPTS
         );
 

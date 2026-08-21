@@ -232,15 +232,18 @@ impl IlGraph {
             .into_iter()
             .flat_map(|block| {
                 let start = block.ops().start();
-                block.ops().slice(operations).iter().enumerate().map(
-                    move |(index, operation)| {
+                block
+                    .ops()
+                    .slice(operations)
+                    .iter()
+                    .enumerate()
+                    .map(move |(index, operation)| {
                         (
                             IlOpId::try_from_index(start + index)
                                 .expect("operation count fits the operation id space"),
                             operation,
                         )
-                    },
-                )
+                    })
             })
     }
 

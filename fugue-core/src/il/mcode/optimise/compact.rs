@@ -15,9 +15,8 @@ pub(crate) struct MCodeCompaction<'a> {
 impl IlRewrite<MCodeIr> for MCodeCompaction<'_> {
     fn rewrite(&mut self, ir: &mut MCodeIr) {
         let required = MCodeRequiredDefs::new(ir, self.required_values);
-        let operation_map = IlIndexMapper::from_kept(ir.ops().len(), |index| {
-            required.op_is_required(index)
-        });
+        let operation_map =
+            IlIndexMapper::from_kept(ir.ops().len(), |index| required.op_is_required(index));
         let block_arg_map = IlIndexMapper::from_kept(ir.block_args().len(), |index| {
             required.block_arg_is_required(index)
         });

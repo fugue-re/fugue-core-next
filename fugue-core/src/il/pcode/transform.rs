@@ -9,11 +9,11 @@ use crate::il::common::{
     IlGenerationError, IlGraph, IlIndexRange, IlMetadata, IlOpId, IlProducer, IlSourceSpan,
     IlSubject,
 };
+use crate::il::pcode::raw::remap_target_position;
 use crate::il::pcode::{
     PCodeAddressAnnotationRole, PCodeBuilder, PCodeError, PCodeIr, PCodeLocation, PCodeLocationId,
     PCodeOpSpec, PCodeOpcode, RawPCodeFlow, RawPCodeFlows,
 };
-use crate::il::pcode::raw::remap_target_position;
 use crate::ir::{
     Address, CodeBlockId, CodeBlockTable, FlowTarget, FunctionId, FunctionTable,
     IncompleteFunction, Location,

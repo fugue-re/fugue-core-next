@@ -50,6 +50,40 @@ impl ProblemTable {
         self.index.allocator.pending_id(offset)
     }
 
+    pub(crate) fn try_get_by_id(
+        &self,
+        id: ProblemId,
+    ) -> Result<Option<Ref<'_>>, EntityStorageError> {
+        self.entries.try_get(&id)
+    }
+
+    pub(crate) fn contains(&self, address: Address) -> bool {
+        self.index.contains(address)
+    }
+
+    pub(crate) fn keys(&self) -> impl Iterator<Item = ProblemKey> + '_ {
+        self.index.keys()
+    }
+
+    pub(crate) fn for_each_key_in_range(&self, range: AddressRange, f: impl FnMut(ProblemKey)) {
+        self.index.for_each_key_in_range(range, f);
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = Ref<'_>> + '_ {
+        self.entries
+            .try_iter()
+            .unwrap_or_else(|e| e.into_fatal())
+            .map(|entry| entry.unwrap_or_else(|e| e.into_fatal()).1)
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.index.is_empty()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.index.len()
+    }
+
     pub(crate) fn publish_upsert(&mut self, problem: Problem, encoded_size: usize, is_new: bool) {
         let id = problem.id();
         let key = problem.key();
@@ -106,13 +140,6 @@ impl ProblemTable {
         Ok(id)
     }
 
-    pub(crate) fn try_get_by_id(
-        &self,
-        id: ProblemId,
-    ) -> Result<Option<Ref<'_>>, EntityStorageError> {
-        self.entries.try_get(&id)
-    }
-
     pub(crate) fn try_get_by_key(
         &self,
         key: ProblemKey,
@@ -121,10 +148,6 @@ impl ProblemTable {
             return Ok(None);
         };
         self.try_get_by_id(id)
-    }
-
-    pub(crate) fn contains(&self, address: Address) -> bool {
-        self.index.contains(address)
     }
 
     pub(crate) fn try_modify_by_id<R>(
@@ -167,14 +190,6 @@ impl ProblemTable {
         self.try_remove_by_id(id)
     }
 
-    pub(crate) fn keys(&self) -> impl Iterator<Item = ProblemKey> + '_ {
-        self.index.keys()
-    }
-
-    pub(crate) fn for_each_address_key_in(&self, range: AddressRange, f: impl FnMut(ProblemKey)) {
-        self.index.for_each_address_key_in(range, f);
-    }
-
     pub(crate) fn entries_after(
         &self,
         after: Option<ProblemKey>,
@@ -182,20 +197,5 @@ impl ProblemTable {
         self.index
             .entries_after(after)
             .filter_map(|(_, id)| self.entries.get(&id))
-    }
-
-    pub(crate) fn iter(&self) -> impl Iterator<Item = Ref<'_>> + '_ {
-        self.entries
-            .try_iter()
-            .unwrap_or_else(|e| e.into_fatal())
-            .map(|entry| entry.unwrap_or_else(|e| e.into_fatal()).1)
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.index.is_empty()
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.index.len()
     }
 }

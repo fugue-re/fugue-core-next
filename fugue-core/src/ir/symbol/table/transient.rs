@@ -88,6 +88,92 @@ where
         Self::default()
     }
 
+    pub(crate) fn pending_id(&self, offset: usize) -> SymbolId {
+        self.allocator.pending_id(offset)
+    }
+
+    pub(crate) fn get_id_by_index(&self, index: SymbolIndex) -> Option<SymbolId> {
+        self.indices.get(&index).copied()
+    }
+
+    pub fn contains(&self, symbol: impl AsRef<str>) -> bool {
+        let Some(symbol) = Symbol::from_existing(symbol.as_ref()) else {
+            return false;
+        };
+        self.names.contains_key(&symbol)
+    }
+
+    pub fn contains_by_index(&self, index: SymbolIndex) -> bool {
+        self.indices.contains_key(&index)
+    }
+
+    pub fn contains_by_address(&self, address: impl Into<A>) -> bool {
+        self.addresses.contains_key(&address.into())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn len(&self) -> usize {
+        self.symbols.len() - self.allocator.free_count()
+    }
+
+    pub fn get_mut<'a>(
+        &'a mut self,
+        symbol: impl AsRef<str>,
+    ) -> Option<impl Iterator<Item = (SymbolId, &'a mut SymbolEntry<A>)> + 'a> {
+        let symbol = Symbol::from_existing(symbol.as_ref())?;
+        let ids = self.names.get(&symbol)?;
+        Some(SymbolEntryIterMut::new(ids, &mut self.symbols))
+    }
+
+    pub fn get_first_mut(
+        &mut self,
+        symbol: impl AsRef<str>,
+    ) -> Option<(SymbolId, &mut SymbolEntry<A>)> {
+        self.get_mut(symbol).and_then(|mut iter| iter.next())
+    }
+
+    pub fn get_by_id_mut(&mut self, id: SymbolId) -> Option<&mut SymbolEntry<A>> {
+        let index = id.index();
+        if self.generations.get(index).copied()? != id.generation() {
+            return None;
+        }
+
+        self.symbols.get_mut(index).filter(|entry| entry.is_valid())
+    }
+
+    pub fn get_by_index_mut(
+        &mut self,
+        index: SymbolIndex,
+    ) -> Option<(SymbolId, &mut SymbolEntry<A>)> {
+        let id = self.indices.get(&index)?;
+        self.symbols
+            .get_mut(id.index())
+            .map(|sym_entry| (*id, sym_entry))
+    }
+
+    pub fn get_by_address_mut(
+        &mut self,
+        address: impl Into<A>,
+    ) -> impl Iterator<Item = (SymbolId, &mut SymbolEntry<A>)> {
+        let address = address.into();
+        let ids = self
+            .addresses
+            .get(&address)
+            .map(|ids| ids.as_slice())
+            .unwrap_or_default();
+        SymbolEntryIterMut::new(ids, &mut self.symbols)
+    }
+
+    pub fn get_first_by_address_mut(
+        &mut self,
+        address: impl Into<A>,
+    ) -> Option<(SymbolId, &mut SymbolEntry<A>)> {
+        self.get_by_address_mut(address).next()
+    }
+
     fn clear_entry(&mut self, id: SymbolId) -> bool {
         use std::collections::btree_map::Entry as AddrsEntry;
         use std::collections::hash_map::Entry as NamesEntry;
@@ -126,10 +212,6 @@ where
 
         mem::take(symbol_entry);
         true
-    }
-
-    pub(crate) fn pending_id(&self, offset: usize) -> SymbolId {
-        self.allocator.pending_id(offset)
     }
 
     pub(crate) fn publish_reservation(&mut self, id: SymbolId) {
@@ -174,10 +256,6 @@ where
         self.allocator.release(id);
     }
 
-    pub(crate) fn get_id_by_index(&self, index: SymbolIndex) -> Option<SymbolId> {
-        self.indices.get(&index).copied()
-    }
-
     pub fn get<'a>(
         &'a self,
         symbol: impl AsRef<str>,
@@ -188,24 +266,8 @@ where
         SymbolEntryIter::new(ids, &self.symbols)
     }
 
-    pub fn get_mut<'a>(
-        &'a mut self,
-        symbol: impl AsRef<str>,
-    ) -> Option<impl Iterator<Item = (SymbolId, &'a mut SymbolEntry<A>)> + 'a> {
-        let symbol = Symbol::from_existing(symbol.as_ref())?;
-        let ids = self.names.get(&symbol)?;
-        Some(SymbolEntryIterMut::new(ids, &mut self.symbols))
-    }
-
     pub fn get_first(&self, symbol: impl AsRef<str>) -> Option<(SymbolId, &SymbolEntry<A>)> {
         self.get(symbol).next()
-    }
-
-    pub fn get_first_mut(
-        &mut self,
-        symbol: impl AsRef<str>,
-    ) -> Option<(SymbolId, &mut SymbolEntry<A>)> {
-        self.get_mut(symbol).and_then(|mut iter| iter.next())
     }
 
     pub fn get_by_id(&self, id: SymbolId) -> Option<&SymbolEntry<A>> {
@@ -215,15 +277,6 @@ where
         }
 
         self.symbols.get(index).filter(|entry| entry.is_valid())
-    }
-
-    pub fn get_by_id_mut(&mut self, id: SymbolId) -> Option<&mut SymbolEntry<A>> {
-        let index = id.index();
-        if self.generations.get(index).copied()? != id.generation() {
-            return None;
-        }
-
-        self.symbols.get_mut(index).filter(|entry| entry.is_valid())
     }
 
     pub fn get_by_index(&self, index: SymbolIndex) -> Option<(SymbolId, &SymbolEntry<A>)> {
@@ -239,16 +292,6 @@ where
         self.get_by_id_mut(id).map(f)
     }
 
-    pub fn get_by_index_mut(
-        &mut self,
-        index: SymbolIndex,
-    ) -> Option<(SymbolId, &mut SymbolEntry<A>)> {
-        let id = self.indices.get(&index)?;
-        self.symbols
-            .get_mut(id.index())
-            .map(|sym_entry| (*id, sym_entry))
-    }
-
     pub fn get_by_address(
         &self,
         address: impl Into<A>,
@@ -262,46 +305,11 @@ where
         SymbolEntryIter::new(ids, &self.symbols)
     }
 
-    pub fn get_by_address_mut(
-        &mut self,
-        address: impl Into<A>,
-    ) -> impl Iterator<Item = (SymbolId, &mut SymbolEntry<A>)> {
-        let address = address.into();
-        let ids = self
-            .addresses
-            .get(&address)
-            .map(|ids| ids.as_slice())
-            .unwrap_or_default();
-        SymbolEntryIterMut::new(ids, &mut self.symbols)
-    }
-
     pub fn get_first_by_address(
         &self,
         address: impl Into<A>,
     ) -> Option<(SymbolId, &SymbolEntry<A>)> {
         self.get_by_address(address).next()
-    }
-
-    pub fn get_first_by_address_mut(
-        &mut self,
-        address: impl Into<A>,
-    ) -> Option<(SymbolId, &mut SymbolEntry<A>)> {
-        self.get_by_address_mut(address).next()
-    }
-
-    pub fn contains(&self, symbol: impl AsRef<str>) -> bool {
-        let Some(symbol) = Symbol::from_existing(symbol.as_ref()) else {
-            return false;
-        };
-        self.names.contains_key(&symbol)
-    }
-
-    pub fn contains_by_index(&self, index: SymbolIndex) -> bool {
-        self.indices.contains_key(&index)
-    }
-
-    pub fn contains_by_address(&self, address: impl Into<A>) -> bool {
-        self.addresses.contains_key(&address.into())
     }
 
     pub fn insert_local(
@@ -468,10 +476,6 @@ where
             })
     }
 
-    pub(crate) fn into_entries(self) -> impl Iterator<Item = SymbolEntry<A>> {
-        self.symbols.into_iter().filter(SymbolEntry::is_valid)
-    }
-
     // Iterator over all symbol entries for a given selector.
     pub fn iter_by_selector<'a>(
         &'a self,
@@ -514,14 +518,6 @@ where
         self.indices
             .iter()
             .map(move |(&index, &id)| (index, id, &self.symbols[id.index()]))
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    pub fn len(&self) -> usize {
-        self.symbols.len() - self.allocator.free_count()
     }
 
     pub fn remove(&mut self, symbol: impl AsRef<str>) -> usize {
@@ -655,6 +651,10 @@ where
         };
 
         self.remove_by_id(id)
+    }
+
+    pub(crate) fn into_entries(self) -> impl Iterator<Item = SymbolEntry<A>> {
+        self.symbols.into_iter().filter(SymbolEntry::is_valid)
     }
 }
 

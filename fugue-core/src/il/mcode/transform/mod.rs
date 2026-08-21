@@ -54,10 +54,7 @@ impl ECodeToMCode {
         let recovery = MCodeRecovery::new(ir, &config, &registers)?;
 
         self.scratch.required_values.clear();
-        let metadata = IlMetadata::new(
-            ir.metadata().function(),
-            ir.metadata().input_revision(),
-        );
+        let metadata = IlMetadata::new(ir.metadata().function(), ir.metadata().input_revision());
         let builder = MCodeBuilder::new(metadata, IlGraph::default());
         let mut mcode = ECodeToMCodeLifter::new(ir, &recovery, builder, &mut self.scratch)?
             .lift(cancellation)?;

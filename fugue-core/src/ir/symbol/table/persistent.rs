@@ -209,6 +209,105 @@ impl SymbolTable {
         })
     }
 
+    pub(crate) fn append_prepared_transition_writes(
+        &self,
+        reservations: &[SymbolId],
+        releases: &[SymbolId],
+        added: usize,
+        removed: usize,
+        writes: &mut EntityWriteBatch,
+    ) -> Result<(), EntityStorageError> {
+        self.allocator
+            .append_transition(reservations, releases, added, removed, writes)
+    }
+
+    pub(crate) fn flush(&self) -> Result<(), EntityStorageError> {
+        self.entries.flush()
+    }
+
+    pub(crate) fn pending_id(&self, offset: usize) -> SymbolId {
+        self.allocator
+            .pending_id(offset)
+            .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub(crate) fn contains(&self, name: impl AsRef<str>) -> bool {
+        Symbol::from_existing(name.as_ref()).is_some_and(|name| {
+            !self
+                .ids_by_name(name)
+                .unwrap_or_else(|error| error.into_fatal())
+                .is_empty()
+        })
+    }
+
+    pub(crate) fn contains_by_index(&self, index: SymbolIndex) -> bool {
+        self.get_id_by_index(index).is_some()
+    }
+
+    pub(crate) fn contains_by_address(&self, address: Address) -> bool {
+        !self
+            .ids_by_address(address)
+            .unwrap_or_else(|error| error.into_fatal())
+            .is_empty()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.allocator.len() == 0
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.allocator.len()
+    }
+
+    pub(crate) fn publish_upsert(&self, id: SymbolId, entry: SymbolEntry, encoded_size: usize) {
+        self.entries.publish_insert(id, entry, encoded_size);
+    }
+
+    pub(crate) fn publish_remove(&self, id: SymbolId) {
+        self.entries.publish_remove(&id);
+    }
+
+    pub(crate) fn get_id_by_index(&self, index: SymbolIndex) -> Option<SymbolId> {
+        self.storage
+            .get::<SymbolLoaderKey, SymbolLoaderRecord>(&SymbolLoaderKey::new(index))
+            .unwrap_or_else(|error| error.into_fatal())
+            .map(|record| record.id)
+    }
+
+    pub(crate) fn try_get_by_id(
+        &self,
+        id: SymbolId,
+    ) -> Result<Option<Ref<'_>>, EntityStorageError> {
+        self.entries.try_get(&id)
+    }
+
+    fn ids_by_address(
+        &self,
+        address: Address,
+    ) -> Result<SmallVec<[SymbolId; 2]>, EntityStorageError> {
+        let first = SymbolAddressKey::first(address);
+        self.storage
+            .iter_range::<SymbolAddressKey, SymbolAddressRecord>(Bound::Included(&first))?
+            .map_while(|entry| match entry {
+                Ok((key, _)) if key.address == address => Some(Ok(key.id)),
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect()
+    }
+
+    fn ids_by_name(&self, name: Symbol) -> Result<Vec<SymbolId>, EntityStorageError> {
+        let first = SymbolNameKey::first(name);
+        self.storage
+            .iter_range::<SymbolNameKey, SymbolNameRecord>(Bound::Included(&first))?
+            .map_while(|entry| match entry {
+                Ok((key, _)) if key.name == name => Some(Ok(key.id)),
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect()
+    }
+
     fn rebuild_indexes(
         storage: &EntityStorage,
         entries: &EntityCache<SymbolId, SymbolEntry>,
@@ -336,18 +435,6 @@ impl SymbolTable {
         Ok(())
     }
 
-    pub(crate) fn append_prepared_transition_writes(
-        &self,
-        reservations: &[SymbolId],
-        releases: &[SymbolId],
-        added: usize,
-        removed: usize,
-        writes: &mut EntityWriteBatch,
-    ) -> Result<(), EntityStorageError> {
-        self.allocator
-            .append_transition(reservations, releases, added, removed, writes)
-    }
-
     pub(crate) fn publish_transition(
         &mut self,
         reservations: &[SymbolId],
@@ -356,58 +443,6 @@ impl SymbolTable {
     ) {
         self.allocator
             .publish_transition(reservations, added, removed);
-    }
-
-    pub(crate) fn flush(&self) -> Result<(), EntityStorageError> {
-        self.entries.flush()
-    }
-
-    pub(crate) fn pending_id(&self, offset: usize) -> SymbolId {
-        self.allocator
-            .pending_id(offset)
-            .unwrap_or_else(|error| error.into_fatal())
-    }
-
-    pub(crate) fn publish_upsert(&self, id: SymbolId, entry: SymbolEntry, encoded_size: usize) {
-        self.entries.publish_insert(id, entry, encoded_size);
-    }
-
-    pub(crate) fn publish_remove(&self, id: SymbolId) {
-        self.entries.publish_remove(&id);
-    }
-
-    pub(crate) fn get_id_by_index(&self, index: SymbolIndex) -> Option<SymbolId> {
-        self.storage
-            .get::<SymbolLoaderKey, SymbolLoaderRecord>(&SymbolLoaderKey::new(index))
-            .unwrap_or_else(|error| error.into_fatal())
-            .map(|record| record.id)
-    }
-
-    fn ids_by_address(
-        &self,
-        address: Address,
-    ) -> Result<SmallVec<[SymbolId; 2]>, EntityStorageError> {
-        let first = SymbolAddressKey::first(address);
-        self.storage
-            .iter_range::<SymbolAddressKey, SymbolAddressRecord>(Bound::Included(&first))?
-            .map_while(|entry| match entry {
-                Ok((key, _)) if key.address == address => Some(Ok(key.id)),
-                Ok(_) => None,
-                Err(error) => Some(Err(error)),
-            })
-            .collect()
-    }
-
-    fn ids_by_name(&self, name: Symbol) -> Result<Vec<SymbolId>, EntityStorageError> {
-        let first = SymbolNameKey::first(name);
-        self.storage
-            .iter_range::<SymbolNameKey, SymbolNameRecord>(Bound::Included(&first))?
-            .map_while(|entry| match entry {
-                Ok((key, _)) if key.name == name => Some(Ok(key.id)),
-                Ok(_) => None,
-                Err(error) => Some(Err(error)),
-            })
-            .collect()
     }
 
     fn referent_of(&self, entry: &SymbolEntry) -> Result<Option<SymbolId>, EntityStorageError> {
@@ -549,13 +584,6 @@ impl SymbolTable {
         Ok(self.entries.try_get(&id)?.map(|entry| (id, entry)))
     }
 
-    pub(crate) fn try_get_by_id(
-        &self,
-        id: SymbolId,
-    ) -> Result<Option<Ref<'_>>, EntityStorageError> {
-        self.entries.try_get(&id)
-    }
-
     pub(crate) fn try_get_by_index(
         &self,
         index: SymbolIndex,
@@ -585,26 +613,6 @@ impl SymbolTable {
             return Ok(None);
         };
         Ok(self.entries.try_get(&id)?.map(|entry| (id, entry)))
-    }
-
-    pub(crate) fn contains(&self, name: impl AsRef<str>) -> bool {
-        Symbol::from_existing(name.as_ref()).is_some_and(|name| {
-            !self
-                .ids_by_name(name)
-                .unwrap_or_else(|error| error.into_fatal())
-                .is_empty()
-        })
-    }
-
-    pub(crate) fn contains_by_index(&self, index: SymbolIndex) -> bool {
-        self.get_id_by_index(index).is_some()
-    }
-
-    pub(crate) fn contains_by_address(&self, address: Address) -> bool {
-        !self
-            .ids_by_address(address)
-            .unwrap_or_else(|error| error.into_fatal())
-            .is_empty()
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = (SymbolId, Ref<'_>)> + '_ {
@@ -690,14 +698,6 @@ impl SymbolTable {
                     .get(&record.id)
                     .map(|entry| (key.symbol_index(), record.id, entry))
             })
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.allocator.len() == 0
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.allocator.len()
     }
 
     pub(crate) fn remove(&mut self, name: impl AsRef<str>) -> Result<usize, EntityStorageError> {

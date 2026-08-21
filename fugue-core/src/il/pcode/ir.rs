@@ -161,7 +161,6 @@ impl PCodeIr {
     pub const fn display_source(&self, address: Address) -> PCodeSourceDisplay<'_> {
         PCodeSourceDisplay::new(self, address)
     }
-
 }
 
 impl IlArtefact for PCodeIr {

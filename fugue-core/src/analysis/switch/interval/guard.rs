@@ -99,12 +99,7 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
         let ceiling = BitVec::max_value_with(width, false);
         let mut guard_block = Some(switch_block);
         while let Some(block) = guard_block {
-            for (_, operation) in self
-                .ssa
-                .graph()
-                .ops_for_block(block, self.ssa.ops())
-                .rev()
-            {
+            for (_, operation) in self.ssa.graph().ops_for_block(block, self.ssa.ops()).rev() {
                 if operation.opcode() != ECodeOpcode::ConditionalBranch {
                     continue;
                 }
@@ -382,10 +377,7 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
             }
             steps += 1;
 
-            let (Some(oa), Some(ob)) = (
-                self.ssa.defining_op(a),
-                self.ssa.defining_op(b),
-            ) else {
+            let (Some(oa), Some(ob)) = (self.ssa.defining_op(a), self.ssa.defining_op(b)) else {
                 return false;
             };
             if oa.opcode() == ECodeOpcode::Undefined && ob.opcode() == ECodeOpcode::Undefined {

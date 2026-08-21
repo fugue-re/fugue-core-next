@@ -105,7 +105,9 @@ impl Insn {
             address,
             properties,
             targets,
-            size: size.try_into().map_err(|_| InsnError::insn_too_large(size))?,
+            size: size
+                .try_into()
+                .map_err(|_| InsnError::insn_too_large(size))?,
         })
     }
 
@@ -166,18 +168,10 @@ impl Insn {
             address,
             properties,
             targets,
-            size: size.try_into().map_err(|_| InsnError::insn_too_large(size))?,
+            size: size
+                .try_into()
+                .map_err(|_| InsnError::insn_too_large(size))?,
         })
-    }
-
-    pub(crate) fn resolve_flow(
-        &mut self,
-        language: &'static Language,
-        size: usize,
-        operations: &[RawPCodeOp],
-    ) -> Result<(), InsnError> {
-        *self = Self::from_resolved_flow(language, self.address, size, operations)?;
-        Ok(())
     }
 
     pub(crate) fn from_disassembly(
@@ -189,16 +183,14 @@ impl Insn {
             address,
             properties,
             targets: SmallVec::new(),
-            size: size.try_into().map_err(|_| InsnError::insn_too_large(size))?,
+            size: size
+                .try_into()
+                .map_err(|_| InsnError::insn_too_large(size))?,
         })
     }
 
     pub fn address(&self) -> Address {
         self.address
-    }
-
-    pub fn next_address(&self) -> Address {
-        self.address + self.size as usize
     }
 
     pub fn properties(&self) -> InsnProperties {
@@ -214,6 +206,32 @@ impl Insn {
 
         self.properties = InsnProperties::from_targets(&self.targets)
             | (self.properties & !InsnProperties::FLOW & !InsnProperties::FALL_THROUGH);
+    }
+
+    pub fn size(&self) -> usize {
+        self.size as _
+    }
+
+    pub fn iter_targets<'a>(
+        &'a self,
+    ) -> impl Iterator<Item = (&'a InsnTarget, InsnTargetKind, Address)> + 'a {
+        self.targets
+            .iter()
+            .filter_map(|(_, target)| target.resolved().map(|(kind, to)| (target, kind, to)))
+    }
+
+    pub(crate) fn resolve_flow(
+        &mut self,
+        language: &'static Language,
+        size: usize,
+        operations: &[RawPCodeOp],
+    ) -> Result<(), InsnError> {
+        *self = Self::from_resolved_flow(language, self.address, size, operations)?;
+        Ok(())
+    }
+
+    pub fn next_address(&self) -> Address {
+        self.address + self.size as usize
     }
 
     pub fn remove_fall_through(&mut self) {
@@ -351,18 +369,6 @@ impl Insn {
             .intersects(InsnProperties::NEEDS_FLOW_RESOLUTION)
     }
 
-    pub fn size(&self) -> usize {
-        self.size as _
-    }
-
-    pub fn iter_targets<'a>(
-        &'a self,
-    ) -> impl Iterator<Item = (&'a InsnTarget, InsnTargetKind, Address)> + 'a {
-        self.targets.iter().filter_map(|(_, target)| {
-            target.resolved().map(|(kind, to)| (target, kind, to))
-        })
-    }
-
     pub fn flow_targets(&self) -> impl Iterator<Item = FlowTarget> + '_ {
         self.iter_targets()
             .filter_map(move |(target, _, to)| FlowTarget::from_insn_target(self, target, to))
@@ -384,7 +390,6 @@ impl Insn {
             )
         })
     }
-
 }
 
 impl EstimateSize for Insn {

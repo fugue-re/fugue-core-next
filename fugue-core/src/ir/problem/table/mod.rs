@@ -16,9 +16,9 @@ pub(crate) const ATTRIBUTE_PROBLEM_CACHE_SIZE: &str = "storage.entities.problem.
 pub(crate) const DEFAULT_PROBLEM_CACHE_BYTES: usize = 2 * 1024 * 1024;
 
 mod persistent;
-mod transient;
-
 use persistent::ProblemTable as PersistentProblemTable;
+
+mod transient;
 use transient::ProblemTable as TransientProblemTable;
 
 pub type ProblemRef<'a> = EntityRef<'a, Problem>;
@@ -27,7 +27,7 @@ const PROBLEM_TABLE_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 struct ProblemTableHeader {
-    version: u32,
+    format_version: u32,
 }
 
 impl Entity for ProblemTableHeader {
@@ -47,14 +47,6 @@ impl ProblemIndex {
         }
     }
 
-    fn insert(&mut self, id: ProblemId, key: ProblemKey) {
-        self.problems.insert(key, id);
-    }
-
-    fn remove(&mut self, key: ProblemKey) {
-        self.problems.remove(&key);
-    }
-
     fn id(&self, key: ProblemKey) -> Option<ProblemId> {
         self.problems.get(&key).copied()
     }
@@ -70,7 +62,23 @@ impl ProblemIndex {
         self.problems.keys().copied()
     }
 
-    fn for_each_address_key_in(&self, range: AddressRange, mut f: impl FnMut(ProblemKey)) {
+    fn is_empty(&self) -> bool {
+        self.problems.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.problems.len()
+    }
+
+    fn insert(&mut self, id: ProblemId, key: ProblemKey) {
+        self.problems.insert(key, id);
+    }
+
+    fn remove(&mut self, key: ProblemKey) {
+        self.problems.remove(&key);
+    }
+
+    fn for_each_key_in_range(&self, range: AddressRange, mut f: impl FnMut(ProblemKey)) {
         if range.is_empty() {
             return;
         }
@@ -90,14 +98,6 @@ impl ProblemIndex {
         self.problems
             .range((start, Bound::Unbounded))
             .map(|(&key, &id)| (key, id))
-    }
-
-    fn is_empty(&self) -> bool {
-        self.problems.is_empty()
-    }
-
-    fn len(&self) -> usize {
-        self.problems.len()
     }
 }
 
@@ -154,6 +154,31 @@ impl ProblemTable {
 
     pub fn new_transient() -> Self {
         Self::Transient(TransientProblemTable::new())
+    }
+
+    pub fn contains(&self, address: Address) -> bool {
+        match self {
+            Self::Persistent(table) => table.contains(address),
+            Self::Transient(table) => table.contains(address),
+        }
+    }
+
+    pub fn contains_any(&self, address: Address, kinds: &[ProblemKind]) -> bool {
+        kinds.iter().any(|kind| self.get(address, *kind).is_some())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Persistent(table) => table.is_empty(),
+            Self::Transient(table) => table.is_empty(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Persistent(table) => table.len(),
+            Self::Transient(table) => table.len(),
+        }
     }
 
     pub(crate) fn is_persistent(&self) -> bool {
@@ -261,17 +286,6 @@ impl ProblemTable {
         }
     }
 
-    pub fn contains(&self, address: Address) -> bool {
-        match self {
-            Self::Persistent(table) => table.contains(address),
-            Self::Transient(table) => table.contains(address),
-        }
-    }
-
-    pub fn contains_any(&self, address: Address, kinds: &[ProblemKind]) -> bool {
-        kinds.iter().any(|kind| self.get(address, *kind).is_some())
-    }
-
     pub fn try_modify_by_id<R>(
         &mut self,
         id: ProblemId,
@@ -331,14 +345,10 @@ impl ProblemTable {
         }
     }
 
-    pub(crate) fn for_each_address_key_in(
-        &self,
-        range: AddressRange,
-        mut f: impl FnMut(ProblemKey),
-    ) {
+    pub(crate) fn for_each_key_in_range(&self, range: AddressRange, mut f: impl FnMut(ProblemKey)) {
         match self {
-            Self::Persistent(table) => table.for_each_address_key_in(range, &mut f),
-            Self::Transient(table) => table.for_each_address_key_in(range, &mut f),
+            Self::Persistent(table) => table.for_each_key_in_range(range, &mut f),
+            Self::Transient(table) => table.for_each_key_in_range(range, &mut f),
         }
     }
 
@@ -358,20 +368,6 @@ impl ProblemTable {
             Self::Transient(table) => Box::new(table.iter().map(EntityRef::borrowed)),
         }
     }
-
-    pub fn is_empty(&self) -> bool {
-        match self {
-            Self::Persistent(table) => table.is_empty(),
-            Self::Transient(table) => table.is_empty(),
-        }
-    }
-
-    pub fn len(&self) -> usize {
-        match self {
-            Self::Persistent(table) => table.len(),
-            Self::Transient(table) => table.len(),
-        }
-    }
 }
 
 impl PersistableProjectEntity for ProblemTable {
@@ -380,7 +376,7 @@ impl PersistableProjectEntity for ProblemTable {
             Self::Persistent(_) => storage.insert(
                 &ProjectEntity::ProblemTable,
                 &ProblemTableHeader {
-                    version: PROBLEM_TABLE_VERSION,
+                    format_version: PROBLEM_TABLE_VERSION,
                 },
             ),
             Self::Transient(_) => Ok(()),

@@ -290,8 +290,7 @@ fn memory_domain_identifiers_round_trip_through_ecode_and_mcode() {
     push_store(&mut builder, space, pointer, stored, memory);
     push_return(&mut builder, [stored]);
     let source = builder.build(&CancellationToken::default()).unwrap();
-    let IlSsaDef::Op(memory_definition) = source.values()[memory.index()].definition()
-    else {
+    let IlSsaDef::Op(memory_definition) = source.values()[memory.index()].definition() else {
         panic!("the ECode memory value is operation-defined");
     };
     let encoded = source.ops()[memory_definition.index()].immediate();
@@ -1286,8 +1285,7 @@ fn exact_register_pair_and_stack_facts_survive_tail_call_lifting() {
                 .then(|| IlValueId::try_from_index(index).unwrap())
         })
         .expect("the stack live output survives optimisation");
-    let IlSsaDef::Op(stack_definition) = mcode.values()[stack_output.index()].definition()
-    else {
+    let IlSsaDef::Op(stack_definition) = mcode.values()[stack_output.index()].definition() else {
         panic!("the stack live output has an operation definition");
     };
     let tail_call_index = mcode

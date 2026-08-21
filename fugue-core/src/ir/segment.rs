@@ -132,6 +132,30 @@ impl ExternSegment {
         }
     }
 
+    pub fn address(&self) -> RawAddress {
+        self.address
+    }
+
+    pub fn alignment(&self) -> usize {
+        self.alignment
+    }
+
+    pub fn symbols(&self) -> usize {
+        self.symbols
+    }
+
+    pub fn template(&self) -> &ExternFunctionTemplate {
+        &self.template
+    }
+
+    pub fn len(&self) -> usize {
+        self.symbols
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.symbols == 0
+    }
+
     pub fn add_extern(&mut self) -> Option<RawAddress> {
         let addr = self.address() + self.size();
         if addr < self.address() {
@@ -168,10 +192,6 @@ impl ExternSegment {
         Ok(())
     }
 
-    pub fn address(&self) -> RawAddress {
-        self.address
-    }
-
     pub fn last_address(&self) -> Option<RawAddress> {
         (self.symbols != 0).then(|| self.address() + self.size() - 1usize)
     }
@@ -180,20 +200,8 @@ impl ExternSegment {
         self.last_address().map(|last| self.address()..=last)
     }
 
-    pub fn alignment(&self) -> usize {
-        self.alignment
-    }
-
     pub fn size(&self) -> usize {
         self.symbols * self.aligned_template_size()
-    }
-
-    pub fn symbols(&self) -> usize {
-        self.symbols
-    }
-
-    pub fn template(&self) -> &ExternFunctionTemplate {
-        &self.template
     }
 
     pub fn aligned_template_size(&self) -> usize {
@@ -205,13 +213,5 @@ impl ExternSegment {
         let start = self.address();
         let step = self.aligned_template_size();
         (0..self.symbols).map(move |i| start + i * step)
-    }
-
-    pub fn len(&self) -> usize {
-        self.symbols
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.symbols == 0
     }
 }

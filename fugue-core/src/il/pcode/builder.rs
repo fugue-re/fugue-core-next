@@ -57,7 +57,6 @@ impl PCodeBuilder {
         self
     }
 
-
     pub fn emitter(&mut self) -> PCodeEmitter<'_> {
         PCodeEmitter { builder: self }
     }
@@ -138,8 +137,7 @@ impl PCodeEmitter<'_> {
     ) -> Result<IlOpId, IlError> {
         let id = IlOpId::try_from_index(self.builder.operations.len())?;
         let operands = self.builder.push_operands(operands)?;
-        self.builder
-            .push_op(PCodeOp::new(spec, output, operands));
+        self.builder.push_op(PCodeOp::new(spec, output, operands));
         Ok(id)
     }
 }

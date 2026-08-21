@@ -115,7 +115,6 @@ impl GeneratedIl {
         self.artefacts
     }
 
-
     pub(crate) fn into_requested(self) -> Option<IlProduced> {
         self.artefacts
             .into_iter()

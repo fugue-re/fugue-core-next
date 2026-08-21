@@ -17,9 +17,9 @@ pub(crate) const ATTRIBUTE_SYMBOL_CACHE_SIZE: &str = "storage.entities.symbol.ca
 pub(crate) const DEFAULT_SYMBOL_CACHE_BYTES: usize = 8 * 1024 * 1024;
 
 mod persistent;
-mod transient;
-
 use persistent::SymbolTable as PersistentSymbolTable;
+
+mod transient;
 pub use transient::SymbolTable as TransientSymbolTable;
 
 pub type SymbolRef<'a> = EntityRef<'a, SymbolEntry>;
@@ -76,7 +76,7 @@ const SYMBOL_TABLE_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 struct SymbolTableHeader {
-    version: u32,
+    format_version: u32,
 }
 
 impl Entity for SymbolTableHeader {
@@ -110,6 +110,42 @@ impl SymbolTable {
 
     pub fn new_transient() -> Self {
         Self::Transient(TransientSymbolTable::new())
+    }
+
+    pub fn contains(&self, symbol: impl AsRef<str>) -> bool {
+        match self {
+            Self::Persistent(table) => table.contains(symbol),
+            Self::Transient(table) => table.contains(symbol),
+        }
+    }
+
+    pub fn contains_by_index(&self, index: SymbolIndex) -> bool {
+        match self {
+            Self::Persistent(table) => table.contains_by_index(index),
+            Self::Transient(table) => table.contains_by_index(index),
+        }
+    }
+
+    pub fn contains_by_address(&self, address: impl Into<Address>) -> bool {
+        let address = address.into();
+        match self {
+            Self::Persistent(table) => table.contains_by_address(address),
+            Self::Transient(table) => table.contains_by_address(address),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Persistent(table) => table.is_empty(),
+            Self::Transient(table) => table.is_empty(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Persistent(table) => table.len(),
+            Self::Transient(table) => table.len(),
+        }
     }
 
     pub(crate) fn is_persistent(&self) -> bool {
@@ -373,28 +409,6 @@ impl SymbolTable {
         }
     }
 
-    pub fn contains(&self, symbol: impl AsRef<str>) -> bool {
-        match self {
-            Self::Persistent(table) => table.contains(symbol),
-            Self::Transient(table) => table.contains(symbol),
-        }
-    }
-
-    pub fn contains_by_index(&self, index: SymbolIndex) -> bool {
-        match self {
-            Self::Persistent(table) => table.contains_by_index(index),
-            Self::Transient(table) => table.contains_by_index(index),
-        }
-    }
-
-    pub fn contains_by_address(&self, address: impl Into<Address>) -> bool {
-        let address = address.into();
-        match self {
-            Self::Persistent(table) => table.contains_by_address(address),
-            Self::Transient(table) => table.contains_by_address(address),
-        }
-    }
-
     pub fn iter(&self) -> Box<dyn Iterator<Item = (SymbolId, SymbolRef<'_>)> + '_> {
         match self {
             Self::Persistent(table) => Box::new(
@@ -481,20 +495,6 @@ impl SymbolTable {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        match self {
-            Self::Persistent(table) => table.is_empty(),
-            Self::Transient(table) => table.is_empty(),
-        }
-    }
-
-    pub fn len(&self) -> usize {
-        match self {
-            Self::Persistent(table) => table.len(),
-            Self::Transient(table) => table.len(),
-        }
-    }
-
     pub fn remove_by_name(&mut self, symbol: impl AsRef<str>) -> usize {
         self.try_remove_by_name(symbol)
             .unwrap_or_else(|error| error.into_fatal())
@@ -557,7 +557,7 @@ impl PersistableProjectEntity for SymbolTable {
             Self::Persistent(_) => storage.insert(
                 &ProjectEntity::SymbolTable,
                 &SymbolTableHeader {
-                    version: SYMBOL_TABLE_VERSION,
+                    format_version: SYMBOL_TABLE_VERSION,
                 },
             ),
             Self::Transient(_) => Ok(()),

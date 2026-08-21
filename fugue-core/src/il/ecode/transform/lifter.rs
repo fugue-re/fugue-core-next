@@ -529,5 +529,4 @@ impl<'a, 'b> PCodeToECodeLifter<'a, 'b> {
 
         Ok(value)
     }
-
 }

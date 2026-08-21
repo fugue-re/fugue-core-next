@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt;
 use std::fmt::{Debug, Display, LowerHex, UpperHex};
 use std::mem;
 use std::num::ParseIntError;
@@ -50,13 +51,13 @@ impl EntityKey for RawAddress {
 }
 
 impl Debug for RawAddress {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:#x}", self.0)
     }
 }
 
 impl Display for RawAddress {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:#x}", self.0)
     }
 }
@@ -75,13 +76,13 @@ impl FromStr for RawAddress {
 }
 
 impl LowerHex for RawAddress {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
         LowerHex::fmt(&self.0, f)
     }
 }
 
 impl UpperHex for RawAddress {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
         UpperHex::fmt(&self.0, f)
     }
 }
@@ -391,16 +392,24 @@ impl SubAssign<u32> for RawAddress {
 impl RawAddress {
     pub const MAX: Self = Self(u64::MAX);
 
-    pub fn new(addr: impl Into<Self>) -> Self {
-        addr.into()
-    }
-
     pub const fn zero() -> Self {
         Self(0u64)
     }
 
+    pub fn new(addr: impl Into<Self>) -> Self {
+        addr.into()
+    }
+
     pub fn offset(&self) -> u64 {
         self.0
+    }
+
+    pub fn checked_offset_from(&self, base: RawAddress) -> Option<u64> {
+        self.0.checked_sub(base.0)
+    }
+
+    pub fn align_down(&self, alignment: usize) -> RawAddress {
+        RawAddress(self.0 & !(alignment as u64).wrapping_sub(1))
     }
 
     pub fn checked_add(&self, offset: impl Into<RawAddress>) -> Option<Self> {
@@ -413,18 +422,10 @@ impl RawAddress {
         self.0.checked_sub(offset.0).map(Self)
     }
 
-    pub fn checked_offset_from(&self, base: RawAddress) -> Option<u64> {
-        self.0.checked_sub(base.0)
-    }
-
     pub fn align(&self, alignment: usize) -> RawAddress {
         let offset =
             (*self + alignment.wrapping_sub(1)).offset() & !(alignment as u64).wrapping_sub(1);
         RawAddress(offset)
-    }
-
-    pub fn align_down(&self, alignment: usize) -> RawAddress {
-        RawAddress(self.0 & !(alignment as u64).wrapping_sub(1))
     }
 
     pub fn absolute_difference(&self, other: &RawAddress) -> u64 {
@@ -491,7 +492,7 @@ pub struct AddressWithContext {
 }
 
 impl Display for AddressWithContext {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
             "{} (context: {}, confidence: {})",
@@ -623,6 +624,43 @@ impl RawAddressRangeSet {
         Self(RangeInclusiveSet::new())
     }
 
+    pub fn union(&self, other: &Self) -> Self {
+        Self(&self.0 | &other.0)
+    }
+
+    pub fn intersection(&self, other: &Self) -> Self {
+        Self(&self.0 & &other.0)
+    }
+
+    pub fn contains(&self, address: impl Into<RawAddress>) -> bool {
+        self.0.contains(&address.into().offset())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = RawAddress> + use<'_> {
+        self.0
+            .iter()
+            .flat_map(|range| range.clone())
+            .map(RawAddress::from)
+    }
+
+    pub fn ranges(&self) -> impl Iterator<Item = RangeInclusive<RawAddress>> + use<'_> {
+        self.0
+            .iter()
+            .map(|r| RawAddress::from(*r.start())..=RawAddress::from(*r.end()))
+    }
+
+    pub fn range_count(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn span(&self) -> Option<RangeInclusive<RawAddress>> {
+        Some(RawAddress::from(*self.0.first()?.start())..=RawAddress::from(*self.0.last()?.end()))
+    }
+
     pub fn insert(&mut self, address: impl Into<RawAddress>) -> bool {
         let address = address.into().offset();
         let inserted = !self.0.contains(&address);
@@ -686,14 +724,6 @@ impl RawAddressRangeSet {
         Self(difference)
     }
 
-    pub fn union(&self, other: &Self) -> Self {
-        Self(&self.0 | &other.0)
-    }
-
-    pub fn intersection(&self, other: &Self) -> Self {
-        Self(&self.0 & &other.0)
-    }
-
     pub fn symmetric_difference(&self, other: &Self) -> Self {
         self.difference(other).union(&other.difference(self))
     }
@@ -706,35 +736,6 @@ impl RawAddressRangeSet {
     pub fn remove_range(&mut self, range: impl Into<RangeInclusive<RawAddress>>) {
         let range = range.into();
         self.0.remove(range.start().offset()..=range.end().offset());
-    }
-
-    pub fn contains(&self, address: impl Into<RawAddress>) -> bool {
-        self.0.contains(&address.into().offset())
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = RawAddress> + use<'_> {
-        self.0
-            .iter()
-            .flat_map(|range| range.clone())
-            .map(RawAddress::from)
-    }
-
-    pub fn ranges(&self) -> impl Iterator<Item = RangeInclusive<RawAddress>> + use<'_> {
-        self.0
-            .iter()
-            .map(|r| RawAddress::from(*r.start())..=RawAddress::from(*r.end()))
-    }
-
-    pub fn range_count(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn span(&self) -> Option<RangeInclusive<RawAddress>> {
-        Some(RawAddress::from(*self.0.first()?.start())..=RawAddress::from(*self.0.last()?.end()))
     }
 
     pub fn clear(&mut self) {
@@ -793,6 +794,18 @@ impl AddressRange {
         self.end
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.end < self.start
+    }
+
+    pub fn contains(&self, address: RawAddress) -> bool {
+        self.start <= address && address <= self.end
+    }
+
+    pub fn contains_address(&self, address: Address) -> bool {
+        self.space == address.space() && self.contains(address.raw_address())
+    }
+
     pub fn start_address(&self) -> Address {
         Address::new(self.space, self.start)
     }
@@ -806,18 +819,6 @@ impl AddressRange {
             .offset()
             .saturating_sub(self.start.offset())
             .saturating_add(1)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.end < self.start
-    }
-
-    pub fn contains(&self, address: RawAddress) -> bool {
-        self.start <= address && address <= self.end
-    }
-
-    pub fn contains_address(&self, address: Address) -> bool {
-        self.space == address.space() && self.contains(address.raw_address())
     }
 
     pub fn intersects(&self, other: &AddressRange) -> bool {
@@ -839,6 +840,50 @@ impl AddressRangeSet {
         Self {
             spaces: BTreeMap::new(),
         }
+    }
+
+    pub fn contains(&self, address: impl Into<Address>) -> bool {
+        let address = address.into();
+        self.spaces
+            .get(&address.space())
+            .is_some_and(|ranges| ranges.contains(address.raw_address()))
+    }
+
+    pub fn spaces(&self) -> impl Iterator<Item = (AddressSpaceId, &RawAddressRangeSet)> + '_ {
+        self.spaces.iter().map(|(space, ranges)| (*space, ranges))
+    }
+
+    pub fn ranges(&self) -> impl Iterator<Item = AddressRange> + '_ {
+        self.spaces.iter().flat_map(|(space, ranges)| {
+            ranges
+                .ranges()
+                .map(move |range| AddressRange::new(*space, *range.start(), *range.end()))
+        })
+    }
+
+    pub fn intersects_range(&self, range: &AddressRange) -> bool {
+        self.spaces
+            .get(&range.space())
+            .is_some_and(|ranges| ranges.intersects_range(range.raw_range()))
+    }
+
+    pub fn range_count(&self) -> usize {
+        self.spaces
+            .values()
+            .map(RawAddressRangeSet::range_count)
+            .sum()
+    }
+
+    pub fn addresses(&self) -> impl Iterator<Item = Address> + '_ {
+        self.spaces.iter().flat_map(|(space, ranges)| {
+            ranges
+                .iter()
+                .map(move |address| Address::new(*space, address))
+        })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.spaces.values().all(RawAddressRangeSet::is_empty)
     }
 
     pub fn insert(&mut self, address: Address) -> bool {
@@ -925,40 +970,8 @@ impl AddressRangeSet {
         intersection
     }
 
-    pub fn contains(&self, address: impl Into<Address>) -> bool {
-        let address = address.into();
-        self.spaces
-            .get(&address.space())
-            .is_some_and(|ranges| ranges.contains(address.raw_address()))
-    }
-
-    pub fn spaces(&self) -> impl Iterator<Item = (AddressSpaceId, &RawAddressRangeSet)> + '_ {
-        self.spaces.iter().map(|(space, ranges)| (*space, ranges))
-    }
-
-    pub fn ranges(&self) -> impl Iterator<Item = AddressRange> + '_ {
-        self.spaces.iter().flat_map(|(space, ranges)| {
-            ranges
-                .ranges()
-                .map(move |range| AddressRange::new(*space, *range.start(), *range.end()))
-        })
-    }
-
-    pub fn intersects_range(&self, range: &AddressRange) -> bool {
-        self.spaces
-            .get(&range.space())
-            .is_some_and(|ranges| ranges.intersects_range(range.raw_range()))
-    }
-
     pub fn intersects(&self, other: &Self) -> bool {
         other.ranges().any(|range| self.intersects_range(&range))
-    }
-
-    pub fn range_count(&self) -> usize {
-        self.spaces
-            .values()
-            .map(RawAddressRangeSet::range_count)
-            .sum()
     }
 
     pub fn spanning_ranges(&self) -> Self {
@@ -971,18 +984,6 @@ impl AddressRangeSet {
         }
 
         spanning
-    }
-
-    pub fn addresses(&self) -> impl Iterator<Item = Address> + '_ {
-        self.spaces.iter().flat_map(|(space, ranges)| {
-            ranges
-                .iter()
-                .map(move |address| Address::new(*space, address))
-        })
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.spaces.values().all(RawAddressRangeSet::is_empty)
     }
 }
 
@@ -1021,6 +1022,30 @@ where
         Self(RangeInclusiveMap::new())
     }
 
+    pub fn contains_address(&self, address: impl Into<RawAddress>) -> bool {
+        self.0.contains_key(&address.into().offset())
+    }
+
+    pub fn get(&self, address: impl Into<RawAddress>) -> Option<&V> {
+        self.0.get(&address.into().offset())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (RawAddress, &V)> {
+        self.0.iter().flat_map(|(range, value)| {
+            range
+                .clone()
+                .map(move |address| (RawAddress::from(address), value))
+        })
+    }
+
+    pub fn run_count(&self) -> usize {
+        self.0.len()
+    }
+
     pub fn insert(&mut self, address: impl Into<RawAddress>, value: V) -> Option<V> {
         let address = address.into().offset();
         let previous = self.0.get(&address).cloned();
@@ -1035,28 +1060,8 @@ where
         previous
     }
 
-    pub fn contains_address(&self, address: impl Into<RawAddress>) -> bool {
-        self.0.contains_key(&address.into().offset())
-    }
-
-    pub fn get(&self, address: impl Into<RawAddress>) -> Option<&V> {
-        self.0.get(&address.into().offset())
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
     pub fn clear(&mut self) {
         self.0.clear();
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (RawAddress, &V)> {
-        self.0.iter().flat_map(|(range, value)| {
-            range
-                .clone()
-                .map(move |address| (RawAddress::from(address), value))
-        })
     }
 
     pub fn range(
@@ -1079,10 +1084,6 @@ where
         let range = range.into();
         self.0
             .insert(range.start().offset()..=range.end().offset(), value);
-    }
-
-    pub fn run_count(&self) -> usize {
-        self.0.len()
     }
 }
 
@@ -1158,26 +1159,26 @@ impl EntityKey for Address {
 }
 
 impl Debug for Address {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}:{:#x}", self.space, self.address.offset())
     }
 }
 
 impl Display for Address {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}:{:#x}", self.space, self.address.offset())
     }
 }
 
 impl LowerHex for Address {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}:", self.space)?;
         LowerHex::fmt(&self.address, f)
     }
 }
 
 impl UpperHex for Address {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}:", self.space)?;
         UpperHex::fmt(&self.address, f)
     }
@@ -1457,6 +1458,26 @@ impl Address {
         }
     }
 
+    pub fn raw_address(&self) -> RawAddress {
+        self.address
+    }
+
+    pub fn space(&self) -> AddressSpaceId {
+        self.space
+    }
+
+    pub fn offset(&self) -> u64 {
+        self.address.offset()
+    }
+
+    pub fn in_space_bounds(&self, language: &Language) -> bool {
+        self.address.in_space_bounds(language)
+    }
+
+    pub fn range_in_space_bounds(&self, language: &Language, size: usize) -> bool {
+        self.address.range_in_space_bounds(language, size)
+    }
+
     pub(crate) fn bounds_in_space<R>(space: AddressSpaceId, range: &R) -> (Bound<Self>, Bound<Self>)
     where
         R: RangeBounds<RawAddress> + ?Sized,
@@ -1472,18 +1493,6 @@ impl Address {
             Bound::Unbounded => Bound::Included(Self::new(space, RawAddress::MAX)),
         };
         (start, end)
-    }
-
-    pub fn raw_address(&self) -> RawAddress {
-        self.address
-    }
-
-    pub fn space(&self) -> AddressSpaceId {
-        self.space
-    }
-
-    pub fn offset(&self) -> u64 {
-        self.address.offset()
     }
 
     pub fn checked_add(&self, offset: impl Into<RawAddress>) -> Option<Self> {
@@ -1525,14 +1534,6 @@ impl Address {
             space: self.space,
             address: self.address.align(alignment),
         }
-    }
-
-    pub fn in_space_bounds(&self, language: &Language) -> bool {
-        self.address.in_space_bounds(language)
-    }
-
-    pub fn range_in_space_bounds(&self, language: &Language, size: usize) -> bool {
-        self.address.range_in_space_bounds(language, size)
     }
 }
 

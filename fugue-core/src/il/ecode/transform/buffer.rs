@@ -75,10 +75,7 @@ impl PCodeToECodeBuffer {
         self.expression_operands.append(operands)
     }
 
-    pub(crate) fn push_op(
-        &mut self,
-        operation: PCodeToECodeEffect,
-    ) -> Result<IlOpId, IlError> {
+    pub(crate) fn push_op(&mut self, operation: PCodeToECodeEffect) -> Result<IlOpId, IlError> {
         let id = IlOpId::try_from_index(self.operations.len())?;
         self.operations.push(operation);
         Ok(id)

@@ -89,14 +89,6 @@ impl Location {
         }
     }
 
-    pub fn address(&self) -> Address {
-        self.address
-    }
-
-    pub fn position(&self) -> u16 {
-        self.position
-    }
-
     pub fn absolute_from(
         language: &Language,
         base: Address,
@@ -126,6 +118,14 @@ impl Location {
             address: base,
             position,
         })
+    }
+
+    pub fn address(&self) -> Address {
+        self.address
+    }
+
+    pub fn position(&self) -> u16 {
+        self.position
     }
 }
 

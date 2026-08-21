@@ -19,21 +19,21 @@ const FREE_ID_PREVIEW_BATCH: usize = 256;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub(crate) enum PersistentTable {
-    CodeBlocks = 1,
     Functions = 0,
-    Problems = 4,
-    Switches = 3,
+    CodeBlocks = 1,
     Symbols = 2,
+    Switches = 3,
+    Problems = 4,
 }
 
 impl PersistentTable {
     fn from_byte(value: u8) -> Option<Self> {
         match value {
-            1 => Some(Self::CodeBlocks),
             0 => Some(Self::Functions),
-            4 => Some(Self::Problems),
-            3 => Some(Self::Switches),
+            1 => Some(Self::CodeBlocks),
             2 => Some(Self::Symbols),
+            3 => Some(Self::Switches),
+            4 => Some(Self::Problems),
             _ => None,
         }
     }
@@ -170,18 +170,14 @@ pub(crate) struct PersistentIdAllocator<T> {
 }
 
 impl<T> PersistentIdAllocator<T> {
-    pub(crate) fn load(
-        storage: EntityStorage,
-        table: PersistentTable,
-    ) -> Result<Option<Self>, EntityStorageError> {
-        let Some(state) = storage
-            .get::<ProjectEntity, TableIndexState>(&table.project_entity())?
-            .filter(|state| state.is_current())
-        else {
-            return Ok(None);
-        };
-
-        Ok(Some(Self::new(storage, table, state)))
+    fn new(storage: EntityStorage, table: PersistentTable, state: TableIndexState) -> Self {
+        Self {
+            pending: Mutex::new(PendingAllocations::new(state.next_index())),
+            state,
+            storage,
+            table,
+            _marker: PhantomData,
+        }
     }
 
     pub(crate) fn initialise(
@@ -195,14 +191,22 @@ impl<T> PersistentIdAllocator<T> {
         Ok(Self::new(storage, table, state))
     }
 
-    fn new(storage: EntityStorage, table: PersistentTable, state: TableIndexState) -> Self {
-        Self {
-            pending: Mutex::new(PendingAllocations::new(state.next_index())),
-            state,
-            storage,
-            table,
-            _marker: PhantomData,
-        }
+    pub(crate) fn len(&self) -> usize {
+        self.state.live()
+    }
+
+    pub(crate) fn load(
+        storage: EntityStorage,
+        table: PersistentTable,
+    ) -> Result<Option<Self>, EntityStorageError> {
+        let Some(state) = storage
+            .get::<ProjectEntity, TableIndexState>(&table.project_entity())?
+            .filter(|state| state.is_current())
+        else {
+            return Ok(None);
+        };
+
+        Ok(Some(Self::new(storage, table, state)))
     }
 
     pub(crate) fn pending_id(&self, offset: usize) -> Result<Id<T>, EntityStorageError> {
@@ -330,9 +334,5 @@ impl<T> PersistentIdAllocator<T> {
             .get_mut()
             .expect("pending allocations lock poisoned")
             .clear(next_index);
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.state.live()
     }
 }

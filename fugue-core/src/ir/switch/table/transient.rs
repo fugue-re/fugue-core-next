@@ -21,12 +21,42 @@ impl SwitchTable {
         }
     }
 
-    pub fn branches_for_function(&self, function: FunctionId) -> impl Iterator<Item = Address> + '_ {
+    pub fn branches_for_function(
+        &self,
+        function: FunctionId,
+    ) -> impl Iterator<Item = Address> + '_ {
         self.index.branches_for_function(function)
     }
 
     pub(crate) fn pending_id(&self, offset: usize) -> SwitchId {
         self.index.allocator.pending_id(offset)
+    }
+
+    pub fn get_by_id(&self, id: SwitchId) -> Option<&Switch> {
+        self.entries
+            .get(id.index())?
+            .as_ref()
+            .filter(|switch| switch.id() == id)
+    }
+
+    pub fn contains(&self, branch: Address) -> bool {
+        self.index.contains(branch)
+    }
+
+    pub fn branches(&self) -> impl Iterator<Item = Address> + '_ {
+        self.index.branches()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Switch> + '_ {
+        self.entries.iter().filter_map(Option::as_ref)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.index.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.index.len()
     }
 
     pub(crate) fn publish_reservation(&mut self, id: SwitchId) {
@@ -94,20 +124,9 @@ impl SwitchTable {
         Ok(id)
     }
 
-    pub fn get_by_id(&self, id: SwitchId) -> Option<&Switch> {
-        self.entries
-            .get(id.index())?
-            .as_ref()
-            .filter(|switch| switch.id() == id)
-    }
-
     pub fn get_by_branch(&self, branch: Address) -> Option<&Switch> {
         let id = self.index.id_by_branch(branch)?;
         self.get_by_id(id)
-    }
-
-    pub fn contains(&self, branch: Address) -> bool {
-        self.index.contains(branch)
     }
 
     pub fn modify_by_id<R>(&mut self, id: SwitchId, f: impl FnOnce(&mut Switch) -> R) -> Option<R> {
@@ -158,25 +177,9 @@ impl SwitchTable {
         self.remove_by_id(id)
     }
 
-    pub fn branches(&self) -> impl Iterator<Item = Address> + '_ {
-        self.index.branches()
-    }
-
     pub fn entries_after(&self, after: Option<Address>) -> impl Iterator<Item = &Switch> + '_ {
         self.index
             .entries_after(after)
             .filter_map(|(_, id)| self.get_by_id(id))
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &Switch> + '_ {
-        self.entries.iter().filter_map(Option::as_ref)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.index.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.index.len()
     }
 }

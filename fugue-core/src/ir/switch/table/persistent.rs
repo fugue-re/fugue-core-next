@@ -57,6 +57,36 @@ impl SwitchTable {
         self.index.allocator.pending_id(offset)
     }
 
+    pub(crate) fn try_get_by_id(
+        &self,
+        id: SwitchId,
+    ) -> Result<Option<Ref<'_>>, EntityStorageError> {
+        self.entries.try_get(&id)
+    }
+
+    pub(crate) fn contains(&self, branch: Address) -> bool {
+        self.index.contains(branch)
+    }
+
+    pub(crate) fn branches(&self) -> impl Iterator<Item = Address> + '_ {
+        self.index.branches()
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = Ref<'_>> + '_ {
+        self.entries
+            .try_iter()
+            .unwrap_or_else(|e| e.into_fatal())
+            .map(|entry| entry.unwrap_or_else(|e| e.into_fatal()).1)
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.index.is_empty()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.index.len()
+    }
+
     pub(crate) fn publish_reservation(&mut self, id: SwitchId) {
         let allocated = self.index.allocator.allocate();
         debug_assert_eq!(allocated, id);
@@ -126,13 +156,6 @@ impl SwitchTable {
         Ok(id)
     }
 
-    pub(crate) fn try_get_by_id(
-        &self,
-        id: SwitchId,
-    ) -> Result<Option<Ref<'_>>, EntityStorageError> {
-        self.entries.try_get(&id)
-    }
-
     pub(crate) fn try_get_by_branch(
         &self,
         branch: Address,
@@ -141,10 +164,6 @@ impl SwitchTable {
             return Ok(None);
         };
         self.try_get_by_id(id)
-    }
-
-    pub(crate) fn contains(&self, branch: Address) -> bool {
-        self.index.contains(branch)
     }
 
     pub(crate) fn try_modify_by_id<R>(
@@ -203,10 +222,6 @@ impl SwitchTable {
         self.try_remove_by_id(id)
     }
 
-    pub(crate) fn branches(&self) -> impl Iterator<Item = Address> + '_ {
-        self.index.branches()
-    }
-
     pub(crate) fn entries_after(
         &self,
         after: Option<Address>,
@@ -214,20 +229,5 @@ impl SwitchTable {
         self.index
             .entries_after(after)
             .filter_map(|(_, id)| self.entries.get(&id))
-    }
-
-    pub(crate) fn iter(&self) -> impl Iterator<Item = Ref<'_>> + '_ {
-        self.entries
-            .try_iter()
-            .unwrap_or_else(|e| e.into_fatal())
-            .map(|entry| entry.unwrap_or_else(|e| e.into_fatal()).1)
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.index.is_empty()
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.index.len()
     }
 }

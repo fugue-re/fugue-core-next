@@ -80,7 +80,6 @@ impl ECodeBuilder {
         self
     }
 
-
     pub fn emitter(&mut self) -> ECodeEmitter<'_> {
         ECodeEmitter { builder: self }
     }

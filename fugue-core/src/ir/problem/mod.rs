@@ -105,21 +105,6 @@ pub enum ProblemScope {
 }
 
 impl ProblemScope {
-    pub fn address(self) -> Option<Address> {
-        match self {
-            Self::Address(address) => Some(address),
-            Self::Global | Self::AddressSpace(_) | Self::Range(_) => None,
-        }
-    }
-
-    pub fn range(self) -> Option<AddressRange> {
-        match self {
-            Self::Address(address) => Some(AddressRange::point(address)),
-            Self::Range(range) => Some(range),
-            Self::Global | Self::AddressSpace(_) => None,
-        }
-    }
-
     pub(crate) fn for_regions(regions: &AddressRangeSet) -> Self {
         let mut ranges = regions.ranges();
         let Some(first) = ranges.next() else {
@@ -133,6 +118,21 @@ impl ProblemScope {
             Self::Global
         } else {
             Self::AddressSpace(space)
+        }
+    }
+
+    pub fn address(self) -> Option<Address> {
+        match self {
+            Self::Address(address) => Some(address),
+            Self::Global | Self::AddressSpace(_) | Self::Range(_) => None,
+        }
+    }
+
+    pub fn range(self) -> Option<AddressRange> {
+        match self {
+            Self::Address(address) => Some(AddressRange::point(address)),
+            Self::Range(range) => Some(range),
+            Self::Global | Self::AddressSpace(_) => None,
         }
     }
 
@@ -191,7 +191,7 @@ pub struct Problem {
     scope: ProblemScope,
     kind: ProblemKind,
     observed_revision: Revision,
-    attempts: u8,
+    attempt_count: u8,
     first_seen: Revision,
     last_seen: Revision,
 }
@@ -230,6 +230,23 @@ impl Problem {
         Self::new_scoped(id, ProblemScope::Address(address), kind, observed_revision)
     }
 
+    pub fn new_scoped(
+        id: ProblemId,
+        scope: ProblemScope,
+        kind: ProblemKind,
+        observed_revision: Revision,
+    ) -> Self {
+        Self {
+            id,
+            scope,
+            kind,
+            observed_revision,
+            attempt_count: 1,
+            first_seen: observed_revision,
+            last_seen: observed_revision,
+        }
+    }
+
     pub fn with_id(mut self, id: ProblemId) -> Self {
         self.set_id(id);
         self
@@ -243,33 +260,12 @@ impl Problem {
         self.id
     }
 
-    pub fn new_scoped(
-        id: ProblemId,
-        scope: ProblemScope,
-        kind: ProblemKind,
-        observed_revision: Revision,
-    ) -> Self {
-        Self {
-            id,
-            scope,
-            kind,
-            observed_revision,
-            attempts: 1,
-            first_seen: observed_revision,
-            last_seen: observed_revision,
-        }
-    }
-
     pub fn scope(&self) -> ProblemScope {
         self.scope
     }
 
     pub fn address(&self) -> Option<Address> {
         self.scope.address()
-    }
-
-    pub fn key(&self) -> ProblemKey {
-        ProblemKey::scoped(self.scope, self.kind)
     }
 
     pub fn kind(&self) -> ProblemKind {
@@ -280,8 +276,8 @@ impl Problem {
         self.observed_revision
     }
 
-    pub fn attempts(&self) -> u8 {
-        self.attempts
+    pub fn attempt_count(&self) -> u8 {
+        self.attempt_count
     }
 
     pub fn first_seen(&self) -> Revision {
@@ -300,8 +296,12 @@ impl Problem {
         self.last_seen = last_seen;
     }
 
+    pub fn key(&self) -> ProblemKey {
+        ProblemKey::scoped(self.scope, self.kind)
+    }
+
     pub fn record_attempt(&mut self, observed_revision: Revision) {
-        self.attempts = self.attempts.saturating_add(1);
+        self.attempt_count = self.attempt_count.saturating_add(1);
         self.last_seen = observed_revision;
     }
 }

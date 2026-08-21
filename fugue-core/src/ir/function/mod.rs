@@ -1,12 +1,13 @@
 use std::collections::BTreeMap;
+use std::iter;
 
 use rustc_hash::FxHashSet;
+use smallvec::SmallVec;
 use ustr::Ustr;
 
-use crate::ir::block::CodeBlockFlowCursor;
 use crate::ir::{
-    Address, CodeBlockId, CodeBlockRef, CodeBlockTable, FlowKind, FlowTarget, Id, Reference,
-    ReferenceKey, ReferenceOrigin, ReferenceProperties,
+    Address, CodeBlockId, CodeBlockTable, FlowKind, FlowTarget, Id, Reference, ReferenceKey,
+    ReferenceOrigin, ReferenceProperties,
 };
 use crate::storage::entities::schema::{ENTITY_FUNCTION_ID, ENTITY_KEY_FUNCTION_ID};
 use crate::storage::entities::{Entity, EntityId, EntityKey, EntityKeyId, MutableEntity};
@@ -17,7 +18,7 @@ pub(crate) mod frame;
 pub use frame::{FunctionFrame, StackChangePoint};
 
 pub(crate) mod incomplete;
-pub(crate) use incomplete::{FunctionInsnIndex, NormalisedFunctionRecord};
+pub(crate) use incomplete::{FunctionInsnIndex, FunctionRecord};
 pub use incomplete::{IncompleteFunction, IncompleteFunctionError, InsnEntry};
 
 mod table;
@@ -43,12 +44,12 @@ pub struct Function {
     entry_block: CodeBlockId,
     blocks: Vec<(Address, CodeBlockId)>,
     edges: Vec<(CodeBlockId, CodeBlockId)>,
+    tail_call_sites: Vec<Address>,
     frame: FunctionFrame,
     properties: FunctionProperties,
-    origin: ReferenceOrigin,
     confidence: Confidence,
+    origin: ReferenceOrigin,
     input_revision: Revision,
-    tail_call_sites: Vec<Address>,
 }
 
 impl AsRef<Function> for Function {
@@ -146,10 +147,6 @@ impl Function {
         self.name = Some(name.into());
     }
 
-    pub fn clear_name(&mut self) {
-        self.name = None;
-    }
-
     pub fn name(&self) -> Option<Ustr> {
         self.name
     }
@@ -164,6 +161,115 @@ impl Function {
 
     pub fn is_entry_block(&self, block: CodeBlockId) -> bool {
         self.entry_block == block
+    }
+
+    pub fn blocks(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = (Address, CodeBlockId)> + ExactSizeIterator + '_ {
+        self.blocks.iter().map(|(addr, blk)| (*addr, *blk))
+    }
+
+    pub fn has_successors(&self, block: CodeBlockId) -> bool {
+        self.edges
+            .binary_search_by_key(&block, |(source, _)| *source)
+            .is_ok()
+    }
+
+    pub(crate) fn edges(&self) -> impl ExactSizeIterator<Item = (CodeBlockId, CodeBlockId)> + '_ {
+        self.edges.iter().copied()
+    }
+
+    pub(crate) fn set_tail_call_sites(&mut self, sites: impl IntoIterator<Item = Address>) {
+        self.tail_call_sites.clear();
+        self.tail_call_sites.extend(sites);
+        self.tail_call_sites.sort_unstable();
+        self.tail_call_sites.dedup();
+    }
+
+    fn with_blocks(
+        mut self,
+        blocks: Vec<(Address, CodeBlockId)>,
+        edges: Vec<(CodeBlockId, CodeBlockId)>,
+        entry_block: Option<CodeBlockId>,
+    ) -> Self {
+        debug_assert!(blocks.is_sorted_by_key(|(address, _)| *address));
+        debug_assert!(edges.is_sorted());
+        self.blocks = blocks;
+        self.edges = edges;
+        self.entry_block = entry_block.unwrap_or(CodeBlockId::INVALID);
+        self
+    }
+
+    pub fn is_non_returning(&self) -> bool {
+        self.properties.contains(FunctionProperties::NON_RETURNING)
+    }
+
+    pub fn is_thunk(&self) -> bool {
+        self.properties.contains(FunctionProperties::THUNK)
+    }
+
+    pub fn is_external(&self) -> bool {
+        self.properties.contains(FunctionProperties::EXTERNAL)
+    }
+
+    pub fn origin(&self) -> ReferenceOrigin {
+        self.origin
+    }
+
+    pub fn set_origin(&mut self, origin: ReferenceOrigin) {
+        self.origin = origin;
+    }
+
+    pub fn with_origin(mut self, origin: ReferenceOrigin) -> Self {
+        self.origin = origin;
+        self
+    }
+
+    pub fn is_asserted(&self) -> bool {
+        self.origin.is_asserted()
+    }
+
+    pub fn confidence(&self) -> Confidence {
+        self.confidence
+    }
+
+    pub fn set_confidence(&mut self, confidence: Confidence) {
+        self.confidence = confidence;
+    }
+
+    pub fn with_confidence(mut self, confidence: Confidence) -> Self {
+        self.confidence = confidence;
+        self
+    }
+
+    pub fn input_revision(&self) -> Revision {
+        self.input_revision
+    }
+
+    pub fn set_input_revision(&mut self, input_revision: Revision) {
+        self.input_revision = input_revision;
+    }
+
+    pub fn with_input_revision(mut self, input_revision: Revision) -> Self {
+        self.set_input_revision(input_revision);
+        self
+    }
+
+    pub fn properties(&self) -> FunctionProperties {
+        self.properties
+    }
+
+    pub fn set_properties(&mut self, properties: FunctionProperties) {
+        self.properties = properties;
+    }
+
+    pub fn with_properties(mut self, properties: FunctionProperties) -> Self {
+        self.set_properties(properties);
+        self
+    }
+
+    pub fn clear_name(&mut self) {
+        self.name = None;
     }
 
     pub fn is_exit_block(&self, block: CodeBlockId) -> bool {
@@ -186,31 +292,6 @@ impl Function {
         }
     }
 
-    pub fn with_blocks(mut self, blocks: impl IntoIterator<Item = (Address, CodeBlockId)>) -> Self {
-        self.add_blocks(blocks);
-        self
-    }
-
-    fn with_body(
-        mut self,
-        blocks: Vec<(Address, CodeBlockId)>,
-        edges: Vec<(CodeBlockId, CodeBlockId)>,
-        entry_block: Option<CodeBlockId>,
-    ) -> Self {
-        debug_assert!(blocks.is_sorted_by_key(|(address, _)| *address));
-        debug_assert!(edges.is_sorted());
-        self.blocks = blocks;
-        self.edges = edges;
-        self.entry_block = entry_block.unwrap_or(CodeBlockId::INVALID);
-        self
-    }
-
-    pub fn blocks(
-        &self,
-    ) -> impl DoubleEndedIterator<Item = (Address, CodeBlockId)> + ExactSizeIterator + '_ {
-        self.blocks.iter().map(|(addr, blk)| (*addr, *blk))
-    }
-
     pub fn blocks_at(&self, address: Address) -> impl ExactSizeIterator<Item = CodeBlockId> + '_ {
         let start = self
             .blocks
@@ -230,16 +311,6 @@ impl Function {
         self.edges[start..end]
             .iter()
             .map(|(_, successor)| *successor)
-    }
-
-    pub fn has_successors(&self, block: CodeBlockId) -> bool {
-        self.edges
-            .binary_search_by_key(&block, |(source, _)| *source)
-            .is_ok()
-    }
-
-    pub(crate) fn edges(&self) -> impl ExactSizeIterator<Item = (CodeBlockId, CodeBlockId)> + '_ {
-        self.edges.iter().copied()
     }
 
     fn reachable_blocks(
@@ -280,30 +351,6 @@ impl Function {
         sites
     }
 
-    fn unconditional_branch_sites_to(
-        &self,
-        blocks: &CodeBlockTable,
-        sources: &FxHashSet<CodeBlockId>,
-        target: Address,
-    ) -> Option<Vec<Address>> {
-        let mut sites = Vec::new();
-        for &source in sources {
-            let block = blocks
-                .get_by_id(source)
-                .expect("function block must exist in the code block table");
-            let before = sites.len();
-            sites.extend(block.flow_targets().filter_map(|flow| {
-                (flow.kind() == FlowKind::Branch && flow.to() == target).then_some(flow.from())
-            }));
-            if sites.len() == before {
-                return None;
-            }
-        }
-        sites.sort_unstable();
-        sites.dedup();
-        Some(sites)
-    }
-
     fn tail_call_sources_to(
         &self,
         blocks: &CodeBlockTable,
@@ -327,7 +374,7 @@ impl Function {
         sources
     }
 
-    fn clear_body_analysis(&mut self) {
+    fn clear_analysis(&mut self) {
         self.frame = FunctionFrame::default();
         self.properties = FunctionProperties::NONE;
     }
@@ -390,9 +437,9 @@ impl Function {
             })
             .collect::<FxHashSet<_>>();
         let parent_boundary =
-            self.unconditional_branch_sites_to(blocks, &parent_boundary_sources, split_entry)?;
+            unconditional_branch_sites_to(blocks, &parent_boundary_sources, split_entry)?;
         let child_boundary =
-            self.unconditional_branch_sites_to(blocks, &child_boundary_sources, self.entry)?;
+            unconditional_branch_sites_to(blocks, &child_boundary_sources, self.entry)?;
 
         let mut parent_tail_calls = self.tail_call_sites_in(blocks, &parent_members);
         parent_tail_calls.extend(parent_boundary);
@@ -401,13 +448,13 @@ impl Function {
 
         let mut parent = self
             .clone()
-            .with_body(parent_blocks, parent_edges, Some(current_entry));
-        parent.clear_body_analysis();
+            .with_blocks(parent_blocks, parent_edges, Some(current_entry));
+        parent.clear_analysis();
         parent.set_tail_call_sites(parent_tail_calls);
         let mut child = Self::new(FunctionId::INVALID, split_entry)
             .with_origin(self.origin)
             .with_confidence(self.confidence)
-            .with_body(child_blocks, child_edges, Some(new_entry));
+            .with_blocks(child_blocks, child_edges, Some(new_entry));
         child.set_tail_call_sites(child_tail_calls);
         Some((parent, child))
     }
@@ -448,17 +495,10 @@ impl Function {
         tail_call_sites.extend(source.tail_call_sites_in(blocks, &member_ids));
         tail_call_sites.retain(|site| !internalised.contains(site));
 
-        let mut merged = self.clone().with_body(members, edges, Some(target_entry));
-        merged.clear_body_analysis();
+        let mut merged = self.clone().with_blocks(members, edges, Some(target_entry));
+        merged.clear_analysis();
         merged.set_tail_call_sites(tail_call_sites);
         Some(merged)
-    }
-
-    pub(crate) fn set_tail_call_sites(&mut self, sites: impl IntoIterator<Item = Address>) {
-        self.tail_call_sites.clear();
-        self.tail_call_sites.extend(sites);
-        self.tail_call_sites.sort_unstable();
-        self.tail_call_sites.dedup();
     }
 
     pub(crate) fn classify_flow_target(&self, mut target: FlowTarget) -> FlowTarget {
@@ -475,20 +515,19 @@ impl Function {
         blocks: &'a CodeBlockTable,
     ) -> impl Iterator<Item = FlowTarget> + 'a {
         let mut ids = self.blocks();
-        let mut block = None::<CodeBlockRef<'a>>;
-        let mut cursor = CodeBlockFlowCursor::default();
+        let mut pending = SmallVec::<[FlowTarget; 2]>::new().into_iter();
 
-        std::iter::from_fn(move || {
+        iter::from_fn(move || {
             loop {
-                if let Some(current) = block.as_ref()
-                    && let Some(target) = current.next_flow_target(&mut cursor)
-                {
+                if let Some(target) = pending.next() {
                     return Some(self.classify_flow_target(target));
                 }
 
-                block = ids.find_map(|(_, id)| blocks.get_by_id(id));
-                cursor = CodeBlockFlowCursor::default();
-                block.as_ref()?;
+                let block = ids.find_map(|(_, id)| blocks.get_by_id(id))?;
+                pending = block
+                    .flow_targets()
+                    .collect::<SmallVec<[FlowTarget; 2]>>()
+                    .into_iter();
             }
         })
     }
@@ -527,83 +566,38 @@ impl Function {
         self.entry_block = CodeBlockId::INVALID;
     }
 
-    pub fn is_non_returning(&self) -> bool {
-        self.properties.contains(FunctionProperties::NON_RETURNING)
-    }
-
     pub fn mark_non_returning(&mut self) {
         self.properties.insert(FunctionProperties::NON_RETURNING);
-    }
-
-    pub fn is_thunk(&self) -> bool {
-        self.properties.contains(FunctionProperties::THUNK)
     }
 
     pub fn mark_thunk(&mut self) {
         self.properties.insert(FunctionProperties::THUNK);
     }
 
-    pub fn is_external(&self) -> bool {
-        self.properties.contains(FunctionProperties::EXTERNAL)
-    }
-
     pub fn mark_external(&mut self) {
         self.properties.insert(FunctionProperties::EXTERNAL);
     }
+}
 
-    pub fn origin(&self) -> ReferenceOrigin {
-        self.origin
+fn unconditional_branch_sites_to(
+    blocks: &CodeBlockTable,
+    sources: &FxHashSet<CodeBlockId>,
+    target: Address,
+) -> Option<Vec<Address>> {
+    let mut sites = Vec::new();
+    for &source in sources {
+        let block = blocks
+            .get_by_id(source)
+            .expect("function block must exist in the code block table");
+        let before = sites.len();
+        sites.extend(block.flow_targets().filter_map(|flow| {
+            (flow.kind() == FlowKind::Branch && flow.to() == target).then_some(flow.from())
+        }));
+        if sites.len() == before {
+            return None;
+        }
     }
-
-    pub fn set_origin(&mut self, origin: ReferenceOrigin) {
-        self.origin = origin;
-    }
-
-    pub fn with_origin(mut self, origin: ReferenceOrigin) -> Self {
-        self.origin = origin;
-        self
-    }
-
-    pub fn is_asserted(&self) -> bool {
-        self.origin.is_asserted()
-    }
-
-    pub fn confidence(&self) -> Confidence {
-        self.confidence
-    }
-
-    pub fn set_confidence(&mut self, confidence: Confidence) {
-        self.confidence = confidence;
-    }
-
-    pub fn with_confidence(mut self, confidence: Confidence) -> Self {
-        self.confidence = confidence;
-        self
-    }
-
-    pub fn input_revision(&self) -> Revision {
-        self.input_revision
-    }
-
-    pub fn set_input_revision(&mut self, input_revision: Revision) {
-        self.input_revision = input_revision;
-    }
-
-    pub fn with_input_revision(mut self, input_revision: Revision) -> Self {
-        self.set_input_revision(input_revision);
-        self
-    }
-
-    pub fn properties(&self) -> FunctionProperties {
-        self.properties
-    }
-
-    pub fn set_properties(&mut self, properties: FunctionProperties) {
-        self.properties = properties;
-    }
-
-    pub fn with_properties(mut self, properties: FunctionProperties) -> Self {
-        self.set_properties(properties);
-        self
-    }
+    sites.sort_unstable();
+    sites.dedup();
+    Some(sites)
 }

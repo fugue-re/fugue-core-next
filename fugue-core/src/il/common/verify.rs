@@ -1,8 +1,8 @@
 use thiserror::Error;
 
 use crate::il::common::{
-    IlBlockArgId, IlBlockId, IlCsr, IlDominance, IlEdgeKinds, IlError, IlOpId, IlSsaDef,
-    IlValueId, SsaIl,
+    IlBlockArgId, IlBlockId, IlCsr, IlDominance, IlEdgeKinds, IlError, IlOpId, IlSsaDef, IlValueId,
+    SsaIl,
 };
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -256,11 +256,12 @@ where
         operation: IlOpId,
         operation_index: usize,
     ) -> Result<(), SsaVerifyError> {
-        let operands = self.ir.op_operands(operation).ok_or(
-            SsaVerifyError::InvalidOpPlacement {
-                operation: operation.value(),
-            },
-        )?;
+        let operands =
+            self.ir
+                .op_operands(operation)
+                .ok_or(SsaVerifyError::InvalidOpPlacement {
+                    operation: operation.value(),
+                })?;
         for &operand in operands {
             let definition = self
                 .ir

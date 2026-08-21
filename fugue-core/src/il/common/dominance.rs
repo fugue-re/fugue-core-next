@@ -249,7 +249,6 @@ impl IlDominanceFrontier {
 
         Ok(IlPhiPlacement::new(phis))
     }
-
 }
 
 impl<I: ControlFlowIl> IlAnalysis<I> for IlDominanceFrontier {

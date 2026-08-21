@@ -97,7 +97,6 @@ impl MCodeBuilder {
         self
     }
 
-
     pub fn emitter(&mut self) -> MCodeEmitter<'_> {
         MCodeEmitter { builder: self }
     }
@@ -123,8 +122,7 @@ impl MCodeBuilder {
         let start = self.values.len();
         let operation = IlOpId::try_from_index(self.operations.len())?;
         for width in widths {
-            self.values
-                .push(MCodeValue::op_result(width, operation));
+            self.values.push(MCodeValue::op_result(width, operation));
         }
 
         IlIndexRange::new(start, self.values.len())

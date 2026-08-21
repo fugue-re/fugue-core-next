@@ -74,7 +74,6 @@ impl ECodeRenameState {
             }
         }
     }
-
 }
 
 #[derive(Debug)]

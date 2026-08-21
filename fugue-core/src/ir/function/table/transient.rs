@@ -31,6 +31,53 @@ impl FunctionTable {
         self.index.allocator.pending_id(offset)
     }
 
+    pub fn get_by_id(&self, id: Id<Function>) -> Option<&Function> {
+        self.entries
+            .get(id.index())?
+            .as_ref()
+            .filter(|function| function.id() == id)
+    }
+
+    pub fn get_by_id_mut(&mut self, id: Id<Function>) -> Option<&mut Function> {
+        self.entries
+            .get_mut(id.index())?
+            .as_mut()
+            .filter(|function| function.id() == id)
+    }
+
+    pub fn get_by_address_mut(&mut self, addr: Address) -> Option<&mut Function> {
+        let id = *self.index.addresses.get(&addr)?;
+        self.get_by_id_mut(id)
+    }
+
+    pub fn contains(&self, addr: Address) -> bool {
+        self.index.addresses.contains_key(&addr)
+    }
+
+    pub fn addresses(&self) -> impl Iterator<Item = Address> + '_ {
+        self.index.addresses.keys().copied()
+    }
+
+    pub(crate) fn get_by_block_id(&self, block: CodeBlockId) -> IdSet<Function> {
+        self.index.get_by_block_id(block)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Function> + '_ {
+        self.entries.iter().filter_map(Option::as_ref)
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Function> + '_ {
+        self.entries.iter_mut().filter_map(Option::as_mut)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.index.addresses.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.index.addresses.len()
+    }
+
     pub(crate) fn publish_reservations(&mut self, reservations: &[FunctionId]) {
         let mut required = self.entries.len();
         for &id in reservations {
@@ -123,28 +170,9 @@ impl FunctionTable {
         Ok((id, value))
     }
 
-    pub fn get_by_id(&self, id: Id<Function>) -> Option<&Function> {
-        self.entries
-            .get(id.index())?
-            .as_ref()
-            .filter(|function| function.id() == id)
-    }
-
     pub fn get_by_address(&self, addr: Address) -> Option<&Function> {
         let id = *self.index.addresses.get(&addr)?;
         self.get_by_id(id)
-    }
-
-    pub fn get_by_id_mut(&mut self, id: Id<Function>) -> Option<&mut Function> {
-        self.entries
-            .get_mut(id.index())?
-            .as_mut()
-            .filter(|function| function.id() == id)
-    }
-
-    pub fn get_by_address_mut(&mut self, addr: Address) -> Option<&mut Function> {
-        let id = *self.index.addresses.get(&addr)?;
-        self.get_by_id_mut(id)
     }
 
     pub fn modify_by_id<R>(
@@ -192,14 +220,6 @@ impl FunctionTable {
         true
     }
 
-    pub fn contains(&self, addr: Address) -> bool {
-        self.index.addresses.contains_key(&addr)
-    }
-
-    pub fn addresses(&self) -> impl Iterator<Item = Address> + '_ {
-        self.index.addresses.keys().copied()
-    }
-
     pub fn addresses_in_range<R>(
         &self,
         space: AddressSpaceId,
@@ -213,25 +233,5 @@ impl FunctionTable {
             .addresses
             .range((start, end))
             .map(|(address, _)| *address)
-    }
-
-    pub(crate) fn get_by_block_id(&self, block: CodeBlockId) -> IdSet<Function> {
-        self.index.get_by_block_id(block)
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &Function> + '_ {
-        self.entries.iter().filter_map(Option::as_ref)
-    }
-
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Function> + '_ {
-        self.entries.iter_mut().filter_map(Option::as_mut)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.index.addresses.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.index.addresses.len()
     }
 }

@@ -204,4 +204,3 @@ impl ECodeOp {
         self.address_space = None;
     }
 }
-

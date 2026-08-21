@@ -37,12 +37,7 @@ impl BlockSuccessors {
             .end()
             .checked_sub(1)
             .filter(|index| *index >= range.start())
-            .and_then(|index| {
-                source
-                    .ops()
-                    .get(index)
-                    .map(|operation| (index, operation))
-            });
+            .and_then(|index| source.ops().get(index).map(|operation| (index, operation)));
 
         let mut successors = Self::default();
         match terminal {
@@ -59,12 +54,7 @@ impl BlockSuccessors {
                     (true, None) => IlEdgeKinds::TAKEN | IlEdgeKinds::FALL_THROUGH,
                 };
                 let taken_arm = mapper
-                    .internal_target(
-                        source,
-                        source_block.ops(),
-                        operation_index,
-                        operation,
-                    )
+                    .internal_target(source, source_block.ops(), operation_index, operation)
                     .and_then(|target| refined_target(first_block, ranges, target))
                     .or_else(|| {
                         external_target(source, operation, original_successors, first_blocks)
@@ -742,9 +732,7 @@ mod test {
         let insert = lifted
             .expressions()
             .iter()
-            .find(|expression| {
-                expression.kind() == PCodeToECodeExprKind::Op(ECodeOpcode::Insert)
-            })
+            .find(|expression| expression.kind() == PCodeToECodeExprKind::Op(ECodeOpcode::Insert))
             .expect("partial write should insert into the root");
 
         assert_eq!(register_reads.len(), 1);

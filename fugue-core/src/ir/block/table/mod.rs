@@ -21,16 +21,16 @@ pub(crate) const ATTRIBUTE_CODE_BLOCK_CACHE_SIZE: &str = "storage.entities.code_
 pub(crate) const DEFAULT_CODE_BLOCK_CACHE_BYTES: usize = 8 * 1024 * 1024;
 
 mod persistent;
-mod transient;
-
 use persistent::CodeBlockTable as PersistentCodeBlockTable;
+
+mod transient;
 use transient::CodeBlockTable as TransientCodeBlockTable;
 
 const CODE_BLOCK_TABLE_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 struct CodeBlockTableHeader {
-    version: u32,
+    format_version: u32,
 }
 
 impl Entity for CodeBlockTableHeader {
@@ -100,6 +100,10 @@ impl CodeBlockIdsByStart {
         }
     }
 
+    pub(in crate::ir) fn contains(&self, address: Address) -> bool {
+        self.first.contains_key(&address)
+    }
+
     fn push(&mut self, address: Address, ids: CodeBlockIds) {
         for id in ids {
             self.insert(address, id);
@@ -115,10 +119,6 @@ impl CodeBlockIdsByStart {
                 self.insert(address, id);
             }
         }
-    }
-
-    pub(in crate::ir) fn contains(&self, address: Address) -> bool {
-        self.first.contains_key(&address)
     }
 
     pub(in crate::ir) fn ids(&self, address: Address) -> impl Iterator<Item = CodeBlockId> + '_ {
@@ -198,6 +198,27 @@ impl CodeBlockTable {
 
     pub fn new_transient() -> Self {
         Self::Transient(TransientCodeBlockTable::new())
+    }
+
+    pub fn contains(&self, addr: Address) -> bool {
+        match self {
+            Self::Persistent(table) => table.contains(addr),
+            Self::Transient(table) => table.contains(addr),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Persistent(table) => table.is_empty(),
+            Self::Transient(table) => table.is_empty(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Persistent(table) => table.len(),
+            Self::Transient(table) => table.len(),
+        }
     }
 
     pub fn flush(&self) -> Result<(), EntityStorageError> {
@@ -364,17 +385,17 @@ impl CodeBlockTable {
         }
     }
 
-    pub fn contains(&self, addr: Address) -> bool {
+    pub fn overlaps_address(
+        &self,
+        addr: Address,
+    ) -> Box<dyn Iterator<Item = CodeBlockRef<'_>> + '_> {
         match self {
-            Self::Persistent(table) => table.contains(addr),
-            Self::Transient(table) => table.contains(addr),
-        }
-    }
-
-    pub fn overlaps_address(&self, addr: Address) -> Box<dyn Iterator<Item = CodeBlockRef<'_>> + '_> {
-        match self {
-            Self::Persistent(table) => Box::new(table.overlaps_address(addr).map(EntityRef::cached)),
-            Self::Transient(table) => Box::new(table.overlaps_address(addr).map(EntityRef::borrowed)),
+            Self::Persistent(table) => {
+                Box::new(table.overlaps_address(addr).map(EntityRef::cached))
+            }
+            Self::Transient(table) => {
+                Box::new(table.overlaps_address(addr).map(EntityRef::borrowed))
+            }
         }
     }
 
@@ -384,9 +405,7 @@ impl CodeBlockTable {
     ) -> Box<dyn Iterator<Item = CodeBlockRef<'a>> + 'a> {
         match self {
             Self::Persistent(table) => Box::new(table.overlaps(range).map(EntityRef::cached)),
-            Self::Transient(table) => {
-                Box::new(table.overlaps(range).map(EntityRef::borrowed))
-            }
+            Self::Transient(table) => Box::new(table.overlaps(range).map(EntityRef::borrowed)),
         }
     }
 
@@ -394,20 +413,6 @@ impl CodeBlockTable {
         match self {
             Self::Persistent(table) => Box::new(table.iter().map(EntityRef::cached)),
             Self::Transient(table) => Box::new(table.iter().map(EntityRef::borrowed)),
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        match self {
-            Self::Persistent(table) => table.is_empty(),
-            Self::Transient(table) => table.is_empty(),
-        }
-    }
-
-    pub fn len(&self) -> usize {
-        match self {
-            Self::Persistent(table) => table.len(),
-            Self::Transient(table) => table.len(),
         }
     }
 }
@@ -418,7 +423,7 @@ impl PersistableProjectEntity for CodeBlockTable {
             Self::Persistent(_) => storage.insert(
                 &ProjectEntity::CodeBlockTable,
                 &CodeBlockTableHeader {
-                    version: CODE_BLOCK_TABLE_VERSION,
+                    format_version: CODE_BLOCK_TABLE_VERSION,
                 },
             ),
             Self::Transient(_) => Ok(()),

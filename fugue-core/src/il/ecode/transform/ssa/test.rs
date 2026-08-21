@@ -487,10 +487,7 @@ fn load_preserves_fugue_address_space() {
     assert_eq!(ir.memory_domains().len(), 1);
     assert_eq!(ir.memory_domains()[0].space(), space);
 
-    let memory = ir.values()[ir
-        .memory_operand(&ir.ops()[load_index])
-        .unwrap()
-        .index()];
+    let memory = ir.values()[ir.memory_operand(&ir.ops()[load_index]).unwrap().index()];
 
     assert_eq!(memory.width(), 0);
 }
@@ -577,8 +574,7 @@ fn load_after_store_uses_store_memory_result() {
         .iter()
         .position(|operation| operation.opcode() == ECodeOpcode::Load)
         .unwrap();
-    let store_memory =
-        IlValueId::try_from_index(ir.ops()[store_index].results().start()).unwrap();
+    let store_memory = IlValueId::try_from_index(ir.ops()[store_index].results().start()).unwrap();
     let load_operands = ir.op_operands_for(&ir.ops()[load_index]);
 
     assert_eq!(ir.memory_domains().len(), 1);

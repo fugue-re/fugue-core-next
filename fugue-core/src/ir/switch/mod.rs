@@ -111,10 +111,6 @@ impl Switch {
         self.cases.len()
     }
 
-    pub fn add_case(&mut self, case: SwitchCase) {
-        self.cases.push(case);
-    }
-
     pub fn set_cases(&mut self, cases: Vec<SwitchCase>) {
         self.cases = cases;
     }
@@ -149,14 +145,6 @@ impl Switch {
         self
     }
 
-    pub fn mark_truncated(&mut self) {
-        self.properties.insert(SwitchProperties::TRUNCATED);
-    }
-
-    pub fn mark_override(&mut self) {
-        self.properties.insert(SwitchProperties::OVERRIDE);
-    }
-
     pub fn is_override(&self) -> bool {
         self.properties.contains(SwitchProperties::OVERRIDE)
     }
@@ -167,6 +155,18 @@ impl Switch {
 
     pub fn has_default(&self) -> bool {
         self.default.is_some()
+    }
+
+    pub fn add_case(&mut self, case: SwitchCase) {
+        self.cases.push(case);
+    }
+
+    pub fn mark_truncated(&mut self) {
+        self.properties.insert(SwitchProperties::TRUNCATED);
+    }
+
+    pub fn mark_override(&mut self) {
+        self.properties.insert(SwitchProperties::OVERRIDE);
     }
 
     pub fn targets(&self) -> impl Iterator<Item = &AddressWithContext> + '_ {

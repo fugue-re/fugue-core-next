@@ -292,10 +292,7 @@ impl MCodeVerifier<'_> {
             }
 
             let uniform_operand_width = operation.opcode().has_uniform_operand_width();
-            for operand in operation
-                .operands()
-                .checked_slice(self.ir.op_operands())?
-            {
+            for operand in operation.operands().checked_slice(self.ir.op_operands())? {
                 let value = self.ir.values().get(operand.index()).ok_or_else(|| {
                     IlError::range_out_of_bounds(operand.index(), self.ir.values().len())
                 })?;
@@ -790,8 +787,7 @@ impl MCodeVerifier<'_> {
     fn verify_terminators(&self) -> Result<(), VerifyError> {
         if self.ir.graph().blocks().is_empty() {
             for (operation_index, operation) in self.ir.ops().iter().enumerate() {
-                if operation.opcode().is_terminator()
-                    && operation_index + 1 != self.ir.ops().len()
+                if operation.opcode().is_terminator() && operation_index + 1 != self.ir.ops().len()
                 {
                     let operation_id = IlOpId::try_from_index(operation_index)?;
                     return Err(VerifyError::invalid_op_placement(operation_id));
@@ -804,9 +800,7 @@ impl MCodeVerifier<'_> {
             let block_id = IlBlockId::try_from_index(block_index)?;
             for operation_index in block.ops().start()..block.ops().end() {
                 let operation = self.ir.ops()[operation_index];
-                if operation.opcode().is_terminator()
-                    && operation_index + 1 != block.ops().end()
-                {
+                if operation.opcode().is_terminator() && operation_index + 1 != block.ops().end() {
                     let operation_id = IlOpId::try_from_index(operation_index)?;
                     return Err(VerifyError::invalid_op_placement(operation_id));
                 }

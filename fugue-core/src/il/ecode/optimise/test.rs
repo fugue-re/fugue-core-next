@@ -281,10 +281,7 @@ fn fold_constants_leaves_disagreeing_block_arg_unfolded() {
         .unwrap();
     ir.rewrite(ECodeConstantFolding);
 
-    assert_eq!(
-        ir.defining_op(sum).unwrap().opcode(),
-        ECodeOpcode::Add
-    );
+    assert_eq!(ir.defining_op(sum).unwrap().opcode(), ECodeOpcode::Add);
     assert_eq!(ir.constant_value(sum), None);
 }
 
@@ -318,10 +315,7 @@ fn fold_constants_leaves_sourceless_block_arg_unfolded() {
 
     ir.rewrite(ECodeConstantFolding);
 
-    assert_eq!(
-        ir.defining_op(copied).unwrap().opcode(),
-        ECodeOpcode::Copy
-    );
+    assert_eq!(ir.defining_op(copied).unwrap().opcode(), ECodeOpcode::Copy);
     assert_eq!(ir.constant_value(copied), None);
 }
 
@@ -382,10 +376,7 @@ fn fold_constants_leaves_self_referential_loop_arg_unfolded() {
         .unwrap();
     ir.rewrite(ECodeConstantFolding);
 
-    assert_eq!(
-        ir.defining_op(sum).unwrap().opcode(),
-        ECodeOpcode::Add
-    );
+    assert_eq!(ir.defining_op(sum).unwrap().opcode(), ECodeOpcode::Add);
     assert_eq!(ir.constant_value(sum), None);
 }
 

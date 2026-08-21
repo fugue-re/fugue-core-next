@@ -87,12 +87,12 @@ impl RegisterRange {
         self.start
     }
 
-    pub const fn byte_size(&self) -> u64 {
-        self.end - self.start
-    }
-
     const fn is_empty(&self) -> bool {
         self.start == self.end
+    }
+
+    pub const fn byte_size(&self) -> u64 {
+        self.end - self.start
     }
 
     fn merge(&mut self, other: Self) -> bool {

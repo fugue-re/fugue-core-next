@@ -294,3 +294,200 @@ rule = "family_visibility_drift"
 path = "fugue-core/src/ir/symbol/table/mod.rs"
 item = "publish_prepared"
 reason = "publish visibility follows the caller: the prepared half-tie mirrors function's internal materialisation"
+
+[[exception]]
+rule = "tuple_type"
+path = "fugue-core/src/ir/insn.rs"
+reason = "the (target, kind, address) triple is a transient iteration view over persisted targets; a named record would restate InsnTarget"
+
+[[exception]]
+rule = "tuple_type"
+path = "fugue-core/src/analysis/switch/idiom/mod.rs"
+reason = "the (table, index, index_before) triple is match-internal plumbing between idiom tracing steps"
+
+[[exception]]
+rule = "tuple_type"
+path = "fugue-core/src/ir/symbol/table"
+reason = "the symbol iteration triple is the same transient view across facade and worker layers; a named record would restate SymbolEntry"
+
+[[exception]]
+rule = "index_conversion_churn"
+path = "fugue-core/src/analysis/switch/idiom/recovery.rs"
+item = "recover_operations"
+reason = "the recovered-window arithmetic bridges raw pcode indices, byte offsets and id spaces; each conversion is the boundary"
+
+[[exception]]
+rule = "accessor_family"
+path = "fugue-core/src/ir/address.rs"
+item = "with_shift"
+reason = "construction-phase fluent setter; the value is configured once while building, not mutated"
+
+[[exception]]
+rule = "accessor_family"
+path = "fugue-core/src/ir/function"
+item = "with_origin"
+reason = "construction-phase fluent setter; the value is configured once while building, not mutated"
+
+[[exception]]
+rule = "accessor_family"
+path = "fugue-core/src/ir/function"
+item = "with_confidence"
+reason = "construction-phase fluent setter; the value is configured once while building, not mutated"
+
+[[exception]]
+rule = "accessor_family"
+path = "fugue-core/src/ir/function/mod.rs"
+item = "with_blocks"
+reason = "construction-phase fluent setter; the value is configured once while building, not mutated"
+
+[[exception]]
+rule = "accessor_family"
+path = "fugue-core/src/ir/reference/mod.rs"
+item = "with_origin"
+reason = "construction-phase fluent setter; the value is configured once while building, not mutated"
+
+[[exception]]
+rule = "allocating_getter"
+path = "fugue-core/src/ir/address.rs"
+reason = "start_address and end_address derive small owned addresses from the range bounds; the accessor form is the established idiom"
+
+[[exception]]
+rule = "allocating_getter"
+path = "fugue-core/src/ir/block/mod.rs"
+reason = "address_range and coverage assemble small owned range views at one natural point; not repeated accessors"
+
+[[exception]]
+rule = "associated_namespace_helper"
+path = "fugue-core/src/ir/block/table/persistent.rs"
+reason = "write-batch builders group on their table type deliberately; the batch is the subject, the table names the domain"
+
+[[exception]]
+rule = "associated_namespace_helper"
+path = "fugue-core/src/ir/function/table/persistent.rs"
+reason = "write-batch builders group on their table type deliberately; the batch is the subject, the table names the domain"
+
+[[exception]]
+rule = "associated_namespace_helper"
+path = "fugue-core/src/ir/symbol/table/persistent.rs"
+reason = "write-batch builders group on their table type deliberately; the batch is the subject, the table names the domain"
+
+[[exception]]
+rule = "associated_namespace_helper"
+path = "fugue-core/src/ir/symbol/table/transient.rs"
+reason = "write-batch builders group on their table type deliberately; the batch is the subject, the table names the domain"
+
+[[exception]]
+rule = "associated_namespace_helper"
+path = "fugue-core/src/ir/function/mod.rs"
+reason = "write-batch builders group on their table type deliberately; the batch is the subject, the table names the domain"
+
+[[exception]]
+rule = "semantic_newtype_bypass"
+path = "fugue-core/src/ir/symbol/table/persistent.rs"
+item = "selector"
+reason = "the loader key packs the selector at the storage boundary and reconstructs the newtype on read; this is the sanctioned conversion point"
+
+[[exception]]
+rule = "rejected_term"
+path = "fugue-core/src/ir/mod.rs"
+item = "crate::ir::cfg"
+reason = "cfg names the control-flow-graph module, not a config abbreviation"
+
+[[exception]]
+rule = "parameter_name_drift"
+path = "fugue-core/src/ir/address.rs"
+reason = "binary-operator and merge shapes take `other`/`base`; the prevailing single-value names do not fit pairwise operations"
+
+[[exception]]
+rule = "parameter_name_drift"
+path = "fugue-core/src/ir/block/table/mod.rs"
+reason = "merge and remap shapes name their pairwise operands; the prevailing single-value names do not fit"
+
+[[exception]]
+rule = "parameter_name_drift"
+path = "fugue-core/src/ir/function/mod.rs"
+reason = "merge shapes take `source`; the prevailing single-value name does not fit pairwise operations"
+
+[[exception]]
+rule = "parameter_name_drift"
+path = "fugue-core/src/ir/function/table/mod.rs"
+reason = "the staging layer receives its backing table; `functions` names the owner's field, not this parameter"
+
+[[exception]]
+rule = "parameter_name_drift"
+path = "fugue-core/src/ir/mod.rs"
+reason = "British spelling adopted here first; the prevailing spelling flips as remaining zones are calibrated"
+
+[[exception]]
+rule = "vague_noun"
+path = "fugue-core/src/ir/persistent.rs"
+reason = "persistence machinery genuinely models opaque state records"
+
+[[exception]]
+rule = "vague_noun"
+path = "fugue-core/src/ir/switch/mod.rs"
+item = "data"
+reason = "the switch payload is genuinely uninterpreted data at this layer"
+
+[[exception]]
+rule = "item_order"
+path = "fugue-core/src/ir"
+reason = "module-local `use` after `mod` declarations is the established layout in ir table modules"
+
+[[exception]]
+rule = "large_inherent_impl"
+path = "fugue-core/src/ir"
+reason = "reviewed cohesive owners; splitting the entity and table impls was considered and rejected"
+
+[[exception]]
+rule = "parameter_order_drift"
+path = "fugue-core/src/ir/reference/index/mod.rs"
+item = "new"
+reason = "the key type is target-major by design; its constructor mirrors the key layout"
+
+[[exception]]
+rule = "parameter_clump"
+path = "fugue-core/src/ir/block/table/mod.rs"
+reason = "the shared triple is the table worker interface; a carrier struct would restate the facade"
+
+[[exception]]
+rule = "parameter_clump"
+path = "fugue-core/src/ir/symbol/table/transient.rs"
+reason = "the shared quad is the symbol worker interface; a carrier struct would restate the facade"
+
+[[exception]]
+rule = "trivial_public_wrapper"
+path = "fugue-core/src/ir/address.rs"
+item = "new"
+reason = "the conversion-accepting constructor is the public face; into-forwarding is the point"
+
+[[exception]]
+rule = "companion_location"
+path = "fugue-core/src/ir/symbol/table/transient.rs"
+item = "SymbolEntryIter"
+reason = "the iterator is worker-layer plumbing; it lives with the storage it walks"
+
+[[exception]]
+rule = "field_forwarder"
+path = "fugue-core/src/ir/problem/table/persistent.rs"
+reason = "storage facade: the table is the public custodian of its index"
+
+[[exception]]
+rule = "field_forwarder"
+path = "fugue-core/src/ir/switch/table/persistent.rs"
+reason = "storage facade: the table is the public custodian of its index"
+
+[[exception]]
+rule = "synonym_cluster"
+path = "fugue-core/src/ir/function/incomplete.rs"
+reason = "add registers a domain fact with its owner (a block edge); insert places into a keyed store"
+
+[[exception]]
+rule = "synonym_cluster"
+path = "fugue-core/src/analysis/function/recovery/analysis.rs"
+reason = "add registers a domain fact with its owner (candidates, avoids, hints); insert places into a keyed store"
+
+[[exception]]
+rule = "synonym_cluster"
+path = "fugue-core/src/loader/image.rs"
+reason = "add registers a domain fact with its owner (a function hint); insert places into a keyed store"

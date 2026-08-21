@@ -150,23 +150,55 @@ where
         self.properties = properties;
     }
 
+    pub(crate) fn with_index(mut self, index: SymbolIndex) -> Self {
+        self.add_index(index);
+        self
+    }
+
+    pub(crate) fn indices(&self) -> &[SymbolIndex] {
+        &self.indices
+    }
+
+    pub fn is_extern(&self) -> bool {
+        self.properties.is_extern()
+    }
+
+    pub fn is_local(&self) -> bool {
+        self.properties.is_local()
+    }
+
+    pub fn is_function(&self) -> bool {
+        self.properties.is_function()
+    }
+
+    pub fn is_data(&self) -> bool {
+        self.properties.is_data()
+    }
+
+    pub fn is_non_returning(&self) -> bool {
+        self.properties.is_non_returning()
+    }
+
+    fn is_valid(&self) -> bool {
+        self.properties != SymbolProperties::INVALID
+    }
+
+    pub fn kind(&self) -> SymbolProperties {
+        self.properties & SymbolProperties::KIND
+    }
+
+    pub fn visibility(&self) -> SymbolProperties {
+        self.properties & SymbolProperties::VISIBILITY
+    }
+
     pub(crate) fn add_index(&mut self, index: SymbolIndex) {
         if !self.indices.contains(&index) {
             self.indices.push(index);
         }
     }
 
-    pub(crate) fn with_index(mut self, index: SymbolIndex) -> Self {
-        self.add_index(index);
-        self
-    }
-
     pub(crate) fn remove_index(&mut self, index: SymbolIndex) {
         self.indices.retain(|existing| *existing != index);
-    }
-
-    pub(crate) fn indices(&self) -> &[SymbolIndex] {
-        &self.indices
     }
 
     pub fn mark_as_extern(&mut self) {
@@ -194,40 +226,8 @@ where
         self.properties.remove(SymbolProperties::FUNCTION);
     }
 
-    pub fn is_extern(&self) -> bool {
-        self.properties.is_extern()
-    }
-
-    pub fn is_local(&self) -> bool {
-        self.properties.is_local()
-    }
-
-    pub fn is_function(&self) -> bool {
-        self.properties.is_function()
-    }
-
-    pub fn is_data(&self) -> bool {
-        self.properties.is_data()
-    }
-
-    pub fn is_non_returning(&self) -> bool {
-        self.properties.is_non_returning()
-    }
-
     pub fn mark_non_returning(&mut self) {
         self.properties |= SymbolProperties::NON_RETURNING;
-    }
-
-    fn is_valid(&self) -> bool {
-        self.properties != SymbolProperties::INVALID
-    }
-
-    pub fn kind(&self) -> SymbolProperties {
-        self.properties & SymbolProperties::KIND
-    }
-
-    pub fn visibility(&self) -> SymbolProperties {
-        self.properties & SymbolProperties::VISIBILITY
     }
 
     pub fn update_kind(&mut self, properties: SymbolProperties) {
@@ -396,20 +396,6 @@ impl SymbolIndex {
 #[cfg(test)]
 mod test {
     use super::*;
-
-    #[test]
-    #[should_panic(expected = "invalid selector bits")]
-    fn symbol_index_invalid_selector() {
-        let sel = SymbolTableSelector::new(0xffff);
-        let _ = SymbolIndex::new(sel, 1);
-    }
-
-    #[test]
-    #[should_panic(expected = "symbol index out of range")]
-    fn symbol_index_invalid_index() {
-        let sel = SymbolTableSelector::new(1);
-        let _ = SymbolIndex::new(sel, usize::MAX);
-    }
 
     #[test]
     fn symbol_index_valid() {

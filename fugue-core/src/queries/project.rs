@@ -240,10 +240,6 @@ impl<'p> ProjectQuery<'p> {
         Self::page(callees, limit)
     }
 
-    fn limit(limit: usize) -> usize {
-        limit.clamp(1, MAX_QUERY_PAGE_SIZE)
-    }
-
     fn push_ordered_group<T>(rows: &mut Vec<T>, group: &mut Vec<T>, after: Option<T>, limit: usize)
     where
         T: Copy + Ord,
@@ -267,7 +263,7 @@ impl<'p> ProjectQuery<'p> {
         K: Copy + Eq,
         T: Clone + Copy + Ord,
     {
-        let limit = Self::limit(limit);
+        let limit = limit.clamp(1, MAX_QUERY_PAGE_SIZE);
         let mut rows = Vec::with_capacity(limit + 1);
         let mut group = Vec::new();
         let mut current_key = None;
@@ -304,7 +300,7 @@ impl<'p> ProjectQuery<'p> {
         limit: usize,
         cursor: impl FnOnce(&T) -> C,
     ) -> QueryPage<T, C> {
-        let limit = Self::limit(limit);
+        let limit = limit.clamp(1, MAX_QUERY_PAGE_SIZE);
         let mut entries = Vec::with_capacity(limit + 1);
         for entry in source.into_iter().take(limit + 1) {
             entries.push(entry);

@@ -202,8 +202,7 @@ impl MCodeIr {
                 | MCodeOpcode::SignExtend
                 | MCodeOpcode::Truncate
                 | MCodeOpcode::ZeroExtend => {
-                    let Some(inner) = self.op_operands_for(operation).first().copied()
-                    else {
+                    let Some(inner) = self.op_operands_for(operation).first().copied() else {
                         return current;
                     };
                     current = inner;
@@ -334,7 +333,6 @@ impl MCodeIr {
     pub const fn display_source(&self, address: Address) -> MCodeSourceDisplay<'_> {
         MCodeSourceDisplay::new(self, address)
     }
-
 }
 
 pub(crate) struct MCodeRewriter<'a> {

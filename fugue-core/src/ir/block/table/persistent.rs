@@ -148,7 +148,7 @@ impl Entity for CodeBlockSizeBucketRecord {
 
 #[derive(Debug, Clone, Copy, Default, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 struct CodeBlockSizeBucketsRecord {
-    buckets: u64,
+    bucket_bits: u64,
     full_width: bool,
 }
 
@@ -157,15 +157,19 @@ impl CodeBlockSizeBucketsRecord {
         if bucket == 64 {
             self.full_width
         } else {
-            self.buckets & (1u64 << bucket) != 0
+            self.bucket_bits & (1u64 << bucket) != 0
         }
+    }
+
+    fn is_empty(self) -> bool {
+        self.bucket_bits == 0 && !self.full_width
     }
 
     fn insert(&mut self, bucket: u8) {
         if bucket == 64 {
             self.full_width = true;
         } else {
-            self.buckets |= 1u64 << bucket;
+            self.bucket_bits |= 1u64 << bucket;
         }
     }
 
@@ -173,16 +177,12 @@ impl CodeBlockSizeBucketsRecord {
         if bucket == 64 {
             self.full_width = false;
         } else {
-            self.buckets &= !(1u64 << bucket);
+            self.bucket_bits &= !(1u64 << bucket);
         }
     }
 
     fn buckets(self) -> impl Iterator<Item = u8> {
         (0..=64).filter(move |&bucket| self.contains(bucket))
-    }
-
-    fn is_empty(self) -> bool {
-        self.buckets == 0 && !self.full_width
     }
 }
 
@@ -234,6 +234,47 @@ impl CodeBlockTable {
         self.allocator
             .pending_id(offset)
             .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub(crate) fn flush(&self) -> Result<(), EntityStorageError> {
+        self.entries.flush()
+    }
+
+    pub(crate) fn publish_upsert(&self, block: CodeBlock, encoded_size: usize) {
+        self.entries.publish_insert(block.id(), block, encoded_size);
+    }
+
+    pub(crate) fn publish_remove(&self, id: Id<CodeBlock>) {
+        self.entries.publish_remove(&id);
+    }
+
+    pub(crate) fn try_get_by_id(
+        &self,
+        id: Id<CodeBlock>,
+    ) -> Result<Option<Ref<'_>>, EntityStorageError> {
+        self.entries.try_get(&id)
+    }
+
+    pub(crate) fn contains(&self, address: Address) -> bool {
+        !self
+            .overlap_ids(address)
+            .unwrap_or_else(|error| error.into_fatal())
+            .is_empty()
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = Ref<'_>> + '_ {
+        self.entries
+            .try_iter()
+            .unwrap_or_else(|error| error.into_fatal())
+            .map(|entry| entry.unwrap_or_else(|error| error.into_fatal()).1)
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.allocator.len() == 0
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.allocator.len()
     }
 
     fn rebuild_indexes(
@@ -320,10 +361,6 @@ impl CodeBlockTable {
             start: range.start(),
             id,
         });
-    }
-
-    pub(crate) fn flush(&self) -> Result<(), EntityStorageError> {
-        self.entries.flush()
     }
 
     pub(crate) fn append_prepared_writes(
@@ -442,21 +479,6 @@ impl CodeBlockTable {
             .publish_transition(reservations, added, removed);
     }
 
-    pub(crate) fn publish_upsert(&self, block: CodeBlock, encoded_size: usize) {
-        self.entries.publish_insert(block.id(), block, encoded_size);
-    }
-
-    pub(crate) fn publish_remove(&self, id: Id<CodeBlock>) {
-        self.entries.publish_remove(&id);
-    }
-
-    pub(crate) fn try_get_by_id(
-        &self,
-        id: Id<CodeBlock>,
-    ) -> Result<Option<Ref<'_>>, EntityStorageError> {
-        self.entries.try_get(&id)
-    }
-
     fn ids_starting_at(&self, address: Address) -> Result<CodeBlockIds, EntityStorageError> {
         let start = CodeBlockStartKey::first(address.space(), address.raw_address());
         self.storage
@@ -532,13 +554,6 @@ impl CodeBlockTable {
         })
     }
 
-    pub(crate) fn contains(&self, address: Address) -> bool {
-        !self
-            .overlap_ids(address)
-            .unwrap_or_else(|error| error.into_fatal())
-            .is_empty()
-    }
-
     fn overlap_ids(
         &self,
         address: Address,
@@ -603,20 +618,5 @@ impl CodeBlockTable {
             }
         }
         Box::new(ids.into_iter().filter_map(move |id| self.entries.get(&id)))
-    }
-
-    pub(crate) fn iter(&self) -> impl Iterator<Item = Ref<'_>> + '_ {
-        self.entries
-            .try_iter()
-            .unwrap_or_else(|error| error.into_fatal())
-            .map(|entry| entry.unwrap_or_else(|error| error.into_fatal()).1)
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.allocator.len() == 0
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.allocator.len()
     }
 }

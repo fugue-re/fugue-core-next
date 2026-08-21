@@ -139,7 +139,6 @@ impl IlSsaBlockArgInputs {
     }
 }
 
-
 pub(crate) fn collect_ssa_uses<'a, T>(
     value_count: usize,
     operation_operands: impl Clone + Iterator<Item = &'a [IlValueId]>,
@@ -161,7 +160,6 @@ where
 
     IlCsr::from_entries(value_count, entries)
 }
-
 
 #[cfg(test)]
 mod test {
@@ -231,10 +229,9 @@ mod test {
             .collect::<Vec<_>>();
         let value_count = ARG_COUNT + PREDECESSOR_COUNT * ARG_COUNT;
 
-        let inputs =
-            IlSsaBlockArgInputs::new(value_count, &graph, args.iter().copied(), |edge| {
-                &edge_args[edge]
-            });
+        let inputs = IlSsaBlockArgInputs::new(value_count, &graph, args.iter().copied(), |edge| {
+            &edge_args[edge]
+        });
 
         for (position, (_, arg)) in args.iter().enumerate() {
             let expected = edge_args

@@ -152,7 +152,7 @@ impl ProblemEntity {
     }
 
     pub fn attempts(&self) -> u8 {
-        self.problem.attempts()
+        self.problem.attempt_count()
     }
 
     pub fn problem(&self) -> &Problem {

@@ -229,5 +229,4 @@ impl MCodeOp {
         self.address = None;
         self.address_space = None;
     }
-
 }

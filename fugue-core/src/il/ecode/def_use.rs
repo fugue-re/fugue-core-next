@@ -1,6 +1,5 @@
 use crate::il::common::{
-    IlAnalysis, IlCsr, IlOpId, IlSsaBlockArgInputs, IlValueId,
-    collect_ssa_uses,
+    IlAnalysis, IlCsr, IlOpId, IlSsaBlockArgInputs, IlValueId, collect_ssa_uses,
 };
 use crate::il::ecode::ECodeIr;
 

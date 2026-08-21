@@ -311,11 +311,7 @@ impl<'a> MCodeCallOutputSolver<'a> {
         block: IlBlockId,
         candidates: &mut MCodeCallOutputCandidates,
     ) -> Result<(), IlError> {
-        for (site, _) in self
-            .source
-            .graph()
-            .ops_for_block(block, self.source.ops())
-        {
+        for (site, _) in self.source.graph().ops_for_block(block, self.source.ops()) {
             self.collect_call_output_at(site, candidates)?;
         }
         Ok(())

@@ -585,7 +585,7 @@ impl ProjectTransaction<'_> {
             }
 
             for range in ranges {
-                self.project.problems.for_each_address_key_in(range, |key| {
+                self.project.problems.for_each_key_in_range(range, |key| {
                     candidates.insert(key);
                 });
             }

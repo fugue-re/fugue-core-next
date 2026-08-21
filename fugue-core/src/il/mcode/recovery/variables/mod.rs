@@ -153,11 +153,7 @@ impl MCodeVariableModel {
                         live.entry(domain).or_default().insert(value);
                     }
                 }
-                for (_, operation) in ir
-                    .graph()
-                    .ops_for_block(block, ir.ops())
-                    .rev()
-                {
+                for (_, operation) in ir.graph().ops_for_block(block, ir.ops()).rev() {
                     merge_live_ranges(ir, operation, &mut live, &mut components);
                 }
             }

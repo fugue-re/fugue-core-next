@@ -21,11 +21,7 @@ impl<'a> RawPCodeDefs<'a> {
         }
     }
 
-    pub fn defining_op(
-        &self,
-        varnode: &Varnode,
-        before: usize,
-    ) -> Option<(usize, &'a RawPCodeOp)> {
+    pub fn defining_op(&self, varnode: &Varnode, before: usize) -> Option<(usize, &'a RawPCodeOp)> {
         let index = *self
             .definitions
             .get(varnode)?

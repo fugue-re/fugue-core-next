@@ -98,7 +98,6 @@ impl MCodeVar {
             _ => None,
         }
     }
-
 }
 
 il_id!(MCodeVarId, "MCode variable");

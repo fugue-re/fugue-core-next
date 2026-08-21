@@ -50,10 +50,6 @@ impl IncompleteCodeBlock {
         &self.insn_ids
     }
 
-    pub fn push_insn(&mut self, insn_id: InsnId) {
-        self.insn_ids.push(insn_id);
-    }
-
     pub fn context(&self) -> &ContextSet {
         &self.context
     }
@@ -66,16 +62,20 @@ impl IncompleteCodeBlock {
         &self.predecessors
     }
 
+    pub fn successors(&self) -> &IdSet<IncompleteCodeBlock> {
+        &self.successors
+    }
+
+    pub fn push_insn(&mut self, id: InsnId) {
+        self.insn_ids.push(id);
+    }
+
     pub(crate) fn add_predecessor(&mut self, block_id: IncompleteCodeBlockId) {
         self.predecessors.insert(block_id);
     }
 
     pub(crate) fn remove_predecessor(&mut self, block_id: IncompleteCodeBlockId) {
         self.predecessors.remove(block_id);
-    }
-
-    pub fn successors(&self) -> &IdSet<IncompleteCodeBlock> {
-        &self.successors
     }
 
     pub(crate) fn add_successor(&mut self, block_id: IncompleteCodeBlockId) {

@@ -98,9 +98,7 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
             .ssa
             .ops_for_source(branch)
             .find(|(_, operation)| operation.opcode() == ECodeOpcode::BranchIndirect)
-            .and_then(|(_, operation)| {
-                self.ssa.op_operands_for(operation).first().copied()
-            })?;
+            .and_then(|(_, operation)| self.ssa.op_operands_for(operation).first().copied())?;
         context.apply(branch, insn_resolver.context_mut());
         if let Some(layout) = self.table_layout(target) {
             return self.recover_loaded(

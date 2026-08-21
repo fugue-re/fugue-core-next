@@ -4,7 +4,7 @@ use crate::il::common::IlArtefact;
 use crate::il::pcode::PCodeIr;
 use crate::ir::{
     Address, AddressRangeSet, CodeBlockId, Function, FunctionId, FunctionProperties,
-    IncompleteFunction, IncompleteFunctionError, NormalisedFunctionRecord, ProblemKind, Reference,
+    FunctionRecord, IncompleteFunction, IncompleteFunctionError, ProblemKind, Reference,
     ReferenceKind, ReferenceOrigin, StagedFunctionChangeRecord,
 };
 use crate::project::{ChangeRecord, FunctionChangeKind, ProjectError};
@@ -39,7 +39,7 @@ impl ProjectTransaction<'_> {
 
     fn stage_function_batch(
         &mut self,
-        functions: impl IntoIterator<Item = Result<NormalisedFunctionRecord, IncompleteFunctionError>>,
+        functions: impl IntoIterator<Item = Result<FunctionRecord, IncompleteFunctionError>>,
     ) -> Result<(), ProjectError> {
         let functions = functions.into_iter();
         let expected = functions.size_hint().0;
@@ -69,7 +69,7 @@ impl ProjectTransaction<'_> {
 
     fn stage_normalised_function(
         &mut self,
-        function: NormalisedFunctionRecord,
+        function: FunctionRecord,
     ) -> Result<StagedFunctionReferenceRecord, ProjectError> {
         let entry = function.entry();
         let record = self.project.functions.stage_materialisation(

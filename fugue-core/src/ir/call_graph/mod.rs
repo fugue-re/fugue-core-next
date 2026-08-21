@@ -1,21 +1,24 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::ops::Bound;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use parking_lot::{ArcRwLockReadGuard, RawRwLock, RwLock};
 
-use crate::ir::{Address, CodeBlockTable, Function, FunctionRef, IndexMetadata};
+use crate::ir::{Address, CodeBlockTable, Function, FunctionRef};
 use crate::storage::EntityStorage;
 use crate::storage::entities::schema::{
     ENTITY_CALL_GRAPH_EDGE_ID, ENTITY_KEY_CALL_GRAPH_FORWARD_ID, ENTITY_KEY_CALL_GRAPH_INVERSE_ID,
 };
 use crate::storage::entities::{
-    Entity, EntityCache, EntityId, EntityKey, EntityKeyCodec, EntityKeyId, EntityStorageError,
-    EntityWrite, EntityWriteBatch, ProjectEntity, WriteBackWorker,
+    Entity, EntityId, EntityKey, EntityKeyCodec, EntityKeyId, EntityStorageError, EntityWrite,
+    EntityWriteBatch, WriteBackWorker,
 };
 use crate::types::Revision;
-use crate::types::common::{cursor_bound, cursor_bound_or_minimum};
+
+mod persistent;
+use persistent::CallGraphIndex as PersistentCallGraphIndex;
+
+mod transient;
+use transient::CallGraphIndex as TransientCallGraphIndex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CallGraphEdgeKey {
@@ -28,16 +31,16 @@ impl CallGraphEdgeKey {
         Self { source, target }
     }
 
+    fn minimum_for(source: Address) -> Self {
+        Self::new(source, Address::MINIMUM)
+    }
+
     pub fn source(&self) -> Address {
         self.source
     }
 
     pub fn target(&self) -> Address {
         self.target
-    }
-
-    fn minimum_for(source: Address) -> Self {
-        Self::new(source, Address::MINIMUM)
     }
 }
 
@@ -59,14 +62,18 @@ impl EntityKey for CallGraphEdgeKey {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct InverseCallGraphEdgeKey {
+pub(crate) struct InverseCallGraphEdgeKey {
     callee: Address,
     caller: Address,
 }
 
 impl InverseCallGraphEdgeKey {
-    fn new(callee: Address, caller: Address) -> Self {
+    fn new(caller: Address, callee: Address) -> Self {
         Self { callee, caller }
+    }
+
+    fn minimum_for(callee: Address) -> Self {
+        Self::new(Address::MINIMUM, callee)
     }
 
     fn callee(&self) -> Address {
@@ -76,17 +83,13 @@ impl InverseCallGraphEdgeKey {
     fn caller(&self) -> Address {
         self.caller
     }
-
-    fn minimum_for(callee: Address) -> Self {
-        Self::new(callee, Address::MINIMUM)
-    }
 }
 
 impl EntityKeyCodec for InverseCallGraphEdgeKey {
     fn decode(input: &mut &[u8]) -> Option<Self> {
         let callee = Address::decode(input)?;
         let caller = Address::decode(input)?;
-        Some(Self::new(callee, caller))
+        Some(Self::new(caller, callee))
     }
 
     fn encode(&self, output: &mut impl Extend<u8>) {
@@ -100,99 +103,15 @@ impl EntityKey for InverseCallGraphEdgeKey {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-struct CallGraphEdgeRecord;
+pub(crate) struct CallGraphEdgeRecord;
 
 impl Entity for CallGraphEdgeRecord {
     const ID: EntityId = ENTITY_CALL_GRAPH_EDGE_ID;
 }
 
-#[derive(Clone)]
-pub struct CallGraphIndex {
-    backing: CallGraphIndexBacking,
-}
-
-#[derive(Clone)]
-enum CallGraphIndexBacking {
-    Persistent {
-        forward: EntityCache<CallGraphEdgeKey, CallGraphEdgeRecord>,
-        inverse: EntityCache<InverseCallGraphEdgeKey, CallGraphEdgeRecord>,
-        storage: EntityStorage,
-    },
-    Transient(Arc<RwLock<TransientCallGraphIndex>>),
-}
-
-#[derive(Default)]
-struct TransientCallGraphIndex {
-    forward: BTreeSet<CallGraphEdgeKey>,
-    inverse: BTreeSet<InverseCallGraphEdgeKey>,
-}
-
-struct PersistentCallGraphIndex<'a> {
-    forward: &'a EntityCache<CallGraphEdgeKey, CallGraphEdgeRecord>,
-    inverse: &'a EntityCache<InverseCallGraphEdgeKey, CallGraphEdgeRecord>,
-    storage: &'a EntityStorage,
-}
-
-struct TransientCallees {
-    index: ArcRwLockReadGuard<RawRwLock, TransientCallGraphIndex>,
-    caller: Address,
-    cursor: Option<CallGraphEdgeKey>,
-}
-
-impl Iterator for TransientCallees {
-    type Item = Result<Address, EntityStorageError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let start = self.cursor.map_or_else(
-            || Bound::Included(CallGraphEdgeKey::minimum_for(self.caller)),
-            Bound::Excluded,
-        );
-        let &edge = self.index.forward.range((start, Bound::Unbounded)).next()?;
-        if edge.source() != self.caller {
-            return None;
-        }
-        self.cursor = Some(edge);
-        Some(Ok(edge.target()))
-    }
-}
-
-struct TransientCallers {
-    index: ArcRwLockReadGuard<RawRwLock, TransientCallGraphIndex>,
-    callee: Address,
-    cursor: Option<InverseCallGraphEdgeKey>,
-}
-
-impl Iterator for TransientCallers {
-    type Item = Result<Address, EntityStorageError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let start = self.cursor.map_or_else(
-            || Bound::Included(InverseCallGraphEdgeKey::minimum_for(self.callee)),
-            Bound::Excluded,
-        );
-        let &edge = self.index.inverse.range((start, Bound::Unbounded)).next()?;
-        if edge.callee() != self.callee {
-            return None;
-        }
-        self.cursor = Some(edge);
-        Some(Ok(edge.caller()))
-    }
-}
-
-struct TransientCallGraphEdges {
-    index: ArcRwLockReadGuard<RawRwLock, TransientCallGraphIndex>,
-    cursor: Option<CallGraphEdgeKey>,
-}
-
-impl Iterator for TransientCallGraphEdges {
-    type Item = Result<CallGraphEdgeKey, EntityStorageError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let start = self.cursor.map_or(Bound::Unbounded, Bound::Excluded);
-        let &edge = self.index.forward.range((start, Bound::Unbounded)).next()?;
-        self.cursor = Some(edge);
-        Some(Ok(edge))
-    }
+pub enum CallGraphIndex {
+    Persistent(PersistentCallGraphIndex),
+    Transient(TransientCallGraphIndex),
 }
 
 #[derive(Default)]
@@ -234,6 +153,10 @@ impl CallGraphStaging {
             });
     }
 
+    pub(crate) fn function_edges(&self, caller: Address) -> Option<&BTreeSet<Address>> {
+        self.functions.get(&caller).map(|edges| &edges.targets)
+    }
+
     pub(crate) fn remove_function_edges(&mut self, caller: Address) {
         self.functions
             .entry(caller)
@@ -243,46 +166,30 @@ impl CallGraphStaging {
                 targets: BTreeSet::new(),
             });
     }
-
-    pub(crate) fn function_edges(&self, caller: Address) -> Option<&BTreeSet<Address>> {
-        self.functions.get(&caller).map(|edges| &edges.targets)
-    }
 }
 
 impl CallGraphIndex {
-    const CACHE_BYTES: usize = 4 * 1024 * 1024;
-
     pub(crate) fn new_transient() -> Self {
-        Self {
-            backing: CallGraphIndexBacking::Transient(Arc::new(RwLock::new(
-                TransientCallGraphIndex::default(),
-            ))),
-        }
+        Self::Transient(TransientCallGraphIndex::default())
     }
 
     pub(crate) fn new(
         storage: EntityStorage,
         worker: Option<Arc<WriteBackWorker>>,
     ) -> Result<Self, EntityStorageError> {
-        let forward =
-            EntityCache::from_storage(storage.clone(), worker.clone(), Self::CACHE_BYTES)?;
-        let inverse = EntityCache::from_storage(storage.clone(), worker, Self::CACHE_BYTES)?;
-
-        Ok(Self {
-            backing: CallGraphIndexBacking::Persistent {
-                forward,
-                inverse,
-                storage,
-            },
-        })
+        Ok(Self::Persistent(PersistentCallGraphIndex::new(
+            storage, worker,
+        )?))
     }
 
     pub(crate) fn set_function_edges(
-        &self,
+        &mut self,
         caller: Address,
         targets: impl IntoIterator<Item = Address>,
     ) -> Result<(), EntityStorageError> {
-        let current = self.callees_set(caller)?;
+        let current = self
+            .callees(caller, None)?
+            .collect::<Result<BTreeSet<_>, _>>()?;
         let next = targets.into_iter().collect::<BTreeSet<_>>();
 
         for target in current.difference(&next) {
@@ -300,14 +207,14 @@ impl CallGraphIndex {
         &self,
         staging: &CallGraphStaging,
     ) -> Result<(PreparedCallGraphBatch, EntityWriteBatch), EntityStorageError> {
-        let encoded = self
-            .persistent()
-            .map(|_| {
+        let encoded = match self {
+            Self::Persistent(_) => Some(
                 rkyv::to_bytes::<rkyv::rancor::Error>(&CallGraphEdgeRecord)
                     .map(Bytes::from_owner)
-                    .map_err(EntityStorageError::encode)
-            })
-            .transpose()?;
+                    .map_err(EntityStorageError::encode)?,
+            ),
+            Self::Transient(_) => None,
+        };
         let encoded_size = encoded.as_ref().map_or(0, Bytes::len);
         let mut edges = Vec::new();
         let mut writes = EntityWriteBatch::new();
@@ -316,7 +223,8 @@ impl CallGraphIndex {
             let current = if record.base_known_empty {
                 BTreeSet::new()
             } else {
-                self.callees_set(caller)?
+                self.callees(caller, None)?
+                    .collect::<Result<BTreeSet<_>, _>>()?
             };
             for &target in current.difference(&record.targets) {
                 let key = CallGraphEdgeKey::new(caller, target);
@@ -324,7 +232,7 @@ impl CallGraphIndex {
                     writes.push(EntityWrite::remove(CallGraphEdgeRecord::ID.key_for(&key)));
                     writes.push(EntityWrite::remove(
                         CallGraphEdgeRecord::ID
-                            .key_for(&InverseCallGraphEdgeKey::new(target, caller)),
+                            .key_for(&InverseCallGraphEdgeKey::new(caller, target)),
                     ));
                 }
                 edges.push(PreparedCallGraphEdgeRecord {
@@ -342,7 +250,7 @@ impl CallGraphIndex {
                     ));
                     writes.push(EntityWrite::insert(
                         CallGraphEdgeRecord::ID
-                            .key_for(&InverseCallGraphEdgeKey::new(target, caller)),
+                            .key_for(&InverseCallGraphEdgeKey::new(caller, target)),
                         encoded.clone(),
                     ));
                 }
@@ -357,70 +265,37 @@ impl CallGraphIndex {
         Ok((PreparedCallGraphBatch { edges }, writes))
     }
 
-    pub(crate) fn publish(&self, batch: PreparedCallGraphBatch) {
-        match &self.backing {
-            CallGraphIndexBacking::Persistent {
-                forward, inverse, ..
-            } => {
-                for edge in batch.edges {
-                    let inverse_key =
-                        InverseCallGraphEdgeKey::new(edge.key.target(), edge.key.source());
-                    if edge.present {
-                        forward.publish_insert(edge.key, CallGraphEdgeRecord, edge.encoded_size);
-                        inverse.publish_insert(inverse_key, CallGraphEdgeRecord, edge.encoded_size);
-                    } else {
-                        forward.publish_remove(&edge.key);
-                        inverse.publish_remove(&inverse_key);
-                    }
-                }
-            }
-            CallGraphIndexBacking::Transient(index) => {
-                let mut index = index.write();
-                for edge in batch.edges {
-                    let inverse =
-                        InverseCallGraphEdgeKey::new(edge.key.target(), edge.key.source());
-                    if edge.present {
-                        index.forward.insert(edge.key);
-                        index.inverse.insert(inverse);
-                    } else {
-                        index.forward.remove(&edge.key);
-                        index.inverse.remove(&inverse);
-                    }
-                }
-            }
+    pub(crate) fn publish(&mut self, batch: PreparedCallGraphBatch) {
+        match self {
+            Self::Persistent(index) => index.publish(batch),
+            Self::Transient(index) => index.publish(batch),
         }
     }
 
     pub(crate) fn ensure_current<'a>(
-        &self,
+        &mut self,
         functions: impl IntoIterator<Item = FunctionRef<'a>>,
         blocks: &CodeBlockTable,
         revision: Revision,
     ) -> Result<(), EntityStorageError> {
-        let Some(persistent) = self.persistent() else {
-            return self.rebuild(functions, blocks);
-        };
-        let metadata = persistent
-            .storage
-            .get::<ProjectEntity, IndexMetadata>(&ProjectEntity::CallGraphIndex)?;
-        if metadata.is_some_and(|metadata| metadata.revision() == revision) {
+        if let Self::Persistent(index) = self
+            && index.metadata_revision()? == Some(revision)
+        {
             return Ok(());
         }
 
         self.rebuild(functions, blocks)?;
-        persistent.forward.flush()?;
-        persistent.inverse.flush()?;
+        if let Self::Persistent(index) = self {
+            index.flush()?;
+        }
         self.mark_current(revision)
     }
 
     pub(crate) fn mark_current(&self, revision: Revision) -> Result<(), EntityStorageError> {
-        let Some(persistent) = self.persistent() else {
-            return Ok(());
-        };
-        persistent.storage.insert(
-            &ProjectEntity::CallGraphIndex,
-            &IndexMetadata::new(revision),
-        )
+        match self {
+            Self::Persistent(index) => index.mark_current(revision),
+            Self::Transient(_) => Ok(()),
+        }
     }
 
     pub(crate) fn callees(
@@ -431,26 +306,9 @@ impl CallGraphIndex {
         Box<dyn Iterator<Item = Result<Address, EntityStorageError>> + '_>,
         EntityStorageError,
     > {
-        match &self.backing {
-            CallGraphIndexBacking::Persistent { forward, .. } => {
-                let after = after.map(|after| CallGraphEdgeKey::new(caller, after));
-                let start = cursor_bound_or_minimum(after, CallGraphEdgeKey::minimum_for(caller));
-                Ok(Box::new(
-                    forward
-                        .try_iter_range(start.as_ref())?
-                        .take_while(move |result| {
-                            result
-                                .as_ref()
-                                .map_or(true, |(key, _)| key.source() == caller)
-                        })
-                        .map(|result| result.map(|(key, _)| key.target())),
-                ))
-            }
-            CallGraphIndexBacking::Transient(index) => Ok(Box::new(TransientCallees {
-                index: index.read_arc(),
-                caller,
-                cursor: after.map(|after| CallGraphEdgeKey::new(caller, after)),
-            })),
+        match self {
+            Self::Persistent(index) => Ok(Box::new(index.callees(caller, after)?)),
+            Self::Transient(index) => Ok(Box::new(index.callees(caller, after))),
         }
     }
 
@@ -462,27 +320,9 @@ impl CallGraphIndex {
         Box<dyn Iterator<Item = Result<Address, EntityStorageError>> + '_>,
         EntityStorageError,
     > {
-        match &self.backing {
-            CallGraphIndexBacking::Persistent { inverse, .. } => {
-                let after = after.map(|after| InverseCallGraphEdgeKey::new(callee, after));
-                let start =
-                    cursor_bound_or_minimum(after, InverseCallGraphEdgeKey::minimum_for(callee));
-                Ok(Box::new(
-                    inverse
-                        .try_iter_range(start.as_ref())?
-                        .take_while(move |result| {
-                            result
-                                .as_ref()
-                                .map_or(true, |(key, _)| key.callee() == callee)
-                        })
-                        .map(|result| result.map(|(key, _)| key.caller())),
-                ))
-            }
-            CallGraphIndexBacking::Transient(index) => Ok(Box::new(TransientCallers {
-                index: index.read_arc(),
-                callee,
-                cursor: after.map(|after| InverseCallGraphEdgeKey::new(callee, after)),
-            })),
+        match self {
+            Self::Persistent(index) => Ok(Box::new(index.callers(callee, after)?)),
+            Self::Transient(index) => Ok(Box::new(index.callers(callee, after))),
         }
     }
 
@@ -493,19 +333,9 @@ impl CallGraphIndex {
         Box<dyn Iterator<Item = Result<CallGraphEdgeKey, EntityStorageError>> + '_>,
         EntityStorageError,
     > {
-        match &self.backing {
-            CallGraphIndexBacking::Persistent { forward, .. } => {
-                let start = cursor_bound(after);
-                Ok(Box::new(
-                    forward
-                        .try_iter_range(start.as_ref())?
-                        .map(|result| result.map(|(key, _)| key)),
-                ))
-            }
-            CallGraphIndexBacking::Transient(index) => Ok(Box::new(TransientCallGraphEdges {
-                index: index.read_arc(),
-                cursor: after,
-            })),
+        match self {
+            Self::Persistent(index) => Ok(Box::new(index.edges(after)?)),
+            Self::Transient(index) => Ok(Box::new(index.edges(after))),
         }
     }
 
@@ -520,12 +350,8 @@ impl CallGraphIndex {
             .collect()
     }
 
-    fn callees_set(&self, caller: Address) -> Result<BTreeSet<Address>, EntityStorageError> {
-        self.callees(caller, None)?.collect()
-    }
-
     fn rebuild<'a>(
-        &self,
+        &mut self,
         functions: impl IntoIterator<Item = FunctionRef<'a>>,
         blocks: &CodeBlockTable,
     ) -> Result<(), EntityStorageError> {
@@ -541,73 +367,33 @@ impl CallGraphIndex {
         Ok(())
     }
 
-    fn clear(&self) -> Result<(), EntityStorageError> {
-        match &self.backing {
-            CallGraphIndexBacking::Persistent {
-                forward, inverse, ..
-            } => {
-                forward.try_clear()?;
-                inverse.try_clear()
-            }
-            CallGraphIndexBacking::Transient(index) => {
-                let mut index = index.write();
-                index.forward.clear();
-                index.inverse.clear();
+    fn clear(&mut self) -> Result<(), EntityStorageError> {
+        match self {
+            Self::Persistent(index) => index.clear(),
+            Self::Transient(index) => {
+                index.clear();
                 Ok(())
             }
         }
     }
 
-    fn insert_edge(&self, caller: Address, callee: Address) -> Result<(), EntityStorageError> {
-        let forward_key = CallGraphEdgeKey::new(caller, callee);
-        let inverse_key = InverseCallGraphEdgeKey::new(callee, caller);
-        match &self.backing {
-            CallGraphIndexBacking::Persistent {
-                forward, inverse, ..
-            } => {
-                forward.try_insert(forward_key, CallGraphEdgeRecord)?;
-                inverse.try_insert(inverse_key, CallGraphEdgeRecord)?;
-            }
-            CallGraphIndexBacking::Transient(index) => {
-                let mut index = index.write();
-                index.forward.insert(forward_key);
-                index.inverse.insert(inverse_key);
-            }
-        }
-        Ok(())
-    }
-
-    fn remove_edge(&self, caller: Address, callee: Address) -> Result<(), EntityStorageError> {
-        let forward_key = CallGraphEdgeKey::new(caller, callee);
-        let inverse_key = InverseCallGraphEdgeKey::new(callee, caller);
-        match &self.backing {
-            CallGraphIndexBacking::Persistent {
-                forward, inverse, ..
-            } => {
-                forward.try_remove(&forward_key)?;
-                inverse.try_remove(&inverse_key)
-            }
-            CallGraphIndexBacking::Transient(index) => {
-                let mut index = index.write();
-                index.forward.remove(&forward_key);
-                index.inverse.remove(&inverse_key);
+    fn insert_edge(&mut self, caller: Address, callee: Address) -> Result<(), EntityStorageError> {
+        match self {
+            Self::Persistent(index) => index.insert_edge(caller, callee),
+            Self::Transient(index) => {
+                index.insert_edge(caller, callee);
                 Ok(())
             }
         }
     }
 
-    fn persistent(&self) -> Option<PersistentCallGraphIndex<'_>> {
-        match &self.backing {
-            CallGraphIndexBacking::Persistent {
-                forward,
-                inverse,
-                storage,
-            } => Some(PersistentCallGraphIndex {
-                forward,
-                inverse,
-                storage,
-            }),
-            CallGraphIndexBacking::Transient(_) => None,
+    fn remove_edge(&mut self, caller: Address, callee: Address) -> Result<(), EntityStorageError> {
+        match self {
+            Self::Persistent(index) => index.remove_edge(caller, callee),
+            Self::Transient(index) => {
+                index.remove_edge(caller, callee);
+                Ok(())
+            }
         }
     }
 }
@@ -615,6 +401,7 @@ impl CallGraphIndex {
 #[cfg(test)]
 mod test {
     use std::io;
+    use std::ops::Bound;
 
     use fugue_lifter::runtime::pcode::Inputs;
 
@@ -631,39 +418,25 @@ mod test {
         CallGraphIndex::new(EntityStorage::new(InMemoryEntityStorage::new()), None)
     }
 
-    struct TransientInverseCallGraphEdges {
-        index: ArcRwLockReadGuard<RawRwLock, TransientCallGraphIndex>,
-        cursor: Option<InverseCallGraphEdgeKey>,
-    }
-
-    impl Iterator for TransientInverseCallGraphEdges {
-        type Item = Result<CallGraphEdgeKey, EntityStorageError>;
-
-        fn next(&mut self) -> Option<Self::Item> {
-            let start = self.cursor.map_or(Bound::Unbounded, Bound::Excluded);
-            let &edge = self.index.inverse.range((start, Bound::Unbounded)).next()?;
-            self.cursor = Some(edge);
-            Some(Ok(CallGraphEdgeKey::new(edge.caller(), edge.callee())))
-        }
-    }
-
     fn inverse_edges(
         graph: &CallGraphIndex,
     ) -> Result<
         Box<dyn Iterator<Item = Result<CallGraphEdgeKey, EntityStorageError>> + '_>,
         EntityStorageError,
     > {
-        match &graph.backing {
-            CallGraphIndexBacking::Persistent { inverse, .. } => Ok(Box::new(
-                inverse.try_iter_range(Bound::Unbounded)?.map(|result| {
-                    result.map(|(key, _)| CallGraphEdgeKey::new(key.caller(), key.callee()))
-                }),
+        match graph {
+            CallGraphIndex::Persistent(index) => Ok(Box::new(
+                index
+                    .inverse
+                    .try_iter_range(Bound::Unbounded)?
+                    .map(|result| {
+                        result.map(|(key, _)| CallGraphEdgeKey::new(key.caller(), key.callee()))
+                    }),
             )),
-            CallGraphIndexBacking::Transient(index) => {
-                Ok(Box::new(TransientInverseCallGraphEdges {
-                    index: index.read_arc(),
-                    cursor: None,
-                }))
+            CallGraphIndex::Transient(index) => {
+                Ok(Box::new(index.inverse.iter().map(|edge| {
+                    Ok(CallGraphEdgeKey::new(edge.caller(), edge.callee()))
+                })))
             }
         }
     }
@@ -806,7 +579,7 @@ mod test {
     }
 
     fn update_graph_for_function(
-        graph: &CallGraphIndex,
+        graph: &mut CallGraphIndex,
         functions: &FunctionTable,
         blocks: &CodeBlockTable,
         function_id: FunctionId,
@@ -823,7 +596,7 @@ mod test {
 
     #[test]
     fn cross_space_edges_are_scanned_and_removed() -> Result<(), Box<dyn std::error::Error>> {
-        let graph = graph()?;
+        let mut graph = graph()?;
         let base_caller = Address::new(AddressSpaceId::from(0u16), 0x1000u64);
         let base_callee = Address::new(AddressSpaceId::from(0u16), 0x1100u64);
         let overlay_caller = Address::new(AddressSpaceId::from(1u16), 0x2000u64);
@@ -871,7 +644,7 @@ mod test {
     #[test]
     fn verifier_reports_forward_and_inverse_mismatches() -> Result<(), Box<dyn std::error::Error>> {
         let language = resolve_language("x86:LE:64")?;
-        let graph = graph()?;
+        let mut graph = graph()?;
         let mut functions = FunctionTable::new_transient();
         let mut blocks = CodeBlockTable::new_transient();
         let caller = Address::new(AddressSpaceId::from(1u16), 0x1000u64);
@@ -913,7 +686,7 @@ mod test {
     #[test]
     fn ensure_current_rebuilds_when_marker_is_stale() -> Result<(), Box<dyn std::error::Error>> {
         let language = resolve_language("x86:LE:64")?;
-        let graph = graph()?;
+        let mut graph = graph()?;
         let mut functions = FunctionTable::new_transient();
         let mut blocks = CodeBlockTable::new_transient();
         let caller = Address::new(AddressSpaceId::from(2u16), 0x1000u64);
@@ -947,7 +720,7 @@ mod test {
     fn ensure_current_trusts_matching_marker_without_rebuild()
     -> Result<(), Box<dyn std::error::Error>> {
         let language = resolve_language("x86:LE:64")?;
-        let graph = graph()?;
+        let mut graph = graph()?;
         let mut functions = FunctionTable::new_transient();
         let mut blocks = CodeBlockTable::new_transient();
         let caller = Address::new(AddressSpaceId::from(2u16), 0x4000u64);
@@ -981,7 +754,7 @@ mod test {
     fn call_graph_incremental_maintenance_holds_for_multispace_updates()
     -> Result<(), Box<dyn std::error::Error>> {
         let language = resolve_language("x86:LE:64")?;
-        let graph = graph()?;
+        let mut graph = graph()?;
         let mut functions = FunctionTable::new_transient();
         let mut blocks = CodeBlockTable::new_transient();
         let entries = (0..16)
@@ -1008,7 +781,7 @@ mod test {
                     let function_id =
                         insert_function(&mut functions, &mut blocks, language, entry, &targets)?;
                     function_ids[index] = Some(function_id);
-                    update_graph_for_function(&graph, &functions, &blocks, function_id)?;
+                    update_graph_for_function(&mut graph, &functions, &blocks, function_id)?;
                 }
             } else if op == 1 {
                 let function_id = function_ids[index].take().unwrap();
@@ -1027,7 +800,7 @@ mod test {
                     entry,
                     &targets,
                 )?;
-                update_graph_for_function(&graph, &functions, &blocks, function_id)?;
+                update_graph_for_function(&mut graph, &functions, &blocks, function_id)?;
             }
 
             assert_consistent(&graph, functions.iter(), &blocks)?;

@@ -95,10 +95,7 @@ fn ecode_verifier_rejects_invalid_value_definition() {
         )
         .build(metadata, IlGraph::default());
 
-    assert!(matches!(
-        ir.verify(),
-        Err(VerifyError::InvalidValueDef)
-    ));
+    assert!(matches!(ir.verify(), Err(VerifyError::InvalidValueDef)));
 }
 
 #[test]

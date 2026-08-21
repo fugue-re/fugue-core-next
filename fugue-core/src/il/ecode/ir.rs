@@ -281,8 +281,7 @@ impl ECodeIr {
                 | ECodeOpcode::WriteFlag
                 | ECodeOpcode::WriteRegister
                 | ECodeOpcode::ZeroExtend => {
-                    let Some(inner) = self.op_operands_for(operation).first().copied()
-                    else {
+                    let Some(inner) = self.op_operands_for(operation).first().copied() else {
                         return current;
                     };
                     current = inner;
@@ -346,7 +345,6 @@ impl ECodeIr {
     pub(crate) fn verify(&self) -> Result<(), VerifyError> {
         verify(self)
     }
-
 }
 
 pub(crate) struct ECodeRewriter<'a> {

@@ -18,9 +18,9 @@ pub(crate) const ATTRIBUTE_SWITCH_CACHE_SIZE: &str = "storage.entities.switch.ca
 pub(crate) const DEFAULT_SWITCH_CACHE_BYTES: usize = 8 * 1024 * 1024;
 
 mod persistent;
-mod transient;
-
 use persistent::SwitchTable as PersistentSwitchTable;
+
+mod transient;
 use transient::SwitchTable as TransientSwitchTable;
 
 pub type SwitchRef<'a> = EntityRef<'a, Switch>;
@@ -29,7 +29,7 @@ const SWITCH_TABLE_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 struct SwitchTableHeader {
-    version: u32,
+    format_version: u32,
 }
 
 impl Entity for SwitchTableHeader {
@@ -51,35 +51,12 @@ impl SwitchIndex {
         }
     }
 
-    fn link(&mut self, function: FunctionId, branch: Address) {
-        self.by_function.entry(function).or_default().insert(branch);
-    }
-
-    fn insert(&mut self, id: SwitchId, function: FunctionId, branch: Address) {
-        self.branches.insert(branch, id);
-        self.link(function, branch);
-    }
-
-    fn remove(&mut self, function: FunctionId, branch: Address) {
-        self.branches.remove(&branch);
-        self.unlink(function, branch);
-    }
-
     fn id_by_branch(&self, branch: Address) -> Option<SwitchId> {
         self.branches.get(&branch).copied()
     }
 
     fn contains(&self, branch: Address) -> bool {
         self.branches.contains_key(&branch)
-    }
-
-    fn unlink(&mut self, function: FunctionId, branch: Address) {
-        if let Some(branches) = self.by_function.get_mut(&function) {
-            branches.remove(&branch);
-            if branches.is_empty() {
-                self.by_function.remove(&function);
-            }
-        }
     }
 
     fn branches_for_function(&self, function: FunctionId) -> impl Iterator<Item = Address> + '_ {
@@ -94,6 +71,37 @@ impl SwitchIndex {
         self.branches.keys().copied()
     }
 
+    fn is_empty(&self) -> bool {
+        self.branches.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.branches.len()
+    }
+
+    fn link(&mut self, function: FunctionId, branch: Address) {
+        self.by_function.entry(function).or_default().insert(branch);
+    }
+
+    fn insert(&mut self, id: SwitchId, function: FunctionId, branch: Address) {
+        self.branches.insert(branch, id);
+        self.link(function, branch);
+    }
+
+    fn remove(&mut self, function: FunctionId, branch: Address) {
+        self.branches.remove(&branch);
+        self.unlink(function, branch);
+    }
+
+    fn unlink(&mut self, function: FunctionId, branch: Address) {
+        if let Some(branches) = self.by_function.get_mut(&function) {
+            branches.remove(&branch);
+            if branches.is_empty() {
+                self.by_function.remove(&function);
+            }
+        }
+    }
+
     fn entries_after(
         &self,
         after: Option<Address>,
@@ -102,14 +110,6 @@ impl SwitchIndex {
         self.branches
             .range((start, Bound::Unbounded))
             .map(|(&address, &id)| (address, id))
-    }
-
-    fn is_empty(&self) -> bool {
-        self.branches.is_empty()
-    }
-
-    fn len(&self) -> usize {
-        self.branches.len()
     }
 }
 
@@ -166,6 +166,27 @@ impl SwitchTable {
 
     pub fn new_transient() -> Self {
         Self::Transient(TransientSwitchTable::new())
+    }
+
+    pub fn contains(&self, branch: Address) -> bool {
+        match self {
+            Self::Persistent(table) => table.contains(branch),
+            Self::Transient(table) => table.contains(branch),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Persistent(table) => table.is_empty(),
+            Self::Transient(table) => table.is_empty(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Persistent(table) => table.len(),
+            Self::Transient(table) => table.len(),
+        }
     }
 
     pub(crate) fn is_persistent(&self) -> bool {
@@ -270,13 +291,6 @@ impl SwitchTable {
         }
     }
 
-    pub fn contains(&self, branch: Address) -> bool {
-        match self {
-            Self::Persistent(table) => table.contains(branch),
-            Self::Transient(table) => table.contains(branch),
-        }
-    }
-
     pub fn modify_by_id<R>(&mut self, id: SwitchId, f: impl FnOnce(&mut Switch) -> R) -> Option<R> {
         self.try_modify_by_id(id, f)
             .unwrap_or_else(|error| error.into_fatal())
@@ -360,20 +374,6 @@ impl SwitchTable {
             Self::Transient(table) => Box::new(table.iter().map(EntityRef::borrowed)),
         }
     }
-
-    pub fn is_empty(&self) -> bool {
-        match self {
-            Self::Persistent(table) => table.is_empty(),
-            Self::Transient(table) => table.is_empty(),
-        }
-    }
-
-    pub fn len(&self) -> usize {
-        match self {
-            Self::Persistent(table) => table.len(),
-            Self::Transient(table) => table.len(),
-        }
-    }
 }
 
 impl PersistableProjectEntity for SwitchTable {
@@ -382,7 +382,7 @@ impl PersistableProjectEntity for SwitchTable {
             Self::Persistent(_) => storage.insert(
                 &ProjectEntity::SwitchTable,
                 &SwitchTableHeader {
-                    version: SWITCH_TABLE_VERSION,
+                    format_version: SWITCH_TABLE_VERSION,
                 },
             ),
             Self::Transient(_) => Ok(()),

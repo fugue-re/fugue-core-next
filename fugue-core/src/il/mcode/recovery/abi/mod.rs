@@ -227,9 +227,10 @@ impl MCodeCallFacts {
     }
 
     fn validate(&self, ir: &ECodeIr, registers: &RegisterBank) -> Result<(), IlError> {
-        let operation = ir.ops().get(self.site.index()).ok_or_else(|| {
-            IlError::range_out_of_bounds(self.site.index() + 1, ir.ops().len())
-        })?;
+        let operation = ir
+            .ops()
+            .get(self.site.index())
+            .ok_or_else(|| IlError::range_out_of_bounds(self.site.index() + 1, ir.ops().len()))?;
         let is_tail_call = matches!(
             operation.opcode(),
             ECodeOpcode::Branch | ECodeOpcode::BranchIndirect
@@ -683,11 +684,7 @@ impl<'a> MCodeAbiSolver<'a> {
             definitions.define_value(self.ir, arg);
         }
         let block_record = self.ir.graph().blocks()[block.index()];
-        for (site, operation) in self
-            .ir
-            .graph()
-            .ops_for_block(block, self.ir.ops())
-        {
+        for (site, operation) in self.ir.graph().ops_for_block(block, self.ir.ops()) {
             let tail_call = block_record.is_exit()
                 && block_record.successors().is_empty()
                 && matches!(

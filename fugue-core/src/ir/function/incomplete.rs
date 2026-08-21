@@ -8,9 +8,9 @@ use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::ir::{
-    Address, AddressRange, AddressRangeSet, AddressWithContext, CodeBlockId, FlowKind, FlowTarget,
-    Function, FunctionId, FunctionProperties, IncompleteCodeBlock, IncompleteCodeBlockId, Insn,
-    InsnId, NormalisedCodeBlockRecord, Reference, ReferenceOrigin, Switch, SwitchCase, Symbol,
+    Address, AddressRange, AddressRangeSet, AddressWithContext, CodeBlockId, CodeBlockRecord,
+    FlowKind, FlowTarget, Function, FunctionId, FunctionProperties, IncompleteCodeBlock,
+    IncompleteCodeBlockId, Insn, InsnId, Reference, ReferenceOrigin, Switch, SwitchCase, Symbol,
 };
 use crate::types::{Confidence, EstimateSize, Revision};
 
@@ -21,17 +21,21 @@ pub(crate) struct FunctionInsnIndex {
 }
 
 impl FunctionInsnIndex {
-    fn clear(&mut self) {
-        self.additional.clear();
-        self.first.clear();
-    }
-
     fn contains(&self, address: Address) -> bool {
         self.first.contains_key(&address)
     }
 
     fn first(&self, address: Address) -> Option<InsnId> {
         self.first.get(&address).copied()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.first.is_empty()
+    }
+
+    fn clear(&mut self) {
+        self.additional.clear();
+        self.first.clear();
     }
 
     fn ids(&self, address: Address) -> impl Iterator<Item = InsnId> + '_ {
@@ -49,10 +53,6 @@ impl FunctionInsnIndex {
                 self.additional.entry(address).or_default().push(id);
             }
         }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.first.is_empty()
     }
 }
 
@@ -75,8 +75,8 @@ impl EstimateSize for FunctionInsnIndex {
     }
 }
 
-pub(crate) struct NormalisedFunctionRecord {
-    blocks: Vec<NormalisedCodeBlockRecord>,
+pub(crate) struct FunctionRecord {
+    blocks: Vec<CodeBlockRecord>,
     call_targets: BTreeSet<Address>,
     confidence: Confidence,
     coverage: AddressRangeSet,
@@ -91,9 +91,9 @@ pub(crate) struct NormalisedFunctionRecord {
     tail_call_sites: SmallVec<[Address; 1]>,
 }
 
-impl NormalisedFunctionRecord {
+impl FunctionRecord {
     pub(crate) fn block_addresses(&self) -> impl Iterator<Item = Address> + '_ {
-        self.blocks.iter().map(NormalisedCodeBlockRecord::address)
+        self.blocks.iter().map(CodeBlockRecord::address)
     }
 
     pub(crate) fn block_count(&self) -> usize {
@@ -119,9 +119,7 @@ impl NormalisedFunctionRecord {
     pub(crate) fn materialise(
         self,
         id: FunctionId,
-        mut resolve_block: impl FnMut(
-            NormalisedCodeBlockRecord,
-        ) -> Result<CodeBlockId, IncompleteFunctionError>,
+        mut resolve_block: impl FnMut(CodeBlockRecord) -> Result<CodeBlockId, IncompleteFunctionError>,
     ) -> Result<Function, IncompleteFunctionError> {
         let mut members = Vec::with_capacity(self.blocks.len());
         for block in self.blocks {
@@ -139,7 +137,7 @@ impl NormalisedFunctionRecord {
         edges.dedup();
 
         let mut function =
-            Function::new_with(id, self.entry, self.name).with_body(members, edges, entry_block);
+            Function::new_with(id, self.entry, self.name).with_blocks(members, edges, entry_block);
         function.set_properties(self.properties);
         function.set_origin(self.origin);
         function.set_confidence(self.confidence);
@@ -351,6 +349,120 @@ impl IncompleteFunction {
         function
     }
 
+    pub(crate) fn has_pending_switch(&self, branch: Address) -> bool {
+        self.pending_switches
+            .iter()
+            .any(|pending| pending.branch() == branch)
+    }
+
+    pub fn set_name(&mut self, name: impl Into<Symbol>) {
+        self.name = Some(name.into());
+    }
+
+    pub fn name(&self) -> Option<Symbol> {
+        self.name
+    }
+
+    pub fn entry(&self) -> Address {
+        self.entry
+    }
+
+    pub fn blocks(&self) -> &[IncompleteCodeBlock] {
+        &self.blocks
+    }
+
+    pub(crate) fn set_tail_call_sites(&mut self, sites: impl IntoIterator<Item = Address>) {
+        self.tail_call_sites.clear();
+        self.tail_call_sites.extend(sites);
+        self.tail_call_sites.sort_unstable();
+        self.tail_call_sites.dedup();
+    }
+
+    pub fn block_mut(&mut self, id: IncompleteCodeBlockId) -> Option<&mut IncompleteCodeBlock> {
+        self.block_index(id).map(|index| &mut self.blocks[index])
+    }
+
+    pub fn contains_insn(&self, address: Address) -> bool {
+        if !self.insn_index.is_empty() {
+            return self.insn_index.contains(address);
+        }
+        if self.insns_unsorted {
+            return self.insns.iter().any(|insn| insn.address() == address);
+        }
+        self.insns
+            .binary_search_by_key(&address, Insn::address)
+            .is_ok()
+    }
+
+    pub(crate) fn insn_mut(&mut self, id: InsnId) -> Option<&mut Insn> {
+        (!id.is_invalid() && id.generation() == self.insn_generation)
+            .then(|| id.index())
+            .and_then(|index| self.insns.get_mut(index))
+    }
+
+    pub fn has_insns(&self) -> bool {
+        !self.insns.is_empty()
+    }
+
+    pub fn insns(&self) -> &[Insn] {
+        &self.insns
+    }
+
+    pub fn properties(&self) -> FunctionProperties {
+        self.properties
+    }
+
+    pub fn origin(&self) -> ReferenceOrigin {
+        self.origin
+    }
+
+    pub fn set_origin(&mut self, origin: ReferenceOrigin) {
+        self.origin = origin;
+    }
+
+    pub fn with_origin(mut self, origin: ReferenceOrigin) -> Self {
+        self.origin = origin;
+        self
+    }
+
+    pub fn confidence(&self) -> Confidence {
+        self.confidence
+    }
+
+    pub fn set_confidence(&mut self, confidence: Confidence) {
+        self.confidence = confidence;
+    }
+
+    pub fn with_confidence(mut self, confidence: Confidence) -> Self {
+        self.confidence = confidence;
+        self
+    }
+
+    pub fn input_revision(&self) -> Revision {
+        self.input_revision
+    }
+
+    pub fn set_input_revision(&mut self, input_revision: Revision) {
+        self.input_revision = input_revision;
+    }
+
+    pub fn with_input_revision(mut self, input_revision: Revision) -> Self {
+        self.set_input_revision(input_revision);
+        self
+    }
+
+    pub fn is_non_returning(&self) -> bool {
+        self.properties.contains(FunctionProperties::NON_RETURNING)
+    }
+
+    pub fn is_thunk(&self) -> bool {
+        self.properties.contains(FunctionProperties::THUNK)
+    }
+
+    pub fn is_external(&self) -> bool {
+        self.properties.contains(FunctionProperties::EXTERNAL)
+    }
+
     pub(crate) fn recycle_insn_index(&mut self) -> FunctionInsnIndex {
         let mut index = mem::take(&mut self.insn_index);
         index.clear();
@@ -400,30 +512,12 @@ impl IncompleteFunction {
         None
     }
 
-    pub(crate) fn has_pending_switch(&self, branch: Address) -> bool {
-        self.pending_switches
-            .iter()
-            .any(|pending| pending.branch() == branch)
-    }
-
     pub fn take_pending_switches(&mut self) -> Vec<Switch> {
         mem::take(&mut self.pending_switches)
     }
 
-    pub fn set_name(&mut self, name: impl Into<Symbol>) {
-        self.name = Some(name.into());
-    }
-
     pub fn clear_name(&mut self) {
         self.name = None;
-    }
-
-    pub fn name(&self) -> Option<Symbol> {
-        self.name
-    }
-
-    pub fn entry(&self) -> Address {
-        self.entry
     }
 
     pub fn entry_block(&self) -> &IncompleteCodeBlock {
@@ -447,23 +541,8 @@ impl IncompleteFunction {
         id
     }
 
-    pub fn blocks(&self) -> &[IncompleteCodeBlock] {
-        &self.blocks
-    }
-
-    pub(crate) fn set_tail_call_sites(&mut self, sites: impl IntoIterator<Item = Address>) {
-        self.tail_call_sites.clear();
-        self.tail_call_sites.extend(sites);
-        self.tail_call_sites.sort_unstable();
-        self.tail_call_sites.dedup();
-    }
-
     pub fn block(&self, id: IncompleteCodeBlockId) -> Option<&IncompleteCodeBlock> {
         self.block_index(id).map(|index| &self.blocks[index])
-    }
-
-    pub fn block_mut(&mut self, id: IncompleteCodeBlockId) -> Option<&mut IncompleteCodeBlock> {
-        self.block_index(id).map(|index| &mut self.blocks[index])
     }
 
     pub fn add_block_edge(
@@ -509,18 +588,6 @@ impl IncompleteFunction {
             .blocks
             .partition_point(|block| block.address() <= address);
         self.blocks[start..end].iter()
-    }
-
-    pub fn contains_insn(&self, address: Address) -> bool {
-        if !self.insn_index.is_empty() {
-            return self.insn_index.contains(address);
-        }
-        if self.insns_unsorted {
-            return self.insns.iter().any(|insn| insn.address() == address);
-        }
-        self.insns
-            .binary_search_by_key(&address, Insn::address)
-            .is_ok()
     }
 
     pub(crate) fn first_insn_id_at(&mut self, address: Address) -> Option<InsnId> {
@@ -609,12 +676,6 @@ impl IncompleteFunction {
             .and_then(|index| self.insns.get(index))
     }
 
-    pub(crate) fn insn_mut(&mut self, id: InsnId) -> Option<&mut Insn> {
-        (!id.is_invalid() && id.generation() == self.insn_generation)
-            .then(|| id.index())
-            .and_then(|index| self.insns.get_mut(index))
-    }
-
     pub fn insns_at(&self, address: Address) -> Box<dyn Iterator<Item = &Insn> + '_> {
         if !self.insn_index.is_empty() {
             return Box::new(self.insn_index.ids(address).filter_map(|id| self.insn(id)));
@@ -632,75 +693,12 @@ impl IncompleteFunction {
         Box::new(self.insns[start..end].iter())
     }
 
-    pub fn has_insns(&self) -> bool {
-        !self.insns.is_empty()
-    }
-
-    pub fn insns(&self) -> &[Insn] {
-        &self.insns
-    }
-
-    pub fn properties(&self) -> FunctionProperties {
-        self.properties
-    }
-
-    pub fn origin(&self) -> ReferenceOrigin {
-        self.origin
-    }
-
-    pub fn set_origin(&mut self, origin: ReferenceOrigin) {
-        self.origin = origin;
-    }
-
-    pub fn with_origin(mut self, origin: ReferenceOrigin) -> Self {
-        self.origin = origin;
-        self
-    }
-
-    pub fn confidence(&self) -> Confidence {
-        self.confidence
-    }
-
-    pub fn set_confidence(&mut self, confidence: Confidence) {
-        self.confidence = confidence;
-    }
-
-    pub fn with_confidence(mut self, confidence: Confidence) -> Self {
-        self.confidence = confidence;
-        self
-    }
-
-    pub fn input_revision(&self) -> Revision {
-        self.input_revision
-    }
-
-    pub fn set_input_revision(&mut self, input_revision: Revision) {
-        self.input_revision = input_revision;
-    }
-
-    pub fn with_input_revision(mut self, input_revision: Revision) -> Self {
-        self.set_input_revision(input_revision);
-        self
-    }
-
-    pub fn is_non_returning(&self) -> bool {
-        self.properties.contains(FunctionProperties::NON_RETURNING)
-    }
-
     pub fn mark_non_returning(&mut self) {
         self.properties.insert(FunctionProperties::NON_RETURNING);
     }
 
-    pub fn is_thunk(&self) -> bool {
-        self.properties.contains(FunctionProperties::THUNK)
-    }
-
     pub fn mark_thunk(&mut self) {
         self.properties.insert(FunctionProperties::THUNK);
-    }
-
-    pub fn is_external(&self) -> bool {
-        self.properties.contains(FunctionProperties::EXTERNAL)
     }
 
     pub fn mark_external(&mut self) {
@@ -766,7 +764,7 @@ impl IncompleteFunction {
         })
     }
 
-    pub(crate) fn normalise(self) -> Result<NormalisedFunctionRecord, IncompleteFunctionError> {
+    pub(crate) fn normalise(self) -> Result<FunctionRecord, IncompleteFunctionError> {
         for block in &self.blocks {
             if block.is_empty() {
                 return Err(IncompleteFunctionError::invalid_block_size(block.address()));
@@ -789,12 +787,8 @@ impl IncompleteFunction {
                 self.insn(id)
                     .expect("validated instruction must remain available")
             });
-            let normalised = NormalisedCodeBlockRecord::new(
-                block.address(),
-                size,
-                block_insns,
-                block.context().clone(),
-            );
+            let normalised =
+                CodeBlockRecord::new(block.address(), size, block_insns, block.context().clone());
             let block_range = normalised.address_range();
             match pending_coverage.as_mut() {
                 Some(current)
@@ -863,7 +857,7 @@ impl IncompleteFunction {
             }
         }
 
-        Ok(NormalisedFunctionRecord {
+        Ok(FunctionRecord {
             blocks,
             call_targets,
             confidence: self.confidence,
