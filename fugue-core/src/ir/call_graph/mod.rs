@@ -135,6 +135,10 @@ struct PreparedCallGraphEdgeRecord {
 }
 
 impl CallGraphStaging {
+    pub(crate) fn function_edges(&self, caller: Address) -> Option<&BTreeSet<Address>> {
+        self.functions.get(&caller).map(|edges| &edges.targets)
+    }
+
     pub(crate) fn set_function_edges(
         &mut self,
         caller: Address,
@@ -151,10 +155,6 @@ impl CallGraphStaging {
                 base_known_empty,
                 targets,
             });
-    }
-
-    pub(crate) fn function_edges(&self, caller: Address) -> Option<&BTreeSet<Address>> {
-        self.functions.get(&caller).map(|edges| &edges.targets)
     }
 
     pub(crate) fn remove_function_edges(&mut self, caller: Address) {
@@ -180,6 +180,47 @@ impl CallGraphIndex {
         Ok(Self::Persistent(PersistentCallGraphIndex::new(
             storage, worker,
         )?))
+    }
+
+    pub(crate) fn callees(
+        &self,
+        caller: Address,
+        after: Option<Address>,
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<Address, EntityStorageError>> + '_>,
+        EntityStorageError,
+    > {
+        match self {
+            Self::Persistent(index) => Ok(Box::new(index.callees(caller, after)?)),
+            Self::Transient(index) => Ok(Box::new(index.callees(caller, after))),
+        }
+    }
+
+    pub(crate) fn callers(
+        &self,
+        callee: Address,
+        after: Option<Address>,
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<Address, EntityStorageError>> + '_>,
+        EntityStorageError,
+    > {
+        match self {
+            Self::Persistent(index) => Ok(Box::new(index.callers(callee, after)?)),
+            Self::Transient(index) => Ok(Box::new(index.callers(callee, after))),
+        }
+    }
+
+    pub(crate) fn edges(
+        &self,
+        after: Option<CallGraphEdgeKey>,
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<CallGraphEdgeKey, EntityStorageError>> + '_>,
+        EntityStorageError,
+    > {
+        match self {
+            Self::Persistent(index) => Ok(Box::new(index.edges(after)?)),
+            Self::Transient(index) => Ok(Box::new(index.edges(after))),
+        }
     }
 
     pub(crate) fn set_function_edges(
@@ -295,47 +336,6 @@ impl CallGraphIndex {
         match self {
             Self::Persistent(index) => index.mark_current(revision),
             Self::Transient(_) => Ok(()),
-        }
-    }
-
-    pub(crate) fn callees(
-        &self,
-        caller: Address,
-        after: Option<Address>,
-    ) -> Result<
-        Box<dyn Iterator<Item = Result<Address, EntityStorageError>> + '_>,
-        EntityStorageError,
-    > {
-        match self {
-            Self::Persistent(index) => Ok(Box::new(index.callees(caller, after)?)),
-            Self::Transient(index) => Ok(Box::new(index.callees(caller, after))),
-        }
-    }
-
-    pub(crate) fn callers(
-        &self,
-        callee: Address,
-        after: Option<Address>,
-    ) -> Result<
-        Box<dyn Iterator<Item = Result<Address, EntityStorageError>> + '_>,
-        EntityStorageError,
-    > {
-        match self {
-            Self::Persistent(index) => Ok(Box::new(index.callers(callee, after)?)),
-            Self::Transient(index) => Ok(Box::new(index.callers(callee, after))),
-        }
-    }
-
-    pub(crate) fn edges(
-        &self,
-        after: Option<CallGraphEdgeKey>,
-    ) -> Result<
-        Box<dyn Iterator<Item = Result<CallGraphEdgeKey, EntityStorageError>> + '_>,
-        EntityStorageError,
-    > {
-        match self {
-            Self::Persistent(index) => Ok(Box::new(index.edges(after)?)),
-            Self::Transient(index) => Ok(Box::new(index.edges(after))),
         }
     }
 

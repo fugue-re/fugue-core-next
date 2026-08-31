@@ -23,6 +23,57 @@ pub(crate) fn emit_value(
 }
 
 #[test]
+fn rewriter_preserves_result_identity_across_algebraic_replacements() {
+    let mut builder = MCodeBuilder::new(metadata(), IlGraph::default());
+    let left = emit_value(
+        &mut builder,
+        MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
+        [],
+        64,
+    )
+    .unwrap();
+    let right = emit_value(
+        &mut builder,
+        MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
+        [],
+        64,
+    )
+    .unwrap();
+    let (operation, results) = builder
+        .emitter()
+        .emit(MCodeOpSpec::new(MCodeOpcode::Not, 64), [left], [64])
+        .unwrap();
+    let result = IlValueId::try_from_index(results.start()).unwrap();
+    builder
+        .emitter()
+        .emit(MCodeOpSpec::new(MCodeOpcode::Return, 0), [result], [])
+        .unwrap();
+    let mut ir = builder
+        .build_unchecked(&CancellationToken::default())
+        .unwrap();
+
+    ir.rewriter()
+        .replace_scalar(operation, MCodeOpcode::And, &[left, right])
+        .unwrap();
+
+    let rewritten = &ir.ops()[operation.index()];
+    assert_eq!(rewritten.opcode(), MCodeOpcode::And);
+    assert_eq!(rewritten.results(), results);
+    assert_eq!(ir.op_operands_for(rewritten), &[left, right]);
+    assert!(ir.verify().is_ok());
+
+    ir.rewriter()
+        .replace_scalar(operation, MCodeOpcode::Copy, &[right])
+        .unwrap();
+
+    let rewritten = &ir.ops()[operation.index()];
+    assert_eq!(rewritten.opcode(), MCodeOpcode::Copy);
+    assert_eq!(rewritten.results(), results);
+    assert_eq!(ir.op_operands_for(rewritten), &[right]);
+    assert!(ir.verify().is_ok());
+}
+
+#[test]
 fn ssa_body_display_is_deterministic() {
     let mut builder = MCodeBuilder::new(metadata(), IlGraph::default());
     let value = emit_value(

@@ -39,6 +39,10 @@ impl CodeBlockStructurer {
         self.block_ends.get(&address).copied()
     }
 
+    fn next_cut_point(&self, index: usize, num_insns: usize) -> usize {
+        self.cut_positions.get(index).copied().unwrap_or(num_insns)
+    }
+
     pub(crate) fn clear(&mut self) {
         self.block_starts.clear();
         self.block_ends.clear();
@@ -165,10 +169,6 @@ impl CodeBlockStructurer {
         self.connect_fall_throughs(function);
 
         Ok(())
-    }
-
-    fn next_cut_point(&self, index: usize, num_insns: usize) -> usize {
-        self.cut_positions.get(index).copied().unwrap_or(num_insns)
     }
 
     fn push_block(

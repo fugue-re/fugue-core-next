@@ -1,5 +1,6 @@
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Cursor, Error as IoError, Read, Seek, SeekFrom, Write};
+use std::marker::PhantomData;
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,6 +15,8 @@ use zip::{ZipArchive, ZipWriter};
 use crate::loader::{ImageResolution, Loadable};
 use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
 use crate::types::{AttributeMap, BytesOrMapping};
+
+pub(crate) mod schema;
 
 pub(crate) mod entities;
 #[cfg(feature = "sqlite")]
@@ -47,11 +50,12 @@ pub use segments::{
     DefaultPersistentSegmentStorage, DefaultTransientSegmentStorage, InMemorySegmentStorage,
     MemoryMappedSegmentStorage, SegmentMapping, SegmentMappingBuilder, SegmentMappingCache,
     SegmentMappingFlags, SegmentMappingId, SegmentMappingKind, SegmentMappingProvenance,
-    SegmentMappingRef, SegmentMappingView, SegmentStorage, SegmentStorageDescriptor,
-    SegmentStorageError, SegmentStorageProvider, SegmentStorageProviderDescriptor,
-    SegmentStorageProviderEntry, SegmentStorageProviderFromLoadable,
-    SegmentStorageProviderFromSegmentRange, SegmentStorageProviderFromStorage,
-    SegmentStorageProviderId, SegmentStorageProviderRegistry, SegmentSubMapping,
+    SegmentMappingRef, SegmentMappingView, SegmentProperties, SegmentStorage,
+    SegmentStorageDescriptor, SegmentStorageError, SegmentStorageProvider,
+    SegmentStorageProviderDescriptor, SegmentStorageProviderEntry,
+    SegmentStorageProviderFromLoadable, SegmentStorageProviderFromSegmentRange,
+    SegmentStorageProviderFromStorage, SegmentStorageProviderId, SegmentStorageProviderRegistry,
+    SegmentSubMapping,
 };
 
 pub const FUGUE_STORAGE_MAGIC: &[u8] = b"FDBZ";
@@ -386,9 +390,7 @@ impl StorageProvider for PersistentEntityStorageProvider {
     }
 }
 
-pub struct PersistentStorageProvider<T, U = DefaultPersistentSegmentStorage>(
-    std::marker::PhantomData<(T, U)>,
-);
+pub struct PersistentStorageProvider<T, U = DefaultPersistentSegmentStorage>(PhantomData<(T, U)>);
 
 impl<T, U> StorageProvider for PersistentStorageProvider<T, U>
 where
@@ -464,7 +466,57 @@ impl StorageCleanupHandler for CompressedPersistentStorage {
 }
 
 impl CompressedPersistentStorage {
-    fn pack(&mut self) -> Result<(), StorageProviderError> {
+    pub fn new(attributes: &mut AttributeMap) -> Result<Self, StorageProviderError> {
+        let path = attributes
+            .get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH)
+            .ok_or(StorageProviderError::NoProjectPath)?;
+
+        Self::create_or_load(&path)?;
+
+        attributes.set_attr(ATTRIBUTE_PROJECT_PATH, path.with_extension("fdb"));
+
+        Ok(Self {
+            path,
+            flags: FugueStorageFlags::empty(),
+        })
+    }
+
+    pub fn from_existing(
+        path: &Path,
+        attributes: &mut AttributeMap,
+    ) -> Result<Self, StorageProviderError> {
+        if !path.exists() {
+            return Err(StorageProviderError::create_project_not_found(format!(
+                "`{}` does not exist",
+                path.display()
+            )));
+        }
+
+        let flags = Self::unpack(path, true)?;
+
+        attributes.set_attr(ATTRIBUTE_PROJECT_PATH, path.with_extension("fdb"));
+
+        Ok(Self {
+            path: path.to_path_buf(),
+            flags,
+        })
+    }
+
+    pub fn flags(&self) -> FugueStorageFlags {
+        self.flags
+    }
+
+    pub fn set_flags(&mut self, flags: FugueStorageFlags) -> &mut Self {
+        self.flags = flags;
+        self
+    }
+
+    pub fn with_flags(mut self, flags: FugueStorageFlags) -> Self {
+        self.set_flags(flags);
+        self
+    }
+
+    fn pack(&self) -> Result<(), StorageProviderError> {
         let packed = self.path.with_extension("fdbz");
         let unpacked = self.path.with_extension("fdb");
 
@@ -521,7 +573,7 @@ impl CompressedPersistentStorage {
 
             zip.start_file_from_path(relative_path, options)
                 .map_err(StorageProviderError::cleanup_project)?;
-            std::io::copy(&mut data, &mut zip).map_err(StorageProviderError::CleanupProject)?;
+            io::copy(&mut data, &mut zip).map_err(StorageProviderError::CleanupProject)?;
         }
 
         let mut writer = zip
@@ -532,56 +584,6 @@ impl CompressedPersistentStorage {
             .map_err(StorageProviderError::cleanup_project)?;
         fs::remove_dir_all(&unpacked).map_err(StorageProviderError::CleanupProject)?;
         Ok(())
-    }
-
-    pub fn new(attributes: &mut AttributeMap) -> Result<Self, StorageProviderError> {
-        let path = attributes
-            .get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH)
-            .ok_or(StorageProviderError::NoProjectPath)?;
-
-        Self::create_or_load(&path)?;
-
-        attributes.set_attr(ATTRIBUTE_PROJECT_PATH, path.with_extension("fdb"));
-
-        Ok(Self {
-            path,
-            flags: FugueStorageFlags::empty(),
-        })
-    }
-
-    pub fn from_existing(
-        path: &Path,
-        attributes: &mut AttributeMap,
-    ) -> Result<Self, StorageProviderError> {
-        if !path.exists() {
-            return Err(StorageProviderError::create_project_not_found(format!(
-                "`{}` does not exist",
-                path.display()
-            )));
-        }
-
-        let flags = Self::unpack(path, true)?;
-
-        attributes.set_attr(ATTRIBUTE_PROJECT_PATH, path.with_extension("fdb"));
-
-        Ok(Self {
-            path: path.to_path_buf(),
-            flags,
-        })
-    }
-
-    pub fn flags(&self) -> FugueStorageFlags {
-        self.flags
-    }
-
-    pub fn set_flags(&mut self, flags: FugueStorageFlags) -> &mut Self {
-        self.flags = flags;
-        self
-    }
-
-    pub fn with_flags(mut self, flags: FugueStorageFlags) -> Self {
-        self.set_flags(flags);
-        self
     }
 
     pub fn read_metadata(mut input: impl Read) -> Result<FugueStorageFlags, StorageProviderError> {

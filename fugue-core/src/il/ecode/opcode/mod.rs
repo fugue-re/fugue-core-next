@@ -81,6 +81,44 @@ pub enum ECodeOpcode {
 }
 
 impl ECodeOpcode {
+    pub(crate) const fn has_side_effect(self) -> bool {
+        matches!(
+            self,
+            Self::Store
+                | Self::Intrinsic
+                | Self::IntrinsicResult
+                | Self::Branch
+                | Self::ConditionalBranch
+                | Self::BranchIndirect
+                | Self::Call
+                | Self::CallIndirect
+                | Self::Return
+                | Self::Trap
+                | Self::WriteRegister
+                | Self::WriteFlag
+        )
+    }
+
+    pub(crate) const fn has_uniform_operand_width(self) -> bool {
+        matches!(
+            self,
+            Self::Add
+                | Self::Sub
+                | Self::Mul
+                | Self::UnsignedDiv
+                | Self::SignedDiv
+                | Self::UnsignedRem
+                | Self::SignedRem
+                | Self::Negate
+                | Self::And
+                | Self::Or
+                | Self::Xor
+                | Self::Not
+                | Self::WriteRegister
+                | Self::WriteFlag
+        )
+    }
+
     pub const fn mnemonic(&self) -> &'static str {
         match self {
             Self::Constant => "const",
@@ -158,44 +196,6 @@ impl ECodeOpcode {
 
     pub const fn requires_memory_domain(&self) -> bool {
         matches!(self, Self::Load | Self::Store)
-    }
-
-    pub(crate) const fn has_side_effect(self) -> bool {
-        matches!(
-            self,
-            Self::Store
-                | Self::Intrinsic
-                | Self::IntrinsicResult
-                | Self::Branch
-                | Self::ConditionalBranch
-                | Self::BranchIndirect
-                | Self::Call
-                | Self::CallIndirect
-                | Self::Return
-                | Self::Trap
-                | Self::WriteRegister
-                | Self::WriteFlag
-        )
-    }
-
-    pub(crate) const fn has_uniform_operand_width(self) -> bool {
-        matches!(
-            self,
-            Self::Add
-                | Self::Sub
-                | Self::Mul
-                | Self::UnsignedDiv
-                | Self::SignedDiv
-                | Self::UnsignedRem
-                | Self::SignedRem
-                | Self::Negate
-                | Self::And
-                | Self::Or
-                | Self::Xor
-                | Self::Not
-                | Self::WriteRegister
-                | Self::WriteFlag
-        )
     }
 
     pub(crate) fn evaluate<T>(self, width: u32, operands: &[T]) -> Option<BitVec>

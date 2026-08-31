@@ -290,7 +290,7 @@ fn first_mapping_placement(
         .find_map(|space| {
             space
                 .priority_list()
-                .first()
+                .next()
                 .map(|mapping_ref| (space.id(), mapping_ref.mapping_id()))
         })
         .expect("fixture should contain at least one mapping");
@@ -318,7 +318,7 @@ fn repeated_function_changes_keep_one_semantic_record() {
         });
     }
 
-    assert!(!changes.is_collapsed());
+    assert!(!changes.collapsed);
     assert_eq!(changes.records().len(), 1);
     assert_eq!(
         changes.records(),
@@ -386,7 +386,7 @@ fn staged_change_detail_collapses_at_its_memory_bound() {
         });
     }
 
-    assert!(changes.is_collapsed());
+    assert!(changes.collapsed);
     assert_eq!(changes.records().len(), 1);
     assert!(changes.semantic());
     assert!(changes.kinds().contains(ChangeKinds::FUNCTION_ADDED));

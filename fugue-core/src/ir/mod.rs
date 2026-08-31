@@ -22,7 +22,7 @@ pub use block::{
     CodeBlock, CodeBlockId, CodeBlockProperties, CodeBlockRef, CodeBlockTable, IncompleteCodeBlock,
     IncompleteCodeBlockId,
 };
-pub(crate) use block::{CodeBlockIdsByStart, CodeBlockRecord, PreparedCodeBlockRecord};
+pub(crate) use block::{CodeBlockIdsByAddress, CodeBlockRecord, PreparedCodeBlockRecord};
 
 pub(crate) mod call_graph;
 pub(crate) use call_graph::CallGraphStaging;
@@ -58,9 +58,6 @@ pub use reference::{
     Reference, ReferenceIndex, ReferenceKey, ReferenceKind, ReferenceOrigin, ReferenceProperties,
     ReferenceTarget,
 };
-
-pub(crate) mod segment;
-pub use segment::{ExternFunctionTemplate, ExternSegment, ExternSegmentError, SegmentProperties};
 
 pub(crate) mod switch;
 pub use switch::{
@@ -198,13 +195,13 @@ impl<T> Id<T> {
     }
 
     #[inline(always)]
-    const fn key(&self) -> u64 {
-        ((self.generation as u64) << 32) | self.id as u64
+    pub const fn is_valid(&self) -> bool {
+        !self.is_invalid()
     }
 
     #[inline(always)]
-    pub const fn is_valid(&self) -> bool {
-        !self.is_invalid()
+    const fn key(&self) -> u64 {
+        ((self.generation as u64) << 32) | self.id as u64
     }
 
     pub(crate) const fn index(&self) -> usize {

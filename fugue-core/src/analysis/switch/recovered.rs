@@ -44,39 +44,6 @@ impl RecoveredSwitch {
         self.properties.contains(SwitchProperties::GUARD_FOUND)
     }
 
-    pub(crate) fn reconcile(self, candidate: Self) -> Option<Self> {
-        if !self.has_same_layout(&candidate) {
-            return None;
-        }
-        Some(if self.should_replace_with(&candidate) {
-            candidate
-        } else {
-            self
-        })
-    }
-
-    pub(crate) fn should_replace_with(&self, candidate: &Self) -> bool {
-        if !self.has_same_layout(candidate) {
-            return false;
-        }
-        match (self.is_guarded(), candidate.is_guarded()) {
-            (false, true) => true,
-            (true, false) => false,
-            _ => candidate.cases.len() > self.cases.len(),
-        }
-    }
-
-    pub(crate) fn into_switch(self, id: SwitchId, function: FunctionId, branch: Address) -> Switch {
-        let mut switch = Switch::new(id, branch, self.model)
-            .with_function(function)
-            .with_cases(self.cases)
-            .with_properties(self.properties);
-        if let Some(default) = self.default {
-            switch.set_default_case(SwitchCase::new(default));
-        }
-        switch
-    }
-
     fn has_same_layout(&self, candidate: &Self) -> bool {
         let same_table = |a: &AddressTable, b: &AddressTable| {
             a.address() == b.address()
@@ -113,6 +80,39 @@ impl RecoveredSwitch {
             (SwitchModel::Explicit, SwitchModel::Explicit) => true,
             _ => false,
         }
+    }
+
+    pub(crate) fn reconcile(self, candidate: Self) -> Option<Self> {
+        if !self.has_same_layout(&candidate) {
+            return None;
+        }
+        Some(if self.should_replace_with(&candidate) {
+            candidate
+        } else {
+            self
+        })
+    }
+
+    pub(crate) fn should_replace_with(&self, candidate: &Self) -> bool {
+        if !self.has_same_layout(candidate) {
+            return false;
+        }
+        match (self.is_guarded(), candidate.is_guarded()) {
+            (false, true) => true,
+            (true, false) => false,
+            _ => candidate.cases.len() > self.cases.len(),
+        }
+    }
+
+    pub(crate) fn into_switch(self, id: SwitchId, function: FunctionId, branch: Address) -> Switch {
+        let mut switch = Switch::new(id, branch, self.model)
+            .with_function(function)
+            .with_cases(self.cases)
+            .with_properties(self.properties);
+        if let Some(default) = self.default {
+            switch.set_default_case(SwitchCase::new(default));
+        }
+        switch
     }
 }
 

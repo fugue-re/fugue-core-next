@@ -7,12 +7,13 @@ use fallible_iterator::FallibleIterator;
 use thiserror::Error;
 
 use crate::arch::Arch;
-use crate::ir::{RawAddress, SegmentProperties};
+use crate::ir::RawAddress;
 use crate::lifter::resolve_language;
 use crate::loader::{
     ImageAddress, ImageLayout, ImageSegment, ImageSegmentContents, Loadable, LoadableMetadata,
     LoaderError,
 };
+use crate::storage::segments::SegmentProperties;
 use crate::storage::segments::mapping::SegmentMappingProvenance;
 use crate::types::{AttributeMap, BytesOrMapping};
 

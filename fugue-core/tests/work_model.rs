@@ -1,11 +1,9 @@
-use std::error::Error;
-
 use fugue_core::engine::Priority;
 use fugue_core::ir::FlowKind;
 use fugue_core::project::AnalysisPhase;
 
 #[test]
-fn phases_order_by_dependency() -> Result<(), Box<dyn Error>> {
+fn phases_order_by_dependency() {
     let ordered = AnalysisPhase::ALL;
 
     assert_eq!(ordered[0], AnalysisPhase::Retract);
@@ -19,12 +17,10 @@ fn phases_order_by_dependency() -> Result<(), Box<dyn Error>> {
             window[1]
         );
     }
-
-    Ok(())
 }
 
 #[test]
-fn phase_dominates_priority_in_dispatch_order() -> Result<(), Box<dyn Error>> {
+fn phase_dominates_priority_in_dispatch_order() {
     let early = (AnalysisPhase::Decode, Priority::ENRICHMENT);
     let late = (AnalysisPhase::Derive, Priority::DISCOVERY);
 
@@ -32,23 +28,19 @@ fn phase_dominates_priority_in_dispatch_order() -> Result<(), Box<dyn Error>> {
         early < late,
         "an enrichment-priority decode must still run before a discovery-priority derive"
     );
-
-    Ok(())
 }
 
 #[test]
-fn retract_precedes_every_other_phase() -> Result<(), Box<dyn Error>> {
+fn retract_precedes_every_other_phase() {
     for phase in AnalysisPhase::ALL {
         if phase != AnalysisPhase::Retract {
             assert!(AnalysisPhase::Retract < phase);
         }
     }
-
-    Ok(())
 }
 
 #[test]
-fn tail_call_flow_kind_is_reachable() -> Result<(), Box<dyn Error>> {
+fn tail_call_flow_kind_is_reachable() {
     let kind = FlowKind::TailCallBranch;
 
     assert!(
@@ -56,6 +48,4 @@ fn tail_call_flow_kind_is_reachable() -> Result<(), Box<dyn Error>> {
         "a tail call leaves the function, so it must be a global edge"
     );
     assert_ne!(kind, FlowKind::Branch);
-
-    Ok(())
 }

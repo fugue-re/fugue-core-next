@@ -31,6 +31,15 @@ where
     is_object: bool,
 }
 
+fn elf_relocation_type(reloc: &Relocation) -> Option<u32> {
+    let RelocationFlags::Elf { r_type } = reloc.flags() else {
+        tracing::warn!("unsupported relocation flags {reloc:?}");
+        return None;
+    };
+
+    Some(r_type)
+}
+
 impl<'data, 'file, Elf, R> ElfSegmentRelocator<'data, 'file, Elf, R>
 where
     Elf: FileHeader,
@@ -51,6 +60,47 @@ where
             symbols,
             is_object,
         }
+    }
+
+    fn resolve_relocation_entry(
+        &self,
+        reloc: &Relocation,
+        is_dynamic: bool,
+    ) -> Option<&SymbolEntry<ImageAddress>> {
+        let RelocationTarget::Symbol(index) = reloc.target() else {
+            tracing::warn!("unsupported relocation target {reloc:?}");
+            return None;
+        };
+
+        let external_selector = if self.is_object {
+            ELF_SYMTAB_SELECTOR
+        } else {
+            ELF_DYNSYM_SELECTOR
+        };
+
+        if (is_dynamic || self.is_object)
+            && let Some((id, entry)) = self
+                .symbols
+                .get_by_index(SymbolIndex::new(external_selector, index.0))
+        {
+            tracing::trace!("found external symbol {id:?} at {}", entry.address());
+            return Some(entry);
+        }
+
+        if !is_dynamic
+            && let Some((id, entry)) = self
+                .symbols
+                .get_by_index(SymbolIndex::new(ELF_SYMTAB_SELECTOR, index.0))
+        {
+            tracing::trace!("found symbol {id:?} at {}", entry.address());
+            return Some(entry);
+        }
+
+        tracing::warn!(
+            "attempting to resolve symbol that is not contained in either expected symbol table {index:?} (dynamic: {is_dynamic})",
+        );
+
+        None
     }
 
     pub fn apply(
@@ -175,15 +225,6 @@ where
         Ok(())
     }
 
-    pub(crate) fn elf_relocation_type(&self, reloc: &Relocation) -> Option<u32> {
-        let RelocationFlags::Elf { r_type } = reloc.flags() else {
-            tracing::warn!("unsupported relocation flags {reloc:?}");
-            return None;
-        };
-
-        Some(r_type)
-    }
-
     pub(crate) fn resolve_relocation_symbol(
         &self,
         reloc: &Relocation,
@@ -191,47 +232,6 @@ where
     ) -> Option<u64> {
         self.resolve_relocation_entry(reloc, is_dynamic)
             .map(|entry| entry.address().raw_offset())
-    }
-
-    fn resolve_relocation_entry(
-        &self,
-        reloc: &Relocation,
-        is_dynamic: bool,
-    ) -> Option<&SymbolEntry<ImageAddress>> {
-        let RelocationTarget::Symbol(index) = reloc.target() else {
-            tracing::warn!("unsupported relocation target {reloc:?}");
-            return None;
-        };
-
-        let extern_selector = if self.is_object {
-            ELF_SYMTAB_SELECTOR
-        } else {
-            ELF_DYNSYM_SELECTOR
-        };
-
-        if (is_dynamic || self.is_object)
-            && let Some((id, entry)) = self
-                .symbols
-                .get_by_index(SymbolIndex::new(extern_selector, index.0))
-        {
-            tracing::trace!("found external symbol {id:?} at {}", entry.address());
-            return Some(entry);
-        }
-
-        if !is_dynamic
-            && let Some((id, entry)) = self
-                .symbols
-                .get_by_index(SymbolIndex::new(ELF_SYMTAB_SELECTOR, index.0))
-        {
-            tracing::trace!("found symbol {id:?} at {}", entry.address());
-            return Some(entry);
-        }
-
-        tracing::warn!(
-            "attempting to resolve symbol that is not contained in either expected symbol table {index:?} (dynamic: {is_dynamic})",
-        );
-
-        None
     }
 
     pub(crate) fn mark_function_symbol(

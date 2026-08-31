@@ -1,14 +1,13 @@
 use std::sync::Arc;
 
-use crate::ir::{Address, IndexMetadata};
-use crate::storage::EntityStorage;
-use crate::storage::entities::{EntityCache, EntityStorageError, ProjectEntity, WriteBackWorker};
-use crate::types::Revision;
-use crate::types::common::{cursor_bound, cursor_bound_or_minimum};
-
 use super::{
     CallGraphEdgeKey, CallGraphEdgeRecord, InverseCallGraphEdgeKey, PreparedCallGraphBatch,
 };
+use crate::ir::{Address, IndexMetadata};
+use crate::storage::EntityStorage;
+use crate::storage::entities::cursor::{cursor_bound, cursor_bound_or_minimum};
+use crate::storage::entities::{EntityCache, EntityStorageError, ProjectEntity, WriteBackWorker};
+use crate::types::Revision;
 
 pub struct CallGraphIndex {
     forward: EntityCache<CallGraphEdgeKey, CallGraphEdgeRecord>,
@@ -34,40 +33,6 @@ impl CallGraphIndex {
             inverse,
             storage,
         })
-    }
-
-    pub(crate) fn mark_current(&self, revision: Revision) -> Result<(), EntityStorageError> {
-        self.storage.insert(
-            &ProjectEntity::CallGraphIndex,
-            &IndexMetadata::new(revision),
-        )
-    }
-
-    pub(crate) fn metadata_revision(&self) -> Result<Option<Revision>, EntityStorageError> {
-        let metadata = self
-            .storage
-            .get::<ProjectEntity, IndexMetadata>(&ProjectEntity::CallGraphIndex)?;
-        Ok(metadata.map(|metadata| metadata.revision()))
-    }
-
-    pub(crate) fn flush(&self) -> Result<(), EntityStorageError> {
-        self.forward.flush()?;
-        self.inverse.flush()
-    }
-
-    pub(crate) fn publish(&self, batch: PreparedCallGraphBatch) {
-        for edge in batch.edges {
-            let inverse_key = InverseCallGraphEdgeKey::new(edge.key.source(), edge.key.target());
-            if edge.present {
-                self.forward
-                    .publish_insert(edge.key, CallGraphEdgeRecord, edge.encoded_size);
-                self.inverse
-                    .publish_insert(inverse_key, CallGraphEdgeRecord, edge.encoded_size);
-            } else {
-                self.forward.publish_remove(&edge.key);
-                self.inverse.publish_remove(&inverse_key);
-            }
-        }
     }
 
     pub(crate) fn callees(
@@ -120,6 +85,40 @@ impl CallGraphIndex {
             .forward
             .try_iter_range(start.as_ref())?
             .map(|result| result.map(|(key, _)| key)))
+    }
+
+    pub(crate) fn mark_current(&self, revision: Revision) -> Result<(), EntityStorageError> {
+        self.storage.insert(
+            &ProjectEntity::CallGraphIndex,
+            &IndexMetadata::new(revision),
+        )
+    }
+
+    pub(crate) fn metadata_revision(&self) -> Result<Option<Revision>, EntityStorageError> {
+        let metadata = self
+            .storage
+            .get::<ProjectEntity, IndexMetadata>(&ProjectEntity::CallGraphIndex)?;
+        Ok(metadata.map(|metadata| metadata.revision()))
+    }
+
+    pub(crate) fn flush(&self) -> Result<(), EntityStorageError> {
+        self.forward.flush()?;
+        self.inverse.flush()
+    }
+
+    pub(crate) fn publish(&self, batch: PreparedCallGraphBatch) {
+        for edge in batch.edges {
+            let inverse_key = InverseCallGraphEdgeKey::new(edge.key.source(), edge.key.target());
+            if edge.present {
+                self.forward
+                    .publish_insert(edge.key, CallGraphEdgeRecord, edge.encoded_size);
+                self.inverse
+                    .publish_insert(inverse_key, CallGraphEdgeRecord, edge.encoded_size);
+            } else {
+                self.forward.publish_remove(&edge.key);
+                self.inverse.publish_remove(&inverse_key);
+            }
+        }
     }
 
     pub(crate) fn clear(&self) -> Result<(), EntityStorageError> {

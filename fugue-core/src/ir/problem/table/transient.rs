@@ -32,6 +32,15 @@ impl ProblemTable {
             .filter(|problem| problem.id() == id)
     }
 
+    pub fn get(&self, address: Address, kind: ProblemKind) -> Option<&Problem> {
+        self.get_by_key(ProblemKey::new(address, kind))
+    }
+
+    pub fn get_by_key(&self, key: ProblemKey) -> Option<&Problem> {
+        let id = self.index.id(key)?;
+        self.get_by_id(id)
+    }
+
     pub fn contains(&self, address: Address) -> bool {
         self.index.contains(address)
     }
@@ -46,6 +55,12 @@ impl ProblemTable {
 
     pub fn iter(&self) -> impl Iterator<Item = &Problem> + '_ {
         self.entries.iter().filter_map(Option::as_ref)
+    }
+
+    pub fn entries_after(&self, after: Option<ProblemKey>) -> impl Iterator<Item = &Problem> + '_ {
+        self.index
+            .entries_after(after)
+            .filter_map(|(_, id)| self.get_by_id(id))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -120,15 +135,6 @@ impl ProblemTable {
         Ok(id)
     }
 
-    pub fn get(&self, address: Address, kind: ProblemKind) -> Option<&Problem> {
-        self.get_by_key(ProblemKey::new(address, kind))
-    }
-
-    pub fn get_by_key(&self, key: ProblemKey) -> Option<&Problem> {
-        let id = self.index.id(key)?;
-        self.get_by_id(id)
-    }
-
     pub fn modify_by_id<R>(
         &mut self,
         id: ProblemId,
@@ -164,11 +170,5 @@ impl ProblemTable {
             return false;
         };
         self.remove_by_id(id)
-    }
-
-    pub fn entries_after(&self, after: Option<ProblemKey>) -> impl Iterator<Item = &Problem> + '_ {
-        self.index
-            .entries_after(after)
-            .filter_map(|(_, id)| self.get_by_id(id))
     }
 }

@@ -50,12 +50,32 @@ impl FunctionTable {
         self.get_by_id_mut(id)
     }
 
+    pub fn get_by_address(&self, addr: Address) -> Option<&Function> {
+        let id = *self.index.addresses.get(&addr)?;
+        self.get_by_id(id)
+    }
+
     pub fn contains(&self, addr: Address) -> bool {
         self.index.addresses.contains_key(&addr)
     }
 
     pub fn addresses(&self) -> impl Iterator<Item = Address> + '_ {
         self.index.addresses.keys().copied()
+    }
+
+    pub fn addresses_in_range<R>(
+        &self,
+        space: AddressSpaceId,
+        range: R,
+    ) -> impl Iterator<Item = Address> + '_
+    where
+        R: RangeBounds<RawAddress>,
+    {
+        let (start, end) = Address::bounds_in_space(space, &range);
+        self.index
+            .addresses
+            .range((start, end))
+            .map(|(address, _)| *address)
     }
 
     pub(crate) fn get_by_block_id(&self, block: CodeBlockId) -> IdSet<Function> {
@@ -170,11 +190,6 @@ impl FunctionTable {
         Ok((id, value))
     }
 
-    pub fn get_by_address(&self, addr: Address) -> Option<&Function> {
-        let id = *self.index.addresses.get(&addr)?;
-        self.get_by_id(id)
-    }
-
     pub fn modify_by_id<R>(
         &mut self,
         id: Id<Function>,
@@ -218,20 +233,5 @@ impl FunctionTable {
         self.index.allocator.release(id);
 
         true
-    }
-
-    pub fn addresses_in_range<R>(
-        &self,
-        space: AddressSpaceId,
-        range: R,
-    ) -> impl Iterator<Item = Address> + '_
-    where
-        R: RangeBounds<RawAddress>,
-    {
-        let (start, end) = Address::bounds_in_space(space, &range);
-        self.index
-            .addresses
-            .range((start, end))
-            .map(|(address, _)| *address)
     }
 }

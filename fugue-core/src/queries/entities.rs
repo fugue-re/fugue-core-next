@@ -2,9 +2,10 @@ use std::cmp::Ordering as CmpOrdering;
 use std::sync::Arc;
 
 use crate::ir::{
-    Address, Problem, ProblemKey, ProblemKind, ProblemScope, SegmentProperties, Switch, Symbol,
-    SymbolEntry, SymbolProperties,
+    Address, Problem, ProblemKey, ProblemKind, ProblemScope, Switch, Symbol, SymbolEntry,
+    SymbolProperties,
 };
+use crate::storage::SegmentProperties;
 use crate::storage::segments::mapping::SegmentMappingId;
 use crate::storage::segments::view::SegmentMappingView;
 use crate::types::Confidence;

@@ -5,12 +5,12 @@ use std::sync::Arc;
 
 use crate::ir::problem::{Problem, ProblemId, ProblemKey, ProblemKind, ProblemScope};
 use crate::ir::{Address, AddressRange, IdAllocator};
+use crate::storage::entities::cursor::cursor_bound;
 use crate::storage::entities::schema::ENTITY_PROBLEM_TABLE_ID;
 use crate::storage::entities::{Entity, EntityId, EntityRef, ProjectEntity, WriteBackWorker};
 use crate::storage::project::PersistableProjectEntity;
 use crate::storage::{EntityStorage, EntityStorageError};
 use crate::types::Revision;
-use crate::types::common::cursor_bound;
 
 pub(crate) const ATTRIBUTE_PROBLEM_CACHE_SIZE: &str = "storage.entities.problem.cache_size";
 pub(crate) const DEFAULT_PROBLEM_CACHE_BYTES: usize = 2 * 1024 * 1024;
@@ -70,6 +70,16 @@ impl ProblemIndex {
         self.problems.len()
     }
 
+    fn entries_after(
+        &self,
+        after: Option<ProblemKey>,
+    ) -> impl Iterator<Item = (ProblemKey, ProblemId)> + '_ {
+        let start = cursor_bound(after);
+        self.problems
+            .range((start, Bound::Unbounded))
+            .map(|(&key, &id)| (key, id))
+    }
+
     fn insert(&mut self, id: ProblemId, key: ProblemKey) {
         self.problems.insert(key, id);
     }
@@ -88,16 +98,6 @@ impl ProblemIndex {
         for (&key, _) in self.problems.range(first..=last) {
             f(key);
         }
-    }
-
-    fn entries_after(
-        &self,
-        after: Option<ProblemKey>,
-    ) -> impl Iterator<Item = (ProblemKey, ProblemId)> + '_ {
-        let start = cursor_bound(after);
-        self.problems
-            .range((start, Bound::Unbounded))
-            .map(|(&key, &id)| (key, id))
     }
 }
 
@@ -185,64 +185,6 @@ impl ProblemTable {
         matches!(self, Self::Persistent(_))
     }
 
-    pub(crate) fn pending_id(&self, offset: usize) -> ProblemId {
-        match self {
-            Self::Persistent(table) => table.pending_id(offset),
-            Self::Transient(table) => table.pending_id(offset),
-        }
-    }
-
-    pub(crate) fn publish_upsert(&mut self, problem: Problem, encoded_size: usize, is_new: bool) {
-        match self {
-            Self::Persistent(table) => table.publish_upsert(problem, encoded_size, is_new),
-            Self::Transient(table) => table.publish_upsert(problem, is_new),
-        }
-    }
-
-    pub(crate) fn publish_remove(&mut self, key: ProblemKey) {
-        match self {
-            Self::Persistent(table) => table.publish_remove(key),
-            Self::Transient(table) => table.publish_remove(key),
-        }
-    }
-
-    pub fn flush(&self) -> Result<(), EntityStorageError> {
-        match self {
-            Self::Persistent(table) => table.flush(),
-            Self::Transient(_) => Ok(()),
-        }
-    }
-
-    pub fn insert(
-        &mut self,
-        address: Address,
-        kind: ProblemKind,
-        observed_revision: Revision,
-    ) -> Result<ProblemId, ProblemTableError> {
-        self.insert_scoped(ProblemScope::Address(address), kind, observed_revision)
-    }
-
-    pub fn insert_scoped(
-        &mut self,
-        scope: ProblemScope,
-        kind: ProblemKind,
-        observed_revision: Revision,
-    ) -> Result<ProblemId, ProblemTableError> {
-        let key = ProblemKey::scoped(scope, kind);
-        if let Some(id) = self.try_get_by_key(key)?.map(|problem| problem.id()) {
-            self.try_modify_by_id(id, |problem| {
-                problem.record_attempt(observed_revision);
-            })?;
-            return Ok(id);
-        }
-
-        let problem = |id, scope| Ok(Problem::new_scoped(id, scope, kind, observed_revision));
-        match self {
-            Self::Persistent(table) => table.insert(scope, kind, problem),
-            Self::Transient(table) => table.insert(scope, kind, problem),
-        }
-    }
-
     pub fn get_by_id(&self, id: ProblemId) -> Option<ProblemRef<'_>> {
         self.try_get_by_id(id)
             .unwrap_or_else(|error| error.into_fatal())
@@ -286,14 +228,71 @@ impl ProblemTable {
         }
     }
 
-    pub fn try_modify_by_id<R>(
-        &mut self,
-        id: ProblemId,
-        f: impl FnOnce(&mut Problem) -> R,
-    ) -> Result<Option<R>, EntityStorageError> {
+    pub fn keys(&self) -> Box<dyn Iterator<Item = ProblemKey> + '_> {
         match self {
-            Self::Persistent(table) => table.try_modify_by_id(id, f),
-            Self::Transient(table) => Ok(table.modify_by_id(id, f)),
+            Self::Persistent(table) => Box::new(table.keys()),
+            Self::Transient(table) => Box::new(table.keys()),
+        }
+    }
+
+    pub fn entries_after(
+        &self,
+        after: Option<ProblemKey>,
+    ) -> Box<dyn Iterator<Item = ProblemRef<'_>> + '_> {
+        match self {
+            Self::Persistent(table) => Box::new(table.entries_after(after).map(EntityRef::cached)),
+            Self::Transient(table) => Box::new(table.entries_after(after).map(EntityRef::borrowed)),
+        }
+    }
+
+    pub fn iter(&self) -> Box<dyn Iterator<Item = ProblemRef<'_>> + '_> {
+        match self {
+            Self::Persistent(table) => Box::new(table.iter().map(EntityRef::cached)),
+            Self::Transient(table) => Box::new(table.iter().map(EntityRef::borrowed)),
+        }
+    }
+
+    pub(crate) fn for_each_key_in_range(&self, range: AddressRange, mut f: impl FnMut(ProblemKey)) {
+        match self {
+            Self::Persistent(table) => table.for_each_key_in_range(range, &mut f),
+            Self::Transient(table) => table.for_each_key_in_range(range, &mut f),
+        }
+    }
+
+    pub(crate) fn pending_id(&self, offset: usize) -> ProblemId {
+        match self {
+            Self::Persistent(table) => table.pending_id(offset),
+            Self::Transient(table) => table.pending_id(offset),
+        }
+    }
+
+    pub fn insert(
+        &mut self,
+        address: Address,
+        kind: ProblemKind,
+        observed_revision: Revision,
+    ) -> Result<ProblemId, ProblemTableError> {
+        self.insert_scoped(ProblemScope::Address(address), kind, observed_revision)
+    }
+
+    pub fn insert_scoped(
+        &mut self,
+        scope: ProblemScope,
+        kind: ProblemKind,
+        observed_revision: Revision,
+    ) -> Result<ProblemId, ProblemTableError> {
+        let key = ProblemKey::scoped(scope, kind);
+        if let Some(id) = self.try_get_by_key(key)?.map(|problem| problem.id()) {
+            self.try_modify_by_id(id, |problem| {
+                problem.record_attempt(observed_revision);
+            })?;
+            return Ok(id);
+        }
+
+        let problem = |id, scope| Ok(Problem::new_scoped(id, scope, kind, observed_revision));
+        match self {
+            Self::Persistent(table) => table.insert(scope, kind, problem),
+            Self::Transient(table) => table.insert(scope, kind, problem),
         }
     }
 
@@ -304,6 +303,17 @@ impl ProblemTable {
     ) -> Option<R> {
         self.try_modify_by_id(id, f)
             .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub fn try_modify_by_id<R>(
+        &mut self,
+        id: ProblemId,
+        f: impl FnOnce(&mut Problem) -> R,
+    ) -> Result<Option<R>, EntityStorageError> {
+        match self {
+            Self::Persistent(table) => table.try_modify_by_id(id, f),
+            Self::Transient(table) => Ok(table.modify_by_id(id, f)),
+        }
     }
 
     pub fn remove_by_id(&mut self, id: ProblemId) -> bool {
@@ -338,34 +348,24 @@ impl ProblemTable {
         }
     }
 
-    pub fn keys(&self) -> Box<dyn Iterator<Item = ProblemKey> + '_> {
+    pub fn flush(&self) -> Result<(), EntityStorageError> {
         match self {
-            Self::Persistent(table) => Box::new(table.keys()),
-            Self::Transient(table) => Box::new(table.keys()),
+            Self::Persistent(table) => table.flush(),
+            Self::Transient(_) => Ok(()),
         }
     }
 
-    pub(crate) fn for_each_key_in_range(&self, range: AddressRange, mut f: impl FnMut(ProblemKey)) {
+    pub(crate) fn publish_upsert(&mut self, problem: Problem, encoded_size: usize, is_new: bool) {
         match self {
-            Self::Persistent(table) => table.for_each_key_in_range(range, &mut f),
-            Self::Transient(table) => table.for_each_key_in_range(range, &mut f),
+            Self::Persistent(table) => table.publish_upsert(problem, encoded_size, is_new),
+            Self::Transient(table) => table.publish_upsert(problem, is_new),
         }
     }
 
-    pub fn entries_after(
-        &self,
-        after: Option<ProblemKey>,
-    ) -> Box<dyn Iterator<Item = ProblemRef<'_>> + '_> {
+    pub(crate) fn publish_remove(&mut self, key: ProblemKey) {
         match self {
-            Self::Persistent(table) => Box::new(table.entries_after(after).map(EntityRef::cached)),
-            Self::Transient(table) => Box::new(table.entries_after(after).map(EntityRef::borrowed)),
-        }
-    }
-
-    pub fn iter(&self) -> Box<dyn Iterator<Item = ProblemRef<'_>> + '_> {
-        match self {
-            Self::Persistent(table) => Box::new(table.iter().map(EntityRef::cached)),
-            Self::Transient(table) => Box::new(table.iter().map(EntityRef::borrowed)),
+            Self::Persistent(table) => table.publish_remove(key),
+            Self::Transient(table) => table.publish_remove(key),
         }
     }
 }

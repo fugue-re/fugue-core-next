@@ -9,7 +9,7 @@ use crate::ir::{CodeBlockTable, FunctionId, FunctionTable, IncompleteFunction};
 use crate::lifter::Language;
 use crate::platform::Platform;
 use crate::storage::SegmentStorage;
-use crate::types::common::Revision;
+use crate::types::Revision;
 
 pub struct IlGenerationContext<'a> {
     subject: IlSubject<'a>,
@@ -107,15 +107,15 @@ pub enum IlSubject<'a> {
 }
 
 impl IlSubject<'_> {
+    pub fn is_speculative(&self) -> bool {
+        matches!(self, Self::Speculative { .. })
+    }
+
     pub fn function(&self) -> FunctionId {
         match self {
             Self::Admitted(function) => *function,
             Self::Speculative { .. } => FunctionId::INVALID,
         }
-    }
-
-    pub fn is_speculative(&self) -> bool {
-        matches!(self, Self::Speculative { .. })
     }
 }
 

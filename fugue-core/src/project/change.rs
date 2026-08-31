@@ -439,6 +439,14 @@ impl ChangeSet {
         self.kinds
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+
     pub fn contains(&self, kinds: ChangeKinds) -> bool {
         self.kinds.intersects(kinds)
     }
@@ -446,14 +454,6 @@ impl ChangeSet {
     pub fn push(&mut self, record: ChangeRecord) {
         self.kinds |= record.kind();
         Arc::make_mut(&mut self.records).push(record);
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.records.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.records.len()
     }
 
     pub fn merge(&mut self, other: &ChangeSet) {

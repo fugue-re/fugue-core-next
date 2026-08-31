@@ -550,66 +550,12 @@ impl Project {
         self.language
     }
 
-    pub fn entry_point(&self) -> Option<Address> {
-        self.attributes().get_attr::<Address>(ATTRIBUTE_ENTRY_POINT)
-    }
-
     pub fn revision(&self) -> Revision {
         self.revisions.revision()
     }
 
-    pub fn pcode(&self, function: FunctionId) -> Result<Option<PCodeIr>, ProjectError> {
-        self.lifted(function)
-    }
-
-    pub fn ecode(&self, function: FunctionId) -> Result<Option<ECodeIr>, ProjectError> {
-        self.lifted(function)
-    }
-
-    pub fn mcode(&self, function: FunctionId) -> Result<Option<MCodeIr>, ProjectError> {
-        self.lifted(function)
-    }
-
-    pub(crate) fn lifted<T>(&self, function: FunctionId) -> Result<Option<T>, ProjectError>
-    where
-        T: PersistableIl,
-    {
-        T::load_current(&self.storage, function, self.revisions.semantic_revision())
-            .map_err(ProjectError::from)
-    }
-
-    pub(crate) fn lifted_erased(
-        &self,
-        registry: &IlRegistry,
-        function: FunctionId,
-        form: &IlFormId,
-    ) -> Result<Option<Box<dyn Any + Send + Sync>>, ProjectError> {
-        let Some(load) = registry.form(form).and_then(IlFormRegistration::load) else {
-            return Ok(None);
-        };
-
-        load(&self.storage, function, self.revisions.semantic_revision())
-            .map_err(ProjectError::from)
-    }
-
     pub(crate) fn semantic_revision(&self) -> Revision {
         self.revisions.semantic_revision()
-    }
-
-    pub(crate) fn abandon_persistence(&mut self) {
-        self.persistable = false;
-    }
-
-    pub fn transaction(&mut self, source: impl Into<ChangeSource>) -> ProjectTransaction<'_> {
-        ProjectTransaction::new(self, source.into(), IlRegistry::standard().clone())
-    }
-
-    pub(crate) fn transaction_with_registry(
-        &mut self,
-        source: impl Into<ChangeSource>,
-        registry: Arc<IlRegistry>,
-    ) -> ProjectTransaction<'_> {
-        ProjectTransaction::new(self, source.into(), registry)
     }
 
     pub fn symbols(&self) -> &SymbolTable {
@@ -658,6 +604,56 @@ impl Project {
 
     pub fn attributes_mut(&mut self) -> &mut AttributeMap {
         &mut self.attributes
+    }
+
+    pub fn entry_point(&self) -> Option<Address> {
+        self.attributes().get_attr::<Address>(ATTRIBUTE_ENTRY_POINT)
+    }
+
+    pub fn pcode(&self, function: FunctionId) -> Result<Option<PCodeIr>, ProjectError> {
+        self.lifted(function)
+    }
+
+    pub fn ecode(&self, function: FunctionId) -> Result<Option<ECodeIr>, ProjectError> {
+        self.lifted(function)
+    }
+
+    pub fn mcode(&self, function: FunctionId) -> Result<Option<MCodeIr>, ProjectError> {
+        self.lifted(function)
+    }
+
+    pub(crate) fn lifted<T>(&self, function: FunctionId) -> Result<Option<T>, ProjectError>
+    where
+        T: PersistableIl,
+    {
+        T::load_current(&self.storage, function, self.revisions.semantic_revision())
+            .map_err(ProjectError::from)
+    }
+
+    pub(crate) fn lifted_erased(
+        &self,
+        registry: &IlRegistry,
+        function: FunctionId,
+        form: &IlFormId,
+    ) -> Result<Option<Box<dyn Any + Send + Sync>>, ProjectError> {
+        let Some(load) = registry.form(form).and_then(IlFormRegistration::load) else {
+            return Ok(None);
+        };
+
+        load(&self.storage, function, self.revisions.semantic_revision())
+            .map_err(ProjectError::from)
+    }
+
+    pub fn transaction(&mut self, source: impl Into<ChangeSource>) -> ProjectTransaction<'_> {
+        ProjectTransaction::new(self, source.into(), IlRegistry::standard().clone())
+    }
+
+    pub(crate) fn transaction_with_registry(
+        &mut self,
+        source: impl Into<ChangeSource>,
+        registry: Arc<IlRegistry>,
+    ) -> ProjectTransaction<'_> {
+        ProjectTransaction::new(self, source.into(), registry)
     }
 
     fn persist(&mut self) -> Result<(), StorageProviderError> {

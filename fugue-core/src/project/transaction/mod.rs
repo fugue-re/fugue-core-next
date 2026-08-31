@@ -5,7 +5,7 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 use tracing::Span;
 
-use super::segment::SegmentMetadataStaging;
+use super::segment::SegmentStorageStaging;
 use super::{
     ChangeKinds, ChangeRecord, ChangeSet, ChangeSource, FunctionChangeKind,
     MAX_DETAILED_CHANGE_RECORDS, Project, ProjectError, ReadSet,
@@ -20,8 +20,8 @@ use crate::ir::{
     SymbolTable,
 };
 use crate::storage::entities::{Entity, EntityWrite, EntityWriteBatch};
+use crate::storage::segments::SegmentStorage;
 use crate::storage::segments::mapping::SegmentMappingId;
-use crate::storage::segments::{SegmentStorage, SegmentWriteRevert};
 use crate::storage::{EntityRef, EntityStorageError};
 use crate::types::Revision;
 
@@ -114,6 +114,22 @@ struct ChangeStaging {
 }
 
 impl ChangeStaging {
+    fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    fn kinds(&self) -> ChangeKinds {
+        self.kinds
+    }
+
+    fn records(&self) -> &[ChangeRecord] {
+        &self.records
+    }
+
+    fn semantic(&self) -> bool {
+        self.semantic_count != 0
+    }
+
     fn reserve(&mut self, additional: usize) {
         let additional = additional.min(MAX_DETAILED_CHANGE_RECORDS);
         self.indices.reserve(additional);
@@ -301,41 +317,12 @@ impl ChangeStaging {
         self.semantic_count -= usize::from(record.affects_lifted_inputs());
     }
 
-    fn clear(&mut self) {
-        self.collapsed = false;
-        self.indices.clear();
-        self.kind_counts.fill(0);
-        self.kinds = ChangeKinds::empty();
-        self.records.clear();
-        self.semantic_count = 0;
-    }
-
     fn finish(mut self, revision: Revision, source: ChangeSource) -> ChangeSet {
         if self.collapsed {
             self.records[0] = ChangeRecord::Resynchronise { to: revision };
         }
 
         ChangeSet::with_records(revision, self.records).with_provenance(source)
-    }
-
-    fn is_empty(&self) -> bool {
-        self.records.is_empty()
-    }
-
-    fn is_collapsed(&self) -> bool {
-        self.collapsed
-    }
-
-    fn kinds(&self) -> ChangeKinds {
-        self.kinds
-    }
-
-    fn records(&self) -> &[ChangeRecord] {
-        &self.records
-    }
-
-    fn semantic(&self) -> bool {
-        self.semantic_count != 0
     }
 }
 
@@ -352,8 +339,7 @@ pub struct ProjectTransaction<'p> {
     symbol_indices: BTreeMap<SymbolIndex, Option<SymbolId>>,
     symbol_reservations: Vec<SymbolId>,
     cancelled_symbols: Vec<SymbolId>,
-    segment_staging: SegmentMetadataStaging,
-    segment_write_reverts: Vec<SegmentWriteRevert>,
+    segment_staging: SegmentStorageStaging,
     staged_references: BTreeMap<ReferenceKey, StagedReferenceRecord>,
     asserted_references: BTreeSet<ReferenceKey>,
     derived_reference_coverage: AddressRangeSet,
@@ -362,21 +348,7 @@ pub struct ProjectTransaction<'p> {
     switch_reservations: Vec<SwitchId>,
     cancelled_switches: Vec<SwitchId>,
     source: ChangeSource,
-    committed: bool,
     span: Span,
-}
-
-impl Drop for ProjectTransaction<'_> {
-    fn drop(&mut self) {
-        let span = self.span.clone();
-        let _entered = span.enter();
-        if !self.committed
-            && let Err(error) = self.restore_eager_writes()
-        {
-            tracing::error!("failed to roll back an abandoned transaction: {error}");
-            self.project.abandon_persistence();
-        }
-    }
 }
 
 impl ProjectTransaction<'_> {
@@ -400,8 +372,7 @@ impl ProjectTransaction<'_> {
             symbol_indices: BTreeMap::new(),
             symbol_reservations: Vec::new(),
             cancelled_symbols: Vec::new(),
-            segment_staging: SegmentMetadataStaging::default(),
-            segment_write_reverts: Vec::new(),
+            segment_staging: SegmentStorageStaging::default(),
             staged_references: BTreeMap::new(),
             asserted_references: BTreeSet::new(),
             derived_reference_coverage: AddressRangeSet::new(),
@@ -410,73 +381,17 @@ impl ProjectTransaction<'_> {
             switch_reservations: Vec::new(),
             cancelled_switches: Vec::new(),
             source,
-            committed: false,
             span,
         }
+    }
+
+    pub(crate) fn reads_collapsed(&self) -> bool {
+        self.reads_collapsed
     }
 
     pub fn project(&mut self, kinds: ChangeKinds) -> &Project {
         self.reads.record_unbounded(kinds);
         self.project
-    }
-
-    fn record_read(&mut self, kinds: ChangeKinds, range: AddressRange) {
-        self.reads_collapsed |= self.reads.record(kinds, range);
-    }
-
-    fn record_unbounded_read(&mut self, kinds: ChangeKinds) {
-        self.reads.record_unbounded(kinds);
-    }
-
-    pub fn function_at(
-        &mut self,
-        address: Address,
-    ) -> Result<Option<FunctionRef<'_>>, ProjectError> {
-        self.record_read(ChangeKinds::FUNCTIONS, AddressRange::point(address));
-        self.project
-            .functions
-            .staged_by_address(&self.function_staging, address)
-            .map(|function| function.map(EntityRef::owned))
-            .map_err(ProjectError::from)
-    }
-
-    pub fn function_callees(&mut self, entry: Address) -> Result<Vec<Address>, ProjectError> {
-        self.record_read(ChangeKinds::FUNCTIONS, AddressRange::point(entry));
-        if let Some(callees) = self.call_graph_staging.function_edges(entry) {
-            return Ok(callees.iter().copied().collect());
-        }
-
-        self.project
-            .call_graph
-            .callees(entry, None)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(ProjectError::from)
-    }
-
-    pub fn switch_at(&mut self, branch: Address) -> Option<SwitchRef<'_>> {
-        self.record_read(ChangeKinds::SWITCHES, AddressRange::point(branch));
-        match self.staged_switches.get(&branch) {
-            Some(Some(switch)) => Some(EntityRef::owned(switch.clone())),
-            Some(None) => None,
-            None => self.project.switches().get_by_branch(branch),
-        }
-    }
-
-    pub fn contains_problem(&mut self, address: Address) -> bool {
-        self.record_read(ChangeKinds::PROBLEMS, AddressRange::point(address));
-        if self
-            .staged_problems
-            .iter()
-            .any(|(key, problem)| key.address() == Some(address) && problem.is_some())
-        {
-            return true;
-        }
-
-        self.project
-            .problems()
-            .keys()
-            .filter(|key| key.address() == Some(address))
-            .any(|key| !self.staged_problems.contains_key(&key))
     }
 
     pub fn functions(&mut self) -> &FunctionTable {
@@ -509,16 +424,71 @@ impl ProjectTransaction<'_> {
         self.project.segments()
     }
 
+    pub fn function_at(
+        &mut self,
+        address: Address,
+    ) -> Result<Option<FunctionRef<'_>>, ProjectError> {
+        self.record_read(ChangeKinds::FUNCTIONS, AddressRange::point(address));
+        self.project
+            .functions
+            .staged_by_address(&self.function_staging, address)
+            .map(|function| function.map(EntityRef::owned))
+            .map_err(ProjectError::from)
+    }
+
+    pub fn switch_at(&mut self, branch: Address) -> Option<SwitchRef<'_>> {
+        self.record_read(ChangeKinds::SWITCHES, AddressRange::point(branch));
+        match self.staged_switches.get(&branch) {
+            Some(Some(switch)) => Some(EntityRef::owned(switch.clone())),
+            Some(None) => None,
+            None => self.project.switches().get_by_branch(branch),
+        }
+    }
+
+    pub fn contains_problem(&mut self, address: Address) -> bool {
+        self.record_read(ChangeKinds::PROBLEMS, AddressRange::point(address));
+        if self
+            .staged_problems
+            .iter()
+            .any(|(key, problem)| key.address() == Some(address) && problem.is_some())
+        {
+            return true;
+        }
+
+        self.project
+            .problems()
+            .keys()
+            .filter(|key| key.address() == Some(address))
+            .any(|key| !self.staged_problems.contains_key(&key))
+    }
+
+    fn record_read(&mut self, kinds: ChangeKinds, range: AddressRange) {
+        self.reads_collapsed |= self.reads.record(kinds, range);
+    }
+
+    fn record_unbounded_read(&mut self, kinds: ChangeKinds) {
+        self.reads.record_unbounded(kinds);
+    }
+
+    pub fn function_callees(&mut self, entry: Address) -> Result<Vec<Address>, ProjectError> {
+        self.record_read(ChangeKinds::FUNCTIONS, AddressRange::point(entry));
+        if let Some(callees) = self.call_graph_staging.function_edges(entry) {
+            return Ok(callees.iter().copied().collect());
+        }
+
+        self.project
+            .call_graph
+            .callees(entry, None)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ProjectError::from)
+    }
+
     pub fn absorb_reads(&mut self, reads: &ReadSet) {
         self.reads_collapsed |= self.reads.merge(reads);
     }
 
     pub(crate) fn take_reads(&mut self) -> ReadSet {
         mem::take(&mut self.reads)
-    }
-
-    pub(crate) fn reads_collapsed(&self) -> bool {
-        self.reads_collapsed
     }
 
     pub fn commit(mut self) -> Result<ChangeSet, ProjectError> {
@@ -551,6 +521,7 @@ impl ProjectTransaction<'_> {
             self.project.call_graph.prepare(&self.call_graph_staging)?;
         writes.extend(call_graph_writes);
         writes.extend(self.il_staging.prepare()?);
+        let segment_batch = mem::take(&mut self.segment_staging).prepare();
         writes.sort_by_key();
         if !writes.is_empty() {
             if let Some(worker) = self.project.storage.write_back() {
@@ -558,7 +529,7 @@ impl ProjectTransaction<'_> {
             }
             self.project.storage.entities().apply_batch(&writes)?;
         }
-        mem::take(&mut self.segment_staging).publish(self.project.storage.segments_mut());
+        segment_batch.publish(self.project.storage.segments_mut());
         self.publish_problems(problems);
         self.publish_switches(switches);
         self.publish_symbols(symbols);
@@ -568,7 +539,6 @@ impl ProjectTransaction<'_> {
         if !self.changes.is_empty() {
             self.project.revisions.advance(self.changes.semantic());
         }
-        self.committed = true;
         let changes = mem::take(&mut self.changes);
         Ok(changes.finish(self.project.revision(), self.source.clone()))
     }
@@ -597,12 +567,12 @@ impl ProjectTransaction<'_> {
 
         for key in candidates {
             if self.staged_problems.contains_key(&key)
-                || (!self.changes.is_collapsed()
+                || (!self.changes.collapsed
                     && !self.changes.records().iter().any(|record| {
                         ChangeKinds::for_problem(key.kind()).intersects(record.kind())
                             && Self::problem_scope_affected(key.scope(), record)
                     }))
-                || (self.changes.is_collapsed()
+                || (self.changes.collapsed
                     && !ChangeKinds::for_problem(key.kind()).intersects(self.changes.kinds()))
             {
                 continue;
@@ -1015,21 +985,6 @@ impl ProjectTransaction<'_> {
                 coverage: self.derived_reference_coverage.clone(),
             });
         }
-    }
-
-    fn restore_eager_writes(&mut self) -> Result<(), ProjectError> {
-        while let Some(revert) = self.segment_write_reverts.pop() {
-            revert.restore(self.project.storage.segments_mut())?;
-        }
-        self.changes.clear();
-        Ok(())
-    }
-
-    pub(crate) fn reject(mut self) -> Result<(), ProjectError> {
-        let span = self.span.clone();
-        let _entered = span.enter();
-        self.committed = true;
-        self.restore_eager_writes()
     }
 }
 

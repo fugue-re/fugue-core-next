@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::fmt::{self, Display};
 use std::path::PathBuf;
 
 use arrayvec::ArrayVec;
@@ -83,7 +83,7 @@ pub struct ContextUpdate {
 }
 
 impl Display for ContextUpdate {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let start = self.bits.start_bit();
         let end = self.bits.end_bit();
         let value = self.value;
@@ -110,7 +110,7 @@ impl ContextUpdate {
 pub struct ContextSet(SmallVec<[ContextUpdate; 1]>);
 
 impl Display for ContextSet {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("{")?;
         if let Some((first, rest)) = self.0.split_first() {
             first.fmt(f)?;
@@ -156,18 +156,18 @@ impl rkyv::Archive for ContextSet {
 impl<S: rkyv::rancor::Fallible + ?Sized + rkyv::ser::Allocator + rkyv::ser::Writer>
     rkyv::Serialize<S> for ContextSet
 {
-    fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
+    fn serialize(&self, serialiser: &mut S) -> Result<Self::Resolver, S::Error> {
         self.0
             .iter()
             .cloned()
             .collect::<ContextSetInner>()
-            .serialize(serializer)
+            .serialize(serialiser)
     }
 }
 
 impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<ContextSet, D> for ArchivedContextSet {
-    fn deserialize(&self, deserializer: &mut D) -> Result<ContextSet, D::Error> {
-        let inner = rkyv::Deserialize::<ContextSetInner, D>::deserialize(&self.0, deserializer)?;
+    fn deserialize(&self, deserialiser: &mut D) -> Result<ContextSet, D::Error> {
+        let inner = rkyv::Deserialize::<ContextSetInner, D>::deserialize(&self.0, deserialiser)?;
         Ok(ContextSet(inner.into_iter().collect()))
     }
 }
@@ -201,13 +201,13 @@ impl ContextSet {
     }
 
     #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+    pub fn single(bits: ContextBitRange, value: u32) -> Self {
+        ContextUpdate::new(bits, value).into()
     }
 
     #[inline]
-    pub fn single(bits: ContextBitRange, value: u32) -> Self {
-        ContextUpdate::new(bits, value).into()
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 
     #[inline]
@@ -281,7 +281,7 @@ pub enum ContextHintKind {
 }
 
 impl Display for ContextHintKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ContextHintKind::Code(bits) => {
                 if *bits != 0 {
@@ -346,7 +346,7 @@ pub struct ContextHint {
 }
 
 impl Display for ContextHint {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.kind.fmt(f)?;
 
         if let Some((first, rest)) = &self

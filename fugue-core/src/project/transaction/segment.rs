@@ -3,7 +3,6 @@ use crate::il::common::IlArtefact;
 use crate::il::pcode::PCodeIr;
 use crate::ir::{Address, AddressRange, ProblemKind, RawAddress};
 use crate::project::{ChangeRecord, ProjectError};
-use crate::storage::SegmentStorageError;
 use crate::storage::segments::mapping::{
     SegmentMappingBuilder, SegmentMappingFlags, SegmentMappingId, SegmentMappingKind,
     SegmentMappingProvenance,
@@ -164,23 +163,17 @@ impl ProjectTransaction<'_> {
     }
 
     pub fn write_bytes(&mut self, addr: Address, bytes: &[u8]) -> Result<(), ProjectError> {
-        let (written, revert) = self
-            .project
-            .storage
-            .segments_mut()
-            .write_bytes_to_space_tracked(addr.space(), addr, bytes)?;
-
-        if written == bytes.len() {
-            self.segment_write_reverts.push(revert);
-            if let Some(range) = AddressRange::from_size(addr, written as u64) {
-                self.changes.push(ChangeRecord::BytesWritten { range });
-                self.invalidate_functions_in_range(&range)?;
-            }
-            Ok(())
-        } else {
-            revert.restore(self.project.storage.segments_mut())?;
-            Err(SegmentStorageError::InvalidAddressRange.into())
-        }
+        let Some(writes) =
+            self.segment_staging
+                .prepare_write(self.project.storage.segments(), addr, bytes)?
+        else {
+            return Ok(());
+        };
+        let range = writes.range();
+        self.invalidate_functions_in_range(&range)?;
+        self.changes.push(ChangeRecord::BytesWritten { range });
+        self.segment_staging.stage_writes(writes);
+        Ok(())
     }
 
     pub fn write_bytes_in_space(

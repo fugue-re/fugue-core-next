@@ -168,6 +168,15 @@ impl ECodeOp {
         self.address_space
     }
 
+    pub(crate) fn constant_bytes<'a>(&self, constants: &'a [u8]) -> Option<&'a [u8]> {
+        if !matches!(self.opcode, ECodeOpcode::Constant) || self.width <= 64 {
+            return None;
+        }
+        let bytes = usize::try_from(self.width.div_ceil(8)).ok()?;
+        let start = usize::try_from(self.immediate).ok()?;
+        constants.get(start..start.checked_add(bytes)?)
+    }
+
     pub(crate) fn set_results(&mut self, results: IlIndexRange) {
         self.results = results;
     }
@@ -185,15 +194,6 @@ impl ECodeOp {
         }
         let slice = self.constant_bytes(constants)?;
         Some(BitVec::from_le_bytes(slice).cast(self.width))
-    }
-
-    pub(crate) fn constant_bytes<'a>(&self, constants: &'a [u8]) -> Option<&'a [u8]> {
-        if !matches!(self.opcode, ECodeOpcode::Constant) || self.width <= 64 {
-            return None;
-        }
-        let bytes = usize::try_from(self.width.div_ceil(8)).ok()?;
-        let start = usize::try_from(self.immediate).ok()?;
-        constants.get(start..start.checked_add(bytes)?)
     }
 
     pub(crate) fn replace_with_constant(&mut self, immediate: u64) {

@@ -34,10 +34,6 @@ pub(crate) struct ResolvedInsn {
 }
 
 impl ResolvedInsn {
-    pub(crate) fn into_insn(self) -> Insn {
-        self.insn
-    }
-
     pub(crate) fn resolve_indirect_target(
         &self,
         mut read: impl FnMut(Address, &mut [u8]) -> bool,
@@ -62,6 +58,10 @@ impl ResolvedInsn {
 
         Some(Address::new(target.pointer.space(), offset))
     }
+
+    pub(crate) fn into_insn(self) -> Insn {
+        self.insn
+    }
 }
 
 impl AsRef<Insn> for ResolvedInsn {
@@ -77,6 +77,14 @@ impl InsnResolver {
             lifter: arch.lifter(),
             operations: Vec::new(),
         }
+    }
+
+    pub(crate) fn context(&self) -> &LiftingContext {
+        self.lifter.context()
+    }
+
+    pub(crate) fn context_mut(&mut self) -> &mut LiftingContext {
+        self.lifter.context_mut()
     }
 
     pub(crate) fn resolve(
@@ -123,14 +131,6 @@ impl InsnResolver {
             .lift(address, bytes.as_ref(), &mut self.operations)?;
         output.append(&mut self.operations);
         Ok(size)
-    }
-
-    pub(crate) fn context(&self) -> &LiftingContext {
-        self.lifter.context()
-    }
-
-    pub(crate) fn context_mut(&mut self) -> &mut LiftingContext {
-        self.lifter.context_mut()
     }
 
     fn indirect_target_pointer(

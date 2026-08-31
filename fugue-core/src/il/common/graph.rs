@@ -3,8 +3,8 @@ use std::mem::size_of;
 use crate::il::common::verify::StructureError;
 use crate::il::common::{IlBlockId, IlCsr, IlError, IlIndexMapper, IlIndexRange, IlOpId, IlPool};
 use crate::ir::{Address, FlowKind};
+use crate::storage::schema::bitflags::archived_bitflags;
 use crate::types::EstimateSize;
-use crate::types::common::archived_bitflags;
 
 bitflags::bitflags! {
     #[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
@@ -247,6 +247,20 @@ impl IlGraph {
             })
     }
 
+    pub fn successors_for(&self, block: IlBlockId) -> &[IlBlockId] {
+        let Some(block) = self.blocks.get(block.index()) else {
+            return &[];
+        };
+        block.successors().slice(&self.successors)
+    }
+
+    pub fn successor_kinds_for(&self, block: IlBlockId) -> &[IlEdgeKinds] {
+        let Some(block) = self.blocks.get(block.index()) else {
+            return &[];
+        };
+        block.successors().slice(&self.successor_kinds)
+    }
+
     pub fn set_op_ranges(
         &mut self,
         operation_ranges: impl ExactSizeIterator<Item = IlIndexRange>,
@@ -390,20 +404,6 @@ impl IlGraph {
         }
 
         Ok(())
-    }
-
-    pub fn successors_for(&self, block: IlBlockId) -> &[IlBlockId] {
-        let Some(block) = self.blocks.get(block.index()) else {
-            return &[];
-        };
-        block.successors().slice(&self.successors)
-    }
-
-    pub fn successor_kinds_for(&self, block: IlBlockId) -> &[IlEdgeKinds] {
-        let Some(block) = self.blocks.get(block.index()) else {
-            return &[];
-        };
-        block.successors().slice(&self.successor_kinds)
     }
 }
 

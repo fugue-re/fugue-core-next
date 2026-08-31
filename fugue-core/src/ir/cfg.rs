@@ -64,13 +64,8 @@ impl FlowKind {
                     Self::Branch
                 }
             }
-            InterSub(target) => {
-                if target.is_some() {
-                    Self::Call
-                } else {
-                    Self::ICall
-                }
-            }
+            InterSub(_) => Self::Call,
+            InterSubIndirect(_) => Self::ICall,
             InterRet(_, _) => Self::Return,
             Intrinsic => Self::ServiceCall,
             _ => {

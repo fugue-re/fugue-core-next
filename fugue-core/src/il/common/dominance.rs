@@ -324,6 +324,17 @@ impl<'a> DominanceSolver<'a> {
         builder
     }
 
+    fn processed_predecessors(&self, block: IlBlockId) -> impl Iterator<Item = IlBlockId> + '_ {
+        self.predecessors
+            .predecessors_for(block)
+            .iter()
+            .copied()
+            .filter(|predecessor| {
+                self.reachable[predecessor.index()]
+                    && self.immediate_dominators[predecessor.index()].is_some()
+            })
+    }
+
     fn solve(mut self) -> IlDominance {
         self.solve_immediate_dominators();
         self.immediate_dominators[self.entry.index()] = None;
@@ -403,17 +414,6 @@ impl<'a> DominanceSolver<'a> {
                 }
             }
         }
-    }
-
-    fn processed_predecessors(&self, block: IlBlockId) -> impl Iterator<Item = IlBlockId> + '_ {
-        self.predecessors
-            .predecessors_for(block)
-            .iter()
-            .copied()
-            .filter(|predecessor| {
-                self.reachable[predecessor.index()]
-                    && self.immediate_dominators[predecessor.index()].is_some()
-            })
     }
 
     fn intersect(&self, first: IlBlockId, second: IlBlockId) -> IlBlockId {

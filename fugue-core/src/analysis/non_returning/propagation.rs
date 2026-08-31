@@ -34,7 +34,7 @@ impl BlockExit {
             return Self::Returns;
         }
 
-        match block.direct_call_target() {
+        match block.call_target() {
             Some(target) => Self::Via(target),
             None => Self::Unknown,
         }
@@ -95,7 +95,6 @@ impl ExitGraph {
 
             for block in function.blocks() {
                 graph.visit_pending_block(
-                    &targets,
                     &mut exits,
                     caller,
                     block.successors().is_empty(),
@@ -132,47 +131,6 @@ impl ExitGraph {
         }
 
         graph
-    }
-
-    fn visit_committed_block(
-        &mut self,
-        exits: &mut FunctionExits,
-        caller: Address,
-        is_exit: bool,
-        block: &CodeBlock,
-    ) {
-        if is_exit {
-            exits.add(BlockExit::from_block(block));
-            return;
-        }
-
-        if block.is_call()
-            && !block.is_branch()
-            && let Some(target) = block.direct_call_target()
-        {
-            self.calls.insert(StaleCall { caller, target });
-        }
-    }
-
-    fn visit_pending_block(
-        &mut self,
-        targets: &NonReturningTargets<'_>,
-        exits: &mut FunctionExits,
-        caller: Address,
-        is_exit: bool,
-        terminator: Option<&Insn>,
-    ) {
-        if is_exit {
-            match terminator {
-                Some(terminator) => exits.add(BlockExit::from_terminator(terminator)),
-                None => exits.returns = true,
-            }
-            return;
-        }
-
-        if let Some(target) = terminator.and_then(|insn| targets.suppressible_call(insn)) {
-            self.calls.insert(StaleCall { caller, target });
-        }
     }
 
     fn stale_calls<'a>(
@@ -214,6 +172,50 @@ impl ExitGraph {
             .filter(|entry| !returning.contains(entry) && !targets.is_non_returning(*entry))
             .collect()
     }
+
+    fn visit_committed_block(
+        &mut self,
+        exits: &mut FunctionExits,
+        caller: Address,
+        is_exit: bool,
+        block: &CodeBlock,
+    ) {
+        if is_exit {
+            exits.add(BlockExit::from_block(block));
+            return;
+        }
+
+        if block.is_call()
+            && !block.is_branch()
+            && let Some(target) = block.call_target()
+        {
+            self.calls.insert(StaleCall { caller, target });
+        }
+    }
+
+    fn visit_pending_block(
+        &mut self,
+        exits: &mut FunctionExits,
+        caller: Address,
+        is_exit: bool,
+        terminator: Option<&Insn>,
+    ) {
+        if is_exit {
+            match terminator {
+                Some(terminator) => exits.add(BlockExit::from_terminator(terminator)),
+                None => exits.returns = true,
+            }
+            return;
+        }
+
+        if let Some(terminator) = terminator
+            && terminator.is_call()
+            && !terminator.is_branch()
+            && let Some(target) = terminator.call_target()
+        {
+            self.calls.insert(StaleCall { caller, target });
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -247,7 +249,7 @@ impl AnalysisPass<FunctionStructuringContext> for NonReturningPropagation {
                 let properties = function.properties() | FunctionProperties::NON_RETURNING;
                 drop(function);
 
-                context.set_function_properties(entry, properties);
+                context.update_function_properties(entry, properties);
                 continue;
             }
 
@@ -463,7 +465,7 @@ mod test {
                     continue;
                 };
 
-                let Some(target) = block.direct_call_target() else {
+                let Some(target) = block.call_target() else {
                     continue;
                 };
 
@@ -501,7 +503,7 @@ mod test {
                         continue;
                     };
 
-                    let Some(target) = block.direct_call_target() else {
+                    let Some(target) = block.call_target() else {
                         continue;
                     };
 

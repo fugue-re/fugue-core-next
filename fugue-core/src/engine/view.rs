@@ -23,7 +23,7 @@ use crate::project::ChangeSet;
 use crate::project::read::MAX_READ_RANGES;
 use crate::project::{ChangeKinds, Project, ProjectError, ReadSet};
 use crate::storage::segments::{AddressSpaceId, SegmentStorage, SegmentStorageError};
-use crate::types::common::Revision;
+use crate::types::Revision;
 
 struct AnalyserDependencies {
     addressless: Option<Arc<ReadSet>>,
@@ -169,6 +169,10 @@ impl<'a> ProjectView<'a> {
         view
     }
 
+    pub(crate) fn collapsed(&self) -> bool {
+        self.collapsed.get()
+    }
+
     pub(crate) fn fork(&self) -> Self {
         Self {
             project: self.project,
@@ -184,18 +188,10 @@ impl<'a> ProjectView<'a> {
         self.collapsed.set(self.collapsed.get() || collapsed);
     }
 
-    pub(crate) fn into_reads(self) -> ReadSet {
-        self.reads.into_inner()
-    }
-
     fn record(&self, kinds: ChangeKinds, range: AddressRange) {
         if self.reads.borrow_mut().record(kinds, range) {
             self.collapsed.set(true);
         }
-    }
-
-    pub(crate) fn collapsed(&self) -> bool {
-        self.collapsed.get()
     }
 
     fn record_unbounded(&self, kinds: ChangeKinds) {
@@ -455,6 +451,10 @@ impl<'a> ProjectView<'a> {
     pub fn segments(&self) -> &SegmentStorage {
         self.record_unbounded(ChangeKinds::SEGMENTS | ChangeKinds::SPACE_CREATED);
         self.project.segments()
+    }
+
+    pub(crate) fn into_reads(self) -> ReadSet {
+        self.reads.into_inner()
     }
 }
 

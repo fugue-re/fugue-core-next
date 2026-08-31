@@ -91,6 +91,59 @@ pub enum MCodeOpcode {
 }
 
 impl MCodeOpcode {
+    pub const fn is_terminator(&self) -> bool {
+        matches!(
+            self,
+            Self::Branch
+                | Self::BranchIndirect
+                | Self::ConditionalBranch
+                | Self::Switch
+                | Self::Return
+                | Self::Trap
+                | Self::TailCall
+                | Self::TailCallIndirect
+        )
+    }
+
+    pub(crate) const fn has_side_effect(self) -> bool {
+        matches!(
+            self,
+            Self::Store
+                | Self::Intrinsic
+                | Self::IntrinsicResult
+                | Self::Branch
+                | Self::ConditionalBranch
+                | Self::BranchIndirect
+                | Self::Switch
+                | Self::Call
+                | Self::CallIndirect
+                | Self::TailCall
+                | Self::TailCallIndirect
+                | Self::Return
+                | Self::Trap
+                | Self::SetVarAliased
+                | Self::SetVarAliasedField
+        )
+    }
+
+    pub(crate) const fn has_uniform_operand_width(self) -> bool {
+        matches!(
+            self,
+            Self::Add
+                | Self::Sub
+                | Self::Mul
+                | Self::UnsignedDiv
+                | Self::SignedDiv
+                | Self::UnsignedRem
+                | Self::SignedRem
+                | Self::Negate
+                | Self::And
+                | Self::Or
+                | Self::Xor
+                | Self::Not
+        )
+    }
+
     pub const fn mnemonic(&self) -> &'static str {
         match self {
             Self::Constant => "const",
@@ -215,20 +268,6 @@ impl MCodeOpcode {
                 | Self::SetVarAliasedField
                 | Self::VarAliased
                 | Self::VarAliasedField
-        )
-    }
-
-    pub const fn is_terminator(&self) -> bool {
-        matches!(
-            self,
-            Self::Branch
-                | Self::BranchIndirect
-                | Self::ConditionalBranch
-                | Self::Switch
-                | Self::Return
-                | Self::Trap
-                | Self::TailCall
-                | Self::TailCallIndirect
         )
     }
 
@@ -398,45 +437,6 @@ impl MCodeOpcode {
             | Self::Switch => Some(0),
             Self::Call | Self::CallIndirect => None,
         }
-    }
-
-    pub(crate) const fn has_side_effect(self) -> bool {
-        matches!(
-            self,
-            Self::Store
-                | Self::Intrinsic
-                | Self::IntrinsicResult
-                | Self::Branch
-                | Self::ConditionalBranch
-                | Self::BranchIndirect
-                | Self::Switch
-                | Self::Call
-                | Self::CallIndirect
-                | Self::TailCall
-                | Self::TailCallIndirect
-                | Self::Return
-                | Self::Trap
-                | Self::SetVarAliased
-                | Self::SetVarAliasedField
-        )
-    }
-
-    pub(crate) const fn has_uniform_operand_width(self) -> bool {
-        matches!(
-            self,
-            Self::Add
-                | Self::Sub
-                | Self::Mul
-                | Self::UnsignedDiv
-                | Self::SignedDiv
-                | Self::UnsignedRem
-                | Self::SignedRem
-                | Self::Negate
-                | Self::And
-                | Self::Or
-                | Self::Xor
-                | Self::Not
-        )
     }
 
     pub(crate) fn evaluate<T>(self, width: u32, operands: &[T]) -> Option<BitVec>

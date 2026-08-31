@@ -7,8 +7,20 @@ use object::elf::{
 use object::read::elf::FileHeader;
 use object::{ReadRef, Relocation, RelocationTarget};
 
-use super::ElfSegmentRelocator;
+use super::{ElfSegmentRelocator, elf_relocation_type};
 use crate::loader::ImageSegmentContents;
+
+fn mips_implicit_addend<T: ByteCast + Default>(
+    bytes: &ImageSegmentContents<'_>,
+    offset: u64,
+    reloc: &Relocation,
+) -> T {
+    if reloc.has_implicit_addend() {
+        bytes.read_value::<T>(offset).unwrap_or_default()
+    } else {
+        T::default()
+    }
+}
 
 impl<'data, 'file, Elf, R> ElfSegmentRelocator<'data, 'file, Elf, R>
 where
@@ -23,7 +35,7 @@ where
         reloc: &Relocation,
         is_dynamic: bool,
     ) {
-        let Some(reloc_type) = self.elf_relocation_type(reloc) else {
+        let Some(reloc_type) = elf_relocation_type(reloc) else {
             return;
         };
 
@@ -31,7 +43,7 @@ where
             R_MIPS_NONE | R_MIPS_JALR => {}
             R_MIPS_REL32 => {
                 // S + A when bound to a symbol, B + A when unbound (STN_UNDEF).
-                let implicit = self.mips_implicit_addend::<u32>(bytes, offset, reloc);
+                let implicit = mips_implicit_addend::<u32>(bytes, offset, reloc);
                 let addend = reloc.addend().wrapping_add(implicit as i64);
 
                 let value = match reloc.target() {
@@ -59,7 +71,7 @@ where
                 bytes.write_value(offset, value as u32);
             }
             R_MIPS_32 => {
-                let implicit = self.mips_implicit_addend::<u32>(bytes, offset, reloc);
+                let implicit = mips_implicit_addend::<u32>(bytes, offset, reloc);
                 let addend = reloc.addend().wrapping_add(implicit as i64);
 
                 let Some(symbol) = self.resolve_relocation_symbol(reloc, is_dynamic) else {
@@ -78,7 +90,7 @@ where
                 bytes.write_value(offset, value as u32);
             }
             R_MIPS_16 => {
-                let implicit = self.mips_implicit_addend::<u16>(bytes, offset, reloc);
+                let implicit = mips_implicit_addend::<u16>(bytes, offset, reloc);
                 let addend = reloc.addend().wrapping_add(implicit as i16 as i64);
 
                 let Some(symbol) = self.resolve_relocation_symbol(reloc, is_dynamic) else {
@@ -99,7 +111,7 @@ where
             R_MIPS_26 => {
                 // Target := ((A << 2) | (P & 0xf000_0000)) + S, encoded as
                 // (Target >> 2) in the low 26 bits of the instruction.
-                let insn = self.mips_implicit_addend::<u32>(bytes, offset, reloc);
+                let insn = mips_implicit_addend::<u32>(bytes, offset, reloc);
                 let implicit_addend = (insn & 0x03ff_ffff) << 2;
                 let addend = reloc.addend().wrapping_add(implicit_addend as i64);
 
@@ -134,7 +146,7 @@ where
             R_MIPS_PC16 => {
                 // (S + A - P) >> 2, with A taken from the sign-extended 16-bit
                 // immediate scaled by 4.
-                let insn = self.mips_implicit_addend::<u32>(bytes, offset, reloc);
+                let insn = mips_implicit_addend::<u32>(bytes, offset, reloc);
                 let implicit_addend = ((insn & 0xffff) as i16 as i64) << 2;
                 let addend = reloc.addend().wrapping_add(implicit_addend);
 
@@ -208,19 +220,6 @@ where
             _ => {
                 tracing::warn!("unsupported relocation type {reloc:?}");
             }
-        }
-    }
-
-    fn mips_implicit_addend<T: ByteCast + Default>(
-        &self,
-        bytes: &ImageSegmentContents<'data>,
-        offset: u64,
-        reloc: &Relocation,
-    ) -> T {
-        if reloc.has_implicit_addend() {
-            bytes.read_value::<T>(offset).unwrap_or_default()
-        } else {
-            T::default()
         }
     }
 }

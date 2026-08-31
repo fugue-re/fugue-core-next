@@ -33,15 +33,15 @@ impl FunctionInsnIndex {
         self.first.is_empty()
     }
 
-    fn clear(&mut self) {
-        self.additional.clear();
-        self.first.clear();
-    }
-
     fn ids(&self, address: Address) -> impl Iterator<Item = InsnId> + '_ {
         self.first(address)
             .into_iter()
             .chain(self.additional.get(&address).into_iter().flatten().copied())
+    }
+
+    fn clear(&mut self) {
+        self.additional.clear();
+        self.first.clear();
     }
 
     fn insert(&mut self, address: Address, id: InsnId) {
@@ -371,15 +371,37 @@ impl IncompleteFunction {
         &self.blocks
     }
 
+    pub fn block(&self, id: IncompleteCodeBlockId) -> Option<&IncompleteCodeBlock> {
+        self.block_index(id).map(|index| &self.blocks[index])
+    }
+
+    pub fn block_mut(&mut self, id: IncompleteCodeBlockId) -> Option<&mut IncompleteCodeBlock> {
+        self.block_index(id).map(|index| &mut self.blocks[index])
+    }
+
+    pub fn blocks_at(
+        &self,
+        address: Address,
+    ) -> impl ExactSizeIterator<Item = &IncompleteCodeBlock> {
+        let start = self
+            .blocks
+            .partition_point(|block| block.address() < address);
+        let end = self
+            .blocks
+            .partition_point(|block| block.address() <= address);
+        self.blocks[start..end].iter()
+    }
+
+    pub fn entry_block(&self) -> &IncompleteCodeBlock {
+        self.block(self.entry_block)
+            .expect("entry block should always exist")
+    }
+
     pub(crate) fn set_tail_call_sites(&mut self, sites: impl IntoIterator<Item = Address>) {
         self.tail_call_sites.clear();
         self.tail_call_sites.extend(sites);
         self.tail_call_sites.sort_unstable();
         self.tail_call_sites.dedup();
-    }
-
-    pub fn block_mut(&mut self, id: IncompleteCodeBlockId) -> Option<&mut IncompleteCodeBlock> {
-        self.block_index(id).map(|index| &mut self.blocks[index])
     }
 
     pub fn contains_insn(&self, address: Address) -> bool {
@@ -394,6 +416,12 @@ impl IncompleteFunction {
             .is_ok()
     }
 
+    pub fn insn(&self, id: InsnId) -> Option<&Insn> {
+        (!id.is_invalid() && id.generation() == self.insn_generation)
+            .then(|| id.index())
+            .and_then(|index| self.insns.get(index))
+    }
+
     pub(crate) fn insn_mut(&mut self, id: InsnId) -> Option<&mut Insn> {
         (!id.is_invalid() && id.generation() == self.insn_generation)
             .then(|| id.index())
@@ -406,6 +434,56 @@ impl IncompleteFunction {
 
     pub fn insns(&self) -> &[Insn] {
         &self.insns
+    }
+
+    pub fn insns_at(&self, address: Address) -> Box<dyn Iterator<Item = &Insn> + '_> {
+        if !self.insn_index.is_empty() {
+            return Box::new(self.insn_index.ids(address).filter_map(|id| self.insn(id)));
+        }
+        if self.insns_unsorted {
+            return Box::new(
+                self.insns
+                    .iter()
+                    .filter(move |insn| insn.address() == address),
+            );
+        }
+
+        let start = self.insns.partition_point(|insn| insn.address() < address);
+        let end = self.insns.partition_point(|insn| insn.address() <= address);
+        Box::new(self.insns[start..end].iter())
+    }
+
+    pub fn indirect_branches(&self) -> impl Iterator<Item = (IncompleteCodeBlockId, Address)> + '_ {
+        self.blocks
+            .iter()
+            .enumerate()
+            .flat_map(move |(block_index, block)| {
+                block.insn_ids().iter().filter_map(move |&instruction| {
+                    let insn = self.insn(instruction)?;
+                    (insn.is_branch() && insn.is_indirect() && !insn.is_call() && !insn.is_return())
+                        .then_some((
+                            IncompleteCodeBlockId::with_generation(
+                                block_index.try_into().expect("too many blocks"),
+                                self.block_generation,
+                            ),
+                            insn.address(),
+                        ))
+                })
+            })
+    }
+
+    pub fn block_flow_targets<'a>(
+        &'a self,
+        block: &'a IncompleteCodeBlock,
+    ) -> impl Iterator<Item = FlowTarget> + 'a {
+        let start = block.address();
+        let end = start + block.size();
+        block
+            .insn_ids()
+            .iter()
+            .filter_map(|id| self.insn(*id))
+            .flat_map(Insn::flow_targets)
+            .filter(move |target| !target.kind().is_fall_through() || target.to() == end)
     }
 
     pub fn properties(&self) -> FunctionProperties {
@@ -463,24 +541,6 @@ impl IncompleteFunction {
         self.properties.contains(FunctionProperties::EXTERNAL)
     }
 
-    pub(crate) fn recycle_insn_index(&mut self) -> FunctionInsnIndex {
-        let mut index = mem::take(&mut self.insn_index);
-        index.clear();
-        index
-    }
-
-    pub fn add_pending_switch(&mut self, switch: Switch) {
-        if let Some(pending) = self
-            .pending_switches
-            .iter_mut()
-            .find(|pending| pending.branch() == switch.branch())
-        {
-            *pending = switch;
-        } else {
-            self.pending_switches.push(switch);
-        }
-    }
-
     pub fn sibling_successor_from_incoming(
         &self,
         block: IncompleteCodeBlockId,
@@ -512,17 +572,30 @@ impl IncompleteFunction {
         None
     }
 
+    pub(crate) fn recycle_insn_index(&mut self) -> FunctionInsnIndex {
+        let mut index = mem::take(&mut self.insn_index);
+        index.clear();
+        index
+    }
+
+    pub fn add_pending_switch(&mut self, switch: Switch) {
+        if let Some(pending) = self
+            .pending_switches
+            .iter_mut()
+            .find(|pending| pending.branch() == switch.branch())
+        {
+            *pending = switch;
+        } else {
+            self.pending_switches.push(switch);
+        }
+    }
+
     pub fn take_pending_switches(&mut self) -> Vec<Switch> {
         mem::take(&mut self.pending_switches)
     }
 
     pub fn clear_name(&mut self) {
         self.name = None;
-    }
-
-    pub fn entry_block(&self) -> &IncompleteCodeBlock {
-        self.block(self.entry_block)
-            .expect("entry block should always exist")
     }
 
     pub fn push_block(&mut self, block: IncompleteCodeBlock) -> IncompleteCodeBlockId {
@@ -539,10 +612,6 @@ impl IncompleteFunction {
         }
         self.blocks.push(block);
         id
-    }
-
-    pub fn block(&self, id: IncompleteCodeBlockId) -> Option<&IncompleteCodeBlock> {
-        self.block_index(id).map(|index| &self.blocks[index])
     }
 
     pub fn add_block_edge(
@@ -575,19 +644,6 @@ impl IncompleteFunction {
         self.blocks[source_index].remove_successor(target);
         self.blocks[target_index].remove_predecessor(source);
         Ok(())
-    }
-
-    pub fn blocks_at(
-        &self,
-        address: Address,
-    ) -> impl ExactSizeIterator<Item = &IncompleteCodeBlock> {
-        let start = self
-            .blocks
-            .partition_point(|block| block.address() < address);
-        let end = self
-            .blocks
-            .partition_point(|block| block.address() <= address);
-        self.blocks[start..end].iter()
     }
 
     pub(crate) fn first_insn_id_at(&mut self, address: Address) -> Option<InsnId> {
@@ -635,62 +691,6 @@ impl IncompleteFunction {
                 unsorted: &mut self.insns_unsorted,
             }),
         }
-    }
-
-    pub fn indirect_branches(&self) -> impl Iterator<Item = (IncompleteCodeBlockId, Address)> + '_ {
-        self.blocks
-            .iter()
-            .enumerate()
-            .flat_map(move |(block_index, block)| {
-                block.insn_ids().iter().filter_map(move |&instruction| {
-                    let insn = self.insn(instruction)?;
-                    (insn.is_branch() && insn.is_indirect() && !insn.is_call() && !insn.is_return())
-                        .then_some((
-                            IncompleteCodeBlockId::with_generation(
-                                block_index.try_into().expect("too many blocks"),
-                                self.block_generation,
-                            ),
-                            insn.address(),
-                        ))
-                })
-            })
-    }
-
-    pub fn block_flow_targets<'a>(
-        &'a self,
-        block: &'a IncompleteCodeBlock,
-    ) -> impl Iterator<Item = FlowTarget> + 'a {
-        let start = block.address();
-        let end = start + block.size();
-        block
-            .insn_ids()
-            .iter()
-            .filter_map(|id| self.insn(*id))
-            .flat_map(Insn::flow_targets)
-            .filter(move |target| !target.kind().is_fall_through() || target.to() == end)
-    }
-
-    pub fn insn(&self, id: InsnId) -> Option<&Insn> {
-        (!id.is_invalid() && id.generation() == self.insn_generation)
-            .then(|| id.index())
-            .and_then(|index| self.insns.get(index))
-    }
-
-    pub fn insns_at(&self, address: Address) -> Box<dyn Iterator<Item = &Insn> + '_> {
-        if !self.insn_index.is_empty() {
-            return Box::new(self.insn_index.ids(address).filter_map(|id| self.insn(id)));
-        }
-        if self.insns_unsorted {
-            return Box::new(
-                self.insns
-                    .iter()
-                    .filter(move |insn| insn.address() == address),
-            );
-        }
-
-        let start = self.insns.partition_point(|insn| insn.address() < address);
-        let end = self.insns.partition_point(|insn| insn.address() <= address);
-        Box::new(self.insns[start..end].iter())
     }
 
     pub fn mark_non_returning(&mut self) {

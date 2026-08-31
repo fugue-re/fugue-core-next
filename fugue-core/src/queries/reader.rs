@@ -129,6 +129,7 @@ impl QueryReader {
         project: Arc<RwLock<Project>>,
         cache: Arc<QueryCache>,
         changes: Arc<RwLock<ChangeIndex>>,
+        intake: Option<Sender<Intake>>,
         registry: Arc<IlRegistry>,
     ) -> Self {
         Self {
@@ -137,26 +138,193 @@ impl QueryReader {
             project,
             cache,
             changes,
-            intake: None,
+            intake,
             registry,
         }
-    }
-
-    pub(crate) fn with_intake(mut self, intake: Sender<Intake>) -> Self {
-        self.intake = Some(intake);
-        self
     }
 
     pub(crate) fn is_active(&self) -> bool {
         self.active.load(Ordering::Acquire)
     }
 
-    pub(crate) fn mark_dead(&self) {
-        self.active.store(false, Ordering::Release);
+    pub fn function_at(&self, entry: Address) -> Result<Option<FunctionId>, QueryError> {
+        self.with_project(|read| read.function_at(entry))
     }
 
-    pub(crate) fn into_project_lock(self) -> Arc<RwLock<Project>> {
-        self.project
+    pub fn function_page(
+        &self,
+        space: AddressSpaceId,
+        after: Option<Address>,
+        limit: usize,
+    ) -> Result<QueryPage<Address>, QueryError> {
+        self.with_project(|read| read.function_page(space, after, limit))
+    }
+
+    pub fn functions(
+        &self,
+        space: AddressSpaceId,
+    ) -> impl Iterator<Item = Result<Address, QueryError>> {
+        let reader = self.clone();
+        Paged::new(move |cursor| reader.function_page(space, cursor, QUERY_WALK_PAGE_SIZE))
+    }
+
+    pub fn call_edge_page(
+        &self,
+        after: Option<CallEdge>,
+        limit: usize,
+    ) -> Result<QueryPage<CallEdge>, QueryError> {
+        self.with_project(|read| read.call_edge_page(after, limit))
+    }
+
+    pub fn call_edges(&self) -> impl Iterator<Item = Result<CallEdge, QueryError>> {
+        let reader = self.clone();
+        Paged::new(move |cursor| reader.call_edge_page(cursor, QUERY_WALK_PAGE_SIZE))
+    }
+
+    pub fn caller_page(
+        &self,
+        entry: Address,
+        after: Option<Address>,
+        limit: usize,
+    ) -> Result<QueryPage<Address>, QueryError> {
+        self.with_project(|read| read.caller_page(entry, after, limit))
+    }
+
+    pub fn callers(&self, entry: Address) -> impl Iterator<Item = Result<Address, QueryError>> {
+        let reader = self.clone();
+        Paged::new(move |cursor| reader.caller_page(entry, cursor, QUERY_WALK_PAGE_SIZE))
+    }
+
+    pub fn callee_page(
+        &self,
+        entry: Address,
+        after: Option<Address>,
+        limit: usize,
+    ) -> Result<QueryPage<Address>, QueryError> {
+        self.with_project(|read| read.callee_page(entry, after, limit))
+    }
+
+    pub fn callees(&self, entry: Address) -> impl Iterator<Item = Result<Address, QueryError>> {
+        let reader = self.clone();
+        Paged::new(move |cursor| reader.callee_page(entry, cursor, QUERY_WALK_PAGE_SIZE))
+    }
+
+    pub fn mapping_page(
+        &self,
+        space: AddressSpaceId,
+        after: Option<MappingEntity>,
+        limit: usize,
+    ) -> Result<QueryPage<MappingEntity>, QueryError> {
+        self.with_project(|read| read.mapping_page(space, after, limit))?
+            .map_err(QueryError::from)
+    }
+
+    pub fn mappings(
+        &self,
+        space: AddressSpaceId,
+    ) -> impl Iterator<Item = Result<MappingEntity, QueryError>> {
+        let reader = self.clone();
+        Paged::new(move |cursor| reader.mapping_page(space, cursor, QUERY_WALK_PAGE_SIZE))
+    }
+
+    pub fn outgoing_reference_page(
+        &self,
+        from: Address,
+        after: Option<Reference>,
+        limit: usize,
+    ) -> Result<QueryPage<Reference>, QueryError> {
+        self.with_project(|read| read.outgoing_reference_page(from, after, limit))
+    }
+
+    pub fn outgoing_references(
+        &self,
+        from: Address,
+    ) -> impl Iterator<Item = Result<Reference, QueryError>> {
+        let reader = self.clone();
+        Paged::new(move |cursor| reader.outgoing_reference_page(from, cursor, QUERY_WALK_PAGE_SIZE))
+    }
+
+    pub fn incoming_reference_page(
+        &self,
+        to: Address,
+        after: Option<Reference>,
+        limit: usize,
+    ) -> Result<QueryPage<Reference>, QueryError> {
+        self.with_project(|read| {
+            read.incoming_reference_page(ReferenceTarget::from(to), after, limit)
+        })
+    }
+
+    pub fn incoming_references(
+        &self,
+        to: Address,
+    ) -> impl Iterator<Item = Result<Reference, QueryError>> {
+        let reader = self.clone();
+        Paged::new(move |cursor| reader.incoming_reference_page(to, cursor, QUERY_WALK_PAGE_SIZE))
+    }
+
+    pub fn problem_at(
+        &self,
+        address: Address,
+        kind: ProblemKind,
+    ) -> Result<Option<ProblemEntity>, QueryError> {
+        self.with_project(|read| read.problem_at(address, kind))
+    }
+
+    pub fn problem_page(
+        &self,
+        after: Option<ProblemKey>,
+        limit: usize,
+    ) -> Result<QueryPage<ProblemEntity, ProblemKey>, QueryError> {
+        self.with_project(|read| read.problem_page(after, limit))
+    }
+
+    pub fn problems(&self) -> impl Iterator<Item = Result<ProblemEntity, QueryError>> {
+        let reader = self.clone();
+        Paged::new(move |cursor| reader.problem_page(cursor, QUERY_WALK_PAGE_SIZE))
+    }
+
+    pub fn switch_at(&self, branch: Address) -> Result<Option<SwitchEntity>, QueryError> {
+        self.with_project(|read| read.switch_at(branch))
+    }
+
+    pub fn switch_page(
+        &self,
+        after: Option<Address>,
+        limit: usize,
+    ) -> Result<QueryPage<SwitchEntity, Address>, QueryError> {
+        self.with_project(|read| read.switch_page(after, limit))
+    }
+
+    pub fn switches(&self) -> impl Iterator<Item = Result<SwitchEntity, QueryError>> {
+        let reader = self.clone();
+        Paged::new(move |cursor| reader.switch_page(cursor, QUERY_WALK_PAGE_SIZE))
+    }
+
+    pub fn symbol_page(
+        &self,
+        after: Option<SymbolEntity>,
+        limit: usize,
+    ) -> Result<QueryPage<SymbolEntity>, QueryError> {
+        self.with_project(|read| read.symbol_page(after, limit))
+    }
+
+    pub fn symbol_page_at(
+        &self,
+        address: Address,
+        after: Option<SymbolEntity>,
+        limit: usize,
+    ) -> Result<QueryPage<SymbolEntity>, QueryError> {
+        self.with_project(|read| read.symbol_page_at(address, after, limit))
+    }
+
+    pub fn symbols(&self) -> impl Iterator<Item = Result<SymbolEntity, QueryError>> {
+        let reader = self.clone();
+        Paged::new(move |cursor| reader.symbol_page(cursor, QUERY_WALK_PAGE_SIZE))
+    }
+
+    pub(crate) fn mark_dead(&self) {
+        self.active.store(false, Ordering::Release);
     }
 
     pub fn revision(&self) -> Result<Revision, QueryError> {
@@ -194,7 +362,9 @@ impl QueryReader {
         let targets = {
             let project = self.project.read();
             let read = ProjectQuery::new(&project);
-            read.function(entry)
+            project
+                .functions()
+                .get_by_address(entry)
                 .map(|function| read.flow_targets(function))
         };
 
@@ -226,6 +396,15 @@ impl QueryReader {
 
     pub fn mcode(&self, function: FunctionId) -> Result<Option<Arc<MCodeIr>>, QueryError> {
         self.lifted::<MCodeIr>(function)
+    }
+
+    pub fn project(&self) -> Result<ProjectHandle, QueryError> {
+        let publication_guard = self.enter_query()?;
+
+        Ok(ProjectHandle {
+            project: self.project.read_arc(),
+            _publication_guard: publication_guard,
+        })
     }
 
     fn cached_il<T>(&self, function: FunctionId) -> Result<Option<Arc<T>>, QueryError>
@@ -274,191 +453,6 @@ impl QueryReader {
         }
     }
 
-    pub fn project(&self) -> Result<ProjectHandle, QueryError> {
-        let publication_guard = self.enter_query()?;
-
-        Ok(ProjectHandle {
-            project: self.project.read_arc(),
-            _publication_guard: publication_guard,
-        })
-    }
-
-    pub fn call_edge_page(
-        &self,
-        after: Option<CallEdge>,
-        limit: usize,
-    ) -> Result<QueryPage<CallEdge>, QueryError> {
-        self.with_project(|read| read.call_edge_page(after, limit))
-    }
-
-    pub fn callee_page(
-        &self,
-        entry: Address,
-        after: Option<Address>,
-        limit: usize,
-    ) -> Result<QueryPage<Address>, QueryError> {
-        self.with_project(|read| read.callee_page(entry, after, limit))
-    }
-
-    pub fn function_id_at(&self, entry: Address) -> Result<Option<FunctionId>, QueryError> {
-        self.with_project(|read| read.function(entry).map(|function| function.id()))
-    }
-
-    pub fn function_page(
-        &self,
-        space: AddressSpaceId,
-        after: Option<Address>,
-        limit: usize,
-    ) -> Result<QueryPage<Address>, QueryError> {
-        self.with_project(|read| read.function_page(space, after, limit))
-    }
-
-    pub fn caller_page(
-        &self,
-        entry: Address,
-        after: Option<Address>,
-        limit: usize,
-    ) -> Result<QueryPage<Address>, QueryError> {
-        self.with_project(|read| read.caller_page(entry, after, limit))
-    }
-
-    pub fn outgoing_reference_page(
-        &self,
-        from: Address,
-        after: Option<Reference>,
-        limit: usize,
-    ) -> Result<QueryPage<Reference>, QueryError> {
-        self.with_project(|read| read.outgoing_reference_page(from, after, limit))
-    }
-
-    pub fn incoming_reference_page(
-        &self,
-        to: Address,
-        after: Option<Reference>,
-        limit: usize,
-    ) -> Result<QueryPage<Reference>, QueryError> {
-        self.with_project(|read| {
-            read.incoming_reference_page(ReferenceTarget::from(to), after, limit)
-        })
-    }
-
-    pub fn mapping_page(
-        &self,
-        space: AddressSpaceId,
-        after: Option<MappingEntity>,
-        limit: usize,
-    ) -> Result<QueryPage<MappingEntity>, QueryError> {
-        self.with_project(|read| read.mapping_page(space, after, limit))?
-            .map_err(QueryError::from)
-    }
-
-    pub fn symbol_page(
-        &self,
-        after: Option<SymbolEntity>,
-        limit: usize,
-    ) -> Result<QueryPage<SymbolEntity>, QueryError> {
-        self.with_project(|read| read.symbol_page(after, limit))
-    }
-
-    pub fn symbol_page_at(
-        &self,
-        address: Address,
-        after: Option<SymbolEntity>,
-        limit: usize,
-    ) -> Result<QueryPage<SymbolEntity>, QueryError> {
-        self.with_project(|read| read.symbol_page_at(address, after, limit))
-    }
-
-    pub fn switch_at(&self, branch: Address) -> Result<Option<SwitchEntity>, QueryError> {
-        self.with_project(|read| read.switch_at(branch))
-    }
-
-    pub fn problem_at(
-        &self,
-        address: Address,
-        kind: ProblemKind,
-    ) -> Result<Option<ProblemEntity>, QueryError> {
-        self.with_project(|read| read.problem_at(address, kind))
-    }
-
-    pub fn problem_page(
-        &self,
-        after: Option<ProblemKey>,
-        limit: usize,
-    ) -> Result<QueryPage<ProblemEntity, ProblemKey>, QueryError> {
-        self.with_project(|read| read.problem_page(after, limit))
-    }
-
-    pub fn problems(&self) -> impl Iterator<Item = Result<ProblemEntity, QueryError>> {
-        let reader = self.clone();
-        Paged::new(move |cursor| reader.problem_page(cursor, QUERY_WALK_PAGE_SIZE))
-    }
-
-    pub fn switch_page(
-        &self,
-        after: Option<Address>,
-        limit: usize,
-    ) -> Result<QueryPage<SwitchEntity, Address>, QueryError> {
-        self.with_project(|read| read.switch_page(after, limit))
-    }
-
-    pub fn switches(&self) -> impl Iterator<Item = Result<SwitchEntity, QueryError>> {
-        let reader = self.clone();
-        Paged::new(move |cursor| reader.switch_page(cursor, QUERY_WALK_PAGE_SIZE))
-    }
-
-    pub fn functions(
-        &self,
-        space: AddressSpaceId,
-    ) -> impl Iterator<Item = Result<Address, QueryError>> {
-        let reader = self.clone();
-        Paged::new(move |cursor| reader.function_page(space, cursor, QUERY_WALK_PAGE_SIZE))
-    }
-
-    pub fn symbols(&self) -> impl Iterator<Item = Result<SymbolEntity, QueryError>> {
-        let reader = self.clone();
-        Paged::new(move |cursor| reader.symbol_page(cursor, QUERY_WALK_PAGE_SIZE))
-    }
-
-    pub fn mappings(
-        &self,
-        space: AddressSpaceId,
-    ) -> impl Iterator<Item = Result<MappingEntity, QueryError>> {
-        let reader = self.clone();
-        Paged::new(move |cursor| reader.mapping_page(space, cursor, QUERY_WALK_PAGE_SIZE))
-    }
-
-    pub fn call_edges(&self) -> impl Iterator<Item = Result<CallEdge, QueryError>> {
-        let reader = self.clone();
-        Paged::new(move |cursor| reader.call_edge_page(cursor, QUERY_WALK_PAGE_SIZE))
-    }
-
-    pub fn callers(&self, entry: Address) -> impl Iterator<Item = Result<Address, QueryError>> {
-        let reader = self.clone();
-        Paged::new(move |cursor| reader.caller_page(entry, cursor, QUERY_WALK_PAGE_SIZE))
-    }
-
-    pub fn callees(&self, entry: Address) -> impl Iterator<Item = Result<Address, QueryError>> {
-        let reader = self.clone();
-        Paged::new(move |cursor| reader.callee_page(entry, cursor, QUERY_WALK_PAGE_SIZE))
-    }
-
-    pub fn outgoing_references(
-        &self,
-        from: Address,
-    ) -> impl Iterator<Item = Result<Reference, QueryError>> {
-        let reader = self.clone();
-        Paged::new(move |cursor| reader.outgoing_reference_page(from, cursor, QUERY_WALK_PAGE_SIZE))
-    }
-
-    pub fn incoming_references(
-        &self,
-        to: Address,
-    ) -> impl Iterator<Item = Result<Reference, QueryError>> {
-        let reader = self.clone();
-        Paged::new(move |cursor| reader.incoming_reference_page(to, cursor, QUERY_WALK_PAGE_SIZE))
-    }
-
     fn with_project<T>(&self, query: impl FnOnce(ProjectQuery<'_>) -> T) -> Result<T, QueryError> {
         let _query_guard = self.enter_query()?;
         let project = self.project.read();
@@ -472,6 +466,10 @@ impl QueryReader {
         } else {
             Err(QueryError::Stopped)
         }
+    }
+
+    pub(crate) fn into_project(self) -> Arc<RwLock<Project>> {
+        self.project
     }
 }
 

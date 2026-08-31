@@ -3,10 +3,11 @@ use std::sync::Arc;
 
 use fugue_core::engine::AnalysisEngine;
 use fugue_core::il::common::{
-    IlArtefact as CoreIlArtefact, IlArtefact, IlBlock as CoreIlBlock, IlBlockId as CoreIlBlockId, IlBlockPredecessors as CoreIlBlockPredecessors,
-    IlBlockProperties as CoreIlBlockProperties, IlDominance as CoreDominance,
-    IlDominanceFrontier as CoreDominanceFrontier, IlError as CoreIlError, IlFormId as CoreIlFormId,
-    IlGraph as CoreIlGraph, IlMetadata as CoreIlMetadata, IlParentSpan as CoreIlParentSpan,
+    IlArtefact as CoreIlArtefact, IlArtefact, IlBlock as CoreIlBlock, IlBlockId as CoreIlBlockId,
+    IlBlockPredecessors as CoreIlBlockPredecessors, IlBlockProperties as CoreIlBlockProperties,
+    IlDominance as CoreDominance, IlDominanceFrontier as CoreDominanceFrontier,
+    IlError as CoreIlError, IlFormId as CoreIlFormId, IlGraph as CoreIlGraph,
+    IlMetadata as CoreIlMetadata, IlParentSpan as CoreIlParentSpan,
     IlSourceSpan as CoreIlSourceSpan, IlSsaDef as CoreIlSsaDef, IlValueId as CoreIlValueId,
     PersistableIl,
 };

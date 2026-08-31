@@ -1,10 +1,9 @@
 use std::collections::BTreeMap;
-use std::fmt;
 use std::fmt::{Debug, Display, LowerHex, UpperHex};
-use std::mem;
 use std::num::ParseIntError;
 use std::ops::{Add, AddAssign, Bound, Range, RangeBounds, RangeInclusive, Sub, SubAssign};
 use std::str::FromStr;
+use std::{fmt, mem};
 
 use rangemap::{RangeInclusiveMap, RangeInclusiveSet};
 use serde::{Deserialize, Serialize};
@@ -794,6 +793,13 @@ impl AddressRange {
         self.end
     }
 
+    pub fn size(&self) -> u64 {
+        self.end
+            .offset()
+            .saturating_sub(self.start.offset())
+            .saturating_add(1)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.end < self.start
     }
@@ -806,19 +812,22 @@ impl AddressRange {
         self.space == address.space() && self.contains(address.raw_address())
     }
 
+    pub fn remaining_from(&self, address: Address) -> Option<u64> {
+        if !self.contains_address(address) {
+            return None;
+        }
+        self.end
+            .offset()
+            .checked_sub(address.offset())?
+            .checked_add(1)
+    }
+
     pub fn start_address(&self) -> Address {
         Address::new(self.space, self.start)
     }
 
     pub fn end_address(&self) -> Address {
         Address::new(self.space, self.end)
-    }
-
-    pub fn size(&self) -> u64 {
-        self.end
-            .offset()
-            .saturating_sub(self.start.offset())
-            .saturating_add(1)
     }
 
     pub fn intersects(&self, other: &AddressRange) -> bool {
@@ -1046,24 +1055,6 @@ where
         self.0.len()
     }
 
-    pub fn insert(&mut self, address: impl Into<RawAddress>, value: V) -> Option<V> {
-        let address = address.into().offset();
-        let previous = self.0.get(&address).cloned();
-        self.0.insert(address..=address, value);
-        previous
-    }
-
-    pub fn remove(&mut self, address: impl Into<RawAddress>) -> Option<V> {
-        let address = address.into().offset();
-        let previous = self.0.get(&address).cloned();
-        self.0.remove(address..=address);
-        previous
-    }
-
-    pub fn clear(&mut self) {
-        self.0.clear();
-    }
-
     pub fn range(
         &self,
         range: impl RangeBounds<RawAddress>,
@@ -1080,10 +1071,28 @@ where
         })
     }
 
+    pub fn insert(&mut self, address: impl Into<RawAddress>, value: V) -> Option<V> {
+        let address = address.into().offset();
+        let previous = self.0.get(&address).cloned();
+        self.0.insert(address..=address, value);
+        previous
+    }
+
     pub fn insert_range(&mut self, range: impl Into<RangeInclusive<RawAddress>>, value: V) {
         let range = range.into();
         self.0
             .insert(range.start().offset()..=range.end().offset(), value);
+    }
+
+    pub fn remove(&mut self, address: impl Into<RawAddress>) -> Option<V> {
+        let address = address.into().offset();
+        let previous = self.0.get(&address).cloned();
+        self.0.remove(address..=address);
+        previous
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
     }
 }
 

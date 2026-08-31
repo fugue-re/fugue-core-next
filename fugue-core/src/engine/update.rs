@@ -42,10 +42,6 @@ impl FunctionAddition {
     fn new(function: IncompleteFunction) -> Self {
         Self { function }
     }
-
-    fn into_function(self) -> IncompleteFunction {
-        self.function
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -478,7 +474,7 @@ enum ProjectOperation {
     RemoveSymbol(SymbolRemoval),
     ReplaceDerivedReferences(DerivedReferenceReplacement),
     ResizeMapping(MappingResize),
-    SetFunctionProperties(FunctionPropertiesUpdate),
+    UpdateFunctionProperties(FunctionPropertiesUpdate),
     UpdateMappingMetadata(MappingMetadataUpdate),
     WriteBytes(ByteWrite),
 }
@@ -600,11 +596,11 @@ impl ProjectUpdate {
         )))
     }
 
-    pub fn set_function_properties(
+    pub fn update_function_properties(
         entry: impl Into<Address>,
         properties: FunctionProperties,
     ) -> Self {
-        Self::new(ProjectOperation::SetFunctionProperties(
+        Self::new(ProjectOperation::UpdateFunctionProperties(
             FunctionPropertiesUpdate::new(entry, properties),
         ))
     }
@@ -635,13 +631,41 @@ impl ProjectUpdate {
         Self { operation }
     }
 
+    pub(crate) fn apply_all(
+        updates: impl IntoIterator<Item = Self>,
+        transaction: &mut ProjectTransaction<'_>,
+    ) -> Result<(), ProjectError> {
+        let mut functions = Vec::new();
+
+        for update in updates {
+            let update = match update.operation {
+                ProjectOperation::AddFunction(addition) => {
+                    functions.push(addition.function);
+                    continue;
+                }
+                operation => Self::new(operation),
+            };
+
+            if !functions.is_empty() {
+                transaction.add_functions(functions.drain(..))?;
+            }
+            update.apply(transaction)?;
+        }
+
+        if !functions.is_empty() {
+            transaction.add_functions(functions)?;
+        }
+
+        Ok(())
+    }
+
     pub(crate) fn apply(
         self,
         transaction: &mut ProjectTransaction<'_>,
     ) -> Result<(), ProjectError> {
         match self.operation {
             ProjectOperation::AddFunction(addition) => {
-                transaction.add_function(addition.into_function())?;
+                transaction.add_function(addition.function)?;
                 Ok(())
             }
             ProjectOperation::AddMappingToSpace(placement) => match placement.mode() {
@@ -707,8 +731,8 @@ impl ProjectUpdate {
             ProjectOperation::ResizeMapping(resize) => {
                 transaction.resize_mapping(resize.mapping(), resize.size())
             }
-            ProjectOperation::SetFunctionProperties(update) => {
-                transaction.set_function_properties(update.entry(), update.properties())?;
+            ProjectOperation::UpdateFunctionProperties(update) => {
+                transaction.update_function_properties(update.entry(), update.properties())?;
                 Ok(())
             }
             ProjectOperation::UpdateMappingMetadata(update) => transaction.update_mapping_metadata(
@@ -721,34 +745,6 @@ impl ProjectUpdate {
                 transaction.write_bytes(write.address(), write.bytes())
             }
         }
-    }
-
-    pub(crate) fn apply_all(
-        updates: impl IntoIterator<Item = Self>,
-        transaction: &mut ProjectTransaction<'_>,
-    ) -> Result<(), ProjectError> {
-        let mut functions = Vec::new();
-
-        for update in updates {
-            let update = match update.operation {
-                ProjectOperation::AddFunction(addition) => {
-                    functions.push(addition.into_function());
-                    continue;
-                }
-                operation => Self::new(operation),
-            };
-
-            if !functions.is_empty() {
-                transaction.add_functions(functions.drain(..))?;
-            }
-            update.apply(transaction)?;
-        }
-
-        if !functions.is_empty() {
-            transaction.add_functions(functions)?;
-        }
-
-        Ok(())
     }
 }
 
@@ -782,7 +778,7 @@ mod test {
         RemoveSymbol,
         ReplaceDerivedReferences,
         ResizeMapping,
-        SetFunctionProperties,
+        UpdateFunctionProperties,
         UpdateMappingMetadata,
         WriteBytes,
     }
@@ -824,7 +820,9 @@ mod test {
                 TransactionVerb::ReplaceDerivedReferences
             }
             ProjectOperation::ResizeMapping(_) => TransactionVerb::ResizeMapping,
-            ProjectOperation::SetFunctionProperties(_) => TransactionVerb::SetFunctionProperties,
+            ProjectOperation::UpdateFunctionProperties(_) => {
+                TransactionVerb::UpdateFunctionProperties
+            }
             ProjectOperation::UpdateMappingMetadata(_) => TransactionVerb::UpdateMappingMetadata,
             ProjectOperation::WriteBytes(_) => TransactionVerb::WriteBytes,
         }
@@ -957,9 +955,9 @@ mod test {
                 TransactionVerb::ResizeMapping,
             ),
             (
-                "set_function_properties",
-                ProjectUpdate::set_function_properties(address, FunctionProperties::NONE),
-                TransactionVerb::SetFunctionProperties,
+                "update_function_properties",
+                ProjectUpdate::update_function_properties(address, FunctionProperties::NONE),
+                TransactionVerb::UpdateFunctionProperties,
             ),
             (
                 "update_mapping_metadata",

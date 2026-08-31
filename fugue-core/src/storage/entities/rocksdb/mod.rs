@@ -173,14 +173,18 @@ impl EntityStorageProvider for RocksDbEntityStorage {
 
     fn read_transaction(&self) -> Result<EntityBytesReadTransaction, EntityStorageError> {
         Ok(Box::new(RocksDbEntityReader {
-            txn: self.database.transaction(),
+            snapshot: self.database.snapshot(),
         }))
     }
 
     fn write_transaction(&self) -> Result<EntityBytesWriteTransaction, EntityStorageError> {
+        let write_options = rocksdb::WriteOptions::default();
+        let mut transaction_options = rocksdb::OptimisticTransactionOptions::default();
+        transaction_options.set_snapshot(true);
         Ok(Box::new(RocksDbEntityWriter {
-            batch: rocksdb::WriteBatchWithTransaction::default(),
-            database: &self.database,
+            transaction: self
+                .database
+                .transaction_opt(&write_options, &transaction_options),
         }))
     }
 }
@@ -398,19 +402,19 @@ impl<'a, T> Iterator for RocksDbEntityBytesAsIterator<'a, T> {
 }
 
 struct RocksDbEntityReader<'a> {
-    txn: rocksdb::Transaction<'a, rocksdb::OptimisticTransactionDB>,
+    snapshot: rocksdb::SnapshotWithThreadMode<'a, rocksdb::OptimisticTransactionDB>,
 }
 
 impl EntityStorageReadTransaction for RocksDbEntityReader<'_> {
     fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError> {
-        self.txn
+        self.snapshot
             .get(key)
             .map_err(EntityStorageError::backing)
             .map(|opt| opt.map(BytesOrSlice::from))
     }
 
     fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageError> {
-        self.txn
+        self.snapshot
             .get_pinned(key)
             .map_err(EntityStorageError::backing)
             .map(|opt| opt.is_some())
@@ -418,34 +422,38 @@ impl EntityStorageReadTransaction for RocksDbEntityReader<'_> {
 }
 
 struct RocksDbEntityWriter<'a> {
-    batch: rocksdb::WriteBatchWithTransaction<true>,
-    database: &'a rocksdb::OptimisticTransactionDB,
+    transaction: rocksdb::Transaction<'a, rocksdb::OptimisticTransactionDB>,
 }
 
 impl EntityStorageWriteTransaction for RocksDbEntityWriter<'_> {
     fn insert(&mut self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
-        self.batch.put(key, value);
-        Ok(())
+        EntityKeyPrefix::split(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
+        self.transaction
+            .put(key, value)
+            .map_err(EntityStorageError::backing)
     }
 
     fn remove(&mut self, key: &[u8]) -> Result<(), EntityStorageError> {
-        self.batch.delete(key);
-        Ok(())
+        EntityKeyPrefix::split(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
+        self.transaction
+            .delete(key)
+            .map_err(EntityStorageError::backing)
     }
 
     fn write_batch(&mut self, writes: &[EntityWrite]) -> Result<(), EntityStorageError> {
         for write in writes {
             match write.value() {
-                Some(value) => self.batch.put(write.key(), value),
-                None => self.batch.delete(write.key()),
+                Some(value) => self.insert(write.key(), BytesOrSlice::from(value))?,
+                None => self.remove(write.key())?,
             }
         }
         Ok(())
     }
 
     fn commit(self: Box<Self>) -> Result<(), EntityStorageError> {
-        let Self { batch, database } = *self;
-        database.write(batch).map_err(EntityStorageError::backing)
+        self.transaction
+            .commit()
+            .map_err(EntityStorageError::backing)
     }
 }
 
@@ -460,7 +468,7 @@ mod test {
     use crate::ir::Address;
     use crate::storage::entities::schema::EntityId;
     use crate::storage::entities::schema::test::assert_domain_keys_round_trip;
-    use crate::storage::entities::{Entity, EntityStorage, EntityWrite};
+    use crate::storage::entities::{Entity, EntityStorage, EntityStorageError, EntityWrite};
 
     #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
     struct TestEntity {
@@ -510,6 +518,76 @@ mod test {
         storage.apply_batch(&writes)?;
         assert_eq!(storage.get(&first)?, Some(TestEntity::new(3)));
         assert_eq!(storage.get::<_, TestEntity>(&second)?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn rocksdb_read_transaction_uses_stable_snapshot() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let mut options = Options::default();
+        options.create_if_missing(true);
+        let provider = RocksDbEntityStorage {
+            database: OptimisticTransactionDB::open(&options, directory.path())?,
+        };
+        let storage = EntityStorage::new(provider);
+        let address = Address::from(1u64);
+
+        storage.insert(&address, &TestEntity::new(1))?;
+        let reader = storage.read_transaction()?;
+        storage.insert(&address, &TestEntity::new(2))?;
+
+        assert_eq!(
+            reader.get::<_, TestEntity>(&address)?,
+            Some(TestEntity::new(1))
+        );
+        assert_eq!(storage.get(&address)?, Some(TestEntity::new(2)));
+        Ok(())
+    }
+
+    #[test]
+    fn rocksdb_write_transaction_detects_snapshot_conflict() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let mut options = Options::default();
+        options.create_if_missing(true);
+        let provider = RocksDbEntityStorage {
+            database: OptimisticTransactionDB::open(&options, directory.path())?,
+        };
+        let storage = EntityStorage::new(provider);
+        let address = Address::from(1u64);
+        let mut writer = storage.write_transaction()?;
+
+        storage.insert(&address, &TestEntity::new(2))?;
+        writer.insert(&address, &TestEntity::new(1))?;
+
+        assert!(writer.commit().is_err());
+        assert_eq!(storage.get(&address)?, Some(TestEntity::new(2)));
+        Ok(())
+    }
+
+    #[test]
+    fn rocksdb_failed_batch_publishes_no_prefix() -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let mut options = Options::default();
+        options.create_if_missing(true);
+        let provider = RocksDbEntityStorage {
+            database: OptimisticTransactionDB::open(&options, directory.path())?,
+        };
+        let storage = EntityStorage::new(provider);
+        let address = Address::from(1u64);
+        let value = rkyv::to_bytes::<rkyv::rancor::Error>(&TestEntity::new(1))?;
+        let writes = [
+            EntityWrite::insert_archived(TestEntity::ID.key_for(&address), value),
+            EntityWrite::insert(
+                bytes::Bytes::from_static(b"x"),
+                bytes::Bytes::from_static(b"value"),
+            ),
+        ];
+
+        assert!(matches!(
+            storage.apply_batch(&writes),
+            Err(EntityStorageError::InvalidKeyFormat)
+        ));
+        assert_eq!(storage.get::<_, TestEntity>(&address)?, None);
         Ok(())
     }
 

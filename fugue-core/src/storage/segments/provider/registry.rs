@@ -74,12 +74,28 @@ impl SegmentStorageProviderRegistry {
         Self { by_tag }
     }
 
-    pub fn get() -> &'static Self {
-        REGISTRY.get_or_init(SegmentStorageProviderRegistry::new)
+    pub fn by_tag(&self, tag: &str) -> Option<&SegmentStorageProviderEntry> {
+        self.by_tag.get(tag).copied()
     }
 
-    pub fn get_by_tag(&self, tag: &str) -> Option<&SegmentStorageProviderEntry> {
-        self.by_tag.get(tag).copied()
+    pub fn tags(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.by_tag.keys().copied()
+    }
+
+    pub fn contains_tag(&self, tag: &str) -> bool {
+        self.by_tag.contains_key(tag)
+    }
+
+    pub fn len(&self) -> usize {
+        self.by_tag.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_tag.is_empty()
+    }
+
+    pub fn get() -> &'static Self {
+        REGISTRY.get_or_init(SegmentStorageProviderRegistry::new)
     }
 
     pub fn from_segment_range(
@@ -113,21 +129,5 @@ impl SegmentStorageProviderRegistry {
         })?;
 
         factory(path, attributes)
-    }
-
-    pub fn tags(&self) -> impl Iterator<Item = &'static str> + '_ {
-        self.by_tag.keys().copied()
-    }
-
-    pub fn contains_tag(&self, tag: &str) -> bool {
-        self.by_tag.contains_key(tag)
-    }
-
-    pub fn len(&self) -> usize {
-        self.by_tag.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.by_tag.is_empty()
     }
 }

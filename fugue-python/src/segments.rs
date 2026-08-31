@@ -1,9 +1,10 @@
 use fallible_iterator::FallibleIterator;
-use fugue_core::ir::{Address as CoreAddress, SegmentProperties as CoreSegmentProperties};
+use fugue_core::ir::Address as CoreAddress;
 use fugue_core::lifter::{ContextHint as CoreContextHint, ContextHintKind};
 use fugue_core::loader::{Loadable, Loader as CoreLoader};
 use fugue_core::storage::{
-    InMemorySegmentStorage, SegmentMappingBuilder, SegmentStorage as CoreSegmentStorage,
+    InMemorySegmentStorage, SegmentMappingBuilder, SegmentProperties as CoreSegmentProperties,
+    SegmentStorage as CoreSegmentStorage,
 };
 use fugue_core::types::AttributeMap;
 use pyo3::exceptions::PyOverflowError;
@@ -177,15 +178,8 @@ impl SegmentProperties {
 #[pymethods]
 impl SegmentProperties {
     #[new]
-    #[pyo3(signature = (read = true, write = true, execute = true, big_endian = false, uninitialised = false, external = false))]
-    fn new(
-        read: bool,
-        write: bool,
-        execute: bool,
-        big_endian: bool,
-        uninitialised: bool,
-        external: bool,
-    ) -> Self {
+    #[pyo3(signature = (read = true, write = true, execute = true, big_endian = false, uninitialised = false))]
+    fn new(read: bool, write: bool, execute: bool, big_endian: bool, uninitialised: bool) -> Self {
         let mut properties = CoreSegmentProperties::NONE;
 
         if read {
@@ -203,10 +197,6 @@ impl SegmentProperties {
         if uninitialised {
             properties |= CoreSegmentProperties::UNINITIALISED;
         }
-        if external {
-            properties |= CoreSegmentProperties::EXTERNAL;
-        }
-
         Self::from_core(properties)
     }
 
@@ -248,11 +238,6 @@ impl SegmentProperties {
     #[getter]
     fn uninitialised(&self) -> bool {
         self.inner.is_uninitialised()
-    }
-
-    #[getter]
-    fn external(&self) -> bool {
-        self.inner.is_external()
     }
 
     fn __repr__(&self) -> String {

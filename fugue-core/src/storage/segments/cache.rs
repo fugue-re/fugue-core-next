@@ -1,7 +1,9 @@
-use crate::ir::{Address, SegmentProperties};
+use crate::ir::Address;
 use crate::storage::segments::provider::SegmentView;
 use crate::storage::segments::view::SegmentMappingView;
-use crate::storage::segments::{SegmentStorage, SegmentStorageError, SegmentSubMapping};
+use crate::storage::segments::{
+    SegmentProperties, SegmentStorage, SegmentStorageError, SegmentSubMapping,
+};
 use crate::types::Revision;
 
 #[derive(Default)]
@@ -36,12 +38,7 @@ impl SegmentMappingCache {
 
         let view = segments.view_containing(address).ok()?;
         self.cached = Some(CachedMapping {
-            submapping: SegmentSubMapping::new(
-                view.mapping_ref(),
-                view.start(),
-                view.size(),
-                view.properties(),
-            ),
+            submapping: SegmentSubMapping::new(view.mapping_ref(), view.range(), view.properties()),
             revision: segments.space_revision(address.space()).unwrap_or_default(),
         });
         Some(view)
@@ -102,7 +99,6 @@ impl SegmentMappingCache {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::ir::SegmentProperties;
     use crate::storage::segments::DEFAULT_SPACE_ID;
     use crate::storage::segments::mapping::SegmentMappingBuilder;
     use crate::storage::segments::provider::InMemorySegmentStorage;
@@ -111,6 +107,7 @@ mod test {
     fn cache_distinguishes_unmapped_addresses_from_backing_gaps() -> Result<(), SegmentStorageError>
     {
         let mut segments = SegmentStorage::empty();
+        segments.set_fill_byte(0xa5);
         let provider = segments.open_provider(
             InMemorySegmentStorage::with_size(8),
             SegmentProperties::PERM_ALL,
@@ -139,6 +136,10 @@ mod test {
         let mut bytes = [0; 2];
         cache.read_bytes_exact(&segments, Address::from(0x1004u64), &mut bytes)?;
         assert_eq!(bytes, [0x12, 0x34]);
+
+        let mut gap = [0x77; 4];
+        cache.read_bytes_exact(&segments, Address::from(0x1000u64), &mut gap)?;
+        assert_eq!(gap, [0xa5; 4]);
 
         Ok(())
     }

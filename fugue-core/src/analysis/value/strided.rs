@@ -1,3 +1,5 @@
+use std::iter;
+
 use fugue_bv::BitVec;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,13 +62,6 @@ impl StridedInterval {
         Self::range(BitVec::zero(mask.bits()), mask.clone(), stride)
     }
 
-    pub fn width(&self) -> u32 {
-        match &self.0 {
-            StridedIntervalRepr::Empty(width) => *width,
-            StridedIntervalRepr::Interval { lo, .. } => lo.bits(),
-        }
-    }
-
     pub fn is_empty(&self) -> bool {
         matches!(self.0, StridedIntervalRepr::Empty(_))
     }
@@ -92,15 +87,20 @@ impl StridedInterval {
         }
     }
 
-    pub fn count(&self) -> Option<usize> {
-        match &self.0 {
-            StridedIntervalRepr::Empty(_) => Some(0),
-            StridedIntervalRepr::Interval { stride, .. } if stride.is_zero() => Some(1),
-            StridedIntervalRepr::Interval { lo, hi, stride } => {
-                let steps = usize::try_from((&(hi - lo) / stride).to_u64()?).ok()?;
-                steps.checked_add(1)
+    pub fn iter(&self) -> impl Iterator<Item = BitVec> + '_ {
+        let mut current = self.lower().cloned();
+        let step = match &self.0 {
+            StridedIntervalRepr::Empty(bits) => BitVec::zero(*bits),
+            StridedIntervalRepr::Interval { stride, .. } => stride.clone(),
+        };
+        iter::from_fn(move || {
+            let value = current.take()?;
+            let hi = self.upper()?;
+            if &value < hi && !step.is_zero() {
+                current = Some(&value + &step);
             }
-        }
+            Some(value)
+        })
     }
 
     pub fn contains(&self, value: &BitVec) -> bool {
@@ -114,6 +114,24 @@ impl StridedInterval {
                 } else {
                     (&(value - lo) % stride).is_zero()
                 }
+            }
+        }
+    }
+
+    pub fn width(&self) -> u32 {
+        match &self.0 {
+            StridedIntervalRepr::Empty(width) => *width,
+            StridedIntervalRepr::Interval { lo, .. } => lo.bits(),
+        }
+    }
+
+    pub fn count(&self) -> Option<usize> {
+        match &self.0 {
+            StridedIntervalRepr::Empty(_) => Some(0),
+            StridedIntervalRepr::Interval { stride, .. } if stride.is_zero() => Some(1),
+            StridedIntervalRepr::Interval { lo, hi, stride } => {
+                let steps = usize::try_from((&(hi - lo) / stride).to_u64()?).ok()?;
+                steps.checked_add(1)
             }
         }
     }
@@ -140,22 +158,6 @@ impl StridedInterval {
             return Self(StridedIntervalRepr::Empty(self.width()));
         }
         Self::range(lo, hi, s1.gcd(s2))
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = BitVec> + '_ {
-        let mut current = self.lower().cloned();
-        let step = match &self.0 {
-            StridedIntervalRepr::Empty(bits) => BitVec::zero(*bits),
-            StridedIntervalRepr::Interval { stride, .. } => stride.clone(),
-        };
-        std::iter::from_fn(move || {
-            let value = current.take()?;
-            let hi = self.upper()?;
-            if &value < hi && !step.is_zero() {
-                current = Some(&value + &step);
-            }
-            Some(value)
-        })
     }
 
     pub fn join(&self, other: &Self) -> Self {
@@ -319,7 +321,7 @@ impl StridedInterval {
     }
 
     pub fn mul(&self, other: &Self) -> Self {
-        match (self.as_single(), other.as_single()) {
+        match (self.to_value(), other.to_value()) {
             (Some(factor), _) => other.scale(&factor),
             (_, Some(factor)) => self.scale(&factor),
             _ => Self::full(self.width()),
@@ -327,7 +329,7 @@ impl StridedInterval {
     }
 
     pub fn shift_left(&self, amount: &Self) -> Self {
-        match amount.as_single().and_then(|value| value.to_u64()) {
+        match amount.to_value().and_then(|value| value.to_u64()) {
             Some(shift) if shift < u64::from(self.width()) => {
                 let factor = BitVec::one(self.width()) << BitVec::from_u64(shift, self.width());
                 self.scale(&factor)
@@ -337,7 +339,7 @@ impl StridedInterval {
     }
 
     pub fn and(&self, other: &Self) -> Self {
-        match (self.as_single(), other.as_single()) {
+        match (self.to_value(), other.to_value()) {
             (Some(a), Some(b)) => Self::single(a & b),
             (Some(mask), None) | (None, Some(mask)) => Self::masked(&mask),
             (None, None) => Self::full(self.width()),
@@ -345,14 +347,14 @@ impl StridedInterval {
     }
 
     pub fn or(&self, other: &Self) -> Self {
-        match (self.as_single(), other.as_single()) {
+        match (self.to_value(), other.to_value()) {
             (Some(a), Some(b)) => Self::single(a | b),
             _ => Self::full(self.width()),
         }
     }
 
     pub fn shift_right(&self, amount: &Self) -> Self {
-        let Some(shift) = amount.as_single().and_then(|value| value.to_u64()) else {
+        let Some(shift) = amount.to_value().and_then(|value| value.to_u64()) else {
             return Self::full(self.width());
         };
         if shift >= u64::from(self.width()) {
@@ -363,15 +365,6 @@ impl StridedInterval {
         };
         let places = BitVec::from_u64(shift, self.width());
         Self::range(lo >> &places, hi >> &places, BitVec::one(self.width()))
-    }
-
-    fn as_single(&self) -> Option<BitVec> {
-        match &self.0 {
-            StridedIntervalRepr::Interval { lo, stride, .. } if stride.is_zero() => {
-                Some(lo.clone())
-            }
-            _ => None,
-        }
     }
 
     fn scale(&self, factor: &BitVec) -> Self {
@@ -386,5 +379,14 @@ impl StridedInterval {
             return Self::full(lo.bits());
         }
         Self::range(lo * factor, hi * factor, stride * factor)
+    }
+
+    fn to_value(&self) -> Option<BitVec> {
+        match &self.0 {
+            StridedIntervalRepr::Interval { lo, stride, .. } if stride.is_zero() => {
+                Some(lo.clone())
+            }
+            _ => None,
+        }
     }
 }

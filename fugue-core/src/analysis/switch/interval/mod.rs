@@ -1,3 +1,5 @@
+use std::mem;
+
 use fugue_bv::BitVec;
 use rustc_hash::FxHashMap;
 
@@ -37,6 +39,18 @@ struct SwitchCaseEnumeration {
 }
 
 impl SwitchCaseEnumeration {
+    fn guard(&self) -> Option<&SwitchGuard> {
+        self.guard.as_ref()
+    }
+
+    fn properties(&self, case_count: usize) -> SwitchProperties {
+        let truncated = self
+            .interval
+            .count()
+            .is_some_and(|count| case_count < count);
+        SwitchProperties::from_recovery(self.guard.is_some(), truncated)
+    }
+
     fn populate_cases(
         &self,
         cases: &mut Vec<SwitchCase>,
@@ -55,18 +69,6 @@ impl SwitchCaseEnumeration {
             }
             cases.push(case);
         }
-    }
-
-    fn guard(&self) -> Option<&SwitchGuard> {
-        self.guard.as_ref()
-    }
-
-    fn properties(&self, case_count: usize) -> SwitchProperties {
-        let truncated = self
-            .interval
-            .count()
-            .is_some_and(|count| case_count < count);
-        SwitchProperties::from_recovery(self.guard.is_some(), truncated)
     }
 }
 
@@ -130,7 +132,7 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
         let enumeration = self.case_enumeration(index, branch)?;
         let space = branch.space();
         target_resolver.set_space(space);
-        let mut cases = std::mem::take(&mut self.cases);
+        let mut cases = mem::take(&mut self.cases);
         let mut evaluator = SwitchTargetEvaluator::new(self, space);
         enumeration.populate_cases(&mut cases, |value| {
             let target = evaluator.evaluate(target, index, value, |address, size| {
@@ -174,7 +176,7 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
         let table_address = Address::new(space, layout.address());
         let mut table = AddressTable::new(table_address, layout.stride());
         target_resolver.set_space(space);
-        let mut cases = std::mem::take(&mut self.cases);
+        let mut cases = mem::take(&mut self.cases);
         enumeration.populate_cases(&mut cases, |value| {
             let entry = u32::try_from(value.to_u64()?).ok()?;
             let address = table.entry_address(entry);

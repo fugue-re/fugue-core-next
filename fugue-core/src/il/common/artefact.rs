@@ -2,8 +2,7 @@ use crate::il::common::verify::StructureVerifierError;
 use crate::il::common::{IlAnalysis, IlFormId, IlGraph, IlParentSpan, IlRewrite, IlSourceSpan};
 use crate::ir::FunctionId;
 use crate::storage::entities::schema::EntityCodec;
-use crate::types::EstimateSize;
-use crate::types::common::Revision;
+use crate::types::{EstimateSize, Revision};
 
 #[derive(
     Debug,

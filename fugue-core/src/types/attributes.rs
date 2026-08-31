@@ -259,7 +259,7 @@ where
     S: rkyv::rancor::Fallible + rkyv::ser::Writer + rkyv::ser::Allocator + ?Sized,
     S::Error: rkyv::rancor::Source,
 {
-    fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
+    fn serialize(&self, serialiser: &mut S) -> Result<Self::Resolver, S::Error> {
         Ok(match self.0 {
             serde_json::Value::Null => JsonValueResolver::Null,
             serde_json::Value::Bool(_) => JsonValueResolver::Bool,
@@ -273,7 +273,7 @@ where
                 }
             }
             serde_json::Value::String(s) => JsonValueResolver::String(
-                rkyv::string::ArchivedString::serialize_from_str(s.as_str(), serializer)?,
+                rkyv::string::ArchivedString::serialize_from_str(s.as_str(), serialiser)?,
             ),
             serde_json::Value::Array(arr) => {
                 JsonValueResolver::Array(
@@ -281,7 +281,7 @@ where
                         JsonValueRef<'_>,
                         _,
                         _,
-                    >(arr.iter().map(JsonValueRef), serializer)?,
+                    >(arr.iter().map(JsonValueRef), serialiser)?,
                 )
             }
             serde_json::Value::Object(obj) => {
@@ -292,7 +292,7 @@ where
                         key: k.as_str(),
                         value: JsonValueRef(v),
                     }),
-                    serializer,
+                    serialiser,
                 )?)
             }
         })
@@ -322,10 +322,10 @@ where
     S: rkyv::rancor::Fallible + rkyv::ser::Writer + rkyv::ser::Allocator + ?Sized,
     S::Error: rkyv::rancor::Source,
 {
-    fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
+    fn serialize(&self, serialiser: &mut S) -> Result<Self::Resolver, S::Error> {
         Ok(rkyv::collections::util::EntryResolver {
-            key: rkyv::string::ArchivedString::serialize_from_str(self.key, serializer)?,
-            value: self.value.serialize(serializer)?,
+            key: rkyv::string::ArchivedString::serialize_from_str(self.key, serialiser)?,
+            value: self.value.serialize(serialiser)?,
         })
     }
 }
@@ -349,7 +349,7 @@ where
     S: rkyv::rancor::Fallible + rkyv::ser::Writer + rkyv::ser::Allocator + ?Sized,
     S::Error: rkyv::rancor::Source,
 {
-    fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
+    fn serialize(&self, serialiser: &mut S) -> Result<Self::Resolver, S::Error> {
         rkyv::vec::ArchivedVec::<
             rkyv::collections::util::Entry<rkyv::string::ArchivedString, ArchivedJsonValue>,
         >::serialize_from_iter::<AttributeEntryRef<'_>, _, _>(
@@ -357,7 +357,7 @@ where
                 key: k.as_str(),
                 value: JsonValueRef(v),
             }),
-            serializer,
+            serialiser,
         )
     }
 }
@@ -367,8 +367,8 @@ where
     D: rkyv::rancor::Fallible + ?Sized,
     D::Error: rkyv::rancor::Source,
 {
-    fn deserialize(&self, deserializer: &mut D) -> Result<serde_json::Value, D::Error> {
-        let _ = &deserializer;
+    fn deserialize(&self, deserialiser: &mut D) -> Result<serde_json::Value, D::Error> {
+        let _ = &deserialiser;
 
         Ok(match self {
             ArchivedJsonValue::Null => serde_json::Value::Null,
@@ -382,7 +382,7 @@ where
             ArchivedJsonValue::Array(arr) => {
                 let mut out = Vec::with_capacity(arr.len());
                 for item in arr.iter() {
-                    out.push(item.deserialize(deserializer)?);
+                    out.push(item.deserialize(deserialiser)?);
                 }
                 serde_json::Value::Array(out)
             }
@@ -391,7 +391,7 @@ where
                 for entry in obj.iter() {
                     map.insert(
                         entry.key.as_str().to_owned(),
-                        entry.value.deserialize(deserializer)?,
+                        entry.value.deserialize(deserialiser)?,
                     );
                 }
                 serde_json::Value::Object(map)
@@ -405,13 +405,13 @@ where
     D: rkyv::rancor::Fallible + ?Sized,
     D::Error: rkyv::rancor::Source,
 {
-    fn deserialize(&self, deserializer: &mut D) -> Result<AttributeMap, D::Error> {
+    fn deserialize(&self, deserialiser: &mut D) -> Result<AttributeMap, D::Error> {
         let archived = self.0.as_slice();
         let mut map = FxHashMap::with_capacity_and_hasher(archived.len(), Default::default());
         for entry in archived {
             map.insert(
                 entry.key.as_str().to_owned(),
-                entry.value.deserialize(deserializer)?,
+                entry.value.deserialize(deserialiser)?,
             );
         }
         Ok(AttributeMap(map))
@@ -449,23 +449,11 @@ impl AttributeMap {
     {
         self.0
             .get(key.borrow())
-            .and_then(|val| serde_json::from_value(val.clone()).ok())
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
     }
 
-    pub fn set_attr(&mut self, key: impl ToString, val: impl serde::Serialize) {
-        self.0.insert(key.to_string(), serde_json::json!(val));
-    }
-
-    pub fn merge(&mut self, other: Self) {
-        self.0.extend(other.0);
-    }
-
-    pub fn merge_vacant(&mut self, other: &Self) {
-        for (key, value) in other.0.iter() {
-            if let Entry::Vacant(entry) = self.0.entry(key.to_owned()) {
-                entry.insert(value.to_owned());
-            }
-        }
+    pub fn set_attr(&mut self, key: impl ToString, value: impl serde::Serialize) {
+        self.0.insert(key.to_string(), serde_json::json!(value));
     }
 
     pub fn contains(&self, key: impl Borrow<str>) -> bool {
@@ -478,6 +466,18 @@ impl AttributeMap {
 
     pub fn len(&self) -> usize {
         self.0.len()
+    }
+
+    pub fn merge(&mut self, other: Self) {
+        self.0.extend(other.0);
+    }
+
+    pub fn merge_vacant(&mut self, other: &Self) {
+        for (key, value) in other.0.iter() {
+            if let Entry::Vacant(entry) = self.0.entry(key.to_owned()) {
+                entry.insert(value.to_owned());
+            }
+        }
     }
 }
 

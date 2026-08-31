@@ -19,7 +19,7 @@ use super::{
     MAX_COMPLETION_ROUNDS, ProjectView, RETRACTED_BY_BYTE_CHANGE, WORK_BATCH_ITEMS, WorkCause,
 };
 use crate::analysis::AnalysisError;
-use crate::analysis::control::{CancellationToken, Cancelled, Progress};
+use crate::analysis::control::{CancellationToken, Cancelled};
 use crate::extension;
 use crate::il::common::{IlError, IlFormId, IlGenerationContext, IlSubject};
 use crate::il::registry::{GeneratedArtefact, IlGenerationSession, IlRegistry};
@@ -123,7 +123,6 @@ pub(crate) struct Worker {
     pending_diagnostics: PendingDiagnostics,
     cancellation: CancellationToken,
     poison: Arc<OnceLock<String>>,
-    progress: Progress,
     project: Arc<RwLock<Project>>,
     queries: QueryEngine,
     generation: IlGenerationSession,
@@ -209,19 +208,19 @@ struct PendingDiagnostics {
 }
 
 impl PendingDiagnostics {
-    fn defer(&mut self, scope: ProblemScope, kind: ProblemKind) {
-        self.scopes
-            .entry(kind)
-            .and_modify(|existing| *existing = existing.covering(scope))
-            .or_insert(scope);
-    }
-
     fn is_empty(&self) -> bool {
         self.scopes.is_empty()
     }
 
     fn iter(&self) -> impl Iterator<Item = (ProblemScope, ProblemKind)> + '_ {
         self.scopes.iter().map(|(&kind, &scope)| (scope, kind))
+    }
+
+    fn defer(&mut self, scope: ProblemScope, kind: ProblemKind) {
+        self.scopes
+            .entry(kind)
+            .and_modify(|existing| *existing = existing.covering(scope))
+            .or_insert(scope);
     }
 
     fn acknowledge(&mut self, diagnostics: &[(ProblemScope, ProblemKind)]) {
@@ -257,14 +256,13 @@ impl Worker {
         queries: QueryEngine,
         poison: Arc<OnceLock<String>>,
         cancellation: CancellationToken,
-        progress: Progress,
         metrics: EngineMetrics,
     ) -> Result<Self, EngineError> {
         let registry = config.registry_handle();
         let mut analysers = Vec::new();
         let project_read = project.read();
         for provider in extension::iter::<AnalyserProvider>() {
-            let analyser = provider.build(&project_read)?;
+            let analyser = provider.create(&project_read)?;
             if analyser.can_analyse(&project_read) {
                 let id = AnalyserId::new(analysers.len());
                 analysers.push(ScheduledAnalyser::new(id, analyser, provider.il_input()));
@@ -301,7 +299,6 @@ impl Worker {
             pending_diagnostics: PendingDiagnostics::default(),
             cancellation,
             poison,
-            progress,
             queries,
             generation,
             il_inputs: None,
@@ -359,7 +356,6 @@ impl Worker {
             analyser.clear_claimed();
         }
         self.cancellation.clear();
-        self.progress.clear_message();
     }
 
     fn reject_pending(rx: &Receiver<Intake>, message: &str) {
@@ -513,7 +509,7 @@ impl Worker {
         }
     }
 
-    fn handle_analysis_cancelled(&mut self, error: &EngineError) -> bool {
+    fn handle_analysis_cancelled(&self, error: &EngineError) -> bool {
         if matches!(error, EngineError::Analysis(AnalysisError::Cancelled(_))) {
             self.cancellation.clear();
             true
@@ -863,7 +859,7 @@ impl Worker {
         }
     }
 
-    fn retract_coverage(&mut self, region: &AddressRangeSet) {
+    fn retract_coverage(&self, region: &AddressRangeSet) {
         if region.is_empty() {
             return;
         }
@@ -939,7 +935,7 @@ impl Worker {
                 drop(project);
                 drop(query_publication);
                 if !changes.is_empty() {
-                    self.finish_publish(&changes)?;
+                    self.finish_publish(&changes);
                 }
                 Ok(TransactionResult::Committed {
                     value,
@@ -949,10 +945,7 @@ impl Worker {
                 })
             }
             Err(error) => {
-                if let Err(rejection_error) = transaction.reject() {
-                    project.abandon_persistence();
-                    return Err(self.poison_and_stop(rejection_error.to_string()));
-                }
+                drop(transaction);
                 drop(project);
                 drop(query_publication);
                 Ok(TransactionResult::Rejected(error))
@@ -1045,8 +1038,7 @@ impl Worker {
         batch: WorkBatch,
     ) -> Result<(), EngineError> {
         let name = self.analysers[id.index()].analyser().name();
-        self.progress.reset();
-        let cx = AnalysisContext::new(self.cancellation.child(), self.progress.clone())
+        let cx = AnalysisContext::new(self.cancellation.child())
             .with_worker_limit(self.config.worker_limit())
             .with_work(phase, causes, continuation);
 
@@ -1070,7 +1062,10 @@ impl Worker {
         };
         let production = match production {
             Ok(production) => production,
-            Err(error) => return self.handle_dispatch_failure(id, batch, error),
+            Err(error) => {
+                self.handle_dispatch_failure(id, batch, error);
+                return Ok(());
+            }
         };
         match self.admit_analysis(name, production)? {
             AnalysisAdmissionResult::Committed(AnalysisAdmission {
@@ -1089,38 +1084,31 @@ impl Worker {
                     let degradations = self.queue.requeue_continuation(batch);
                     self.defer_degradations(degradations);
                 }
-                self.progress.clear_message();
                 Ok(())
             }
             AnalysisAdmissionResult::Committed(AnalysisAdmission {
                 outcome: Err(cancelled),
                 ..
-            }) => {
-                self.progress.clear_message();
-                Err(AnalysisError::Cancelled(cancelled).into())
+            }) => Err(AnalysisError::Cancelled(cancelled).into()),
+            AnalysisAdmissionResult::Conflict => {
+                self.handle_admission_conflict(batch);
+                Ok(())
             }
-            AnalysisAdmissionResult::Conflict => self.handle_admission_conflict(batch),
             AnalysisAdmissionResult::Rejected(error) => {
-                self.handle_dispatch_failure(id, batch, error)
+                self.handle_dispatch_failure(id, batch, error);
+                Ok(())
             }
         }
     }
 
-    fn handle_admission_conflict(&mut self, batch: WorkBatch) -> Result<(), EngineError> {
+    fn handle_admission_conflict(&mut self, batch: WorkBatch) {
         for item in batch {
             let degradations = self.queue.requeue(item);
             self.defer_degradations(degradations);
         }
-        self.progress.clear_message();
-        Ok(())
     }
 
-    fn handle_dispatch_failure(
-        &mut self,
-        id: AnalyserId,
-        batch: WorkBatch,
-        error: AnalysisError,
-    ) -> Result<(), EngineError> {
+    fn handle_dispatch_failure(&mut self, id: AnalyserId, batch: WorkBatch, error: AnalysisError) {
         let name = self.analysers[id.index()].analyser().name();
         let bound = self.analysers[id.index()].max_attempts();
         tracing::warn!("analyser {name} failed: {error}");
@@ -1143,9 +1131,6 @@ impl Worker {
             let degradations = self.queue.requeue(item);
             self.defer_degradations(degradations);
         }
-
-        self.progress.clear_message();
-        Ok(())
     }
 
     fn run_completion_hooks(&mut self) -> Result<(), EngineError> {
@@ -1158,9 +1143,8 @@ impl Worker {
 
     fn run_completion_hook(&mut self, id: AnalyserId) -> Result<(), EngineError> {
         let name = self.analysers[id.index()].analyser().name();
-        self.progress.reset();
         for _ in 0..MAX_COMPLETION_ROUNDS {
-            let cx = AnalysisContext::new(self.cancellation.child(), self.progress.clone())
+            let cx = AnalysisContext::new(self.cancellation.child())
                 .with_worker_limit(self.config.worker_limit());
             let production = {
                 let project = self.project.read();
@@ -1183,7 +1167,6 @@ impl Worker {
                 Ok(production) => production,
                 Err(error) => {
                     tracing::warn!("analyser {name} completion failed: {error}");
-                    self.progress.clear_message();
                     return Err(error.into());
                 }
             };
@@ -1197,26 +1180,20 @@ impl Worker {
                     if reads_collapsed {
                         self.defer_read_set_collapse(&AddressRangeSet::new());
                     }
-                    self.progress.clear_message();
                     Ok(())
                 }
                 AnalysisAdmissionResult::Committed(AnalysisAdmission {
                     outcome: Err(cancelled),
                     ..
-                }) => {
-                    self.progress.clear_message();
-                    Err(AnalysisError::Cancelled(cancelled).into())
-                }
+                }) => Err(AnalysisError::Cancelled(cancelled).into()),
                 AnalysisAdmissionResult::Conflict => continue,
                 AnalysisAdmissionResult::Rejected(error) => {
                     tracing::warn!("analyser {name} completion failed: {error}");
-                    self.progress.clear_message();
                     Err(error.into())
                 }
             };
         }
 
-        self.progress.clear_message();
         Err(self.poison_and_stop(format!(
             "analyser {name} completion admission did not converge"
         )))
@@ -1390,12 +1367,11 @@ impl Worker {
         }
     }
 
-    fn finish_publish(&mut self, changes: &ChangeSet) -> Result<(), EngineError> {
+    fn finish_publish(&mut self, changes: &ChangeSet) {
         let mut resync = None;
         self.subscribers
             .retain(|subscriber| subscriber.materialise(changes, &mut resync));
         self.route_changes(changes);
-        Ok(())
     }
 
     fn subscribe(&mut self, subscriber: Subscriber) {

@@ -204,7 +204,7 @@ impl<'a> Snapshot<'a> {
     fn listing(&self, entry: Address) -> Result<Vec<ListingLine>, WorkbenchError> {
         let function = self
             .reader
-            .function_id_at(entry)?
+            .function_at(entry)?
             .ok_or_else(|| WorkbenchError::no_function(format!("{:#x}", entry.offset())))?;
         let ecode = self
             .reader
@@ -233,7 +233,7 @@ impl<'a> Snapshot<'a> {
         let form_id = IlFormId::new(form).map_err(|_| WorkbenchError::unrenderable_form(form))?;
         let function = self
             .reader
-            .function_id_at(entry)?
+            .function_at(entry)?
             .ok_or_else(|| WorkbenchError::no_function(format!("{:#x}", entry.offset())))?;
 
         let renderer = IlRenderer::new(self.reader.project()?.arch());
@@ -266,7 +266,7 @@ impl<'a> Snapshot<'a> {
     fn cfg(&self, entry: Address) -> Result<CfgResponse, WorkbenchError> {
         let function = self
             .reader
-            .function_id_at(entry)?
+            .function_at(entry)?
             .ok_or_else(|| WorkbenchError::no_function(format!("{:#x}", entry.offset())))?;
         let ecode = self
             .reader
@@ -479,7 +479,7 @@ async fn rename(
 ) -> Result<Json<MutationResponse>, WorkbenchError> {
     let address = bindings::Address::decode(&request.address)?;
     let function = session
-        .read(move |reader| Ok(reader.function_id_at(address)?.is_some()))
+        .read(move |reader| Ok(reader.function_at(address)?.is_some()))
         .await?;
     let revision = session.rename(address, request.name, function).await?;
     Ok(Json(MutationResponse { revision }))

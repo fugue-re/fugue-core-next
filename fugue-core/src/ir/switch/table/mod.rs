@@ -8,11 +8,11 @@ use thiserror::Error;
 
 use crate::ir::switch::{Switch, SwitchId};
 use crate::ir::{Address, FunctionId, IdAllocator};
+use crate::storage::entities::cursor::cursor_bound;
 use crate::storage::entities::schema::ENTITY_SWITCH_TABLE_ID;
 use crate::storage::entities::{Entity, EntityId, EntityRef, ProjectEntity, WriteBackWorker};
 use crate::storage::project::PersistableProjectEntity;
 use crate::storage::{EntityStorage, EntityStorageError};
-use crate::types::common::cursor_bound;
 
 pub(crate) const ATTRIBUTE_SWITCH_CACHE_SIZE: &str = "storage.entities.switch.cache_size";
 pub(crate) const DEFAULT_SWITCH_CACHE_BYTES: usize = 8 * 1024 * 1024;
@@ -79,6 +79,16 @@ impl SwitchIndex {
         self.branches.len()
     }
 
+    fn entries_after(
+        &self,
+        after: Option<Address>,
+    ) -> impl Iterator<Item = (Address, SwitchId)> + '_ {
+        let start = cursor_bound(after);
+        self.branches
+            .range((start, Bound::Unbounded))
+            .map(|(&address, &id)| (address, id))
+    }
+
     fn link(&mut self, function: FunctionId, branch: Address) {
         self.by_function.entry(function).or_default().insert(branch);
     }
@@ -100,16 +110,6 @@ impl SwitchIndex {
                 self.by_function.remove(&function);
             }
         }
-    }
-
-    fn entries_after(
-        &self,
-        after: Option<Address>,
-    ) -> impl Iterator<Item = (Address, SwitchId)> + '_ {
-        let start = cursor_bound(after);
-        self.branches
-            .range((start, Bound::Unbounded))
-            .map(|(&address, &id)| (address, id))
     }
 }
 
@@ -189,71 +189,6 @@ impl SwitchTable {
         }
     }
 
-    pub(crate) fn is_persistent(&self) -> bool {
-        matches!(self, Self::Persistent(_))
-    }
-
-    pub(crate) fn pending_id(&self, offset: usize) -> SwitchId {
-        match self {
-            Self::Persistent(table) => table.pending_id(offset),
-            Self::Transient(table) => table.pending_id(offset),
-        }
-    }
-
-    pub(crate) fn publish_reservations(&mut self, reservations: &[SwitchId]) {
-        for &id in reservations {
-            match self {
-                Self::Persistent(table) => table.publish_reservation(id),
-                Self::Transient(table) => table.publish_reservation(id),
-            }
-        }
-    }
-
-    pub(crate) fn publish_release(&mut self, id: SwitchId) {
-        match self {
-            Self::Persistent(table) => table.publish_release(id),
-            Self::Transient(table) => table.publish_release(id),
-        }
-    }
-
-    pub(crate) fn publish_upsert(
-        &mut self,
-        switch: Switch,
-        previous_function: Option<FunctionId>,
-        encoded_size: usize,
-    ) {
-        match self {
-            Self::Persistent(table) => {
-                table.publish_upsert(switch, previous_function, encoded_size)
-            }
-            Self::Transient(table) => table.publish_upsert(switch, previous_function),
-        }
-    }
-
-    pub(crate) fn publish_remove(&mut self, id: SwitchId, function: FunctionId, branch: Address) {
-        match self {
-            Self::Persistent(table) => table.publish_remove(id, function, branch),
-            Self::Transient(table) => table.publish_remove(id, function, branch),
-        }
-    }
-
-    pub fn flush(&self) -> Result<(), EntityStorageError> {
-        match self {
-            Self::Persistent(table) => table.flush(),
-            Self::Transient(_) => Ok(()),
-        }
-    }
-
-    pub fn insert<F>(&mut self, branch: Address, f: F) -> Result<SwitchId, SwitchTableError>
-    where
-        F: FnOnce(SwitchId, Address) -> Result<Switch, SwitchTableError>,
-    {
-        match self {
-            Self::Persistent(table) => table.insert(branch, f),
-            Self::Transient(table) => table.insert(branch, f),
-        }
-    }
-
     pub fn get_by_id(&self, id: SwitchId) -> Option<SwitchRef<'_>> {
         self.try_get_by_id(id)
             .unwrap_or_else(|error| error.into_fatal())
@@ -288,6 +223,51 @@ impl SwitchTable {
         match self {
             Self::Persistent(table) => Box::new(table.branches_for_function(function)),
             Self::Transient(table) => Box::new(table.branches_for_function(function)),
+        }
+    }
+
+    pub fn branches(&self) -> Box<dyn Iterator<Item = Address> + '_> {
+        match self {
+            Self::Persistent(table) => Box::new(table.branches()),
+            Self::Transient(table) => Box::new(table.branches()),
+        }
+    }
+
+    pub fn entries_after(
+        &self,
+        after: Option<Address>,
+    ) -> Box<dyn Iterator<Item = SwitchRef<'_>> + '_> {
+        match self {
+            Self::Persistent(table) => Box::new(table.entries_after(after).map(EntityRef::cached)),
+            Self::Transient(table) => Box::new(table.entries_after(after).map(EntityRef::borrowed)),
+        }
+    }
+
+    pub fn iter(&self) -> Box<dyn Iterator<Item = SwitchRef<'_>> + '_> {
+        match self {
+            Self::Persistent(table) => Box::new(table.iter().map(EntityRef::cached)),
+            Self::Transient(table) => Box::new(table.iter().map(EntityRef::borrowed)),
+        }
+    }
+
+    pub(crate) fn is_persistent(&self) -> bool {
+        matches!(self, Self::Persistent(_))
+    }
+
+    pub(crate) fn pending_id(&self, offset: usize) -> SwitchId {
+        match self {
+            Self::Persistent(table) => table.pending_id(offset),
+            Self::Transient(table) => table.pending_id(offset),
+        }
+    }
+
+    pub fn insert<F>(&mut self, branch: Address, f: F) -> Result<SwitchId, SwitchTableError>
+    where
+        F: FnOnce(SwitchId, Address) -> Result<Switch, SwitchTableError>,
+    {
+        match self {
+            Self::Persistent(table) => table.insert(branch, f),
+            Self::Transient(table) => table.insert(branch, f),
         }
     }
 
@@ -351,27 +331,47 @@ impl SwitchTable {
         }
     }
 
-    pub fn branches(&self) -> Box<dyn Iterator<Item = Address> + '_> {
+    pub fn flush(&self) -> Result<(), EntityStorageError> {
         match self {
-            Self::Persistent(table) => Box::new(table.branches()),
-            Self::Transient(table) => Box::new(table.branches()),
+            Self::Persistent(table) => table.flush(),
+            Self::Transient(_) => Ok(()),
         }
     }
 
-    pub fn entries_after(
-        &self,
-        after: Option<Address>,
-    ) -> Box<dyn Iterator<Item = SwitchRef<'_>> + '_> {
-        match self {
-            Self::Persistent(table) => Box::new(table.entries_after(after).map(EntityRef::cached)),
-            Self::Transient(table) => Box::new(table.entries_after(after).map(EntityRef::borrowed)),
+    pub(crate) fn publish_reservations(&mut self, reservations: &[SwitchId]) {
+        for &id in reservations {
+            match self {
+                Self::Persistent(table) => table.publish_reservation(id),
+                Self::Transient(table) => table.publish_reservation(id),
+            }
         }
     }
 
-    pub fn iter(&self) -> Box<dyn Iterator<Item = SwitchRef<'_>> + '_> {
+    pub(crate) fn publish_release(&mut self, id: SwitchId) {
         match self {
-            Self::Persistent(table) => Box::new(table.iter().map(EntityRef::cached)),
-            Self::Transient(table) => Box::new(table.iter().map(EntityRef::borrowed)),
+            Self::Persistent(table) => table.publish_release(id),
+            Self::Transient(table) => table.publish_release(id),
+        }
+    }
+
+    pub(crate) fn publish_upsert(
+        &mut self,
+        switch: Switch,
+        previous_function: Option<FunctionId>,
+        encoded_size: usize,
+    ) {
+        match self {
+            Self::Persistent(table) => {
+                table.publish_upsert(switch, previous_function, encoded_size)
+            }
+            Self::Transient(table) => table.publish_upsert(switch, previous_function),
+        }
+    }
+
+    pub(crate) fn publish_remove(&mut self, id: SwitchId, function: FunctionId, branch: Address) {
+        match self {
+            Self::Persistent(table) => table.publish_remove(id, function, branch),
+            Self::Transient(table) => table.publish_remove(id, function, branch),
         }
     }
 }

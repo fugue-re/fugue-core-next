@@ -158,8 +158,8 @@ impl EntityStorageProvider for MdbxEntityStorage {
     fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError> {
         let txn = self.database.begin_ro_txn()?;
         let tbl = txn.open_table(None)?;
-        let val = txn.get::<Vec<u8>>(&tbl, key)?;
-        Ok(val.map(BytesOrSlice::from))
+        let value = txn.get::<Vec<u8>>(&tbl, key)?;
+        Ok(value.map(BytesOrSlice::from))
     }
 
     fn get_as<F, T>(&self, key: &[u8], mut f: F) -> Result<Option<T>, EntityStorageError>
@@ -168,8 +168,8 @@ impl EntityStorageProvider for MdbxEntityStorage {
     {
         let txn = self.database.begin_ro_txn()?;
         let tbl = txn.open_table(None)?;
-        let val = txn.get::<Cow<[u8]>>(&tbl, key)?;
-        val.map(|bytes| f(bytes.as_ref())).transpose()
+        let value = txn.get::<Cow<[u8]>>(&tbl, key)?;
+        value.map(|bytes| f(bytes.as_ref())).transpose()
     }
 
     fn insert(&self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
@@ -191,8 +191,8 @@ impl EntityStorageProvider for MdbxEntityStorage {
     fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageError> {
         let txn = self.database.begin_ro_txn()?;
         let tbl = txn.open_table(None)?;
-        let val = txn.get::<Cow<[u8]>>(&tbl, key)?;
-        Ok(val.is_some())
+        let value = txn.get::<Cow<[u8]>>(&tbl, key)?;
+        Ok(value.is_some())
     }
 
     fn iter_prefix_keys(
@@ -483,14 +483,14 @@ impl<'a> MdbxEntityReader<'a> {
 impl EntityStorageReadTransaction for MdbxEntityReader<'_> {
     fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError> {
         let tbl = self.txn.open_table(None)?;
-        let val = self.txn.get::<Cow<[u8]>>(&tbl, key)?;
-        Ok(val.map(BytesOrSlice::from))
+        let value = self.txn.get::<Cow<[u8]>>(&tbl, key)?;
+        Ok(value.map(BytesOrSlice::from))
     }
 
     fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageError> {
         let tbl = self.txn.open_table(None)?;
-        let val = self.txn.get::<Cow<[u8]>>(&tbl, key)?;
-        Ok(val.is_some())
+        let value = self.txn.get::<Cow<[u8]>>(&tbl, key)?;
+        Ok(value.is_some())
     }
 }
 

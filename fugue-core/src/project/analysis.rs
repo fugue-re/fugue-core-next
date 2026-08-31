@@ -158,10 +158,6 @@ impl CoverageReconfiguration {
 }
 
 impl CoverageConfiguration {
-    pub(crate) fn into_reconfiguration(self) -> CoverageReconfiguration {
-        self.reconfiguration
-    }
-
     fn from_changes(
         changes: SmallVec<[CoverageConfigurationChange; 4]>,
     ) -> CoverageReconfiguration {
@@ -271,6 +267,10 @@ impl CoverageConfiguration {
             reanalysis,
         }
     }
+
+    pub(crate) fn into_reconfiguration(self) -> CoverageReconfiguration {
+        self.reconfiguration
+    }
 }
 
 #[derive(Debug, Clone, Default, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -293,6 +293,83 @@ impl Entity for AnalysisCoverageRecord {
 impl AnalysisCoverage {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn from_storage(storage: &EntityStorage) -> Result<Self, EntityStorageError> {
+        let Some(record) =
+            storage.get::<ProjectEntity, AnalysisCoverageRecord>(&ProjectEntity::Coverage)?
+        else {
+            return Ok(Self::new());
+        };
+
+        let mut coverage = Self::new();
+        for analyser in record.analysers {
+            let mut ranges = AddressRangeSet::new();
+            for range in analyser.ranges {
+                ranges.insert_range(range);
+            }
+            let mut pending = AddressRangeSet::new();
+            for range in analyser.pending {
+                pending.insert_range(range);
+            }
+            coverage.analysers.insert(
+                SmolStr::new(analyser.name),
+                AnalyserCoverage {
+                    pending,
+                    phase: analyser.phase,
+                    ranges,
+                },
+            );
+        }
+
+        Ok(coverage)
+    }
+
+    pub fn range_count(&self) -> usize {
+        self.analysers
+            .values()
+            .map(|coverage| coverage.ranges.range_count())
+            .sum()
+    }
+
+    pub(crate) fn gaps_for(&self, analyser: &str, within: &AddressRangeSet) -> AddressRangeSet {
+        self.analysers.get(analyser).map_or_else(
+            || within.clone(),
+            |coverage| within.difference(&coverage.ranges),
+        )
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.analysers
+            .values()
+            .all(|coverage| coverage.ranges.is_empty())
+    }
+
+    pub fn is_covered(&self, phase: AnalysisPhase, address: Address) -> bool {
+        self.covered(phase).contains(address)
+    }
+
+    pub fn is_complete(&self, phase: AnalysisPhase, within: &AddressRangeSet) -> bool {
+        self.gaps(phase, within).is_empty()
+    }
+
+    pub fn covered(&self, phase: AnalysisPhase) -> AddressRangeSet {
+        let mut ranges = self
+            .analysers
+            .values()
+            .filter(|coverage| coverage.phase == phase)
+            .map(|coverage| &coverage.ranges);
+        let Some(first) = ranges.next() else {
+            return AddressRangeSet::new();
+        };
+
+        ranges.fold(first.clone(), |covered, ranges| {
+            covered.intersection(ranges)
+        })
+    }
+
+    pub fn gaps(&self, phase: AnalysisPhase, within: &AddressRangeSet) -> AddressRangeSet {
+        within.difference(&self.covered(phase))
     }
 
     pub(crate) fn configure<'a>(
@@ -414,83 +491,6 @@ impl AnalysisCoverage {
             }
             coverage.ranges.remove_range(range);
         }
-    }
-
-    pub fn range_count(&self) -> usize {
-        self.analysers
-            .values()
-            .map(|coverage| coverage.ranges.range_count())
-            .sum()
-    }
-
-    pub fn covered(&self, phase: AnalysisPhase) -> AddressRangeSet {
-        let mut ranges = self
-            .analysers
-            .values()
-            .filter(|coverage| coverage.phase == phase)
-            .map(|coverage| &coverage.ranges);
-        let Some(first) = ranges.next() else {
-            return AddressRangeSet::new();
-        };
-
-        ranges.fold(first.clone(), |covered, ranges| {
-            covered.intersection(ranges)
-        })
-    }
-
-    pub fn is_covered(&self, phase: AnalysisPhase, address: Address) -> bool {
-        self.covered(phase).contains(address)
-    }
-
-    pub fn gaps(&self, phase: AnalysisPhase, within: &AddressRangeSet) -> AddressRangeSet {
-        within.difference(&self.covered(phase))
-    }
-
-    pub(crate) fn gaps_for(&self, analyser: &str, within: &AddressRangeSet) -> AddressRangeSet {
-        self.analysers.get(analyser).map_or_else(
-            || within.clone(),
-            |coverage| within.difference(&coverage.ranges),
-        )
-    }
-
-    pub fn is_complete(&self, phase: AnalysisPhase, within: &AddressRangeSet) -> bool {
-        self.gaps(phase, within).is_empty()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.analysers
-            .values()
-            .all(|coverage| coverage.ranges.is_empty())
-    }
-
-    pub(crate) fn from_storage(storage: &EntityStorage) -> Result<Self, EntityStorageError> {
-        let Some(record) =
-            storage.get::<ProjectEntity, AnalysisCoverageRecord>(&ProjectEntity::Coverage)?
-        else {
-            return Ok(Self::new());
-        };
-
-        let mut coverage = Self::new();
-        for analyser in record.analysers {
-            let mut ranges = AddressRangeSet::new();
-            for range in analyser.ranges {
-                ranges.insert_range(range);
-            }
-            let mut pending = AddressRangeSet::new();
-            for range in analyser.pending {
-                pending.insert_range(range);
-            }
-            coverage.analysers.insert(
-                SmolStr::new(analyser.name),
-                AnalyserCoverage {
-                    pending,
-                    phase: analyser.phase,
-                    ranges,
-                },
-            );
-        }
-
-        Ok(coverage)
     }
 }
 

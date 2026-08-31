@@ -38,7 +38,7 @@ impl Subscriber {
             return self.resync(Self::resynchronisation(changes, resync));
         }
 
-        let scoped = match changes.scoped_to(&self.filter) {
+        let scoped = match self.filter.apply(changes) {
             Some(scoped) => Arc::new(scoped),
             None => return true,
         };
@@ -117,8 +117,12 @@ impl<'a> SubscriptionBuilder<'a> {
         self
     }
 
-    pub fn with_capacity(mut self, capacity: usize) -> Self {
+    pub fn set_capacity(&mut self, capacity: usize) {
         self.capacity = capacity;
+    }
+
+    pub fn with_capacity(mut self, capacity: usize) -> Self {
+        self.set_capacity(capacity);
         self
     }
 

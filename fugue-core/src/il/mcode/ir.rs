@@ -3,9 +3,9 @@ use std::mem::{self, size_of};
 use fugue_bv::BitVec;
 
 use crate::il::common::{
-    ControlFlowIl, IlArtefact, IlBlockArgId, IlBlockId, IlConstantInterner, IlGraph, IlIndexRange,
-    IlMetadata, IlOpId, IlParentSpan, IlSchemaVersion, IlSourceSpan, IlSsaDef, IlValueId,
-    PersistableIl, SsaIl,
+    ControlFlowIl, IlArtefact, IlBlockArgId, IlBlockId, IlConstantInterner, IlError, IlGraph,
+    IlIndexRange, IlMetadata, IlOpId, IlParentSpan, IlSchemaVersion, IlSourceSpan, IlSsaDef,
+    IlValueId, PersistableIl, SsaIl,
 };
 use crate::il::mcode::verify::{VerifyError, verify};
 use crate::il::mcode::{
@@ -190,6 +190,28 @@ impl MCodeIr {
         self.values.get(value.index()).map(MCodeValue::width)
     }
 
+    pub fn args_for_edge(&self, edge: usize) -> &[IlValueId] {
+        self.edge_args
+            .get(edge)
+            .expect("edge index is within the edge argument table")
+            .slice(&self.edge_arg_values)
+    }
+
+    pub fn ops_for_source(
+        &self,
+        address: Address,
+    ) -> impl Iterator<Item = (IlOpId, &MCodeOp)> + '_ {
+        IlSourceSpan::ops(&self.source_spans, &self.operations, address)
+    }
+
+    pub fn defining_op(&self, value: IlValueId) -> Option<&MCodeOp> {
+        let record = self.values.get(value.index())?;
+        let IlSsaDef::Op(operation) = record.definition() else {
+            return None;
+        };
+        self.operations.get(operation.index())
+    }
+
     pub fn underlying_value(&self, value: IlValueId) -> IlValueId {
         let mut current = value;
         for _ in 0..self.values.len() {
@@ -211,13 +233,6 @@ impl MCodeIr {
             }
         }
         current
-    }
-
-    pub fn args_for_edge(&self, edge: usize) -> &[IlValueId] {
-        self.edge_args
-            .get(edge)
-            .expect("edge index is within the edge argument table")
-            .slice(&self.edge_arg_values)
     }
 
     pub fn shrink_to_fit(&mut self) {
@@ -253,6 +268,7 @@ impl MCodeIr {
         }
         MCodeRewriter {
             operations: &mut self.operations,
+            value_operands: &mut self.value_operands,
             constant_storage: &mut self.constant_storage,
             constants,
         }
@@ -303,27 +319,12 @@ impl MCodeIr {
         )
     }
 
-    pub fn ops_for_source(
-        &self,
-        address: Address,
-    ) -> impl Iterator<Item = (IlOpId, &MCodeOp)> + '_ {
-        IlSourceSpan::ops(&self.source_spans, &self.operations, address)
-    }
-
     pub fn pointer_operand(&self, operation: &MCodeOp) -> Option<IlValueId> {
         if !matches!(operation.opcode(), MCodeOpcode::Load | MCodeOpcode::Store) {
             return None;
         }
 
         self.op_operands_for(operation).first().copied()
-    }
-
-    pub fn defining_op(&self, value: IlValueId) -> Option<&MCodeOp> {
-        let record = self.values.get(value.index())?;
-        let IlSsaDef::Op(operation) = record.definition() else {
-            return None;
-        };
-        self.operations.get(operation.index())
     }
 
     pub const fn display(&self) -> MCodeIrDisplay<'_> {
@@ -337,6 +338,7 @@ impl MCodeIr {
 
 pub(crate) struct MCodeRewriter<'a> {
     operations: &'a mut Vec<MCodeOp>,
+    value_operands: &'a mut Vec<IlValueId>,
     constant_storage: &'a mut Vec<u8>,
     constants: IlConstantInterner,
 }
@@ -346,9 +348,32 @@ impl MCodeRewriter<'_> {
         self.operations
     }
 
+    pub(crate) fn replace_scalar(
+        &mut self,
+        operation: IlOpId,
+        opcode: MCodeOpcode,
+        operands: &[IlValueId],
+    ) -> Result<(), IlError> {
+        let operands_range = if operands.is_empty() {
+            IlIndexRange::EMPTY
+        } else {
+            let start = self.value_operands.len();
+            let end = start
+                .checked_add(operands.len())
+                .ok_or_else(|| IlError::integer_overflow("MCode operand count"))?;
+            let range = IlIndexRange::new(start, end)?;
+            self.value_operands.extend_from_slice(operands);
+            range
+        };
+        self.operations[operation.index()].replace(opcode, operands_range);
+        Ok(())
+    }
+
     pub(crate) fn replace_with_constant(&mut self, operation: IlOpId, value: &BitVec) {
         let immediate = self.constants.intern(self.constant_storage, value);
-        self.operations[operation.index()].replace_with_constant(immediate);
+        self.replace_scalar(operation, MCodeOpcode::Constant, &[])
+            .expect("an empty operand range is representable");
+        self.operations[operation.index()].set_immediate(immediate);
     }
 }
 

@@ -3,11 +3,10 @@ use std::ops::Bound;
 
 use rustc_hash::FxHashSet;
 
+use super::{InverseReferenceKey, PreparedReferenceIndexRecord};
 use crate::ir::Address;
 use crate::ir::reference::{Reference, ReferenceKey, ReferenceTarget};
 use crate::storage::entities::EntityStorageError;
-
-use super::{InverseReferenceKey, PreparedReferenceIndexRecord};
 
 #[derive(Default)]
 pub struct ReferenceIndex {
@@ -18,6 +17,36 @@ pub struct ReferenceIndex {
 impl ReferenceIndex {
     pub(crate) fn get(&self, from: Address, target: ReferenceTarget) -> Option<Reference> {
         self.forward.get(&ReferenceKey::new(from, target)).copied()
+    }
+
+    pub(crate) fn references_from(
+        &self,
+        from: Address,
+        after: Option<&Reference>,
+    ) -> impl Iterator<Item = Result<Reference, EntityStorageError>> + '_ {
+        let start = after.map_or_else(
+            || Bound::Included(ReferenceKey::minimum_for(from)),
+            |after| Bound::Excluded(ReferenceKey::new(after.from(), after.target())),
+        );
+        self.forward
+            .range((start, Bound::Unbounded))
+            .take_while(move |(key, _)| key.from() == from)
+            .map(|(_, &reference)| Ok(reference))
+    }
+
+    pub(crate) fn references_to(
+        &self,
+        target: ReferenceTarget,
+        after: Option<&Reference>,
+    ) -> impl Iterator<Item = Result<Reference, EntityStorageError>> + '_ {
+        let start = after.map_or_else(
+            || Bound::Included(InverseReferenceKey::minimum_for(target)),
+            |after| Bound::Excluded(InverseReferenceKey::new(after.target(), after.from())),
+        );
+        self.inverse
+            .range((start, Bound::Unbounded))
+            .take_while(move |(key, _)| key.target() == target)
+            .map(|(_, &reference)| Ok(reference))
     }
 
     pub(crate) fn collect_range(
@@ -57,36 +86,6 @@ impl ReferenceIndex {
                 None => self.remove(key.from(), key.target()),
             }
         }
-    }
-
-    pub(crate) fn references_from(
-        &self,
-        from: Address,
-        after: Option<&Reference>,
-    ) -> impl Iterator<Item = Result<Reference, EntityStorageError>> + '_ {
-        let start = after.map_or_else(
-            || Bound::Included(ReferenceKey::minimum_for(from)),
-            |after| Bound::Excluded(ReferenceKey::new(after.from(), after.target())),
-        );
-        self.forward
-            .range((start, Bound::Unbounded))
-            .take_while(move |(key, _)| key.from() == from)
-            .map(|(_, &reference)| Ok(reference))
-    }
-
-    pub(crate) fn references_to(
-        &self,
-        target: ReferenceTarget,
-        after: Option<&Reference>,
-    ) -> impl Iterator<Item = Result<Reference, EntityStorageError>> + '_ {
-        let start = after.map_or_else(
-            || Bound::Included(InverseReferenceKey::minimum_for(target)),
-            |after| Bound::Excluded(InverseReferenceKey::new(after.target(), after.from())),
-        );
-        self.inverse
-            .range((start, Bound::Unbounded))
-            .take_while(move |(key, _)| key.target() == target)
-            .map(|(_, &reference)| Ok(reference))
     }
 
     pub(crate) fn clear_derived(&mut self) -> FxHashSet<ReferenceKey> {

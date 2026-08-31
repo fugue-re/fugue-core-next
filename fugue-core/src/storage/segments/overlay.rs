@@ -34,6 +34,10 @@ impl OverlayTree {
         Self::default()
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = (RawAddress, &OverlayChunk)> {
+        self.chunks.iter().map(|(&key, value)| (key, value))
+    }
+
     pub fn write(&mut self, addr: impl Into<RawAddress>, data: impl Into<Vec<u8>>) {
         let data = data.into();
         if data.is_empty() {
@@ -132,13 +136,13 @@ impl OverlayTree {
         }
     }
 
-    pub fn read(&self, addr: impl Into<RawAddress>, buf: &mut [u8]) -> usize {
-        if buf.is_empty() {
+    pub fn read(&self, addr: impl Into<RawAddress>, buffer: &mut [u8]) -> usize {
+        if buffer.is_empty() {
             return 0;
         }
 
         let addr = addr.into();
-        let read_end = RawAddress::from(addr.offset().saturating_add(buf.len() as u64));
+        let read_end = RawAddress::from(addr.offset().saturating_add(buffer.len() as u64));
         let mut bytes_applied = 0;
 
         let first = self
@@ -157,21 +161,17 @@ impl OverlayTree {
             let overlap_start = addr.max(chunk_start);
             let overlap_end = read_end.min(chunk_end);
 
-            let buf_start = usize::from(overlap_start - addr);
-            let buf_end = usize::from(overlap_end - addr);
+            let buffer_start = usize::from(overlap_start - addr);
+            let buffer_end = usize::from(overlap_end - addr);
             let chunk_offset = usize::from(overlap_start - chunk_start);
             let chunk_size = usize::from(overlap_end - overlap_start);
 
-            buf[buf_start..buf_end]
+            buffer[buffer_start..buffer_end]
                 .copy_from_slice(&chunk.data[chunk_offset..chunk_offset + chunk_size]);
             bytes_applied += chunk_size;
         }
 
         bytes_applied
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (RawAddress, &OverlayChunk)> {
-        self.chunks.iter().map(|(&k, v)| (k, v))
     }
 
     pub fn chunk_covering(

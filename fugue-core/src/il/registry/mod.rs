@@ -4,6 +4,7 @@ use std::error::Error;
 use std::fmt;
 use std::sync::{Arc, LazyLock};
 
+use runtime::IlRecipe;
 use rustc_hash::FxHashMap;
 use thiserror::Error as ThisError;
 
@@ -18,9 +19,7 @@ use crate::il::pcode::PCodeCanonicaliser;
 use crate::il::storage::{IlPersist, IlStaging, IlStorageError};
 use crate::ir::FunctionId;
 use crate::storage::StorageContainer;
-use crate::types::EstimateSize;
-use crate::types::common::Revision;
-use runtime::IlRecipe;
+use crate::types::{EstimateSize, Revision};
 
 mod runtime;
 

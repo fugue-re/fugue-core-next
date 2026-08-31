@@ -124,6 +124,14 @@ impl EntityKeyPrefix {
         Self::new(K::ID, E::ID)
     }
 
+    pub const fn key_id(self) -> u8 {
+        self.0[0]
+    }
+
+    pub const fn entity_id(self) -> u8 {
+        self.0[1]
+    }
+
     pub fn extract<K: EntityKey, E: Entity>(bytes: BytesOrSlice<'_>) -> Option<K> {
         let (prefix, mut key) = Self::split(bytes.as_ref())?;
         if prefix != Self::of::<K, E>() {
@@ -144,14 +152,6 @@ impl EntityKeyPrefix {
     pub fn split(bytes: &[u8]) -> Option<(Self, &[u8])> {
         let prefix = Self::try_from(bytes.get(..ENTITY_PREFIX_SIZE)?).ok()?;
         Some((prefix, &bytes[ENTITY_PREFIX_SIZE..]))
-    }
-
-    pub const fn key_id(self) -> u8 {
-        self.0[0]
-    }
-
-    pub const fn entity_id(self) -> u8 {
-        self.0[1]
     }
 }
 

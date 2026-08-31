@@ -1,10 +1,9 @@
 #[cfg(feature = "static-lifters")]
 pub use fugue_lifter::mips::*;
 
-use crate::arch::Arch;
 use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
-use crate::ir::ExternFunctionTemplate;
+use crate::arch::{Arch, ExternalThunkTemplate};
 use crate::lifter::{
     Language, LanguageError, LanguageId, LanguageLoader, LanguageSource, Lifter, Varnode,
 };
@@ -42,12 +41,12 @@ impl ArchT for Mips {
         Lifter::new(self.language)
     }
 
-    fn external_function_template(&self) -> ExternFunctionTemplate {
+    fn external_thunk_template(&self) -> ExternalThunkTemplate {
         let mut bytes = [0x08, 0x00, 0xe0, 0x03]; // jr $ra
         if self.language().is_big_endian() {
             bytes.reverse();
         }
-        ExternFunctionTemplate::new(bytes)
+        ExternalThunkTemplate::new(bytes)
     }
 
     fn gprs(&self) -> &[Varnode] {

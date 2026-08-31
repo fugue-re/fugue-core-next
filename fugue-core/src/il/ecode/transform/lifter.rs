@@ -214,19 +214,7 @@ impl<'a, 'b> PCodeToECodeLifter<'a, 'b> {
 
     fn lift_intrinsic(&mut self, operation: &PCodeOp) -> Result<(), IlError> {
         let intrinsic = u64::from(operation.immediate());
-        if self.is_trap_intrinsic(operation) {
-            self.buffer.trap(intrinsic, operation.address_space())?;
-        } else {
-            self.lift_operand_values(operation, None)?;
-            self.buffer
-                .intrinsic(intrinsic, &self.scratch.operands, operation.address_space())?;
-        }
-        self.effects += 1;
 
-        Ok(())
-    }
-
-    fn is_trap_intrinsic(&mut self, operation: &PCodeOp) -> bool {
         self.scratch.intrinsic_args.clear();
         for operand in self.source.op_operands_for(operation) {
             let location = self.location(*operand);
@@ -236,11 +224,22 @@ impl<'a, 'b> PCodeToECodeLifter<'a, 'b> {
                 location.size(),
             ));
         }
-        self.arch.is_trap_intrinsic(
+        let is_trap = self.arch.is_trap_intrinsic(
             u16::try_from(operation.immediate())
                 .expect("PCode user-op identifier originated as u16"),
             &self.scratch.intrinsic_args,
-        )
+        );
+
+        if is_trap {
+            self.buffer.trap(intrinsic, operation.address_space())?;
+        } else {
+            self.lift_operand_values(operation, None)?;
+            self.buffer
+                .intrinsic(intrinsic, &self.scratch.operands, operation.address_space())?;
+        }
+        self.effects += 1;
+
+        Ok(())
     }
 
     fn lift_expression_op(

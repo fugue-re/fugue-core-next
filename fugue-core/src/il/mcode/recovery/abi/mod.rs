@@ -202,6 +202,14 @@ impl MCodeCallFacts {
         self.outputs.as_deref()
     }
 
+    fn stack_storage(&self) -> impl Iterator<Item = MCodeStorageFact> + '_ {
+        self.inputs
+            .iter()
+            .chain(&self.outputs)
+            .flat_map(|facts| facts.iter().copied())
+            .filter(|fact| matches!(fact.location(), MCodeStorageLocation::Stack { .. }))
+    }
+
     pub fn set_inputs(&mut self, inputs: impl IntoIterator<Item = MCodeStorageFact>) {
         self.inputs = Some(inputs.into_iter().collect());
     }
@@ -216,14 +224,6 @@ impl MCodeCallFacts {
 
     pub fn insert_output(&mut self, output: MCodeStorageFact) {
         self.outputs.get_or_insert_with(Vec::new).push(output);
-    }
-
-    fn stack_storage(&self) -> impl Iterator<Item = MCodeStorageFact> + '_ {
-        self.inputs
-            .iter()
-            .chain(&self.outputs)
-            .flat_map(|facts| facts.iter().copied())
-            .filter(|fact| matches!(fact.location(), MCodeStorageLocation::Stack { .. }))
     }
 
     fn validate(&self, ir: &ECodeIr, registers: &RegisterBank) -> Result<(), IlError> {
@@ -294,6 +294,19 @@ impl MCodeFunctionFacts {
         self.tail_call_live_outputs.as_deref()
     }
 
+    pub(crate) fn stack_storage(&self) -> impl Iterator<Item = MCodeStorageFact> + '_ {
+        self.calls
+            .values()
+            .flat_map(MCodeCallFacts::stack_storage)
+            .chain(
+                self.return_live_outputs
+                    .iter()
+                    .chain(&self.tail_call_live_outputs)
+                    .flat_map(|facts| facts.iter().copied())
+                    .filter(|fact| matches!(fact.location(), MCodeStorageLocation::Stack { .. })),
+            )
+    }
+
     pub fn set_return_live_outputs(&mut self, outputs: impl IntoIterator<Item = MCodeStorageFact>) {
         let mut outputs = outputs.into_iter().collect::<Vec<_>>();
         outputs.sort_unstable();
@@ -357,19 +370,6 @@ impl MCodeFunctionFacts {
             call.validate(ir, registers)?;
         }
         Ok(())
-    }
-
-    pub(crate) fn stack_storage(&self) -> impl Iterator<Item = MCodeStorageFact> + '_ {
-        self.calls
-            .values()
-            .flat_map(MCodeCallFacts::stack_storage)
-            .chain(
-                self.return_live_outputs
-                    .iter()
-                    .chain(&self.tail_call_live_outputs)
-                    .flat_map(|facts| facts.iter().copied())
-                    .filter(|fact| matches!(fact.location(), MCodeStorageLocation::Stack { .. })),
-            )
     }
 
     pub(crate) fn validate_stack(&self, stack: &MCodeStackModel) -> Result<(), IlError> {
@@ -625,6 +625,12 @@ impl<'a> MCodeAbiSolver<'a> {
         }
     }
 
+    fn is_reaching_input(&self, value: IlValueId) -> bool {
+        self.ir.defining_op(value).is_none_or(|operation| {
+            operation.opcode() != ECodeOpcode::Undefined || self.entry_live_inputs.contains(&value)
+        })
+    }
+
     fn solve(mut self) -> Result<MCodeAbiModel, IlError> {
         if self.ir.graph().blocks().is_empty() {
             let mut definitions = MCodeReachingDefs::default();
@@ -742,12 +748,6 @@ impl<'a> MCodeAbiSolver<'a> {
         }
 
         Ok(())
-    }
-
-    fn is_reaching_input(&self, value: IlValueId) -> bool {
-        self.ir.defining_op(value).is_none_or(|operation| {
-            operation.opcode() != ECodeOpcode::Undefined || self.entry_live_inputs.contains(&value)
-        })
     }
 
     fn recover_call(

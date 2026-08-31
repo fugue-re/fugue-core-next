@@ -1,3 +1,5 @@
+use std::mem;
+
 use fugue_bv::BitVec;
 
 use super::SwitchIdiomMatcher;
@@ -155,7 +157,7 @@ impl SwitchIdiomRecovery {
 
         Some(RecoveredSwitch::new(
             model,
-            std::mem::take(&mut self.cases),
+            mem::take(&mut self.cases),
             properties,
         ))
     }

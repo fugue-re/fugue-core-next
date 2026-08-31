@@ -148,130 +148,6 @@ impl SymbolTable {
         }
     }
 
-    pub(crate) fn is_persistent(&self) -> bool {
-        matches!(self, Self::Persistent(_))
-    }
-
-    pub(crate) fn initialise(
-        &mut self,
-        symbols: TransientSymbolTable,
-    ) -> Result<(), EntityStorageError> {
-        assert!(self.is_empty(), "initial symbol table must be empty");
-        match self {
-            Self::Persistent(table) => table.initialise(symbols),
-            Self::Transient(table) => {
-                *table = symbols;
-                Ok(())
-            }
-        }
-    }
-
-    pub(crate) fn pending_id(&self, offset: usize) -> SymbolId {
-        match self {
-            Self::Persistent(table) => table.pending_id(offset),
-            Self::Transient(table) => table.pending_id(offset),
-        }
-    }
-
-    pub(crate) fn append_prepared_writes(
-        &self,
-        id: SymbolId,
-        entry: Option<&SymbolEntry>,
-        previous: Option<&SymbolIndexState>,
-        writes: &mut EntityWriteBatch,
-    ) -> Result<(), EntityStorageError> {
-        if matches!(self, Self::Persistent(_)) {
-            PersistentSymbolTable::append_prepared_writes(id, entry, previous, writes)?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn append_prepared_transition_writes(
-        &self,
-        reservations: &[SymbolId],
-        releases: &[SymbolId],
-        added: usize,
-        removed: usize,
-        writes: &mut EntityWriteBatch,
-    ) -> Result<(), EntityStorageError> {
-        if let Self::Persistent(table) = self {
-            table.append_prepared_transition_writes(
-                reservations,
-                releases,
-                added,
-                removed,
-                writes,
-            )?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn publish_prepared(
-        &mut self,
-        reservations: &[SymbolId],
-        cancelled: &[SymbolId],
-        added: usize,
-        removed: usize,
-    ) {
-        match self {
-            Self::Persistent(table) => table.publish_transition(reservations, added, removed),
-            Self::Transient(table) => {
-                for &id in reservations {
-                    table.publish_reservation(id);
-                }
-                for &id in cancelled {
-                    table.publish_release(id);
-                }
-            }
-        }
-    }
-
-    pub(crate) fn publish_upsert(
-        &mut self,
-        id: SymbolId,
-        entry: SymbolEntry,
-        previous: Option<&SymbolIndexState>,
-        encoded_size: usize,
-    ) {
-        match self {
-            Self::Persistent(table) => table.publish_upsert(id, entry, encoded_size),
-            Self::Transient(table) => table.publish_upsert(id, entry, previous),
-        }
-    }
-
-    pub(crate) fn publish_remove(&mut self, id: SymbolId, previous: &SymbolIndexState) {
-        match self {
-            Self::Persistent(table) => table.publish_remove(id),
-            Self::Transient(table) => table.publish_remove(id, previous),
-        }
-    }
-
-    pub fn persisted(storage: &EntityStorage) -> Result<bool, EntityStorageError> {
-        storage.contains::<ProjectEntity, SymbolTableHeader>(&ProjectEntity::SymbolTable)
-    }
-
-    pub fn flush(&self) -> Result<(), EntityStorageError> {
-        match self {
-            Self::Persistent(table) => table.flush(),
-            Self::Transient(_) => Ok(()),
-        }
-    }
-
-    pub fn insert(
-        &mut self,
-        index: SymbolIndex,
-        address: impl Into<Address>,
-        symbol: impl Into<Symbol>,
-        properties: SymbolProperties,
-    ) -> Result<SymbolInsertion, EntityStorageError> {
-        let address = address.into();
-        let symbol = symbol.into();
-        match self {
-            Self::Persistent(table) => table.insert(index, address, symbol, properties),
-            Self::Transient(table) => Ok(table.insert(index, address, symbol, properties)),
-        }
-    }
-
     pub fn get_by_name(
         &self,
         symbol: impl AsRef<str>,
@@ -325,26 +201,6 @@ impl SymbolTable {
         match self {
             Self::Persistent(table) => table.get_id_by_index(index),
             Self::Transient(table) => table.get_id_by_index(index),
-        }
-    }
-
-    pub fn modify_by_id<R>(
-        &mut self,
-        id: SymbolId,
-        f: impl FnOnce(&mut SymbolEntry) -> R,
-    ) -> Option<R> {
-        self.try_modify_by_id(id, f)
-            .unwrap_or_else(|error| error.into_fatal())
-    }
-
-    pub fn try_modify_by_id<R>(
-        &mut self,
-        id: SymbolId,
-        f: impl FnOnce(&mut SymbolEntry) -> R,
-    ) -> Result<Option<R>, EntityStorageError> {
-        match self {
-            Self::Persistent(table) => table.try_modify_by_id(id, f),
-            Self::Transient(table) => Ok(table.modify_by_id(id, f)),
         }
     }
 
@@ -495,6 +351,52 @@ impl SymbolTable {
         }
     }
 
+    pub(crate) fn is_persistent(&self) -> bool {
+        matches!(self, Self::Persistent(_))
+    }
+
+    pub(crate) fn pending_id(&self, offset: usize) -> SymbolId {
+        match self {
+            Self::Persistent(table) => table.pending_id(offset),
+            Self::Transient(table) => table.pending_id(offset),
+        }
+    }
+
+    pub fn insert(
+        &mut self,
+        index: SymbolIndex,
+        address: impl Into<Address>,
+        symbol: impl Into<Symbol>,
+        properties: SymbolProperties,
+    ) -> Result<SymbolInsertion, EntityStorageError> {
+        let address = address.into();
+        let symbol = symbol.into();
+        match self {
+            Self::Persistent(table) => table.insert(index, address, symbol, properties),
+            Self::Transient(table) => Ok(table.insert(index, address, symbol, properties)),
+        }
+    }
+
+    pub fn modify_by_id<R>(
+        &mut self,
+        id: SymbolId,
+        f: impl FnOnce(&mut SymbolEntry) -> R,
+    ) -> Option<R> {
+        self.try_modify_by_id(id, f)
+            .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub fn try_modify_by_id<R>(
+        &mut self,
+        id: SymbolId,
+        f: impl FnOnce(&mut SymbolEntry) -> R,
+    ) -> Result<Option<R>, EntityStorageError> {
+        match self {
+            Self::Persistent(table) => table.try_modify_by_id(id, f),
+            Self::Transient(table) => Ok(table.modify_by_id(id, f)),
+        }
+    }
+
     pub fn remove_by_name(&mut self, symbol: impl AsRef<str>) -> usize {
         self.try_remove_by_name(symbol)
             .unwrap_or_else(|error| error.into_fatal())
@@ -547,6 +449,104 @@ impl SymbolTable {
         match self {
             Self::Persistent(table) => table.remove_by_index(index),
             Self::Transient(table) => Ok(table.remove_by_index(index)),
+        }
+    }
+
+    pub fn persisted(storage: &EntityStorage) -> Result<bool, EntityStorageError> {
+        storage.contains::<ProjectEntity, SymbolTableHeader>(&ProjectEntity::SymbolTable)
+    }
+
+    pub fn flush(&self) -> Result<(), EntityStorageError> {
+        match self {
+            Self::Persistent(table) => table.flush(),
+            Self::Transient(_) => Ok(()),
+        }
+    }
+
+    pub(crate) fn initialise(
+        &mut self,
+        symbols: TransientSymbolTable,
+    ) -> Result<(), EntityStorageError> {
+        assert!(self.is_empty(), "initial symbol table must be empty");
+        match self {
+            Self::Persistent(table) => table.initialise(symbols),
+            Self::Transient(table) => {
+                *table = symbols;
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) fn append_prepared_writes(
+        &self,
+        id: SymbolId,
+        entry: Option<&SymbolEntry>,
+        previous: Option<&SymbolIndexState>,
+        writes: &mut EntityWriteBatch,
+    ) -> Result<(), EntityStorageError> {
+        if matches!(self, Self::Persistent(_)) {
+            PersistentSymbolTable::append_prepared_writes(id, entry, previous, writes)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn append_prepared_transition_writes(
+        &self,
+        reservations: &[SymbolId],
+        releases: &[SymbolId],
+        added: usize,
+        removed: usize,
+        writes: &mut EntityWriteBatch,
+    ) -> Result<(), EntityStorageError> {
+        if let Self::Persistent(table) = self {
+            table.append_prepared_transition_writes(
+                reservations,
+                releases,
+                added,
+                removed,
+                writes,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn publish_prepared(
+        &mut self,
+        reservations: &[SymbolId],
+        cancelled: &[SymbolId],
+        added: usize,
+        removed: usize,
+    ) {
+        match self {
+            Self::Persistent(table) => table.publish_transition(reservations, added, removed),
+            Self::Transient(table) => {
+                for &id in reservations {
+                    table.publish_reservation(id);
+                }
+                for &id in cancelled {
+                    table.publish_release(id);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn publish_upsert(
+        &mut self,
+        id: SymbolId,
+        entry: SymbolEntry,
+        previous: Option<&SymbolIndexState>,
+        encoded_size: usize,
+    ) {
+        match self {
+            Self::Persistent(table) => table.publish_upsert(id, entry, encoded_size),
+            Self::Transient(table) => table.publish_upsert(id, entry, previous),
+        }
+    }
+
+    pub(crate) fn publish_remove(&mut self, id: SymbolId, previous: &SymbolIndexState) {
+        match self {
+            Self::Persistent(table) => table.publish_remove(id),
+            Self::Transient(table) => table.publish_remove(id, previous),
         }
     }
 }

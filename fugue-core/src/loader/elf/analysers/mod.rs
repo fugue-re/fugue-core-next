@@ -1,11 +1,11 @@
 use crate::analysis::AnalysisError;
 use crate::analysis::function::recovery::{
-    FunctionRecoveryExtension, FunctionRecoveryPatternMatcher,
+    FunctionRecoveryExtension as ProjectFunctionRecoveryExtension, FunctionRecoveryPatternMatcher,
 };
 use crate::analysis::function::{FunctionRecovery, FunctionRecoveryConfig};
 use crate::arch::Arch;
 use crate::extension::submit;
-use crate::loader::elf::extensions::{AnalysisContext, FunctionRecoveryHandler};
+use crate::loader::elf::extensions::{AnalysisContext, FunctionRecoveryExtension};
 use crate::loader::{Elf, Loadable, LoadableAnalysers};
 use crate::platform::{CallingConvention, Format};
 use crate::project::Project;
@@ -63,14 +63,14 @@ impl<'a> LoadableAnalysers for ElfAnalysers<'a> {
 }
 
 submit! {
-    FunctionRecoveryExtension::new(
+    ProjectFunctionRecoveryExtension::new(
         "elf-loader-patterns",
         ElfAnalysers::add_project_function_recovery_patterns,
     )
 }
 
 #[fugue_core::extension]
-impl FunctionRecoveryHandler {
+impl FunctionRecoveryExtension {
     const NAME: &str = "elf-loader-patterns";
 
     fn apply(

@@ -99,6 +99,10 @@ impl QueryCache {
         }
     }
 
+    pub(crate) fn flow_targets(&self, entry: Address) -> CacheLookup<FlowTargets> {
+        CacheLookup::from_cached(self.flow_targets.get(&entry))
+    }
+
     pub(crate) fn lifted<T: IlArtefact>(
         &self,
         function: FunctionId,
@@ -144,10 +148,6 @@ impl QueryCache {
         if retained <= self.lifted_cache_bytes {
             self.lifted.insert(key, entry);
         }
-    }
-
-    pub(crate) fn flow_targets(&self, entry: Address) -> CacheLookup<FlowTargets> {
-        CacheLookup::from_cached(self.flow_targets.get(&entry))
     }
 
     pub(crate) fn insert_flow_targets(&self, entry: Address, targets: Option<Arc<FlowTargets>>) {

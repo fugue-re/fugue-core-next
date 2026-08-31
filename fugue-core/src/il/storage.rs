@@ -11,7 +11,7 @@ use crate::storage::entities::schema::{
 };
 use crate::storage::entities::{EntityWrite, EntityWriteBatch};
 use crate::storage::{EntityStorageError, StorageContainer};
-use crate::types::common::Revision;
+use crate::types::Revision;
 
 #[derive(Debug, Error)]
 pub(crate) enum IlStorageError {

@@ -351,6 +351,21 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         })
     }
 
+    fn is_switch(&self, site: IlOpId) -> bool {
+        self.operation_blocks
+            .get(site.index())
+            .copied()
+            .flatten()
+            .and_then(|block| self.source.graph().blocks().get(block.index()))
+            .is_some_and(|block| {
+                block
+                    .successors()
+                    .slice(self.source.graph().successor_kinds())
+                    .iter()
+                    .any(|kinds| kinds.is_computed())
+            })
+    }
+
     fn target_variable(&self, variable: MCodeVarId) -> MCodeVarId {
         self.target_variables[variable.index()]
     }
@@ -1622,21 +1637,6 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             }
         };
         Ok(opcode)
-    }
-
-    fn is_switch(&self, site: IlOpId) -> bool {
-        self.operation_blocks
-            .get(site.index())
-            .copied()
-            .flatten()
-            .and_then(|block| self.source.graph().blocks().get(block.index()))
-            .is_some_and(|block| {
-                block
-                    .successors()
-                    .slice(self.source.graph().successor_kinds())
-                    .iter()
-                    .any(|kinds| kinds.is_computed())
-            })
     }
 
     fn mapped_memory_operand(&self, operation: ECodeOp) -> Result<IlValueId, IlError> {

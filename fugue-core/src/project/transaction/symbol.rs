@@ -30,7 +30,7 @@ impl ProjectTransaction<'_> {
         self.insert_or_update_symbol(index, entry)
     }
 
-    pub fn set_symbol_properties(
+    pub fn update_symbol_properties(
         &mut self,
         id: SymbolId,
         properties: SymbolProperties,

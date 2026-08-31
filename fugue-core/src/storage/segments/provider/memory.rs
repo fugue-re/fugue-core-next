@@ -78,21 +78,21 @@ impl SegmentStorageProvider for InMemorySegmentStorage {
     fn read_bytes(&self, offset: u64, bytes: &mut [u8]) -> Result<usize, SegmentStorageError> {
         let offset = usize::try_from(offset).map_err(|_| SegmentStorageError::InvalidAddress)?;
         let read = self.clamped_len(offset, bytes.len())?;
-        let buf = &mut bytes[..read];
+        let buffer = &mut bytes[..read];
 
         if self.chunk_contains(offset, read) {
             let start = offset - self.base;
-            buf.copy_from_slice(&self.chunk[start..start + read]);
+            buffer.copy_from_slice(&self.chunk[start..start + read]);
             return Ok(read);
         }
 
-        buf.fill(0);
-        self.overlay.read(offset as u64, buf);
+        buffer.fill(0);
+        self.overlay.read(offset as u64, buffer);
 
         if let Some(o) =
             SegmentRangeOverlap::new(self.base, self.chunk.len(), offset, offset + read)
         {
-            buf[o.window()].copy_from_slice(&self.chunk[o.source()]);
+            buffer[o.window()].copy_from_slice(&self.chunk[o.source()]);
         }
 
         Ok(read)

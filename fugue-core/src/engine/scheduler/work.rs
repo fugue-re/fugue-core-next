@@ -150,8 +150,26 @@ impl WorkItem {
         self.attempts
     }
 
-    pub(crate) fn record_attempt(&mut self) {
-        self.attempts = self.attempts.saturating_add(1);
+    fn has_same_causes(&self, other: &Self) -> bool {
+        self.causes.len() == other.causes.len()
+            && self.causes.iter().all(|cause| other.causes.contains(cause))
+    }
+
+    fn with_range(&self, range: AddressRange) -> Self {
+        Self {
+            range: Some(range),
+            ..self.clone()
+        }
+    }
+
+    fn cost(&self) -> u64 {
+        self.range.map_or(1, |range| range.size())
+    }
+
+    fn scope(&self) -> ProblemScope {
+        self.range
+            .map(ProblemScope::Range)
+            .unwrap_or(ProblemScope::Global)
     }
 
     fn regions(&self) -> AddressRangeSet {
@@ -171,6 +189,10 @@ impl WorkItem {
             kind: self.kind,
             end: self.range.map_or(0u64.into(), |range| range.end()),
         }
+    }
+
+    pub(crate) fn record_attempt(&mut self) {
+        self.attempts = self.attempts.saturating_add(1);
     }
 
     fn absorb(&mut self, causes: &[WorkCause]) -> bool {
@@ -193,28 +215,6 @@ impl WorkItem {
         }
 
         merged
-    }
-
-    fn has_same_causes(&self, other: &Self) -> bool {
-        self.causes.len() == other.causes.len()
-            && self.causes.iter().all(|cause| other.causes.contains(cause))
-    }
-
-    fn with_range(&self, range: AddressRange) -> Self {
-        Self {
-            range: Some(range),
-            ..self.clone()
-        }
-    }
-
-    fn cost(&self) -> u64 {
-        self.range.map_or(1, |range| range.size())
-    }
-
-    fn scope(&self) -> ProblemScope {
-        self.range
-            .map(ProblemScope::Range)
-            .unwrap_or(ProblemScope::Global)
     }
 }
 
@@ -247,6 +247,12 @@ impl AnalysisWorkQueue {
         self.items.is_empty()
     }
 
+    pub(crate) fn has_pending_for(&self, analyser: AnalyserId) -> bool {
+        self.keys_by_analyser_and_range
+            .get(analyser.index())
+            .is_some_and(|keys| !keys.is_empty())
+    }
+
     pub(crate) fn pending_for(&self, analyser: AnalyserId) -> AddressRangeSet {
         let mut pending = AddressRangeSet::new();
         let Some(keys) = self.keys_by_analyser_and_range.get(analyser.index()) else {
@@ -259,12 +265,6 @@ impl AnalysisWorkQueue {
             }
         }
         pending
-    }
-
-    pub(crate) fn has_pending_for(&self, analyser: AnalyserId) -> bool {
-        self.keys_by_analyser_and_range
-            .get(analyser.index())
-            .is_some_and(|keys| !keys.is_empty())
     }
 
     pub(crate) fn schedule(

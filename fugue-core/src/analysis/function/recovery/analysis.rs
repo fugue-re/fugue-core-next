@@ -16,7 +16,7 @@ use super::{
     FunctionRecoveryCommitContext, FunctionRecoveryCommitHook, FunctionRecoveryConfig,
     FunctionRecoveryError, FunctionRecoveryState,
 };
-use crate::analysis::control::{CancellationToken, Progress};
+use crate::analysis::control::CancellationToken;
 use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
 use crate::engine::{
     Analyser, AnalyserProvider, AnalysisContext, Priority, ProjectUpdate, ProjectView,
@@ -28,7 +28,7 @@ use crate::ir::{
 };
 use crate::lifter::InsnResolver;
 use crate::project::{AnalysisPhase, ChangeKinds, Project};
-use crate::storage::{AddressSpaceId, SegmentStorage};
+use crate::storage::{AddressSpaceId, SegmentMappingProvenance, SegmentStorage};
 use crate::types::{Confidence, EstimateSize};
 
 pub const DEFAULT_FUNCTION_RECOVERY_CHUNK_FUNCTIONS: usize = 8192;
@@ -76,7 +76,6 @@ pub struct FunctionRecovery {
     discovered_targets: Vec<AddressWithContext>,
     executor: FunctionRecoveryExecutor,
     cancellation: CancellationToken,
-    progress: Progress,
     wave_active: bool,
     wave_inputs: Option<FunctionRecoveryInputs>,
 }
@@ -98,13 +97,17 @@ impl FunctionRecoveryExtension {
         }
     }
 
-    pub const fn with_priority(mut self, priority: Priority) -> Self {
-        self.priority = priority;
-        self
-    }
-
     pub fn priority(&self) -> Priority {
         self.priority
+    }
+
+    pub const fn set_priority(&mut self, priority: Priority) {
+        self.priority = priority;
+    }
+
+    pub const fn with_priority(mut self, priority: Priority) -> Self {
+        self.set_priority(priority);
+        self
     }
 
     pub fn apply(
@@ -140,21 +143,16 @@ struct FunctionConfidenceMap {
 }
 
 impl FunctionConfidenceMap {
-    fn candidate_known(
-        project_functions: &FunctionTable,
-        pending_functions: &BTreeMap<Address, IncompleteFunction>,
-        functions: &Self,
-        new_functions: &Self,
-        address: Address,
-    ) -> bool {
-        pending_functions.contains_key(&address)
-            || functions.contains(address)
-            || new_functions.contains(address)
-            || project_functions.contains(address)
-    }
-
     fn contains(&self, address: Address) -> bool {
         self.entries.contains_key(&address)
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&Address, &Confidence)> {
+        self.entries.iter()
+    }
+
+    fn entries(&self) -> &BTreeMap<Address, Confidence> {
+        &self.entries
     }
 
     fn insert(&mut self, address: Address, confidence: Confidence) -> bool {
@@ -169,16 +167,21 @@ impl FunctionConfidenceMap {
         true
     }
 
-    fn iter(&self) -> impl Iterator<Item = (&Address, &Confidence)> {
-        self.entries.iter()
-    }
-
     fn remove(&mut self, address: Address) {
         self.entries.remove(&address);
     }
 
-    fn entries(&self) -> &BTreeMap<Address, Confidence> {
-        &self.entries
+    fn candidate_known(
+        project_functions: &FunctionTable,
+        pending_functions: &BTreeMap<Address, IncompleteFunction>,
+        functions: &Self,
+        new_functions: &Self,
+        address: Address,
+    ) -> bool {
+        pending_functions.contains_key(&address)
+            || functions.contains(address)
+            || new_functions.contains(address)
+            || project_functions.contains(address)
     }
 }
 
@@ -236,32 +239,12 @@ impl FunctionDiscoveryContext {
         &self.candidates
     }
 
-    pub fn add_candidate(&mut self, candidate: impl Into<AddressWithContext>) {
-        self.candidates.push_back(candidate.into());
-    }
-
-    pub fn add_candidates(
-        &mut self,
-        candidates: impl IntoIterator<Item = impl Into<AddressWithContext>>,
-    ) {
-        self.candidates
-            .extend(candidates.into_iter().map(|candidate| candidate.into()));
-    }
-
     pub fn avoids(&self) -> &AddressRangeSet {
         &self.avoids
     }
 
     pub fn avoids_mut(&mut self) -> &mut AddressRangeSet {
         &mut self.avoids
-    }
-
-    pub fn add_avoid(&mut self, address: impl Into<Address>) {
-        self.avoids.insert(address.into());
-    }
-
-    pub fn add_avoid_range(&mut self, range: impl Into<RangeInclusive<Address>>) {
-        self.avoids.insert_meta_range(range.into());
     }
 
     pub fn functions(&self) -> &BTreeMap<Address, Confidence> {
@@ -286,6 +269,26 @@ impl FunctionDiscoveryContext {
     ) -> impl Iterator<Item = RangeInclusive<RawAddress>> + '_ {
         self.coverage.available_ranges(space_id)
     }
+
+    pub fn add_candidate(&mut self, candidate: impl Into<AddressWithContext>) {
+        self.candidates.push_back(candidate.into());
+    }
+
+    pub fn add_candidates(
+        &mut self,
+        candidates: impl IntoIterator<Item = impl Into<AddressWithContext>>,
+    ) {
+        self.candidates
+            .extend(candidates.into_iter().map(|candidate| candidate.into()));
+    }
+
+    pub fn add_avoid(&mut self, address: impl Into<Address>) {
+        self.avoids.insert(address.into());
+    }
+
+    pub fn add_avoid_range(&mut self, range: impl Into<RangeInclusive<Address>>) {
+        self.avoids.insert_meta_range(range.into());
+    }
 }
 
 impl FunctionCoverage {
@@ -298,14 +301,15 @@ impl FunctionCoverage {
         let mut coverage = Self {
             available: BTreeMap::new(),
             covered: AddressRangeSet::new(),
-            fine_grained: config.use_fine_grained_block_coverage(),
+            fine_grained: config.fine_grained_block_coverage(),
             pending: Vec::new(),
         };
 
         for space_id in segments.spaces().map(|space| space.id()) {
             let mut gaps = RawAddressRangeSet::new();
             for view in segments.iter_views(space_id)?.filter(|view| {
-                view.properties().is_executable() && !view.properties().is_external()
+                view.properties().is_executable()
+                    && view.provenance() != SegmentMappingProvenance::External
             }) {
                 gaps.insert_range(view.start().raw_address()..=view.last().raw_address());
             }
@@ -342,6 +346,33 @@ impl FunctionCoverage {
         coverage.flush();
 
         Ok(coverage)
+    }
+
+    fn available_ranges(
+        &self,
+        space_id: AddressSpaceId,
+    ) -> impl Iterator<Item = RangeInclusive<RawAddress>> + '_ {
+        self.available
+            .get(&space_id)
+            .into_iter()
+            .flat_map(RawAddressRangeSet::ranges)
+    }
+
+    fn gaps(&self, space_id: AddressSpaceId) -> AddressRangeSet {
+        let mut gaps = AddressRangeSet::new();
+        if let Some(available) = self.available.get(&space_id) {
+            let covered = self
+                .covered
+                .spaces()
+                .find_map(|(space, ranges)| (space == space_id).then_some(ranges));
+            let ranges = covered
+                .map(|covered| available.difference(covered))
+                .unwrap_or_else(|| available.clone());
+            for range in ranges.ranges() {
+                gaps.insert_raw_range(space_id, range);
+            }
+        }
+        gaps
     }
 
     fn insert(&mut self, function: &IncompleteFunction) {
@@ -404,33 +435,6 @@ impl FunctionCoverage {
             self.covered.insert_range(self.pending[index]);
         }
         self.pending.clear();
-    }
-
-    fn gaps(&self, space_id: AddressSpaceId) -> AddressRangeSet {
-        let mut gaps = AddressRangeSet::new();
-        if let Some(available) = self.available.get(&space_id) {
-            let covered = self
-                .covered
-                .spaces()
-                .find_map(|(space, ranges)| (space == space_id).then_some(ranges));
-            let ranges = covered
-                .map(|covered| available.difference(covered))
-                .unwrap_or_else(|| available.clone());
-            for range in ranges.ranges() {
-                gaps.insert_raw_range(space_id, range);
-            }
-        }
-        gaps
-    }
-
-    fn available_ranges(
-        &self,
-        space_id: AddressSpaceId,
-    ) -> impl Iterator<Item = RangeInclusive<RawAddress>> + '_ {
-        self.available
-            .get(&space_id)
-            .into_iter()
-            .flat_map(RawAddressRangeSet::ranges)
     }
 }
 
@@ -525,24 +529,12 @@ impl FunctionStructuringContext {
         &self.config
     }
 
-    pub fn add_candidate(&mut self, candidate: impl Into<AddressWithContext>) {
-        self.candidates.push_back(candidate.into());
-    }
-
     pub fn avoids(&self) -> &AddressRangeSet {
         &self.avoids
     }
 
     pub fn avoids_mut(&mut self) -> &mut AddressRangeSet {
         &mut self.avoids
-    }
-
-    pub fn add_avoid(&mut self, address: impl Into<Address>) {
-        self.avoids.insert(address.into());
-    }
-
-    pub fn add_avoid_range(&mut self, range: impl Into<RangeInclusive<Address>>) {
-        self.avoids.insert_meta_range(range.into());
     }
 
     pub fn functions(&self) -> &BTreeMap<Address, Confidence> {
@@ -555,6 +547,18 @@ impl FunctionStructuringContext {
 
     pub fn pending_functions(&self) -> &BTreeMap<Address, IncompleteFunction> {
         &self.pending_functions
+    }
+
+    pub fn add_candidate(&mut self, candidate: impl Into<AddressWithContext>) {
+        self.candidates.push_back(candidate.into());
+    }
+
+    pub fn add_avoid(&mut self, address: impl Into<Address>) {
+        self.avoids.insert(address.into());
+    }
+
+    pub fn add_avoid_range(&mut self, range: impl Into<RangeInclusive<Address>>) {
+        self.avoids.insert_meta_range(range.into());
     }
 
     pub fn add_function(
@@ -594,7 +598,7 @@ impl FunctionStructuringContext {
         f(function)
     }
 
-    pub fn set_function_properties(
+    pub fn update_function_properties(
         &mut self,
         address: impl Into<Address>,
         properties: FunctionProperties,
@@ -667,7 +671,6 @@ impl FunctionRecovery {
             discovered_targets: Vec::new(),
             executor: FunctionRecoveryExecutor::new(),
             cancellation: CancellationToken::default(),
-            progress: Progress::default(),
             wave_active: false,
             wave_inputs: None,
         }
@@ -681,28 +684,12 @@ impl FunctionRecovery {
         self.builder.config_mut()
     }
 
-    pub fn add_candidate(&mut self, candidate: impl Into<AddressWithContext>) {
-        self.candidates.push_back(candidate.into());
-    }
-
-    pub fn add_candidates(
-        &mut self,
-        candidates: impl IntoIterator<Item = impl Into<AddressWithContext>>,
-    ) {
-        self.candidates
-            .extend(candidates.into_iter().map(|candidate| candidate.into()));
-    }
-
     pub fn cancellation_token(&self) -> CancellationToken {
         self.cancellation.clone()
     }
 
     pub fn set_cancellation_token(&mut self, token: CancellationToken) {
         self.cancellation = token;
-    }
-
-    pub fn progress(&self) -> Progress {
-        self.progress.clone()
     }
 
     pub fn chunk_function_limit(&self) -> Option<usize> {
@@ -749,6 +736,22 @@ impl FunctionRecovery {
         &mut self.structuring_passes
     }
 
+    pub fn set_commit_hook(&mut self, hook: impl FunctionRecoveryCommitHook + 'static) {
+        self.commit_hook = Some(Box::new(hook));
+    }
+
+    pub fn add_candidate(&mut self, candidate: impl Into<AddressWithContext>) {
+        self.candidates.push_back(candidate.into());
+    }
+
+    pub fn add_candidates(
+        &mut self,
+        candidates: impl IntoIterator<Item = impl Into<AddressWithContext>>,
+    ) {
+        self.candidates
+            .extend(candidates.into_iter().map(|candidate| candidate.into()));
+    }
+
     pub fn add_candidate_discovery_pass(
         &mut self,
         name: impl Into<String>,
@@ -779,10 +782,6 @@ impl FunctionRecovery {
         pass: impl AnalysisPass<FunctionRecoveryState> + 'static,
     ) {
         self.builder.add_post_structuring_pass(name, pass);
-    }
-
-    pub fn set_commit_hook(&mut self, hook: impl FunctionRecoveryCommitHook + 'static) {
-        self.commit_hook = Some(Box::new(hook));
     }
 
     fn start_recovery(&mut self, project: &ProjectView<'_>) -> Result<(), AnalysisError> {
@@ -887,7 +886,7 @@ impl FunctionRecovery {
             candidates.insert(entry.into());
         }
 
-        if self.config().use_symbol_table_function_hints() {
+        if self.config().symbol_table_function_hints() {
             for (_, entry) in project
                 .symbols()
                 .iter_by_address()
@@ -904,7 +903,7 @@ impl FunctionRecovery {
             }
         }
 
-        if self.config().use_segment_function_hints() {
+        if self.config().segment_function_hints() {
             for hint in project.segments().function_hints() {
                 self.cancellation.check()?;
                 tracing::debug!(source = "segment", "function hint: {hint}");
@@ -963,7 +962,7 @@ impl FunctionRecovery {
             self.add_candidate(address);
         }
 
-        if self.config().use_symbol_table_function_hints() {
+        if self.config().symbol_table_function_hints() {
             for (_, entry) in project
                 .symbols()
                 .iter_by_address()
@@ -981,7 +980,7 @@ impl FunctionRecovery {
             }
         }
 
-        if self.config().use_segment_function_hints() {
+        if self.config().segment_function_hints() {
             for hint in project
                 .segments()
                 .function_hints()
@@ -1117,9 +1116,6 @@ impl FunctionRecovery {
         let function_recovery_span = span.enter();
 
         let t = Instant::now();
-        self.progress.reset();
-        self.progress.set_message("recovering functions");
-        self.progress.set_total(self.candidates.len() as u64);
         let mut chunk_output_bytes = 0usize;
         let mut chunk_functions = 0usize;
         let mut chunk_candidates = 0usize;
@@ -1209,7 +1205,6 @@ impl FunctionRecovery {
                     let original_address = candidate.address();
                     let replacing = self.reanalysis_candidates.contains(&original_address);
                     self.cancellation.check()?;
-                    self.progress.advance(1);
                     chunk_candidates += 1;
 
                     let at_limit = chunk_limit_reached(
@@ -1491,7 +1486,7 @@ impl FunctionRecovery {
             }
 
             for (f, properties) in context.changed_functions {
-                updates.push(ProjectUpdate::set_function_properties(f, properties));
+                updates.push(ProjectUpdate::update_function_properties(f, properties));
             }
 
             // commit any functions that were forced during restructuring
@@ -1587,8 +1582,6 @@ impl FunctionRecovery {
             if self.candidates.is_empty() {
                 break;
             }
-            self.progress
-                .set_total(self.progress.done() + self.candidates.len() as u64);
         }
 
         if self.config().commit_pending_functions() {
@@ -1620,7 +1613,6 @@ impl FunctionRecovery {
             elapsed.as_secs(),
             elapsed.as_millis(),
         );
-        self.progress.clear_message();
         self.continuation_coverage = None;
         self.boundary_reconciliation_pending = false;
         self.recovery_active = false;
@@ -1721,7 +1713,6 @@ impl Analyser for FunctionRecovery {
         updates: &mut Vec<ProjectUpdate>,
     ) -> Result<(), AnalysisError> {
         self.set_cancellation_token(cx.cancellation().clone());
-        self.progress = cx.progress().clone();
 
         if cx.is_continuation() {
             self.analyse_candidates(project, updates, cx.worker_limit())
@@ -1789,7 +1780,7 @@ mod test {
         let mut context = FunctionStructuringContext::default();
 
         context.add_function(entry, incomplete(entry), Confidence::default());
-        context.set_function_properties(entry, FunctionProperties::NON_RETURNING);
+        context.update_function_properties(entry, FunctionProperties::NON_RETURNING);
         context.reanalyse_function(entry);
 
         assert!(!context.pending_functions.contains_key(&entry));

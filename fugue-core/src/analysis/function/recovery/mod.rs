@@ -165,7 +165,7 @@ impl From<InsnResolverError> for FunctionRecoveryError {
 }
 
 // NOTE: we use the following conventions for function recovery configuration:
-// - If an option is a flag (boolean), then we use `enable_<option>` to set it and
+// - If an option is a flag (boolean), then we use `set_<option>` to set it and
 //   `with_<option>` to create a new config with the option set.
 // - If an option is a value (e.g., usize), then we use `set_<option>` to set it and
 //   `with_<option>` to create a new config with the option set.
@@ -186,17 +186,17 @@ pub struct FunctionRecoveryConfig {
     // tracked at the level of individual blocks, rather than at the function level, i.e., whether
     // to track the coverage of a function based on block bounds or by the minimum and maximum
     // addresses of the function's blocks.
-    use_fine_grained_block_coverage: bool,
+    fine_grained_block_coverage: bool,
     // This flag controls whether to identify non-returning functions during recovery, and to
     // suppress the fall-through of calls that target them.
-    use_non_returning_analysis: bool,
+    non_returning_analysis: bool,
     // This flag controls whether to use segment function hints when recovering functions.
-    use_segment_function_hints: bool,
+    segment_function_hints: bool,
     // This flag controls whether to use segment mapping hints when recovering functions.
-    use_segment_mapping_hints: bool,
+    segment_mapping_hints: bool,
     // This flag controls whether to use symbol table function hints when recovering functions.
-    use_symbol_table_function_hints: bool,
-    use_switch_analysis: bool,
+    symbol_table_function_hints: bool,
+    switch_analysis: bool,
 }
 
 impl Default for FunctionRecoveryConfig {
@@ -206,12 +206,12 @@ impl Default for FunctionRecoveryConfig {
             max_function_blocks: DEFAULT_MAX_FUNCTION_BLOCKS,
             max_function_insns: DEFAULT_MAX_FUNCTION_INSNS,
             max_block_insns: DEFAULT_MAX_BLOCK_INSNS,
-            use_fine_grained_block_coverage: false,
-            use_non_returning_analysis: false,
-            use_segment_function_hints: true,
-            use_segment_mapping_hints: true,
-            use_symbol_table_function_hints: true,
-            use_switch_analysis: false,
+            fine_grained_block_coverage: false,
+            non_returning_analysis: false,
+            segment_function_hints: true,
+            segment_mapping_hints: true,
+            symbol_table_function_hints: true,
+            switch_analysis: false,
         }
     }
 }
@@ -221,12 +221,12 @@ impl FunctionRecoveryConfig {
         self.commit_pending_functions
     }
 
-    pub fn enable_commit_pending_functions(&mut self, enabled: bool) {
+    pub fn set_commit_pending_functions(&mut self, enabled: bool) {
         self.commit_pending_functions = enabled;
     }
 
     pub fn with_commit_pending_functions(mut self, enabled: bool) -> Self {
-        self.enable_commit_pending_functions(enabled);
+        self.set_commit_pending_functions(enabled);
         self
     }
 
@@ -269,81 +269,81 @@ impl FunctionRecoveryConfig {
         self
     }
 
-    pub fn use_fine_grained_block_coverage(&self) -> bool {
-        self.use_fine_grained_block_coverage
+    pub fn fine_grained_block_coverage(&self) -> bool {
+        self.fine_grained_block_coverage
     }
 
-    pub fn enable_fine_grained_block_coverage(&mut self, enabled: bool) {
-        self.use_fine_grained_block_coverage = enabled;
+    pub fn set_fine_grained_block_coverage(&mut self, enabled: bool) {
+        self.fine_grained_block_coverage = enabled;
     }
 
     pub fn with_fine_grained_block_coverage(mut self, enabled: bool) -> Self {
-        self.enable_fine_grained_block_coverage(enabled);
+        self.set_fine_grained_block_coverage(enabled);
         self
     }
 
-    pub fn use_segment_function_hints(&self) -> bool {
-        self.use_segment_function_hints
+    pub fn segment_function_hints(&self) -> bool {
+        self.segment_function_hints
     }
 
-    pub fn enable_segment_function_hints(&mut self, enabled: bool) {
-        self.use_segment_function_hints = enabled;
+    pub fn set_segment_function_hints(&mut self, enabled: bool) {
+        self.segment_function_hints = enabled;
     }
 
     pub fn with_segment_function_hints(mut self, enabled: bool) -> Self {
-        self.enable_segment_function_hints(enabled);
+        self.set_segment_function_hints(enabled);
         self
     }
 
-    pub fn use_segment_mapping_hints(&self) -> bool {
-        self.use_segment_mapping_hints
+    pub fn segment_mapping_hints(&self) -> bool {
+        self.segment_mapping_hints
     }
 
-    pub fn enable_segment_mapping_hints(&mut self, enabled: bool) {
-        self.use_segment_mapping_hints = enabled;
+    pub fn set_segment_mapping_hints(&mut self, enabled: bool) {
+        self.segment_mapping_hints = enabled;
     }
 
     pub fn with_segment_mapping_hints(mut self, enabled: bool) -> Self {
-        self.enable_segment_mapping_hints(enabled);
+        self.set_segment_mapping_hints(enabled);
         self
     }
 
-    pub fn use_non_returning_analysis(&self) -> bool {
-        self.use_non_returning_analysis
+    pub fn non_returning_analysis(&self) -> bool {
+        self.non_returning_analysis
     }
 
-    pub fn enable_non_returning_analysis(&mut self, enabled: bool) {
-        self.use_non_returning_analysis = enabled;
+    pub fn set_non_returning_analysis(&mut self, enabled: bool) {
+        self.non_returning_analysis = enabled;
     }
 
     pub fn with_non_returning_analysis(mut self, enabled: bool) -> Self {
-        self.enable_non_returning_analysis(enabled);
+        self.set_non_returning_analysis(enabled);
         self
     }
 
-    pub fn use_switch_analysis(&self) -> bool {
-        self.use_switch_analysis
+    pub fn switch_analysis(&self) -> bool {
+        self.switch_analysis
     }
 
-    pub fn enable_switch_analysis(&mut self, enabled: bool) {
-        self.use_switch_analysis = enabled;
+    pub fn set_switch_analysis(&mut self, enabled: bool) {
+        self.switch_analysis = enabled;
     }
 
     pub fn with_switch_analysis(mut self, enabled: bool) -> Self {
-        self.enable_switch_analysis(enabled);
+        self.set_switch_analysis(enabled);
         self
     }
 
-    pub fn use_symbol_table_function_hints(&self) -> bool {
-        self.use_symbol_table_function_hints
+    pub fn symbol_table_function_hints(&self) -> bool {
+        self.symbol_table_function_hints
     }
 
-    pub fn enable_symbol_table_function_hints(&mut self, enabled: bool) {
-        self.use_symbol_table_function_hints = enabled;
+    pub fn set_symbol_table_function_hints(&mut self, enabled: bool) {
+        self.symbol_table_function_hints = enabled;
     }
 
     pub fn with_symbol_table_function_hints(mut self, enabled: bool) -> Self {
-        self.enable_symbol_table_function_hints(enabled);
+        self.set_symbol_table_function_hints(enabled);
         self
     }
 }

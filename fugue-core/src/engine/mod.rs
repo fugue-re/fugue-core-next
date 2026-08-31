@@ -10,7 +10,7 @@ use thiserror::Error;
 
 use self::change::ChangeFilter;
 use crate::analysis::AnalysisError;
-use crate::analysis::control::{CancellationToken, Progress};
+use crate::analysis::control::CancellationToken;
 use crate::extension::{self, Registration};
 use crate::il::common::{IlAnalyser, IlArtefact, IlFormId};
 use crate::il::registry::IlRegistry;
@@ -235,43 +235,24 @@ pub struct AnalysisContext {
     causes: SmallVec<[WorkCause; 4]>,
     continuation: bool,
     phase: AnalysisPhase,
-    progress: Progress,
     worker_limit: usize,
 }
 
 impl Default for AnalysisContext {
     fn default() -> Self {
-        Self::new(CancellationToken::default(), Progress::default())
+        Self::new(CancellationToken::default())
     }
 }
 
 impl AnalysisContext {
-    pub fn new(cancellation: CancellationToken, progress: Progress) -> Self {
+    pub fn new(cancellation: CancellationToken) -> Self {
         Self {
             cancellation,
             causes: SmallVec::new(),
             continuation: false,
             phase: AnalysisPhase::default(),
-            progress,
             worker_limit: 1,
         }
-    }
-
-    fn with_worker_limit(mut self, limit: usize) -> Self {
-        self.worker_limit = limit.max(1);
-        self
-    }
-
-    fn with_work(
-        mut self,
-        phase: AnalysisPhase,
-        causes: impl IntoIterator<Item = WorkCause>,
-        continuation: bool,
-    ) -> Self {
-        self.causes.extend(causes);
-        self.continuation = continuation;
-        self.phase = phase;
-        self
     }
 
     pub fn causes(&self) -> &[WorkCause] {
@@ -290,12 +271,29 @@ impl AnalysisContext {
         &self.cancellation
     }
 
-    pub fn progress(&self) -> &Progress {
-        &self.progress
-    }
-
     pub fn worker_limit(&self) -> usize {
         self.worker_limit
+    }
+
+    fn set_worker_limit(&mut self, limit: usize) {
+        self.worker_limit = limit.max(1);
+    }
+
+    fn with_worker_limit(mut self, limit: usize) -> Self {
+        self.set_worker_limit(limit);
+        self
+    }
+
+    fn with_work(
+        mut self,
+        phase: AnalysisPhase,
+        causes: impl IntoIterator<Item = WorkCause>,
+        continuation: bool,
+    ) -> Self {
+        self.causes.extend(causes);
+        self.continuation = continuation;
+        self.phase = phase;
+        self
     }
 }
 
@@ -364,10 +362,6 @@ impl AnalyserProvider {
         }
     }
 
-    pub fn build(&self, project: &Project) -> Result<Box<dyn Analyser>, AnalysisError> {
-        (self.build)(project)
-    }
-
     pub const fn for_il<A: IlAnalyser>() -> Self {
         Self {
             build: Self::build_il_analyser::<A>,
@@ -376,16 +370,20 @@ impl AnalyserProvider {
         }
     }
 
+    pub(crate) fn il_input(&self) -> Option<IlFormId> {
+        self.il_input.clone()
+    }
+
+    pub fn create(&self, project: &Project) -> Result<Box<dyn Analyser>, AnalysisError> {
+        (self.build)(project)
+    }
+
     fn build_il_analyser<A: IlAnalyser>(
         project: &Project,
     ) -> Result<Box<dyn Analyser>, AnalysisError> {
         Ok(Box::new(scheduler::IlAnalyserAdapter::new(A::build(
             project,
         )?)))
-    }
-
-    pub(crate) fn il_input(&self) -> Option<IlFormId> {
-        self.il_input.clone()
     }
 }
 
@@ -459,7 +457,6 @@ impl AnalysisEngine {
         let (worker_done_tx, worker_done) = flume::bounded(1);
         let cancellation = CancellationToken::default();
         let poison = Arc::new(OnceLock::new());
-        let progress = Progress::default();
         let project = Arc::new(RwLock::new(project));
         let registry = config.registry_handle();
         let queries = QueryEngine::new(
@@ -471,7 +468,6 @@ impl AnalysisEngine {
         let worker_cancellation = cancellation.clone();
         let worker_poison = poison.clone();
         let worker_state_poison = poison.clone();
-        let worker_progress = progress.clone();
         let metrics = EngineMetrics::new();
         let worker_metrics = metrics.clone();
         let handle = Builder::new()
@@ -483,7 +479,6 @@ impl AnalysisEngine {
                     queries,
                     worker_state_poison,
                     worker_cancellation,
-                    worker_progress,
                     worker_metrics,
                 );
                 match worker {
@@ -505,6 +500,14 @@ impl AnalysisEngine {
             tx,
             worker_done,
         })
+    }
+
+    pub fn metrics(&self) -> EngineMetricsSnapshot {
+        self.metrics.snapshot()
+    }
+
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.cancellation.clone()
     }
 
     pub fn schedule_ranges(
@@ -787,10 +790,6 @@ impl AnalysisEngine {
         self.receive_reply(reply_rx)
     }
 
-    pub fn metrics(&self) -> EngineMetricsSnapshot {
-        self.metrics.snapshot()
-    }
-
     pub fn query_reader(&self) -> Result<QueryReader, EngineError> {
         self.poison_check()?;
         self.query_reader
@@ -799,29 +798,12 @@ impl AnalysisEngine {
             .ok_or(EngineError::Stopped)
     }
 
-    pub fn into_project(mut self) -> Result<Project, EngineError> {
-        self.shutdown()?;
-
-        let project = self
-            .query_reader
-            .take()
-            .ok_or(EngineError::Stopped)?
-            .into_project_lock();
-        Arc::try_unwrap(project)
-            .map(RwLock::into_inner)
-            .map_err(|_| EngineError::ProjectRetained)
-    }
-
     pub fn cancel(&self) -> Result<(), EngineError> {
         self.poison_check()?;
         self.cancellation.cancel();
         self.tx
             .send(Intake::Cancel)
             .map_err(|_| EngineError::Stopped)
-    }
-
-    pub fn cancellation_token(&self) -> CancellationToken {
-        self.cancellation.clone()
     }
 
     pub fn subscribe(&self) -> SubscriptionBuilder<'_> {
@@ -892,6 +874,19 @@ impl AnalysisEngine {
             return Err(EngineError::Poisoned(message.clone()));
         }
         Ok(())
+    }
+
+    pub fn into_project(mut self) -> Result<Project, EngineError> {
+        self.shutdown()?;
+
+        let project = self
+            .query_reader
+            .take()
+            .ok_or(EngineError::Stopped)?
+            .into_project();
+        Arc::try_unwrap(project)
+            .map(RwLock::into_inner)
+            .map_err(|_| EngineError::ProjectRetained)
     }
 }
 

@@ -210,8 +210,8 @@ impl<'a> AnalysisContext<'a> {
         &self,
         recovery: &mut FunctionRecovery,
     ) -> Result<(), AnalysisError> {
-        for handler in extension::iter::<FunctionRecoveryHandler>() {
-            self.apply_function_recovery_extension(handler, recovery)?;
+        for extension in extension::iter::<FunctionRecoveryExtension>() {
+            self.apply_function_recovery_extension(extension, recovery)?;
         }
 
         Ok(())
@@ -219,23 +219,23 @@ impl<'a> AnalysisContext<'a> {
 
     pub fn apply_function_recovery_extension(
         &self,
-        handler: &FunctionRecoveryHandler,
+        extension: &FunctionRecoveryExtension,
         recovery: &mut FunctionRecovery,
     ) -> Result<(), AnalysisError> {
-        handler.apply(self, recovery)
+        extension.apply(self, recovery)
     }
 }
 
-type FunctionRecoveryHandlerFn =
+type FunctionRecoveryExtensionFn =
     fn(&AnalysisContext<'_>, &mut FunctionRecovery) -> Result<(), AnalysisError>;
 
-pub struct FunctionRecoveryHandler {
+pub struct FunctionRecoveryExtension {
     name: &'static str,
-    apply: FunctionRecoveryHandlerFn,
+    apply: FunctionRecoveryExtensionFn,
 }
 
-impl FunctionRecoveryHandler {
-    pub const fn new(name: &'static str, apply: FunctionRecoveryHandlerFn) -> Self {
+impl FunctionRecoveryExtension {
+    pub const fn new(name: &'static str, apply: FunctionRecoveryExtensionFn) -> Self {
         Self { name, apply }
     }
 
@@ -248,13 +248,13 @@ impl FunctionRecoveryHandler {
     }
 }
 
-impl Registration for FunctionRecoveryHandler {
+impl Registration for FunctionRecoveryExtension {
     fn name(&self) -> &'static str {
         self.name
     }
 }
 
-extension::collect!(FunctionRecoveryHandler);
+extension::collect!(FunctionRecoveryExtension);
 
 pub struct RelocationContext<'a, 'data> {
     machine: u16,
@@ -324,8 +324,8 @@ impl<'a, 'data> RelocationContext<'a, 'data> {
     }
 
     pub fn apply_relocation(&mut self) -> Result<bool, LoaderError> {
-        for handler in extension::iter::<RelocationHandler>() {
-            if self.apply_relocation_with(handler)? {
+        for extension in extension::iter::<RelocationExtension>() {
+            if self.apply_relocation_extension(extension)? {
                 return Ok(true);
             }
         }
@@ -333,38 +333,35 @@ impl<'a, 'data> RelocationContext<'a, 'data> {
         Ok(false)
     }
 
-    fn apply_relocation_with(&mut self, handler: &RelocationHandler) -> Result<bool, LoaderError> {
-        handler.apply_relocation(self)
-    }
-}
-
-type RelocationApplyFn = fn(&mut RelocationContext<'_, '_>) -> Result<bool, LoaderError>;
-
-pub struct RelocationHandler {
-    name: &'static str,
-    apply_relocation: RelocationApplyFn,
-}
-
-impl RelocationHandler {
-    pub const fn new(name: &'static str, apply_relocation: RelocationApplyFn) -> Self {
-        Self {
-            name,
-            apply_relocation,
-        }
-    }
-
-    pub fn apply_relocation(
-        &self,
-        context: &mut RelocationContext<'_, '_>,
+    fn apply_relocation_extension(
+        &mut self,
+        extension: &RelocationExtension,
     ) -> Result<bool, LoaderError> {
-        (self.apply_relocation)(context)
+        extension.apply(self)
     }
 }
 
-impl Registration for RelocationHandler {
+type RelocationExtensionFn = fn(&mut RelocationContext<'_, '_>) -> Result<bool, LoaderError>;
+
+pub struct RelocationExtension {
+    name: &'static str,
+    apply: RelocationExtensionFn,
+}
+
+impl RelocationExtension {
+    pub const fn new(name: &'static str, apply: RelocationExtensionFn) -> Self {
+        Self { name, apply }
+    }
+
+    pub fn apply(&self, context: &mut RelocationContext<'_, '_>) -> Result<bool, LoaderError> {
+        (self.apply)(context)
+    }
+}
+
+impl Registration for RelocationExtension {
     fn name(&self) -> &'static str {
         self.name
     }
 }
 
-extension::collect!(RelocationHandler);
+extension::collect!(RelocationExtension);

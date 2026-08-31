@@ -26,16 +26,16 @@ impl<'a> SwitchTargetResolver<'a> {
         }
     }
 
+    pub(crate) fn set_space(&mut self, space: AddressSpaceId) {
+        self.space = space;
+    }
+
     pub(crate) fn resolve_value(
         &mut self,
         value: &BitVec,
         context: &LiftingContext,
     ) -> Option<AddressWithContext> {
         self.resolve_address(RawAddress::from(value.to_u64()?), context)
-    }
-
-    pub(crate) fn set_space(&mut self, space: AddressSpaceId) {
-        self.space = space;
     }
 
     pub(crate) fn contiguous_view_from(&mut self, address: Address) -> Option<SegmentView<'a>> {

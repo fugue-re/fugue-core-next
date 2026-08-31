@@ -1,7 +1,7 @@
 use crate::analysis::AnalysisError;
 use crate::analysis::function::recovery::{FunctionRecovery, FunctionRecoveryExtension};
 use crate::engine::ProjectView;
-use crate::ir::{Address, Insn};
+use crate::ir::Address;
 use crate::project::Project;
 
 pub mod externs;
@@ -26,18 +26,6 @@ impl<'a> NonReturningTargets<'a> {
     pub(crate) fn is_non_returning(&self, address: Address) -> bool {
         self.project.is_non_returning_at(address)
     }
-
-    pub(crate) fn suppressible_call(&self, insn: &Insn) -> Option<Address> {
-        if !self.is_suppressible(insn) {
-            return None;
-        }
-
-        insn.direct_call_target()
-    }
-
-    fn is_suppressible(&self, insn: &Insn) -> bool {
-        insn.is_call() && !insn.is_branch()
-    }
 }
 
 #[fugue_core::extension]
@@ -45,7 +33,7 @@ impl FunctionRecoveryExtension {
     const NAME: &str = "non-returning";
 
     fn apply(_project: &Project, recovery: &mut FunctionRecovery) -> Result<(), AnalysisError> {
-        if !recovery.config().use_non_returning_analysis() {
+        if !recovery.config().non_returning_analysis() {
             return Ok(());
         }
 

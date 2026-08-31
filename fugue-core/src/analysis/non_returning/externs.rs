@@ -46,7 +46,7 @@ impl NonReturningExterns {
 
         marked.into_iter().try_for_each(|(id, properties)| {
             transaction
-                .set_symbol_properties(id, properties)
+                .update_symbol_properties(id, properties)
                 .map(|_| ())
                 .map_err(|error| AnalysisError::pass_failed(NON_RETURNING_EXTERNS_ANALYSER, error))
         })?;

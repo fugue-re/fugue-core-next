@@ -75,6 +75,13 @@ impl IlAnalysisInputs {
         self.function
     }
 
+    pub(crate) fn requested(&self, form: &IlFormId) -> Option<Arc<dyn Any + Send + Sync>> {
+        self.artefacts
+            .iter()
+            .find(|artefact| artefact.form() == form)
+            .map(IlAnalysisInput::artefact)
+    }
+
     pub(crate) fn get<T: IlArtefact>(
         &self,
         function: FunctionId,
@@ -94,13 +101,6 @@ impl IlAnalysisInputs {
             .downcast::<T>()
             .map(Some)
             .map_err(|_| IlError::mismatched_artefact(T::FORM))
-    }
-
-    pub(crate) fn requested(&self, form: &IlFormId) -> Option<Arc<dyn Any + Send + Sync>> {
-        self.artefacts
-            .iter()
-            .find(|artefact| artefact.form() == form)
-            .map(IlAnalysisInput::artefact)
     }
 
     pub(crate) fn into_artefacts(self) -> Vec<IlAnalysisInput> {
@@ -213,14 +213,6 @@ impl ScheduledAnalyser {
         self.analyser.as_mut()
     }
 
-    pub(crate) fn claim(&mut self, range: AddressRange) {
-        self.claimed.insert_range(range);
-    }
-
-    pub(crate) fn clear_claimed(&mut self) {
-        self.claimed = AddressRangeSet::new();
-    }
-
     pub(crate) fn max_attempts(&self) -> usize {
         self.max_attempts
     }
@@ -237,6 +229,10 @@ impl ScheduledAnalyser {
         self.order
     }
 
+    pub(crate) fn set_order(&mut self, order: AnalyserOrder) {
+        self.order = order;
+    }
+
     pub(crate) fn phase(&self) -> AnalysisPhase {
         self.phase
     }
@@ -245,19 +241,23 @@ impl ScheduledAnalyser {
         self.priority
     }
 
+    pub(crate) fn triggers(&self) -> ChangeKinds {
+        self.triggers
+    }
+
+    pub(crate) fn claim(&mut self, range: AddressRange) {
+        self.claimed.insert_range(range);
+    }
+
+    pub(crate) fn clear_claimed(&mut self) {
+        self.claimed = AddressRangeSet::new();
+    }
+
     pub(crate) fn retract_claimed(&mut self, range: AddressRange) {
         self.claimed.remove_range(range);
     }
 
-    pub(crate) fn set_order(&mut self, order: AnalyserOrder) {
-        self.order = order;
-    }
-
     pub(crate) fn take_claimed(&mut self) -> AddressRangeSet {
         mem::take(&mut self.claimed)
-    }
-
-    pub(crate) fn triggers(&self) -> ChangeKinds {
-        self.triggers
     }
 }

@@ -12,7 +12,7 @@ pub use ustr::{
 use crate::ir::{Address, Id};
 use crate::storage::entities::schema::{ENTITY_KEY_SYMBOL_ID, ENTITY_SYMBOL_ID};
 use crate::storage::entities::{Entity, EntityId, EntityKey, EntityKeyCodec, EntityKeyId};
-use crate::types::common::archived_bitflags;
+use crate::storage::schema::bitflags::archived_bitflags;
 
 mod table;
 
@@ -191,6 +191,10 @@ where
         self.properties & SymbolProperties::VISIBILITY
     }
 
+    pub fn has_same_referent(&self, other: &SymbolEntry<A>) -> bool {
+        self.address == other.address && self.symbol == other.symbol && self.kind() == other.kind()
+    }
+
     pub(crate) fn add_index(&mut self, index: SymbolIndex) {
         if !self.indices.contains(&index) {
             self.indices.push(index);
@@ -240,10 +244,6 @@ where
         let visibility = properties & SymbolProperties::VISIBILITY;
         self.properties.remove(SymbolProperties::VISIBILITY);
         self.properties |= visibility;
-    }
-
-    pub fn has_same_referent(&self, other: &SymbolEntry<A>) -> bool {
-        self.address == other.address && self.symbol == other.symbol && self.kind() == other.kind()
     }
 }
 

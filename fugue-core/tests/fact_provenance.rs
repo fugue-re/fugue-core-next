@@ -5,12 +5,14 @@ use fugue_core::il::common::{IlGraph, IlSourceSpan};
 use fugue_core::il::pcode::{PCodeIr, PCodeLocation, PCodeLocationId, PCodeOp};
 use fugue_core::ir::{
     Address, CodeBlockProperties, FlowTarget, FunctionProperties, Location, ProblemKind, Reference,
-    ReferenceOrigin, SegmentProperties,
+    ReferenceOrigin,
 };
 use fugue_core::lifter::ContextSet;
 use fugue_core::project::{ChangeRecord, Project};
 use fugue_core::queries::QueryReader;
-use fugue_core::storage::{DEFAULT_SPACE_ID, SegmentMappingBuilder, TransientStorageProvider};
+use fugue_core::storage::{
+    DEFAULT_SPACE_ID, SegmentMappingBuilder, SegmentProperties, TransientStorageProvider,
+};
 use fugue_core::types::Confidence;
 
 mod common;
@@ -159,7 +161,7 @@ fn assert_byte_change_converges(
     let incremental = AnalysisEngine::new(project)?;
     incremental.analyse()?;
     assert!(
-        incremental.query_reader()?.function_id_at(entry)?.is_some(),
+        incremental.query_reader()?.function_at(entry)?.is_some(),
         "the mutable function hint must be recovered before invalidation"
     );
 
@@ -291,7 +293,7 @@ fn a_user_removed_function_is_not_rediscovered() -> Result<(), Box<dyn Error>> {
 
     let reader = engine.query_reader()?;
     assert!(
-        reader.function_id_at(entry)?.is_some(),
+        reader.function_at(entry)?.is_some(),
         "recovery must find the entry point before it can be removed"
     );
 
@@ -299,7 +301,7 @@ fn a_user_removed_function_is_not_rediscovered() -> Result<(), Box<dyn Error>> {
     engine.analyse()?;
 
     assert!(
-        reader.function_id_at(entry)?.is_none(),
+        reader.function_at(entry)?.is_none(),
         "automatic analysis must not cross a user assertion and re-add the function"
     );
 
@@ -326,7 +328,7 @@ fn scheduler_retry_exhaustion_does_not_block_function_recovery() -> Result<(), B
     engine.analyse()?;
 
     assert!(
-        engine.query_reader()?.function_id_at(entry)?.is_some(),
+        engine.query_reader()?.function_at(entry)?.is_some(),
         "scheduler retry state must not become a semantic function-recovery blocker"
     );
 

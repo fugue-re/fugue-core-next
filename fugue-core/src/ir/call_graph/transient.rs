@@ -1,10 +1,9 @@
 use std::collections::BTreeSet;
 use std::ops::Bound;
 
+use super::{CallGraphEdgeKey, InverseCallGraphEdgeKey, PreparedCallGraphBatch};
 use crate::ir::Address;
 use crate::storage::entities::EntityStorageError;
-
-use super::{CallGraphEdgeKey, InverseCallGraphEdgeKey, PreparedCallGraphBatch};
 
 #[derive(Default)]
 pub struct CallGraphIndex {
@@ -15,19 +14,6 @@ pub struct CallGraphIndex {
 }
 
 impl CallGraphIndex {
-    pub(crate) fn publish(&mut self, batch: PreparedCallGraphBatch) {
-        for edge in batch.edges {
-            let inverse = InverseCallGraphEdgeKey::new(edge.key.source(), edge.key.target());
-            if edge.present {
-                self.forward.insert(edge.key);
-                self.inverse.insert(inverse);
-            } else {
-                self.forward.remove(&edge.key);
-                self.inverse.remove(&inverse);
-            }
-        }
-    }
-
     pub(crate) fn callees(
         &self,
         caller: Address,
@@ -66,6 +52,19 @@ impl CallGraphIndex {
         self.forward
             .range((start, Bound::Unbounded))
             .map(|&edge| Ok(edge))
+    }
+
+    pub(crate) fn publish(&mut self, batch: PreparedCallGraphBatch) {
+        for edge in batch.edges {
+            let inverse = InverseCallGraphEdgeKey::new(edge.key.source(), edge.key.target());
+            if edge.present {
+                self.forward.insert(edge.key);
+                self.inverse.insert(inverse);
+            } else {
+                self.forward.remove(&edge.key);
+                self.inverse.remove(&inverse);
+            }
+        }
     }
 
     pub(crate) fn clear(&mut self) {

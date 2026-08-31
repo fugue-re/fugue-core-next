@@ -6,8 +6,11 @@ use fugue_core::ir::{
     IncompleteFunction, SymbolEntry, SymbolIndex, SymbolProperties, SymbolTableSelector,
 };
 use fugue_core::lifter::ContextSet;
-use fugue_core::project::{ChangeKinds, ChangeRecord, FunctionChangeKind, Project};
-use fugue_core::storage::{DEFAULT_SPACE_ID, TransientStorageProvider};
+use fugue_core::project::{ChangeRecord, FunctionChangeKind, Project, ProjectError};
+use fugue_core::storage::{
+    DEFAULT_SPACE_ID, SegmentMappingBuilder, SegmentProperties, SegmentStorageError,
+    TransientStorageProvider,
+};
 use fugue_core::types::AttributeMap;
 
 mod common;
@@ -78,7 +81,7 @@ fn test_removing_mapping_records_unmapped_ranges() -> Result<(), Box<dyn std::er
         .find_map(|space| {
             space
                 .priority_list()
-                .first()
+                .next()
                 .map(|mapping_ref| (space.id(), mapping_ref.mapping_id()))
         })
         .expect("fixture should contain at least one mapping");
@@ -101,6 +104,65 @@ fn test_removing_mapping_records_unmapped_ranges() -> Result<(), Box<dyn std::er
 }
 
 #[test]
+fn mapping_transactions_distinguish_addition_from_priority()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
+    let (space, existing) = project
+        .segments()
+        .spaces()
+        .find_map(|space| {
+            space
+                .priority_list()
+                .next()
+                .map(|mapping_ref| (space.id(), mapping_ref.mapping_id()))
+        })
+        .expect("fixture should contain at least one mapping");
+    let provider = project
+        .segments()
+        .mapping(existing)
+        .expect("fixture mapping exists")
+        .provider_id();
+    let mut transaction = project.transaction("test");
+    let mapping = transaction.create_mapping(SegmentMappingBuilder::new(
+        Address::new(space, 0x7000_0000u64),
+        4,
+        0,
+        provider,
+    ))?;
+
+    assert!(matches!(
+        transaction.prioritise_mapping(space, mapping),
+        Err(ProjectError::SegmentStorage(
+            SegmentStorageError::MappingNotInSpace(candidate, candidate_space)
+        )) if candidate == mapping && candidate_space == space
+    ));
+    transaction.add_mapping_to_space_top(space, mapping)?;
+    assert!(matches!(
+        transaction.add_mapping_to_space_bottom(space, mapping),
+        Err(ProjectError::SegmentStorage(
+            SegmentStorageError::MappingAlreadyInSpace(candidate, candidate_space)
+        )) if candidate == mapping && candidate_space == space
+    ));
+    assert!(matches!(
+        transaction.add_mapping_to_space_bottom(space, existing),
+        Err(ProjectError::SegmentStorage(
+            SegmentStorageError::MappingAlreadyInSpace(candidate, candidate_space)
+        )) if candidate == existing && candidate_space == space
+    ));
+    transaction.deprioritise_mapping(space, mapping)?;
+    transaction.prioritise_mapping(space, existing)?;
+    transaction.commit()?;
+
+    assert!(
+        project
+            .segments()
+            .mapping_placements(mapping)
+            .any(|(candidate, _)| candidate == space)
+    );
+    Ok(())
+}
+
+#[test]
 fn test_remapping_mapping_records_old_and_new_ranges() -> Result<(), Box<dyn std::error::Error>> {
     let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
     let (space, mapping) = project
@@ -109,7 +171,7 @@ fn test_remapping_mapping_records_old_and_new_ranges() -> Result<(), Box<dyn std
         .find_map(|space| {
             space
                 .priority_list()
-                .first()
+                .next()
                 .map(|mapping_ref| (space.id(), mapping_ref.mapping_id()))
         })
         .expect("fixture should contain at least one mapping");
@@ -156,7 +218,7 @@ fn test_rejecting_mapping_removal_preserves_placement() -> Result<(), Box<dyn st
         .find_map(|space| {
             space
                 .priority_list()
-                .first()
+                .next()
                 .map(|mapping_ref| (space.id(), mapping_ref.mapping_id()))
         })
         .expect("fixture should contain at least one mapping");
@@ -190,7 +252,7 @@ fn test_rejecting_mapping_remap_preserves_old_range() -> Result<(), Box<dyn std:
         .find_map(|space| {
             space
                 .priority_list()
-                .first()
+                .next()
                 .map(|mapping_ref| (space.id(), mapping_ref.mapping_id()))
         })
         .expect("fixture should contain at least one mapping");
@@ -241,7 +303,7 @@ fn test_rejecting_space_creation_discards_space() -> Result<(), Box<dyn std::err
 }
 
 #[test]
-fn test_rejecting_byte_write_restores_old_bytes() -> Result<(), Box<dyn std::error::Error>> {
+fn dropping_staged_byte_write_preserves_old_bytes() -> Result<(), Box<dyn std::error::Error>> {
     let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
     let address = writable_address(&project, 1)?;
     let mut old = [0u8; 1];
@@ -250,25 +312,23 @@ fn test_rejecting_byte_write_restores_old_bytes() -> Result<(), Box<dyn std::err
 
     let mut transaction = project.transaction("test");
     transaction.write_bytes(address, &patch)?;
-    let mut patched = [0u8; 1];
+    let mut committed = [0u8; 1];
     transaction
-        .project(ChangeKinds::all())
         .segments()
-        .read_bytes_exact(address, &mut patched)?;
-    assert_eq!(patched, patch);
+        .read_bytes_exact(address, &mut committed)?;
+    assert_eq!(committed, old);
     drop(transaction);
 
-    let mut restored = [0u8; 1];
     project
         .segments()
-        .read_bytes_exact(address, &mut restored)?;
-    assert_eq!(restored, old);
+        .read_bytes_exact(address, &mut committed)?;
+    assert_eq!(committed, old);
 
     Ok(())
 }
 
 #[test]
-fn test_partial_write_bytes_restores_before_error() -> Result<(), Box<dyn std::error::Error>> {
+fn partial_byte_write_is_not_staged() -> Result<(), Box<dyn std::error::Error>> {
     let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
     let address = project
         .segments()
@@ -286,13 +346,118 @@ fn test_partial_write_bytes_restores_before_error() -> Result<(), Box<dyn std::e
             .write_bytes(address, &[old[0] ^ 0xff, 0xdd])
             .is_err()
     );
-    let mut restored = [0u8; 1];
-    transaction
-        .project(ChangeKinds::all())
+    transaction.commit()?;
+
+    let mut unchanged = [0u8; 1];
+    project
         .segments()
-        .read_bytes_exact(address, &mut restored)?;
-    assert_eq!(restored, old);
-    drop(transaction);
+        .read_bytes_exact(address, &mut unchanged)?;
+    assert_eq!(unchanged, old);
+
+    Ok(())
+}
+
+#[test]
+fn committed_byte_writes_preserve_order() -> Result<(), Box<dyn std::error::Error>> {
+    let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
+    let address = writable_address(&project, 3)?;
+
+    let mut transaction = project.transaction("test");
+    transaction.write_bytes(address, &[0x11, 0x22, 0x33])?;
+    transaction.write_bytes(address + 1u64, &[0xaa, 0xbb])?;
+    transaction.commit()?;
+
+    let mut bytes = [0u8; 3];
+    project.segments().read_bytes_exact(address, &mut bytes)?;
+    assert_eq!(bytes, [0x11, 0xaa, 0xbb]);
+
+    Ok(())
+}
+
+#[test]
+fn byte_write_resolves_staged_mapping_layout() -> Result<(), Box<dyn std::error::Error>> {
+    let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
+    let source = writable_address(&project, 4)?;
+    let view = project.segments().view_containing(source)?;
+    let provider = view.mapping().provider_id();
+    let provider_offset = view.mapping().to_offset(source);
+
+    let mut transaction = project.transaction("test");
+    let space = transaction.create_space()?;
+    let address = Address::new(space, 0x7000_0000u64);
+    let mapping = transaction.create_mapping(
+        SegmentMappingBuilder::new(address, 4, provider_offset, provider)
+            .with_properties(SegmentProperties::PERM_READ | SegmentProperties::PERM_WRITE),
+    )?;
+    transaction.add_mapping_to_space_top(space, mapping)?;
+    transaction.write_bytes(address, &[0xde, 0xad, 0xbe, 0xef])?;
+    transaction.commit()?;
+
+    let mut bytes = [0u8; 4];
+    project.segments().read_bytes_exact(address, &mut bytes)?;
+    assert_eq!(bytes, [0xde, 0xad, 0xbe, 0xef]);
+
+    Ok(())
+}
+
+#[test]
+fn byte_write_resolves_staged_mapping_remap() -> Result<(), Box<dyn std::error::Error>> {
+    let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
+    let source = writable_address(&project, 1)?;
+    let view = project.segments().view_containing(source)?;
+    let mapping = view.mapping();
+    let mapping_id = mapping.id();
+    let relative_offset = source.offset() - mapping.start().offset();
+    let new_mapping_start = Address::new(mapping.space(), 0x7000_0000u64);
+    let target = Address::new(source.space(), new_mapping_start.offset() + relative_offset);
+
+    let mut transaction = project.transaction("test");
+    transaction.remap_mapping(mapping_id, new_mapping_start)?;
+    transaction.write_bytes(target, &[0xa5])?;
+    transaction.commit()?;
+
+    let mut byte = [0u8; 1];
+    project.segments().read_bytes_exact(target, &mut byte)?;
+    assert_eq!(byte, [0xa5]);
+
+    Ok(())
+}
+
+#[test]
+fn byte_write_resolves_staged_mapping_priority() -> Result<(), Box<dyn std::error::Error>> {
+    let mut project = Project::from_file_transient(fixture_path("ls.elf"))?;
+    let source = writable_address(&project, 2)?;
+    let view = project.segments().view_containing(source)?;
+    let provider = view.mapping().provider_id();
+    let provider_offset = view.mapping().to_offset(source);
+    let mut original = [0u8; 2];
+    project
+        .segments()
+        .read_bytes_direct(provider, provider_offset, &mut original)?;
+    let patch = [original[0] ^ 0xff];
+
+    let mut transaction = project.transaction("test");
+    let space = transaction.create_space()?;
+    let address = Address::new(space, 0x7000_0000u64);
+    let lower = transaction.create_mapping(
+        SegmentMappingBuilder::new(address, 1, provider_offset, provider)
+            .with_properties(SegmentProperties::PERM_READ | SegmentProperties::PERM_WRITE),
+    )?;
+    let upper = transaction.create_mapping(
+        SegmentMappingBuilder::new(address, 1, provider_offset + 1, provider)
+            .with_properties(SegmentProperties::PERM_READ | SegmentProperties::PERM_WRITE),
+    )?;
+    transaction.add_mapping_to_space_bottom(space, lower)?;
+    transaction.add_mapping_to_space_top(space, upper)?;
+    transaction.prioritise_mapping(space, lower)?;
+    transaction.write_bytes(address, &patch)?;
+    transaction.commit()?;
+
+    let mut written = [0u8; 2];
+    project
+        .segments()
+        .read_bytes_direct(provider, provider_offset, &mut written)?;
+    assert_eq!(written, [patch[0], original[1]]);
 
     Ok(())
 }
@@ -416,8 +581,8 @@ fn test_setting_function_properties_records_a_property_change()
     transaction.commit()?;
 
     let mut transaction = project.transaction("test");
-    assert!(transaction.set_function_properties(entry, FunctionProperties::NON_RETURNING)?);
-    assert!(!transaction.set_function_properties(entry, FunctionProperties::NON_RETURNING)?);
+    assert!(transaction.update_function_properties(entry, FunctionProperties::NON_RETURNING)?);
+    assert!(!transaction.update_function_properties(entry, FunctionProperties::NON_RETURNING)?);
     let changes = transaction.commit()?;
 
     let mut covered = AddressRangeSet::new();
@@ -442,7 +607,7 @@ fn test_setting_function_properties_records_a_property_change()
     );
 
     let mut transaction = project.transaction("test");
-    transaction.set_function_properties(entry, FunctionProperties::empty())?;
+    transaction.update_function_properties(entry, FunctionProperties::empty())?;
     drop(transaction);
 
     assert!(
@@ -468,7 +633,9 @@ fn test_setting_symbol_properties_records_a_symbol_change() -> Result<(), Box<dy
         .expect("ls.elf should have a function symbol");
 
     let mut transaction = project.transaction("test");
-    assert!(transaction.set_symbol_properties(id, properties | SymbolProperties::NON_RETURNING)?);
+    assert!(
+        transaction.update_symbol_properties(id, properties | SymbolProperties::NON_RETURNING)?
+    );
     let changes = transaction.commit()?;
 
     assert!(matches!(
@@ -484,7 +651,7 @@ fn test_setting_symbol_properties_records_a_symbol_change() -> Result<(), Box<dy
     );
 
     let mut transaction = project.transaction("test");
-    transaction.set_symbol_properties(id, properties)?;
+    transaction.update_symbol_properties(id, properties)?;
     drop(transaction);
 
     assert!(

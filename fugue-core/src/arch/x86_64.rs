@@ -5,8 +5,8 @@ use yaxpeax_x86::amd64::{DecodeError, InstDecoder, Instruction, Opcode, Operand}
 
 use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
-use crate::arch::{Arch, BytesProperties, Flag};
-use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnError, InsnProperties, RawAddress};
+use crate::arch::{Arch, BytesProperties, ExternalThunkTemplate, Flag};
+use crate::ir::{Address, Insn, InsnError, InsnProperties, RawAddress};
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
     Disassembler, DisassemblerError, Language, LanguageError, LanguageId, LanguageLoader,
@@ -136,8 +136,8 @@ impl ArchT for X86_64 {
         Lifter::new(self.language)
     }
 
-    fn external_function_template(&self) -> ExternFunctionTemplate {
-        ExternFunctionTemplate::new([0xc3])
+    fn external_thunk_template(&self) -> ExternalThunkTemplate {
+        ExternalThunkTemplate::new([0xc3])
     }
 
     fn flags(&self) -> &[Flag] {
@@ -165,14 +165,16 @@ impl ArchT for X86_64 {
         classify_contiguous_bytes(bytes)
     }
 
-    fn is_skip_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
-        (self.data.swi_op == Some(op) && args.first().copied() == Some(Varnode::constant(0x3, 8)))
-            || self.data.invalid_insn_op == Some(op)
+    fn is_skip_intrinsic(&self, user_op: u16, args: &[Varnode]) -> bool {
+        (self.data.swi_op == Some(user_op)
+            && args.first().copied() == Some(Varnode::constant(0x3, 8)))
+            || self.data.invalid_insn_op == Some(user_op)
     }
 
-    fn is_trap_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
-        (self.data.swi_op == Some(op) && args.first().copied() == Some(Varnode::constant(0x3, 8)))
-            || self.data.invalid_insn_op == Some(op)
+    fn is_trap_intrinsic(&self, user_op: u16, args: &[Varnode]) -> bool {
+        (self.data.swi_op == Some(user_op)
+            && args.first().copied() == Some(Varnode::constant(0x3, 8)))
+            || self.data.invalid_insn_op == Some(user_op)
     }
 
     fn language(&self) -> &'static Language {

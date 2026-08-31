@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, btree_map};
 use std::fmt;
+use std::mem;
 use std::ops::{Add, RangeInclusive};
 
 use arrayvec::ArrayVec;
@@ -8,12 +9,12 @@ use fallible_iterator::FallibleIterator;
 use fugue_bytes::{BE, ByteCast, LE};
 use smallvec::{SmallVec, smallvec};
 
-use crate::ir::{Address, Endian, RawAddress, RawAddressRangeSet, SegmentProperties};
+use crate::ir::{Address, Endian, RawAddress, RawAddressRangeSet};
 use crate::lifter::ContextHint;
 use crate::loader::LoaderError;
-use crate::storage::segments::SegmentStorageProviderId;
 use crate::storage::segments::mapping::SegmentMappingProvenance;
 use crate::storage::segments::space::AddressSpaceId;
+use crate::storage::segments::{SegmentProperties, SegmentStorageProviderId};
 
 const MAX_PATCH_SIZE: usize = 8;
 
@@ -396,12 +397,12 @@ where
         Self::default()
     }
 
-    pub(crate) fn route(&mut self, source: T, bank: ImageBankHandle) {
-        self.by_source.insert(source, bank);
-    }
-
     pub(crate) fn bank_for(&self, source: T) -> Option<ImageBankHandle> {
         self.by_source.get(&source).copied()
+    }
+
+    pub(crate) fn route(&mut self, source: T, bank: ImageBankHandle) {
+        self.by_source.insert(source, bank);
     }
 }
 
@@ -520,8 +521,8 @@ impl<'a> ImageWrite<'a> {
 pub struct ImageSegment<'a> {
     address: ImageAddress,
     backing: Option<ImageBacking>,
-    function_hints: Cow<'a, BTreeSet<RawAddress>>,
-    mapping_hints: Cow<'a, BTreeMap<RawAddress, ContextHint>>,
+    function_hints: BTreeSet<RawAddress>,
+    mapping_hints: BTreeMap<RawAddress, ContextHint>,
     name: Cow<'a, str>,
     properties: SegmentProperties,
     provenance: SegmentMappingProvenance,
@@ -538,8 +539,8 @@ impl<'a> ImageSegment<'a> {
         Self {
             address,
             backing: None,
-            function_hints: Cow::Owned(BTreeSet::new()),
-            mapping_hints: Cow::Owned(BTreeMap::new()),
+            function_hints: BTreeSet::new(),
+            mapping_hints: BTreeMap::new(),
             name: name.into(),
             properties,
             provenance: SegmentMappingProvenance::default(),
@@ -597,14 +598,14 @@ impl<'a> ImageSegment<'a> {
     }
 
     pub fn set_function_hints(&mut self, function_hints: impl Into<BTreeSet<RawAddress>>) {
-        self.function_hints = Cow::Owned(function_hints.into());
+        self.function_hints = function_hints.into();
     }
 
     pub fn set_mapping_hints(
         &mut self,
         mapping_hints: impl Into<BTreeMap<RawAddress, ContextHint>>,
     ) {
-        self.mapping_hints = Cow::Owned(mapping_hints.into());
+        self.mapping_hints = mapping_hints.into();
     }
 
     pub fn set_provenance(&mut self, provenance: impl Into<SegmentMappingProvenance>) {
@@ -613,17 +614,6 @@ impl<'a> ImageSegment<'a> {
 
     pub fn size(&self) -> u64 {
         self.size
-    }
-
-    #[allow(clippy::type_complexity)]
-    pub(crate) fn into_name_and_hints(
-        self,
-    ) -> (
-        Cow<'a, str>,
-        Cow<'a, BTreeMap<RawAddress, ContextHint>>,
-        Cow<'a, BTreeSet<RawAddress>>,
-    ) {
-        (self.name, self.mapping_hints, self.function_hints)
     }
 
     pub fn with_backing(mut self, backing: impl Into<Option<ImageBacking>>) -> Self {
@@ -647,6 +637,16 @@ impl<'a> ImageSegment<'a> {
     pub fn with_provenance(mut self, provenance: impl Into<SegmentMappingProvenance>) -> Self {
         self.set_provenance(provenance);
         self
+    }
+
+    pub(crate) fn into_name_and_hints(
+        self,
+    ) -> (
+        Cow<'a, str>,
+        BTreeMap<RawAddress, ContextHint>,
+        BTreeSet<RawAddress>,
+    ) {
+        (self.name, self.mapping_hints, self.function_hints)
     }
 }
 
@@ -736,40 +736,12 @@ impl<'a> ImageSegmentContents<'a> {
         }
     }
 
-    pub fn set_bank(&mut self, bank: ImageBankHandle) {
-        self.bank = bank;
-    }
-
-    pub fn bank(&self) -> ImageBankHandle {
-        self.bank
-    }
-
-    pub fn add_function_hint(&mut self, offset: impl Into<RawAddress>) {
-        self.function_hints.insert(offset.into());
-    }
-
-    pub fn add_mapping_hint(&mut self, offset: impl Into<RawAddress>, hint: ContextHint) {
-        self.mapping_hints.insert(offset.into(), hint);
-    }
-
     pub fn address(&self) -> RawAddress {
         self.address
     }
 
-    pub fn into_writes(
-        self,
-        bank_base: RawAddress,
-    ) -> Result<ImageSegmentChunkWrites<'a>, LoaderError> {
-        let segment_offset = self
-            .address
-            .checked_sub(bank_base)
-            .ok_or_else(|| LoaderError::address_overflow(self.address))?;
-
-        Ok(ImageSegmentChunkWrites {
-            bank: self.bank,
-            segment_offset,
-            chunks: self.chunks.into_iter(),
-        })
+    pub fn bank(&self) -> ImageBankHandle {
+        self.bank
     }
 
     pub fn function_hints(&self) -> &BTreeSet<RawAddress> {
@@ -778,14 +750,6 @@ impl<'a> ImageSegmentContents<'a> {
 
     pub fn mapping_hints(&self) -> &BTreeMap<RawAddress, ContextHint> {
         &self.mapping_hints
-    }
-
-    pub fn take_function_hints(&mut self) -> BTreeSet<RawAddress> {
-        std::mem::take(&mut self.function_hints)
-    }
-
-    pub fn take_mapping_hints(&mut self) -> BTreeMap<RawAddress, ContextHint> {
-        std::mem::take(&mut self.mapping_hints)
     }
 
     pub fn size(&self) -> u64 {
@@ -804,6 +768,26 @@ impl<'a> ImageSegmentContents<'a> {
         self.endian
     }
 
+    pub fn set_bank(&mut self, bank: ImageBankHandle) {
+        self.bank = bank;
+    }
+
+    pub fn add_function_hint(&mut self, offset: impl Into<RawAddress>) {
+        self.function_hints.insert(offset.into());
+    }
+
+    pub fn add_mapping_hint(&mut self, offset: impl Into<RawAddress>, hint: ContextHint) {
+        self.mapping_hints.insert(offset.into(), hint);
+    }
+
+    pub fn take_function_hints(&mut self) -> BTreeSet<RawAddress> {
+        mem::take(&mut self.function_hints)
+    }
+
+    pub fn take_mapping_hints(&mut self) -> BTreeMap<RawAddress, ContextHint> {
+        mem::take(&mut self.mapping_hints)
+    }
+
     pub fn offset_of(&self, address: impl Into<RawAddress>) -> Option<u64> {
         let delta = address.into().checked_offset_from(self.address)?;
         (delta < self.size).then_some(delta)
@@ -815,13 +799,13 @@ impl<'a> ImageSegmentContents<'a> {
         }
         let offset = usize::try_from(offset).ok()?;
 
-        let mut buf = SmallVec::<[u8; MAX_PATCH_SIZE]>::from_elem(0, T::SIZEOF);
-        self.read_into(offset, &mut buf);
+        let mut buffer = SmallVec::<[u8; MAX_PATCH_SIZE]>::from_elem(0, T::SIZEOF);
+        self.read_into(offset, &mut buffer);
 
         Some(if self.endian.is_big() {
-            T::from_bytes::<BE>(&buf)
+            T::read_bytes::<BE>(&buffer)
         } else {
-            T::from_bytes::<LE>(&buf)
+            T::read_bytes::<LE>(&buffer)
         })
     }
 
@@ -836,14 +820,14 @@ impl<'a> ImageSegmentContents<'a> {
         }
         let offset = usize::try_from(offset).ok()?;
 
-        let mut buf = SmallVec::<[u8; MAX_PATCH_SIZE]>::from_elem(0, T::SIZEOF);
+        let mut buffer = SmallVec::<[u8; MAX_PATCH_SIZE]>::from_elem(0, T::SIZEOF);
         if self.endian.is_big() {
-            value.into_bytes::<BE>(&mut buf);
+            value.write_bytes::<BE>(&mut buffer);
         } else {
-            value.into_bytes::<LE>(&mut buf);
+            value.write_bytes::<LE>(&mut buffer);
         }
 
-        for (i, chunk) in buf.chunks(MAX_PATCH_SIZE).enumerate() {
+        for (i, chunk) in buffer.chunks(MAX_PATCH_SIZE).enumerate() {
             self.write_at(offset + i * MAX_PATCH_SIZE, chunk);
         }
         Some(())
@@ -869,8 +853,8 @@ impl<'a> ImageSegmentContents<'a> {
             if overlap_start >= overlap_end {
                 continue;
             }
-            let src = &chunk.bytes()[overlap_start - start..overlap_end - start];
-            out[overlap_start - offset..overlap_end - offset].copy_from_slice(src);
+            let source = &chunk.bytes()[overlap_start - start..overlap_end - start];
+            out[overlap_start - offset..overlap_end - offset].copy_from_slice(source);
         }
     }
 
@@ -916,6 +900,22 @@ impl<'a> ImageSegmentContents<'a> {
             self.chunks.insert(start, chunk);
         }
     }
+
+    pub fn into_writes(
+        self,
+        bank_base: RawAddress,
+    ) -> Result<ImageSegmentChunkWrites<'a>, LoaderError> {
+        let segment_offset = self
+            .address
+            .checked_sub(bank_base)
+            .ok_or_else(|| LoaderError::address_overflow(self.address))?;
+
+        Ok(ImageSegmentChunkWrites {
+            bank: self.bank,
+            segment_offset,
+            chunks: self.chunks.into_iter(),
+        })
+    }
 }
 
 pub type ImageSegmentIterator<'a> =
@@ -949,21 +949,12 @@ pub struct ImageResolution {
 }
 
 impl ImageResolution {
-    pub fn insert_bank(&mut self, bank: ImageBankHandle, provider: SegmentStorageProviderId) {
-        self.banks.insert(bank, provider);
-    }
-
-    pub fn insert_space(&mut self, space: ImageSpaceHandle, target: AddressSpaceId) {
-        self.spaces.insert(space, target);
-    }
-
     pub fn banks(&self) -> &BTreeMap<ImageBankHandle, SegmentStorageProviderId> {
         &self.banks
     }
 
-    pub fn resolve_address(&self, address: ImageAddress) -> Option<Address> {
-        let space = self.spaces.get(&address.space()).copied()?;
-        Some(Address::new(space, address.offset()))
+    pub fn spaces(&self) -> &BTreeMap<ImageSpaceHandle, AddressSpaceId> {
+        &self.spaces
     }
 
     pub fn resolve_bank(&self, bank: ImageBankHandle) -> Option<SegmentStorageProviderId> {
@@ -974,7 +965,16 @@ impl ImageResolution {
         self.spaces.get(&space).copied()
     }
 
-    pub fn spaces(&self) -> &BTreeMap<ImageSpaceHandle, AddressSpaceId> {
-        &self.spaces
+    pub fn insert_bank(&mut self, bank: ImageBankHandle, provider: SegmentStorageProviderId) {
+        self.banks.insert(bank, provider);
+    }
+
+    pub fn insert_space(&mut self, space: ImageSpaceHandle, target: AddressSpaceId) {
+        self.spaces.insert(space, target);
+    }
+
+    pub fn resolve_address(&self, address: ImageAddress) -> Option<Address> {
+        let space = self.spaces.get(&address.space()).copied()?;
+        Some(Address::new(space, address.offset()))
     }
 }

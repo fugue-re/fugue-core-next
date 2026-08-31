@@ -7,7 +7,7 @@ use crate::storage::entities::schema::{
     ENTITY_KEY_REFERENCE_FORWARD_ID, ENTITY_REFERENCE_RECORD_ID,
 };
 use crate::storage::entities::{Entity, EntityId, EntityKey, EntityKeyCodec, EntityKeyId};
-use crate::types::common::archived_bitflags;
+use crate::storage::schema::bitflags::archived_bitflags;
 
 #[derive(
     Debug,

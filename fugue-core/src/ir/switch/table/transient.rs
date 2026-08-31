@@ -39,6 +39,11 @@ impl SwitchTable {
             .filter(|switch| switch.id() == id)
     }
 
+    pub fn get_by_branch(&self, branch: Address) -> Option<&Switch> {
+        let id = self.index.id_by_branch(branch)?;
+        self.get_by_id(id)
+    }
+
     pub fn contains(&self, branch: Address) -> bool {
         self.index.contains(branch)
     }
@@ -49,6 +54,12 @@ impl SwitchTable {
 
     pub fn iter(&self) -> impl Iterator<Item = &Switch> + '_ {
         self.entries.iter().filter_map(Option::as_ref)
+    }
+
+    pub fn entries_after(&self, after: Option<Address>) -> impl Iterator<Item = &Switch> + '_ {
+        self.index
+            .entries_after(after)
+            .filter_map(|(_, id)| self.get_by_id(id))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -124,11 +135,6 @@ impl SwitchTable {
         Ok(id)
     }
 
-    pub fn get_by_branch(&self, branch: Address) -> Option<&Switch> {
-        let id = self.index.id_by_branch(branch)?;
-        self.get_by_id(id)
-    }
-
     pub fn modify_by_id<R>(&mut self, id: SwitchId, f: impl FnOnce(&mut Switch) -> R) -> Option<R> {
         let switch = self
             .entries
@@ -175,11 +181,5 @@ impl SwitchTable {
             return false;
         };
         self.remove_by_id(id)
-    }
-
-    pub fn entries_after(&self, after: Option<Address>) -> impl Iterator<Item = &Switch> + '_ {
-        self.index
-            .entries_after(after)
-            .filter_map(|(_, id)| self.get_by_id(id))
     }
 }

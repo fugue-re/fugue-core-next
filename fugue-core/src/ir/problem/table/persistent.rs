@@ -57,6 +57,16 @@ impl ProblemTable {
         self.entries.try_get(&id)
     }
 
+    pub(crate) fn try_get_by_key(
+        &self,
+        key: ProblemKey,
+    ) -> Result<Option<Ref<'_>>, EntityStorageError> {
+        let Some(id) = self.index.id(key) else {
+            return Ok(None);
+        };
+        self.try_get_by_id(id)
+    }
+
     pub(crate) fn contains(&self, address: Address) -> bool {
         self.index.contains(address)
     }
@@ -74,6 +84,15 @@ impl ProblemTable {
             .try_iter()
             .unwrap_or_else(|e| e.into_fatal())
             .map(|entry| entry.unwrap_or_else(|e| e.into_fatal()).1)
+    }
+
+    pub(crate) fn entries_after(
+        &self,
+        after: Option<ProblemKey>,
+    ) -> impl Iterator<Item = Ref<'_>> + '_ {
+        self.index
+            .entries_after(after)
+            .filter_map(|(_, id)| self.entries.get(&id))
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -140,16 +159,6 @@ impl ProblemTable {
         Ok(id)
     }
 
-    pub(crate) fn try_get_by_key(
-        &self,
-        key: ProblemKey,
-    ) -> Result<Option<Ref<'_>>, EntityStorageError> {
-        let Some(id) = self.index.id(key) else {
-            return Ok(None);
-        };
-        self.try_get_by_id(id)
-    }
-
     pub(crate) fn try_modify_by_id<R>(
         &self,
         id: ProblemId,
@@ -188,14 +197,5 @@ impl ProblemTable {
             return Ok(false);
         };
         self.try_remove_by_id(id)
-    }
-
-    pub(crate) fn entries_after(
-        &self,
-        after: Option<ProblemKey>,
-    ) -> impl Iterator<Item = Ref<'_>> + '_ {
-        self.index
-            .entries_after(after)
-            .filter_map(|(_, id)| self.entries.get(&id))
     }
 }

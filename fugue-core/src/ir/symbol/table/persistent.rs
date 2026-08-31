@@ -281,6 +281,148 @@ impl SymbolTable {
         self.entries.try_get(&id)
     }
 
+    pub(crate) fn get(
+        &self,
+        name: impl AsRef<str>,
+    ) -> impl Iterator<Item = (SymbolId, Ref<'_>)> + '_ {
+        let ids = Symbol::from_existing(name.as_ref())
+            .map(|name| self.ids_by_name(name))
+            .transpose()
+            .unwrap_or_else(|error| error.into_fatal())
+            .unwrap_or_default();
+        ids.into_iter()
+            .filter_map(move |id| self.entries.get(&id).map(|entry| (id, entry)))
+    }
+
+    pub(crate) fn try_get_first(
+        &self,
+        name: impl AsRef<str>,
+    ) -> Result<Option<(SymbolId, Ref<'_>)>, EntityStorageError> {
+        let Some(name) = Symbol::from_existing(name.as_ref()) else {
+            return Ok(None);
+        };
+        let Some(id) = self.ids_by_name(name)?.into_iter().next() else {
+            return Ok(None);
+        };
+        Ok(self.entries.try_get(&id)?.map(|entry| (id, entry)))
+    }
+
+    pub(crate) fn try_get_by_index(
+        &self,
+        index: SymbolIndex,
+    ) -> Result<Option<(SymbolId, Ref<'_>)>, EntityStorageError> {
+        let Some(id) = self.get_id_by_index(index) else {
+            return Ok(None);
+        };
+        Ok(self.entries.try_get(&id)?.map(|entry| (id, entry)))
+    }
+
+    pub(crate) fn get_by_address(
+        &self,
+        address: Address,
+    ) -> impl Iterator<Item = (SymbolId, Ref<'_>)> + '_ {
+        let ids = self
+            .ids_by_address(address)
+            .unwrap_or_else(|error| error.into_fatal());
+        ids.into_iter()
+            .filter_map(move |id| self.entries.get(&id).map(|entry| (id, entry)))
+    }
+
+    pub(crate) fn try_get_first_by_address(
+        &self,
+        address: Address,
+    ) -> Result<Option<(SymbolId, Ref<'_>)>, EntityStorageError> {
+        let Some(id) = self.ids_by_address(address)?.into_iter().next() else {
+            return Ok(None);
+        };
+        Ok(self.entries.try_get(&id)?.map(|entry| (id, entry)))
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (SymbolId, Ref<'_>)> + '_ {
+        self.iter_by_address()
+    }
+
+    pub(crate) fn iter_by_selector(
+        &self,
+        selector: SymbolTableSelector,
+    ) -> impl Iterator<Item = (SymbolId, Ref<'_>)> + '_ {
+        let first = SymbolLoaderKey::first(selector);
+        self.storage
+            .iter_range::<SymbolLoaderKey, SymbolLoaderRecord>(Bound::Included(&first))
+            .unwrap_or_else(|error| error.into_fatal())
+            .map_while(move |entry| {
+                let (key, record) = entry.unwrap_or_else(|error| error.into_fatal());
+                (key.selector == selector.index() as u8).then_some(record.id)
+            })
+            .filter_map(move |id| self.entries.get(&id).map(|entry| (id, entry)))
+    }
+
+    pub(crate) fn iter_by_address(&self) -> impl Iterator<Item = (SymbolId, Ref<'_>)> + '_ {
+        self.storage
+            .iter::<SymbolAddressKey, SymbolAddressRecord>()
+            .unwrap_or_else(|error| error.into_fatal())
+            .filter_map(move |entry| {
+                let (key, _) = entry.unwrap_or_else(|error| error.into_fatal());
+                self.entries.get(&key.id).map(|entry| (key.id, entry))
+            })
+    }
+
+    pub(crate) fn range_by_address<R>(
+        &self,
+        range: R,
+    ) -> impl Iterator<Item = (SymbolId, Ref<'_>)> + '_
+    where
+        R: RangeBounds<Address>,
+    {
+        let lower = match range.start_bound() {
+            Bound::Included(address) => Bound::Included(*address),
+            Bound::Excluded(address) => Bound::Excluded(*address),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        let upper = match range.end_bound() {
+            Bound::Included(address) => Bound::Included(*address),
+            Bound::Excluded(address) => Bound::Excluded(*address),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        let start = match lower {
+            Bound::Included(address) | Bound::Excluded(address) => {
+                Bound::Included(SymbolAddressKey::first(address))
+            }
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        self.storage
+            .iter_range::<SymbolAddressKey, SymbolAddressRecord>(start.as_ref())
+            .unwrap_or_else(|error| error.into_fatal())
+            .map_while(move |entry| {
+                let (key, _) = entry.unwrap_or_else(|error| error.into_fatal());
+                match upper {
+                    Bound::Included(end) if key.address > end => None,
+                    Bound::Excluded(end) if key.address >= end => None,
+                    _ => Some(key),
+                }
+            })
+            .filter(move |key| match lower {
+                Bound::Included(start) => key.address >= start,
+                Bound::Excluded(start) => key.address > start,
+                Bound::Unbounded => true,
+            })
+            .filter_map(move |key| self.entries.get(&key.id).map(|entry| (key.id, entry)))
+    }
+
+    pub(crate) fn iter_by_index(
+        &self,
+    ) -> impl Iterator<Item = (SymbolIndex, SymbolId, Ref<'_>)> + '_ {
+        self.storage
+            .iter::<SymbolLoaderKey, SymbolLoaderRecord>()
+            .unwrap_or_else(|error| error.into_fatal())
+            .filter_map(move |entry| {
+                let (key, record) = entry.unwrap_or_else(|error| error.into_fatal());
+                self.entries
+                    .get(&record.id)
+                    .map(|entry| (key.symbol_index(), record.id, entry))
+            })
+    }
+
     fn ids_by_address(
         &self,
         address: Address,
@@ -556,148 +698,6 @@ impl SymbolTable {
         let result = f(&mut updated);
         self.replace_entry(id, updated, Some(&previous), false)?;
         Ok(Some(result))
-    }
-
-    pub(crate) fn get(
-        &self,
-        name: impl AsRef<str>,
-    ) -> impl Iterator<Item = (SymbolId, Ref<'_>)> + '_ {
-        let ids = Symbol::from_existing(name.as_ref())
-            .map(|name| self.ids_by_name(name))
-            .transpose()
-            .unwrap_or_else(|error| error.into_fatal())
-            .unwrap_or_default();
-        ids.into_iter()
-            .filter_map(move |id| self.entries.get(&id).map(|entry| (id, entry)))
-    }
-
-    pub(crate) fn try_get_first(
-        &self,
-        name: impl AsRef<str>,
-    ) -> Result<Option<(SymbolId, Ref<'_>)>, EntityStorageError> {
-        let Some(name) = Symbol::from_existing(name.as_ref()) else {
-            return Ok(None);
-        };
-        let Some(id) = self.ids_by_name(name)?.into_iter().next() else {
-            return Ok(None);
-        };
-        Ok(self.entries.try_get(&id)?.map(|entry| (id, entry)))
-    }
-
-    pub(crate) fn try_get_by_index(
-        &self,
-        index: SymbolIndex,
-    ) -> Result<Option<(SymbolId, Ref<'_>)>, EntityStorageError> {
-        let Some(id) = self.get_id_by_index(index) else {
-            return Ok(None);
-        };
-        Ok(self.entries.try_get(&id)?.map(|entry| (id, entry)))
-    }
-
-    pub(crate) fn get_by_address(
-        &self,
-        address: Address,
-    ) -> impl Iterator<Item = (SymbolId, Ref<'_>)> + '_ {
-        let ids = self
-            .ids_by_address(address)
-            .unwrap_or_else(|error| error.into_fatal());
-        ids.into_iter()
-            .filter_map(move |id| self.entries.get(&id).map(|entry| (id, entry)))
-    }
-
-    pub(crate) fn try_get_first_by_address(
-        &self,
-        address: Address,
-    ) -> Result<Option<(SymbolId, Ref<'_>)>, EntityStorageError> {
-        let Some(id) = self.ids_by_address(address)?.into_iter().next() else {
-            return Ok(None);
-        };
-        Ok(self.entries.try_get(&id)?.map(|entry| (id, entry)))
-    }
-
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (SymbolId, Ref<'_>)> + '_ {
-        self.iter_by_address()
-    }
-
-    pub(crate) fn iter_by_selector(
-        &self,
-        selector: SymbolTableSelector,
-    ) -> impl Iterator<Item = (SymbolId, Ref<'_>)> + '_ {
-        let first = SymbolLoaderKey::first(selector);
-        self.storage
-            .iter_range::<SymbolLoaderKey, SymbolLoaderRecord>(Bound::Included(&first))
-            .unwrap_or_else(|error| error.into_fatal())
-            .map_while(move |entry| {
-                let (key, record) = entry.unwrap_or_else(|error| error.into_fatal());
-                (key.selector == selector.index() as u8).then_some(record.id)
-            })
-            .filter_map(move |id| self.entries.get(&id).map(|entry| (id, entry)))
-    }
-
-    pub(crate) fn iter_by_address(&self) -> impl Iterator<Item = (SymbolId, Ref<'_>)> + '_ {
-        self.storage
-            .iter::<SymbolAddressKey, SymbolAddressRecord>()
-            .unwrap_or_else(|error| error.into_fatal())
-            .filter_map(move |entry| {
-                let (key, _) = entry.unwrap_or_else(|error| error.into_fatal());
-                self.entries.get(&key.id).map(|entry| (key.id, entry))
-            })
-    }
-
-    pub(crate) fn range_by_address<R>(
-        &self,
-        range: R,
-    ) -> impl Iterator<Item = (SymbolId, Ref<'_>)> + '_
-    where
-        R: RangeBounds<Address>,
-    {
-        let lower = match range.start_bound() {
-            Bound::Included(address) => Bound::Included(*address),
-            Bound::Excluded(address) => Bound::Excluded(*address),
-            Bound::Unbounded => Bound::Unbounded,
-        };
-        let upper = match range.end_bound() {
-            Bound::Included(address) => Bound::Included(*address),
-            Bound::Excluded(address) => Bound::Excluded(*address),
-            Bound::Unbounded => Bound::Unbounded,
-        };
-        let start = match lower {
-            Bound::Included(address) | Bound::Excluded(address) => {
-                Bound::Included(SymbolAddressKey::first(address))
-            }
-            Bound::Unbounded => Bound::Unbounded,
-        };
-        self.storage
-            .iter_range::<SymbolAddressKey, SymbolAddressRecord>(start.as_ref())
-            .unwrap_or_else(|error| error.into_fatal())
-            .map_while(move |entry| {
-                let (key, _) = entry.unwrap_or_else(|error| error.into_fatal());
-                match upper {
-                    Bound::Included(end) if key.address > end => None,
-                    Bound::Excluded(end) if key.address >= end => None,
-                    _ => Some(key),
-                }
-            })
-            .filter(move |key| match lower {
-                Bound::Included(start) => key.address >= start,
-                Bound::Excluded(start) => key.address > start,
-                Bound::Unbounded => true,
-            })
-            .filter_map(move |key| self.entries.get(&key.id).map(|entry| (key.id, entry)))
-    }
-
-    pub(crate) fn iter_by_index(
-        &self,
-    ) -> impl Iterator<Item = (SymbolIndex, SymbolId, Ref<'_>)> + '_ {
-        self.storage
-            .iter::<SymbolLoaderKey, SymbolLoaderRecord>()
-            .unwrap_or_else(|error| error.into_fatal())
-            .filter_map(move |entry| {
-                let (key, record) = entry.unwrap_or_else(|error| error.into_fatal());
-                self.entries
-                    .get(&record.id)
-                    .map(|entry| (key.symbol_index(), record.id, entry))
-            })
     }
 
     pub(crate) fn remove(&mut self, name: impl AsRef<str>) -> Result<usize, EntityStorageError> {

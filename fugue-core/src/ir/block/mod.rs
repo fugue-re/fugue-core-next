@@ -7,15 +7,15 @@ use crate::ir::{Address, AddressRange, AddressRangeSet, FlowKind, FlowTarget, Id
 use crate::lifter::ContextSet;
 use crate::storage::entities::schema::{ENTITY_CODE_BLOCK_ID, ENTITY_KEY_CODE_BLOCK_ID};
 use crate::storage::entities::{Entity, EntityId, EntityKey, EntityKeyId, MutableEntity};
+use crate::storage::schema::bitflags::archived_bitflags;
 use crate::storage::segments::space::AddressSpaceId;
-use crate::types::common::archived_bitflags;
 
 pub(crate) mod incomplete;
 pub use incomplete::{IncompleteCodeBlock, IncompleteCodeBlockId};
 
 mod table;
 pub(crate) use table::{
-    ATTRIBUTE_CODE_BLOCK_CACHE_SIZE, CodeBlockIdsByStart, DEFAULT_CODE_BLOCK_CACHE_BYTES,
+    ATTRIBUTE_CODE_BLOCK_CACHE_SIZE, CodeBlockIdsByAddress, DEFAULT_CODE_BLOCK_CACHE_BYTES,
     PreparedCodeBlockRecord,
 };
 pub use table::{CodeBlockRef, CodeBlockTable};
@@ -150,7 +150,7 @@ impl CodeBlock {
         self.targets.iter().any(|target| target.kind.is_branch())
     }
 
-    pub fn direct_call_target(&self) -> Option<Address> {
+    pub fn call_target(&self) -> Option<Address> {
         self.targets
             .iter()
             .find_map(|target| target.kind.is_call().then_some(target.target))

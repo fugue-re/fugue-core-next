@@ -1,3 +1,4 @@
+use std::array;
 use std::collections::BTreeMap;
 
 use crate::ir::{AddressRange, AddressRangeSet, RawAddressMap};
@@ -80,6 +81,13 @@ impl RegionGroup {
         }
     }
 
+    fn run_count(&self) -> usize {
+        self.spaces
+            .values()
+            .map(RawAddressMap::run_count)
+            .sum::<usize>()
+    }
+
     fn touch(&mut self, range: AddressRange, revision: Revision) -> bool {
         self.spaces
             .entry(range.space())
@@ -94,13 +102,6 @@ impl RegionGroup {
         }
 
         false
-    }
-
-    fn run_count(&self) -> usize {
-        self.spaces
-            .values()
-            .map(RawAddressMap::run_count)
-            .sum::<usize>()
     }
 
     fn compact(&mut self) -> bool {
@@ -208,7 +209,7 @@ pub(crate) struct ChangeIndex {
 impl ChangeIndex {
     pub(crate) fn new(revision: Revision) -> Self {
         Self {
-            groups: std::array::from_fn(|_| RegionGroup::new(revision)),
+            groups: array::from_fn(|_| RegionGroup::new(revision)),
             global: GlobalWatermarks::new(revision),
         }
     }

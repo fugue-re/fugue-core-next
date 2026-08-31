@@ -137,6 +137,16 @@ impl FunctionTable {
         self.entries.try_get(&id)
     }
 
+    pub(crate) fn try_get_by_address(
+        &self,
+        address: Address,
+    ) -> Result<Option<Ref<'_>>, EntityStorageError> {
+        let Some(record) = self.storage.get::<Address, FunctionEntryRecord>(&address)? else {
+            return Ok(None);
+        };
+        self.entries.try_get(&record.id)
+    }
+
     pub(crate) fn try_get_by_id_mut(
         &mut self,
         id: Id<Function>,
@@ -167,6 +177,44 @@ impl FunctionTable {
             .map(|entry| entry.unwrap_or_else(|error| error.into_fatal()).0)
     }
 
+    pub(crate) fn addresses_in_range<R>(
+        &self,
+        space: AddressSpaceId,
+        range: R,
+    ) -> impl Iterator<Item = Address> + '_
+    where
+        R: RangeBounds<RawAddress>,
+    {
+        let (start, end) = Address::bounds_in_space(space, &range);
+        self.storage
+            .iter_range::<Address, FunctionEntryRecord>(start.as_ref())
+            .unwrap_or_else(|error| error.into_fatal())
+            .map(|entry| entry.unwrap_or_else(|error| error.into_fatal()).0)
+            .take_while(move |address| match end {
+                Bound::Included(end) => *address <= end,
+                Bound::Excluded(end) => *address < end,
+                Bound::Unbounded => true,
+            })
+    }
+
+    pub(crate) fn get_by_block_id(&self, block: CodeBlockId) -> IdSet<Function> {
+        let mut functions = IdSet::new();
+        for function in self
+            .storage
+            .iter_range::<FunctionBlockKey, FunctionBlockRecord>(Bound::Included(
+                &FunctionBlockKey::first(block),
+            ))
+            .unwrap_or_else(|error| error.into_fatal())
+            .map_while(|entry| {
+                let (key, _) = entry.unwrap_or_else(|error| error.into_fatal());
+                (key.block == block).then_some(key.function)
+            })
+        {
+            functions.insert(function);
+        }
+        functions
+    }
+
     pub(crate) fn try_iter(
         &self,
     ) -> Result<impl Iterator<Item = Result<Ref<'_>, EntityStorageError>>, EntityStorageError> {
@@ -174,6 +222,12 @@ impl FunctionTable {
             .entries
             .try_iter()?
             .map(|entry| entry.map(|(_, function)| function)))
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = Ref<'_>> + '_ {
+        self.try_iter()
+            .unwrap_or_else(|error| error.into_fatal())
+            .map(|entry| entry.unwrap_or_else(|error| error.into_fatal()))
     }
 
     pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = RefMut<'_>> + '_ {
@@ -372,16 +426,6 @@ impl FunctionTable {
         Ok((id, value))
     }
 
-    pub(crate) fn try_get_by_address(
-        &self,
-        address: Address,
-    ) -> Result<Option<Ref<'_>>, EntityStorageError> {
-        let Some(record) = self.storage.get::<Address, FunctionEntryRecord>(&address)? else {
-            return Ok(None);
-        };
-        self.entries.try_get(&record.id)
-    }
-
     pub(crate) fn try_modify_by_id<R>(
         &mut self,
         id: Id<Function>,
@@ -441,49 +485,5 @@ impl FunctionTable {
             return Ok(false);
         };
         self.try_remove_by_id(record.id)
-    }
-
-    pub(crate) fn addresses_in_range<R>(
-        &self,
-        space: AddressSpaceId,
-        range: R,
-    ) -> impl Iterator<Item = Address> + '_
-    where
-        R: RangeBounds<RawAddress>,
-    {
-        let (start, end) = Address::bounds_in_space(space, &range);
-        self.storage
-            .iter_range::<Address, FunctionEntryRecord>(start.as_ref())
-            .unwrap_or_else(|error| error.into_fatal())
-            .map(|entry| entry.unwrap_or_else(|error| error.into_fatal()).0)
-            .take_while(move |address| match end {
-                Bound::Included(end) => *address <= end,
-                Bound::Excluded(end) => *address < end,
-                Bound::Unbounded => true,
-            })
-    }
-
-    pub(crate) fn get_by_block_id(&self, block: CodeBlockId) -> IdSet<Function> {
-        let mut functions = IdSet::new();
-        for function in self
-            .storage
-            .iter_range::<FunctionBlockKey, FunctionBlockRecord>(Bound::Included(
-                &FunctionBlockKey::first(block),
-            ))
-            .unwrap_or_else(|error| error.into_fatal())
-            .map_while(|entry| {
-                let (key, _) = entry.unwrap_or_else(|error| error.into_fatal());
-                (key.block == block).then_some(key.function)
-            })
-        {
-            functions.insert(function);
-        }
-        functions
-    }
-
-    pub(crate) fn iter(&self) -> impl Iterator<Item = Ref<'_>> + '_ {
-        self.try_iter()
-            .unwrap_or_else(|error| error.into_fatal())
-            .map(|entry| entry.unwrap_or_else(|error| error.into_fatal()))
     }
 }

@@ -141,9 +141,9 @@ impl QueryEngine {
             self.project.clone(),
             self.cache.clone(),
             self.changes.clone(),
+            Some(intake),
             self.registry.clone(),
         )
-        .with_intake(intake)
     }
 
     pub(crate) fn begin_publication(&self) -> QueryPublicationGuard {

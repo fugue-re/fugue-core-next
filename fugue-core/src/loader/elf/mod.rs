@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::RangeInclusive;
 use std::path::Path;
+use std::slice;
 use std::sync::OnceLock;
 
 use bitflags::bitflags;
@@ -22,19 +23,20 @@ use smallvec::{SmallVec, smallvec};
 
 use crate::arch::Arch;
 use crate::ir::{
-    ExternSegment, RawAddress, RawAddressRangeSet, SegmentProperties, Symbol, SymbolIndex,
-    SymbolProperties, SymbolTableSelector, TransientSymbolTable,
+    RawAddress, RawAddressRangeSet, Symbol, SymbolIndex, SymbolProperties, SymbolTableSelector,
+    TransientSymbolTable,
 };
 use crate::lifter::ContextHint;
 use crate::loader::elf::extensions::ImageContext;
 use crate::loader::{
-    ImageAddress, ImageBacking, ImageBank, ImageBankHandle, ImageBankLayout, ImageCoveredRegions,
-    ImageLayout, ImageRegionBankMap, ImageSegment, ImageSegmentContents,
+    ExternalThunkLayout, ImageAddress, ImageBacking, ImageBank, ImageBankHandle, ImageBankLayout,
+    ImageCoveredRegions, ImageLayout, ImageRegionBankMap, ImageSegment, ImageSegmentContents,
     ImageSegmentContentsIterator, ImageSegmentIterator, ImageSpace, ImageSpaceHandle, ImageSpaces,
     Loadable, LoadableAnalysers, LoadableFromBytes, LoadableFromFile, LoadableMetadata,
     LoaderError,
 };
 use crate::platform::{Format, OperatingSystem, Platform};
+use crate::storage::segments::SegmentProperties;
 use crate::storage::segments::mapping::SegmentMappingProvenance;
 use crate::types::attributes::{ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE};
 use crate::types::{AttributeMap, BytesOrMapping};
@@ -81,6 +83,21 @@ macro_rules! with_elf {
 }
 
 impl<'this, 'data> ElfFileRepr<'this, 'data> {
+    fn parse(data: &'this BytesOrMapping<'data>) -> Result<Self, LoaderError> {
+        let elf = match FileKind::parse(data).map_err(LoaderError::format)? {
+            FileKind::Elf32 => {
+                Self::Elf32(elf::ElfFile32::parse(data).map_err(LoaderError::format)?)
+            }
+            FileKind::Elf64 => {
+                Self::Elf64(elf::ElfFile64::parse(data).map_err(LoaderError::format)?)
+            }
+            _ => {
+                return Err(LoaderError::format_with("input is not an ELF"));
+            }
+        };
+        Ok(elf)
+    }
+
     pub(crate) fn is_64(&self) -> bool {
         with_elf!(self, elf | elf.is_64())
     }
@@ -95,21 +112,6 @@ impl<'this, 'data> ElfFileRepr<'this, 'data> {
 
     pub(crate) fn flags(&self) -> u32 {
         with_elf!(self, elf | elf.elf_header().e_flags(elf.endian()))
-    }
-
-    fn parse(data: &'this BytesOrMapping<'data>) -> Result<Self, LoaderError> {
-        let elf = match FileKind::parse(data).map_err(LoaderError::format)? {
-            FileKind::Elf32 => {
-                Self::Elf32(elf::ElfFile32::parse(data).map_err(LoaderError::format)?)
-            }
-            FileKind::Elf64 => {
-                Self::Elf64(elf::ElfFile64::parse(data).map_err(LoaderError::format)?)
-            }
-            _ => {
-                return Err(LoaderError::format_with("input is not an ELF"));
-            }
-        };
-        Ok(elf)
     }
 }
 
@@ -127,7 +129,7 @@ pub struct Elf<'a> {
     segments: Vec<ElfImageSegment>,
     region_bank: ElfRegionBankMap,
     sections: ElfSectionMap,
-    extern_segm: ExternSegment,
+    external_thunks: ExternalThunkLayout,
     attributes: AttributeMap,
 }
 
@@ -173,15 +175,15 @@ impl<'a> Elf<'a> {
 
         let config = ElfLoaderProperties::new(&attributes);
 
-        let ElfSymbolData {
+        let ElfSymbolLayout {
             bounds,
             symbols,
             sections,
             mapping_hints,
-            extern_segm,
+            external_thunks,
         } = with_elf!(
             view,
-            elf | ElfSymbolData::from_elf(elf, &architecture, base, preferred_base, config)?
+            elf | ElfSymbolLayout::from_elf(elf, &architecture, base, preferred_base, config)?
         );
 
         let header_last = config
@@ -218,10 +220,10 @@ impl<'a> Elf<'a> {
                     preferred_base,
                     default_bank,
                     &sections,
-                    &extern_segm,
+                    &external_thunks,
                     config,
                 )?;
-                while let Some(region) = walk.next_region()? {
+                while let Some(region) = walk.next_region() {
                     walk.place_region(region)?;
                 }
                 walk.into_parts()
@@ -287,7 +289,7 @@ impl<'a> Elf<'a> {
             segments: placements,
             region_bank,
             sections,
-            extern_segm,
+            external_thunks,
             attributes,
         };
 
@@ -296,6 +298,33 @@ impl<'a> Elf<'a> {
         }
 
         Ok(slf)
+    }
+
+    pub fn loaded_view(&self) -> &ElfFileRepr<'_, 'a> {
+        self.object.borrow_view()
+    }
+
+    pub fn mapping_hints(&self) -> &BTreeMap<RawAddress, ContextHint> {
+        &self.mapping_hints
+    }
+
+    pub fn image_symbols(&self) -> &TransientSymbolTable<ImageAddress> {
+        &self.image_symbols
+    }
+
+    pub fn external_thunks(&self) -> &ExternalThunkLayout {
+        &self.external_thunks
+    }
+
+    pub fn base_address(&self) -> RawAddress {
+        self.base
+    }
+
+    pub fn is_object(&self) -> bool {
+        with_elf!(
+            self.object.borrow_view(),
+            elf | elf.kind() == ObjectKind::Relocatable
+        )
     }
 
     pub fn entry(&self) -> Option<RawAddress> {
@@ -314,33 +343,6 @@ impl<'a> Elf<'a> {
             _ => OperatingSystem::Linux,
         }
     }
-
-    pub fn loaded_view(&self) -> &ElfFileRepr<'_, 'a> {
-        self.object.borrow_view()
-    }
-
-    pub fn mapping_hints(&self) -> &BTreeMap<RawAddress, ContextHint> {
-        &self.mapping_hints
-    }
-
-    pub fn image_symbols(&self) -> &TransientSymbolTable<ImageAddress> {
-        &self.image_symbols
-    }
-
-    pub fn extern_segment(&self) -> &ExternSegment {
-        &self.extern_segm
-    }
-
-    pub fn is_object(&self) -> bool {
-        with_elf!(
-            self.object.borrow_view(),
-            elf | elf.kind() == ObjectKind::Relocatable
-        )
-    }
-
-    pub fn base_address(&self) -> RawAddress {
-        self.base
-    }
 }
 
 #[derive(Debug, Default)]
@@ -351,15 +353,15 @@ impl ElfSectionMap {
         Self::default()
     }
 
+    pub(crate) fn get(&self, index: usize) -> Option<RawAddress> {
+        self.0.get(index).copied().flatten()
+    }
+
     fn insert(&mut self, index: usize, address: RawAddress) {
         if index >= self.0.len() {
             self.0.resize(index + 1, None);
         }
         self.0[index] = Some(address);
-    }
-
-    pub(crate) fn get(&self, index: usize) -> Option<RawAddress> {
-        self.0.get(index).copied().flatten()
     }
 }
 
@@ -678,7 +680,7 @@ where
     sects: ElfSectionRevIterator<'data, 'file, Elf, R>,
     segms: ElfSegmentIterator<'data, 'file, Elf, R>,
     headers: ElfHeaderRegions<'data>,
-    extern_segm: Option<&'file ExternSegment>,
+    external_thunks: Option<&'file ExternalThunkLayout>,
     covered: RawAddressRangeSet,
     spaces: ImageSpaces,
     bank_layout: ElfBankLayout,
@@ -747,7 +749,7 @@ where
         preferred_base: RawAddress,
         default_bank: ImageBank,
         sections: &'file ElfSectionMap,
-        externs: &'file ExternSegment,
+        external_thunks: &'file ExternalThunkLayout,
         mut config: ElfLoaderProperties,
     ) -> Result<Self, LoaderError> {
         let is_object = elf.kind() == ObjectKind::Relocatable;
@@ -765,7 +767,7 @@ where
             sects: ElfSectionRevIterator::new(elf),
             segms: elf.segments(),
             headers: ElfHeaderRegions::new(elf, base, preferred_base)?,
-            extern_segm: Some(externs),
+            external_thunks: Some(external_thunks),
             covered: RawAddressRangeSet::new(),
             spaces: smallvec![ImageSpace::base(base_space)],
             bank_layout: ElfBankLayout::new(default_bank),
@@ -777,15 +779,11 @@ where
         })
     }
 
-    fn into_parts(self) -> (Vec<ElfImageSegment>, ImageSpaces, ElfBankLayout) {
-        (self.placements, self.spaces, self.bank_layout)
-    }
-
-    fn next_region(&mut self) -> Result<Option<ElfRegion<'data>>, LoaderError> {
+    fn next_region(&mut self) -> Option<ElfRegion<'data>> {
         if self.config.load_headers()
             && let Some(header) = self.headers.next()
         {
-            return Ok(Some(ElfRegion {
+            return Some(ElfRegion {
                 name: Cow::Borrowed(header.name),
                 address: header.address,
                 size: header.size(),
@@ -793,7 +791,7 @@ where
                 provenance: SegmentMappingProvenance::Section,
                 file_offset: Some(header.file_offset),
                 source: Some(header.source),
-            }));
+            });
         }
 
         if self.is_object {
@@ -801,7 +799,7 @@ where
                 let Some(address) = self.sections.get(sect.index().0) else {
                     continue;
                 };
-                return Ok(Some(ElfRegion {
+                return Some(ElfRegion {
                     name: Cow::Borrowed(sect.name().ok().unwrap_or("LOAD")),
                     address,
                     size: sect.size().max(1),
@@ -809,9 +807,9 @@ where
                     provenance: SegmentMappingProvenance::Section,
                     file_offset: sect.file_range().map(|(off, _)| off),
                     source: Some(ElfRegionSource::section(sect.index().0)),
-                }));
+                });
             }
-            return Ok(self.extern_region());
+            return self.external_region();
         }
 
         for sect in self.sects.by_ref() {
@@ -829,7 +827,7 @@ where
                 );
                 continue;
             }
-            return Ok(Some(ElfRegion {
+            return Some(ElfRegion {
                 name: Cow::Borrowed(sect.name().ok().unwrap_or("LOAD")),
                 address: (self.base - self.preferred_base) + sect.address(),
                 size,
@@ -837,7 +835,7 @@ where
                 provenance: SegmentMappingProvenance::Section,
                 file_offset: sect.file_range().map(|(off, _)| off),
                 source: Some(ElfRegionSource::section(sect.index().0)),
-            }));
+            });
         }
 
         for segm in self.segms.by_ref() {
@@ -852,7 +850,7 @@ where
                 .map(|name| Cow::Owned(name.to_owned()))
                 .unwrap_or(Cow::Borrowed("LOAD"));
             let (file_off, file_size) = segm.file_range();
-            return Ok(Some(ElfRegion {
+            return Some(ElfRegion {
                 name,
                 address: (self.base - self.preferred_base) + segm.address(),
                 size,
@@ -860,22 +858,23 @@ where
                 provenance: SegmentMappingProvenance::Segment,
                 file_offset: (file_size != 0).then_some(file_off),
                 source: Some(ElfRegionSource::segment(self.next_segment_ordinal())),
-            }));
+            });
         }
 
-        Ok(self.extern_region())
+        self.external_region()
     }
 
-    fn extern_region(&mut self) -> Option<ElfRegion<'data>> {
-        let externs = self.extern_segm.take().filter(|e| !e.is_empty())?;
+    fn external_region(&mut self) -> Option<ElfRegion<'data>> {
+        let external_thunks = self
+            .external_thunks
+            .take()
+            .filter(|layout| !layout.is_empty())?;
         Some(ElfRegion {
-            name: Cow::Borrowed("EXTERN"),
-            address: externs.address(),
-            size: externs.size() as u64,
-            properties: SegmentProperties::EXTERNAL
-                | SegmentProperties::PERM_READ
-                | SegmentProperties::PERM_EXECUTE,
-            provenance: SegmentMappingProvenance::Extern,
+            name: Cow::Borrowed("EXTERNAL"),
+            address: external_thunks.start(),
+            size: external_thunks.size() as u64,
+            properties: SegmentProperties::PERM_READ | SegmentProperties::PERM_EXECUTE,
+            provenance: SegmentMappingProvenance::External,
             file_offset: None,
             source: None,
         })
@@ -1014,7 +1013,7 @@ where
 
         let placement = if !conflicts.is_empty() {
             for index in conflicts {
-                self.demote_region(index)?;
+                self.demote_region(index);
             }
             Some(self.push_placement(&region, self.base_space, backing_offset))
         } else if overlaps {
@@ -1036,7 +1035,7 @@ where
         Ok(())
     }
 
-    fn demote_region(&mut self, placed_index: usize) -> Result<(), LoaderError> {
+    fn demote_region(&mut self, placed_index: usize) {
         let placed = &self.placed_regions[placed_index];
         let placement = placed.placement();
         let start = placed.start();
@@ -1044,7 +1043,7 @@ where
         let source = placed.source();
 
         if self.placements[placement].space() != self.base_space {
-            return Ok(());
+            return;
         }
 
         let overlay = self.next_overlay_space();
@@ -1056,12 +1055,15 @@ where
         displaced.backing_offset = RawAddress::from(0u64);
 
         self.bank_layout.route_region(source, bank);
-        Ok(())
+    }
+
+    fn into_parts(self) -> (Vec<ElfImageSegment>, ImageSpaces, ElfBankLayout) {
+        (self.placements, self.spaces, self.bank_layout)
     }
 }
 
 struct ElfImageSegments<'a> {
-    segments: std::slice::Iter<'a, ElfImageSegment>,
+    segments: slice::Iter<'a, ElfImageSegment>,
     mapping_hints: &'a BTreeMap<RawAddress, ContextHint>,
     image_symbols: &'a TransientSymbolTable<ImageAddress>,
 }
@@ -1140,15 +1142,15 @@ struct RawElfSymbol {
     properties: SymbolProperties,
 }
 
-struct ElfSymbolData {
+struct ElfSymbolLayout {
     bounds: RangeInclusive<RawAddress>,
     mapping_hints: BTreeMap<RawAddress, ContextHint>,
     symbols: BTreeMap<SymbolIndex, RawElfSymbol>,
     sections: ElfSectionMap,
-    extern_segm: ExternSegment,
+    external_thunks: ExternalThunkLayout,
 }
 
-impl ElfSymbolData {
+impl ElfSymbolLayout {
     fn from_elf<'a>(
         elf: &'a impl Object<'a>,
         arch: &Arch,
@@ -1168,7 +1170,7 @@ impl ElfSymbolData {
         let mut min_addr = base_addr;
         let mut max_addr = base_addr;
 
-        let extern_base = if is_object {
+        let external_base = if is_object {
             let base = if config.preserve_relocatable_section_addresses() {
                 Self::place_object_sections_preserving_addresses(
                     elf,
@@ -1206,9 +1208,9 @@ impl ElfSymbolData {
                 .ok_or_else(|| LoaderError::address_overflow(base_addr))?
         };
 
-        let aligned_extern_base = extern_base.align(addr_align);
+        let aligned_external_base = external_base.align(addr_align);
 
-        if aligned_extern_base < extern_base {
+        if aligned_external_base < external_base {
             return Err(LoaderError::address_overflow(base_addr));
         }
 
@@ -1297,8 +1299,8 @@ impl ElfSymbolData {
         // if we were to consider the external address as a function, and call to it, we would
         // hit valid code, and return.
 
-        let mut extern_segm = ExternSegment::new(
-            aligned_extern_base,
+        let mut external_thunks = ExternalThunkLayout::new(
+            aligned_external_base,
             addr_align,
             arch.external_thunk_template(),
         );
@@ -1344,8 +1346,8 @@ impl ElfSymbolData {
             }
         }) {
             let address = if properties.is_extern() {
-                extern_segm
-                    .add_extern()
+                external_thunks
+                    .allocate()
                     .ok_or_else(|| LoaderError::address_overflow(base_addr))?
             } else if is_object {
                 let Some(section_start) = sym
@@ -1370,7 +1372,7 @@ impl ElfSymbolData {
             );
         }
 
-        let max_addr = extern_segm.last_address().unwrap_or(max_addr);
+        let max_addr = external_thunks.last().unwrap_or(max_addr);
         let bounds = min_addr..=max_addr;
 
         Ok(Self {
@@ -1378,7 +1380,7 @@ impl ElfSymbolData {
             mapping_hints,
             symbols,
             sections,
-            extern_segm,
+            external_thunks,
         })
     }
 
@@ -1632,7 +1634,7 @@ where
     arch: &'file Arch,
     symbols: &'file TransientSymbolTable<ImageAddress>,
     sections: &'file ElfSectionMap,
-    extern_segm: &'file ExternSegment,
+    external_thunks: &'file ExternalThunkLayout,
     region_bank: &'file ElfRegionBankMap,
     config: ElfLoaderProperties,
 }
@@ -1648,7 +1650,7 @@ where
         arch: &'file Arch,
         symbols: &'file TransientSymbolTable<ImageAddress>,
         sections: &'file ElfSectionMap,
-        extern_segm: &'file ExternSegment,
+        external_thunks: &'file ExternalThunkLayout,
         region_bank: &'file ElfRegionBankMap,
         mut config: ElfLoaderProperties,
     ) -> Self {
@@ -1661,7 +1663,7 @@ where
             arch,
             symbols,
             sections,
-            extern_segm,
+            external_thunks,
             region_bank,
             config,
         }
@@ -1683,8 +1685,8 @@ where
         self.sections
     }
 
-    fn extern_segment(&self) -> &'file ExternSegment {
-        self.extern_segm
+    fn external_thunks(&self) -> &'file ExternalThunkLayout {
+        self.external_thunks
     }
 
     fn region_bank(&self) -> &'file ElfRegionBankMap {
@@ -1709,7 +1711,7 @@ where
     covered: ElfCoveredRegions,
     current_base: RawAddress,
     preferred_base: RawAddress,
-    extern_pending: bool,
+    external_thunks_pending: bool,
     segment_ordinal: usize,
 }
 
@@ -1734,30 +1736,29 @@ where
             covered: ElfCoveredRegions::new(),
             current_base: base,
             preferred_base,
-            extern_pending: true,
+            external_thunks_pending: true,
             segment_ordinal: 0,
         })
     }
 
-    pub(crate) fn extern_segment(
-        &mut self,
-    ) -> Result<Option<ImageSegmentContents<'data>>, LoaderError> {
-        if !self.extern_pending {
-            return Ok(None);
+    pub(crate) fn external_thunk_contents(&mut self) -> Option<ImageSegmentContents<'data>> {
+        if !self.external_thunks_pending {
+            return None;
         }
-        self.extern_pending = false;
+        self.external_thunks_pending = false;
 
-        let externs = self.context.extern_segment();
-        if externs.is_empty() {
-            return Ok(None);
+        let external_thunks = self.context.external_thunks();
+        if external_thunks.is_empty() {
+            return None;
         }
-        let extern_size = externs.size();
-        let extern_padding = externs.aligned_template_size() - externs.template().size();
+        let external_size = external_thunks.size();
+        let external_padding =
+            external_thunks.aligned_template_size() - external_thunks.template().size();
 
-        let address = externs.address();
-        let last_address = externs.last_address().expect("not empty");
+        let address = external_thunks.start();
+        let last_address = external_thunks.last().expect("not empty");
 
-        let mut contents = Vec::with_capacity(extern_size);
+        let mut contents = Vec::with_capacity(external_size);
 
         let function_offsets = self
             .context
@@ -1775,21 +1776,21 @@ where
             })
             .collect::<BTreeSet<RawAddress>>();
 
-        for addr in externs.iter() {
+        for addr in external_thunks.iter() {
             if function_offsets.contains(&RawAddress::from(addr.offset())) {
-                contents.extend_from_slice(externs.template().bytes());
-                contents.resize(contents.len() + extern_padding, 0);
+                contents.extend_from_slice(external_thunks.template().bytes());
+                contents.resize(contents.len() + external_padding, 0);
             } else {
-                contents.resize(contents.len() + externs.aligned_template_size(), 0);
+                contents.resize(contents.len() + external_thunks.aligned_template_size(), 0);
             }
         }
 
-        let extern_range = address..=last_address;
+        let external_range = address..=last_address;
         self.covered
-            .insert_range(ImageBankHandle::default(), extern_range);
+            .insert_range(ImageBankHandle::default(), external_range);
 
         let mut bytes = ImageSegmentContents::new(
-            externs.address(),
+            external_thunks.start(),
             self.context.arch().endian(),
             Cow::Owned(contents),
         );
@@ -1797,7 +1798,7 @@ where
             bytes.add_function_hint(offset);
         }
 
-        Ok(Some(bytes))
+        Some(bytes)
     }
 
     pub(crate) fn header_segment(
@@ -1886,8 +1887,9 @@ where
             return Ok(Some(bytes));
         }
 
-        self.extern_segment()
+        Ok(self.external_thunk_contents())
     }
+
     pub(crate) fn next_linked_section(
         &mut self,
     ) -> Result<Option<ImageSegmentContents<'data>>, LoaderError> {
@@ -2035,7 +2037,7 @@ where
             return Ok(Some(v));
         }
 
-        self.extern_segment()
+        Ok(self.external_thunk_contents())
     }
 }
 
@@ -2158,7 +2160,7 @@ impl Loadable for Elf<'_> {
                     &self.architecture,
                     &self.image_symbols,
                     &self.sections,
-                    &self.extern_segm,
+                    &self.external_thunks,
                     &self.region_bank,
                     props,
                 );

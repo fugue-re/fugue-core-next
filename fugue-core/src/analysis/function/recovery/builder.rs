@@ -152,47 +152,6 @@ impl Default for BlockContexts {
 }
 
 impl BlockContexts {
-    fn insert(&mut self, address: Address, context: &ContextSet) {
-        match self {
-            Self::Addresses(addresses) if context.is_empty() => {
-                addresses.insert(address);
-            }
-            Self::Addresses(addresses) => {
-                let addresses = mem::take(addresses);
-                let mut contexts =
-                    IndexMap::with_capacity_and_hasher(addresses.len() + 1, FxBuildHasher);
-                contexts.extend(
-                    addresses
-                        .into_iter()
-                        .map(|address| (address, ContextSet::new())),
-                );
-                contexts.insert(address, context.clone());
-                *self = Self::Contexts(contexts);
-            }
-            Self::Contexts(contexts) => {
-                contexts.entry(address).or_insert_with(|| context.clone());
-            }
-        }
-    }
-
-    fn remove(&mut self, address: &Address) {
-        match self {
-            Self::Addresses(addresses) => {
-                addresses.swap_remove(address);
-            }
-            Self::Contexts(contexts) => {
-                contexts.swap_remove(address);
-            }
-        }
-    }
-
-    fn clear(&mut self) {
-        match self {
-            Self::Addresses(addresses) => addresses.clear(),
-            Self::Contexts(contexts) => contexts.clear(),
-        }
-    }
-
     fn contains(&self, address: &Address) -> bool {
         match self {
             Self::Addresses(addresses) => addresses.contains(address),
@@ -234,6 +193,47 @@ impl BlockContexts {
                     .iter()
                     .map(|(address, context)| (*address, context)),
             ),
+        }
+    }
+
+    fn insert(&mut self, address: Address, context: &ContextSet) {
+        match self {
+            Self::Addresses(addresses) if context.is_empty() => {
+                addresses.insert(address);
+            }
+            Self::Addresses(addresses) => {
+                let addresses = mem::take(addresses);
+                let mut contexts =
+                    IndexMap::with_capacity_and_hasher(addresses.len() + 1, FxBuildHasher);
+                contexts.extend(
+                    addresses
+                        .into_iter()
+                        .map(|address| (address, ContextSet::new())),
+                );
+                contexts.insert(address, context.clone());
+                *self = Self::Contexts(contexts);
+            }
+            Self::Contexts(contexts) => {
+                contexts.entry(address).or_insert_with(|| context.clone());
+            }
+        }
+    }
+
+    fn remove(&mut self, address: &Address) {
+        match self {
+            Self::Addresses(addresses) => {
+                addresses.swap_remove(address);
+            }
+            Self::Contexts(contexts) => {
+                contexts.swap_remove(address);
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        match self {
+            Self::Addresses(addresses) => addresses.clear(),
+            Self::Contexts(contexts) => contexts.clear(),
         }
     }
 }
@@ -302,6 +302,22 @@ impl FunctionBuilder {
         &mut self.context
     }
 
+    pub fn avoids(&self) -> &AddressRangeSet {
+        &self.context.avoids
+    }
+
+    pub fn avoids_mut(&mut self) -> &mut AddressRangeSet {
+        &mut self.context.avoids
+    }
+
+    pub fn local_targets(&self) -> impl ExactSizeIterator<Item = &FlowTarget> {
+        self.context.local_targets.iter()
+    }
+
+    pub fn global_targets(&self) -> impl ExactSizeIterator<Item = &AddressWithContext> {
+        self.context.global_targets.iter()
+    }
+
     fn analyse(
         &mut self,
         project: &ProjectView<'_>,
@@ -340,22 +356,6 @@ impl FunctionBuilder {
             result,
             self.context.global_targets.drain(..).collect(),
         )
-    }
-
-    pub fn avoids(&self) -> &AddressRangeSet {
-        &self.context.avoids
-    }
-
-    pub fn avoids_mut(&mut self) -> &mut AddressRangeSet {
-        &mut self.context.avoids
-    }
-
-    pub fn local_targets(&self) -> impl ExactSizeIterator<Item = &FlowTarget> {
-        self.context.local_targets.iter()
-    }
-
-    pub fn global_targets(&self) -> impl ExactSizeIterator<Item = &AddressWithContext> {
-        self.context.global_targets.iter()
     }
 
     pub fn add_initialisation_pass(
@@ -425,6 +425,42 @@ impl FunctionBuilderContext {
 
     pub fn candidates(&self) -> impl ExactSizeIterator<Item = &AddressWithContext> {
         self.candidates.iter()
+    }
+
+    pub fn is_flow_target(&self, address: Address) -> bool {
+        self.block_contexts.contains(&address)
+    }
+
+    pub fn local_targets(&self) -> impl ExactSizeIterator<Item = &FlowTarget> {
+        self.local_targets.iter()
+    }
+
+    pub fn global_targets(&self) -> impl ExactSizeIterator<Item = &AddressWithContext> {
+        self.global_targets.iter()
+    }
+
+    pub fn block_starts(&self) -> impl ExactSizeIterator<Item = (Address, IncompleteCodeBlockId)> {
+        self.structurer.block_starts()
+    }
+
+    pub fn block_ends(&self) -> impl ExactSizeIterator<Item = (Address, IncompleteCodeBlockId)> {
+        self.structurer.block_ends()
+    }
+
+    pub fn block_start_at(&self, address: Address) -> Option<IncompleteCodeBlockId> {
+        self.structurer.block_start_at(address)
+    }
+
+    pub fn block_end_at(&self, address: Address) -> Option<IncompleteCodeBlockId> {
+        self.structurer.block_end_at(address)
+    }
+
+    pub fn context_at(&self, address: Address) -> Option<&ContextSet> {
+        self.block_contexts.get(&address, &self.empty_context)
+    }
+
+    pub fn contexts(&self) -> impl ExactSizeIterator<Item = (Address, &ContextSet)> {
+        self.block_contexts.iter(&self.empty_context)
     }
 
     fn queue_block_candidate(&mut self, candidate: AddressWithContext) {
@@ -544,7 +580,7 @@ impl FunctionBuilderContext {
         let non_returning_targets = inputs.non_returning_targets;
         let arch = project.arch();
         let segments = project.segments();
-        let use_mapping_hints = config.use_segment_mapping_hints();
+        let use_mapping_hints = config.segment_mapping_hints();
 
         self.mapping_cache
             .view_containing(segments, self.entry())
@@ -612,7 +648,13 @@ impl FunctionBuilderContext {
                 tracing::trace!("skipping {block}: no contiguous bytes in segment");
                 continue 'outer;
             };
-            let bytes = &bytes[..bytes.len().min(usize::from(view.end() - block))];
+            let remaining = usize::try_from(
+                view.range()
+                    .remaining_from(block)
+                    .expect("mapping view contains the block address"),
+            )
+            .unwrap_or(usize::MAX);
+            let bytes = &bytes[..bytes.len().min(remaining)];
             let mut offset = 0usize;
             let mut cancellation_check = INSN_CANCELLATION_CHECK_INTERVAL;
             let mut mapping_hints = view.mapping_hints_from(block);
@@ -716,8 +758,8 @@ impl FunctionBuilderContext {
 
                         let insn = f.insn(insn_id).expect("inserted instruction must exist");
 
-                        let orphaned_fall_through = if config.use_non_returning_analysis()
-                            && insn.direct_call_target().is_some_and(|target| {
+                        let orphaned_fall_through = if config.non_returning_analysis()
+                            && insn.call_target().is_some_and(|target| {
                                 non_returning_targets.binary_search(&target).is_ok()
                             }) {
                             tracing::trace!(
@@ -834,42 +876,6 @@ impl FunctionBuilderContext {
         Ok(ControlFlow::Continue(()))
     }
 
-    pub fn contexts(&self) -> impl ExactSizeIterator<Item = (Address, &ContextSet)> {
-        self.block_contexts.iter(&self.empty_context)
-    }
-
-    pub fn context_at(&self, address: Address) -> Option<&ContextSet> {
-        self.block_contexts.get(&address, &self.empty_context)
-    }
-
-    pub fn is_flow_target(&self, address: Address) -> bool {
-        self.block_contexts.contains(&address)
-    }
-
-    pub fn local_targets(&self) -> impl ExactSizeIterator<Item = &FlowTarget> {
-        self.local_targets.iter()
-    }
-
-    pub fn global_targets(&self) -> impl ExactSizeIterator<Item = &AddressWithContext> {
-        self.global_targets.iter()
-    }
-
-    pub fn block_starts(&self) -> impl ExactSizeIterator<Item = (Address, IncompleteCodeBlockId)> {
-        self.structurer.block_starts()
-    }
-
-    pub fn block_start_at(&self, address: Address) -> Option<IncompleteCodeBlockId> {
-        self.structurer.block_start_at(address)
-    }
-
-    pub fn block_ends(&self) -> impl ExactSizeIterator<Item = (Address, IncompleteCodeBlockId)> {
-        self.structurer.block_ends()
-    }
-
-    pub fn block_end_at(&self, address: Address) -> Option<IncompleteCodeBlockId> {
-        self.structurer.block_end_at(address)
-    }
-
     fn structure_blocks(
         &mut self,
         function: &mut IncompleteFunction,
@@ -909,7 +915,7 @@ impl FunctionBuilderContext {
         self.clear();
         self.entry = candidate.address();
 
-        if analysis.config.use_segment_mapping_hints() {
+        if analysis.config.segment_mapping_hints() {
             // NOTE: this expect is safe because the entry address must be valid to reach this
             // point under normal usage.
             let view = analysis
@@ -1043,7 +1049,7 @@ impl<'p> FunctionCandidateState<'p> {
         let confidence = candidate.confidence();
 
         let mut failure = None;
-        if config.use_segment_mapping_hints() {
+        if config.segment_mapping_hints() {
             let mapping = view
                 .segments()
                 .view_containing(context.entry)
@@ -1074,6 +1080,10 @@ impl<'p> FunctionCandidateState<'p> {
             structured: false,
             view,
         }
+    }
+
+    pub(crate) fn is_complete(&self) -> bool {
+        self.complete || self.failure.is_some() || self.cancelled.is_some()
     }
 
     pub(crate) fn resolve(
@@ -1170,14 +1180,6 @@ impl<'p> FunctionCandidateState<'p> {
         }
     }
 
-    pub(crate) fn is_complete(&self) -> bool {
-        self.complete || self.failure.is_some() || self.cancelled.is_some()
-    }
-
-    pub(crate) fn into_candidate(self) -> AddressWithContext {
-        self.candidate
-    }
-
     pub(crate) fn finish(mut self) -> (ReadSet, FunctionCandidateOutcome) {
         let succeeded = self.failure.is_none() && self.cancelled.is_none();
         if succeeded {
@@ -1206,5 +1208,9 @@ impl<'p> FunctionCandidateState<'p> {
             targets: self.context.global_targets.into_iter().collect(),
         };
         (self.view.into_reads(), outcome)
+    }
+
+    pub(crate) fn into_candidate(self) -> AddressWithContext {
+        self.candidate
     }
 }

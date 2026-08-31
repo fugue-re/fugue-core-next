@@ -173,6 +173,21 @@ impl ECodeIr {
             .slice(&self.edge_arg_values)
     }
 
+    pub fn ops_for_source(
+        &self,
+        address: Address,
+    ) -> impl Iterator<Item = (IlOpId, &ECodeOp)> + '_ {
+        IlSourceSpan::ops(&self.source_spans, &self.operations, address)
+    }
+
+    pub fn defining_op(&self, value: IlValueId) -> Option<&ECodeOp> {
+        let record = self.values.get(value.index())?;
+        let IlSsaDef::Op(operation) = record.definition() else {
+            return None;
+        };
+        self.operations.get(operation.index())
+    }
+
     pub fn shrink_to_fit(&mut self) {
         self.graph.shrink_to_fit();
         self.source_spans.shrink_to_fit();
@@ -235,21 +250,6 @@ impl ECodeIr {
             Address::new(space, pointer.immediate()),
             u64::from(width.div_ceil(8)),
         )
-    }
-
-    pub fn ops_for_source(
-        &self,
-        address: Address,
-    ) -> impl Iterator<Item = (IlOpId, &ECodeOp)> + '_ {
-        IlSourceSpan::ops(&self.source_spans, &self.operations, address)
-    }
-
-    pub fn defining_op(&self, value: IlValueId) -> Option<&ECodeOp> {
-        let record = self.values.get(value.index())?;
-        let IlSsaDef::Op(operation) = record.definition() else {
-            return None;
-        };
-        self.operations.get(operation.index())
     }
 
     pub fn memory_operand(&self, operation: &ECodeOp) -> Option<IlValueId> {

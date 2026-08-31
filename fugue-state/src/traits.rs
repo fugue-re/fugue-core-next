@@ -34,14 +34,14 @@ macro_rules! impl_for {
         impl FromStateValues<u8> for $t {
             #[inline(always)]
             fn from_values<O: ByteOrder>(buf: &[u8]) -> Self {
-                <$t as ByteCast>::from_bytes::<O>(buf)
+                <$t as ByteCast>::read_bytes::<O>(buf)
             }
         }
 
         impl IntoStateValues<u8> for $t {
             #[inline(always)]
             fn into_values<O: ByteOrder>(self, buf: &mut [u8]) {
-                <$t as ByteCast>::into_bytes::<O>(&self, buf)
+                <$t as ByteCast>::write_bytes::<O>(&self, buf)
             }
         }
     };

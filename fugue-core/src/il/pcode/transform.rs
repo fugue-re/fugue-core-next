@@ -21,7 +21,7 @@ use crate::ir::{
 use crate::lifter::{ContextSet, Language, Lifter, Op, RawPCodeOp, Varnode};
 use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::segments::{SegmentMappingCache, SegmentStorage};
-use crate::types::common::Revision;
+use crate::types::Revision;
 
 #[derive(Debug, Default)]
 pub struct PCodeCanonicaliser {
@@ -191,19 +191,19 @@ impl<'a> PCodeFunctionSource<'a> {
         }
     }
 
+    const fn cancellation(&self) -> &'a CancellationToken {
+        match self {
+            Self::Admitted(input) => input.cancellation,
+            Self::Speculative { cancellation, .. } => cancellation,
+        }
+    }
+
     fn metadata(&self) -> IlMetadata {
         match self {
             Self::Admitted(input) => IlMetadata::new(input.function, input.input_revision),
             Self::Speculative { input_revision, .. } => {
                 IlMetadata::new(FunctionId::INVALID, *input_revision)
             }
-        }
-    }
-
-    const fn cancellation(&self) -> &'a CancellationToken {
-        match self {
-            Self::Admitted(input) => input.cancellation,
-            Self::Speculative { cancellation, .. } => cancellation,
         }
     }
 }

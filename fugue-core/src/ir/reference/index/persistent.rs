@@ -1,16 +1,15 @@
 use std::ops::Bound;
 use std::sync::Arc;
 
+use super::{InverseReferenceKey, PreparedReferenceIndexRecord};
 use crate::ir::reference::{
     Reference, ReferenceKey, ReferenceOrigin, ReferenceRecord, ReferenceTarget,
 };
 use crate::ir::{Address, IndexMetadata};
 use crate::storage::EntityStorage;
+use crate::storage::entities::cursor::{cursor_bound, cursor_bound_or_minimum};
 use crate::storage::entities::{EntityCache, EntityStorageError, ProjectEntity, WriteBackWorker};
 use crate::types::Revision;
-use crate::types::common::{cursor_bound, cursor_bound_or_minimum};
-
-use super::{InverseReferenceKey, PreparedReferenceIndexRecord};
 
 pub struct ReferenceIndex {
     forward: EntityCache<ReferenceKey, ReferenceRecord>,
@@ -36,44 +35,6 @@ impl ReferenceIndex {
         })
     }
 
-    pub(crate) fn mark_current(&self, revision: Revision) -> Result<(), EntityStorageError> {
-        self.storage.insert(
-            &ProjectEntity::ReferenceIndex,
-            &IndexMetadata::new(revision),
-        )
-    }
-
-    pub(crate) fn metadata_revision(&self) -> Result<Option<Revision>, EntityStorageError> {
-        let metadata = self
-            .storage
-            .get::<ProjectEntity, IndexMetadata>(&ProjectEntity::ReferenceIndex)?;
-        Ok(metadata.map(|metadata| metadata.revision()))
-    }
-
-    pub(crate) fn flush(&self) -> Result<(), EntityStorageError> {
-        self.forward.flush()?;
-        self.inverse.flush()
-    }
-
-    pub(crate) fn insert(&self, reference: &Reference) -> Result<(), EntityStorageError> {
-        let forward_key = ReferenceKey::new(reference.from(), reference.target());
-        let inverse_key = InverseReferenceKey::new(reference.target(), reference.from());
-        let record = ReferenceRecord::of(reference);
-        self.forward.try_insert(forward_key, record)?;
-        self.inverse.try_insert(inverse_key, record)?;
-        Ok(())
-    }
-
-    pub(crate) fn remove(
-        &self,
-        from: Address,
-        target: ReferenceTarget,
-    ) -> Result<(), EntityStorageError> {
-        self.forward.try_remove(&ReferenceKey::new(from, target))?;
-        self.inverse
-            .try_remove(&InverseReferenceKey::new(target, from))
-    }
-
     pub(crate) fn get(
         &self,
         from: Address,
@@ -83,31 +44,6 @@ impl ReferenceIndex {
             return Ok(None);
         };
         Ok(Some(cached.as_ref().materialise(from, target)))
-    }
-
-    pub(crate) fn publish_records(
-        &self,
-        records: impl IntoIterator<Item = PreparedReferenceIndexRecord>,
-    ) {
-        for record in records {
-            let PreparedReferenceIndexRecord {
-                encoded_size,
-                key,
-                reference,
-            } = record;
-            let inverse = InverseReferenceKey::new(key.target(), key.from());
-            match reference {
-                Some(reference) => {
-                    let record = ReferenceRecord::of(&reference);
-                    self.forward.publish_insert(key, record, encoded_size);
-                    self.inverse.publish_insert(inverse, record, encoded_size);
-                }
-                None => {
-                    self.forward.publish_remove(&key);
-                    self.inverse.publish_remove(&inverse);
-                }
-            }
-        }
     }
 
     pub(crate) fn references_from(
@@ -175,5 +111,68 @@ impl ReferenceIndex {
             references.push(cached.as_ref().materialise(key.from(), key.target()));
         }
         Ok(())
+    }
+
+    pub(crate) fn mark_current(&self, revision: Revision) -> Result<(), EntityStorageError> {
+        self.storage.insert(
+            &ProjectEntity::ReferenceIndex,
+            &IndexMetadata::new(revision),
+        )
+    }
+
+    pub(crate) fn metadata_revision(&self) -> Result<Option<Revision>, EntityStorageError> {
+        let metadata = self
+            .storage
+            .get::<ProjectEntity, IndexMetadata>(&ProjectEntity::ReferenceIndex)?;
+        Ok(metadata.map(|metadata| metadata.revision()))
+    }
+
+    pub(crate) fn flush(&self) -> Result<(), EntityStorageError> {
+        self.forward.flush()?;
+        self.inverse.flush()
+    }
+
+    pub(crate) fn insert(&self, reference: &Reference) -> Result<(), EntityStorageError> {
+        let forward_key = ReferenceKey::new(reference.from(), reference.target());
+        let inverse_key = InverseReferenceKey::new(reference.target(), reference.from());
+        let record = ReferenceRecord::of(reference);
+        self.forward.try_insert(forward_key, record)?;
+        self.inverse.try_insert(inverse_key, record)?;
+        Ok(())
+    }
+
+    pub(crate) fn remove(
+        &self,
+        from: Address,
+        target: ReferenceTarget,
+    ) -> Result<(), EntityStorageError> {
+        self.forward.try_remove(&ReferenceKey::new(from, target))?;
+        self.inverse
+            .try_remove(&InverseReferenceKey::new(target, from))
+    }
+
+    pub(crate) fn publish_records(
+        &self,
+        records: impl IntoIterator<Item = PreparedReferenceIndexRecord>,
+    ) {
+        for record in records {
+            let PreparedReferenceIndexRecord {
+                encoded_size,
+                key,
+                reference,
+            } = record;
+            let inverse = InverseReferenceKey::new(key.target(), key.from());
+            match reference {
+                Some(reference) => {
+                    let record = ReferenceRecord::of(&reference);
+                    self.forward.publish_insert(key, record, encoded_size);
+                    self.inverse.publish_insert(inverse, record, encoded_size);
+                }
+                None => {
+                    self.forward.publish_remove(&key);
+                    self.inverse.publish_remove(&inverse);
+                }
+            }
+        }
     }
 }

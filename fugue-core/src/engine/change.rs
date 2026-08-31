@@ -69,14 +69,34 @@ impl ChangeFilter {
         Self::default()
     }
 
-    pub fn with_kinds(mut self, kinds: ChangeKinds) -> Self {
+    pub fn kinds(&self) -> ChangeKinds {
+        self.kinds
+    }
+
+    pub fn set_kinds(&mut self, kinds: ChangeKinds) {
         self.kinds = kinds;
+    }
+
+    pub fn with_kinds(mut self, kinds: ChangeKinds) -> Self {
+        self.set_kinds(kinds);
         self
     }
 
-    pub fn with_region(mut self, region: AddressRangeSet) -> Self {
+    pub fn region(&self) -> Option<&AddressRangeSet> {
+        self.region.as_ref()
+    }
+
+    pub fn set_region(&mut self, region: AddressRangeSet) {
         self.region = Some(region);
+    }
+
+    pub fn with_region(mut self, region: AddressRangeSet) -> Self {
+        self.set_region(region);
         self
+    }
+
+    pub fn sources(&self) -> &ChangeSourceFilter {
+        &self.sources
     }
 
     pub fn with_category(mut self, category: ChangeCategory) -> Self {
@@ -87,18 +107,6 @@ impl ChangeFilter {
     pub fn with_source_label(mut self, label: impl Into<SmolStr>) -> Self {
         self.sources = self.sources.with_label(label);
         self
-    }
-
-    pub fn kinds(&self) -> ChangeKinds {
-        self.kinds
-    }
-
-    pub fn region(&self) -> Option<&AddressRangeSet> {
-        self.region.as_ref()
-    }
-
-    pub fn sources(&self) -> &ChangeSourceFilter {
-        &self.sources
     }
 
     pub fn matches(&self, record: &ChangeRecord) -> bool {
@@ -113,26 +121,24 @@ impl ChangeFilter {
         let ranges = record.ranges();
         ranges.is_empty() || ranges.iter().any(|range| region.intersects_range(range))
     }
-}
 
-impl ChangeSet {
-    pub fn scoped_to(&self, filter: &ChangeFilter) -> Option<Self> {
-        if !filter.sources().matches(self.provenance()) || !self.contains(filter.kinds()) {
+    pub fn apply(&self, changes: &ChangeSet) -> Option<ChangeSet> {
+        if !self.sources.matches(changes.provenance()) || !changes.contains(self.kinds) {
             return None;
         }
 
-        let scoped = self
+        let scoped = changes
             .records()
             .iter()
-            .filter(|record| filter.matches(record))
+            .filter(|record| self.matches(record))
             .cloned()
             .collect::<Vec<_>>();
 
         if scoped.is_empty() {
             None
         } else {
-            let mut scoped_set = Self::with_records(self.revision(), scoped);
-            scoped_set.merge_provenance(self.provenance());
+            let mut scoped_set = ChangeSet::with_records(changes.revision(), scoped);
+            scoped_set.merge_provenance(changes.provenance());
             Some(scoped_set)
         }
     }
@@ -203,13 +209,13 @@ mod test {
         mixed.merge(&analysis);
 
         let analysis_only = ChangeFilter::new().with_category(ChangeCategory::Analysis);
-        assert!(agent.scoped_to(&analysis_only).is_none());
-        assert!(analysis.scoped_to(&analysis_only).is_some());
-        assert!(mixed.scoped_to(&analysis_only).is_some());
+        assert!(analysis_only.apply(&agent).is_none());
+        assert!(analysis_only.apply(&analysis).is_some());
+        assert!(analysis_only.apply(&mixed).is_some());
 
         let recovery_only = ChangeFilter::new().with_source_label("function-recovery");
-        assert!(agent.scoped_to(&recovery_only).is_none());
-        assert!(analysis.scoped_to(&recovery_only).is_some());
+        assert!(recovery_only.apply(&agent).is_none());
+        assert!(recovery_only.apply(&analysis).is_some());
     }
 
     #[test]

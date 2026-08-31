@@ -192,12 +192,31 @@ impl MCodeOp {
         self.address_space
     }
 
+    pub(crate) fn constant_bytes<'a>(&self, constants: &'a [u8]) -> Option<&'a [u8]> {
+        if !matches!(self.opcode, MCodeOpcode::Constant) || self.width <= 64 {
+            return None;
+        }
+        let bytes = usize::try_from(self.width.div_ceil(8)).ok()?;
+        let start = usize::try_from(self.immediate).ok()?;
+        let end = start.checked_add(bytes)?;
+        constants.get(start..end)
+    }
+
     pub(crate) fn set_results(&mut self, results: IlIndexRange) {
         self.results = results;
     }
 
     pub(crate) fn set_operands(&mut self, operands: IlIndexRange) {
         self.operands = operands;
+    }
+
+    pub(crate) fn replace(&mut self, opcode: MCodeOpcode, operands: IlIndexRange) {
+        self.opcode = opcode;
+        self.operands = operands;
+        self.variable = None;
+        self.immediate = 0;
+        self.address = None;
+        self.address_space = None;
     }
 
     pub(crate) fn constant(&self, constants: &[u8]) -> Option<BitVec> {
@@ -211,22 +230,8 @@ impl MCodeOp {
         Some(BitVec::from_le_bytes(slice).cast(self.width))
     }
 
-    pub(crate) fn constant_bytes<'a>(&self, constants: &'a [u8]) -> Option<&'a [u8]> {
-        if !matches!(self.opcode, MCodeOpcode::Constant) || self.width <= 64 {
-            return None;
-        }
-        let bytes = usize::try_from(self.width.div_ceil(8)).ok()?;
-        let start = usize::try_from(self.immediate).ok()?;
-        let end = start.checked_add(bytes)?;
-        constants.get(start..end)
-    }
-
     pub(crate) fn replace_with_constant(&mut self, immediate: u64) {
-        self.opcode = MCodeOpcode::Constant;
-        self.operands = IlIndexRange::EMPTY;
-        self.variable = None;
+        self.replace(MCodeOpcode::Constant, IlIndexRange::EMPTY);
         self.immediate = immediate;
-        self.address = None;
-        self.address_space = None;
     }
 }

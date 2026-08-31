@@ -10,15 +10,15 @@ use fugue_core::analysis::{AnalysisError, AnalysisPass};
 use fugue_core::arch::{AArch64, Arch, Arm, X86, X86_64};
 use fugue_core::engine::ProjectView;
 use fugue_core::ir::{
-    Address, AddressWithContext, ExternSegment, FlowKind, RawAddress, SegmentProperties,
-    SymbolIndex, SymbolProperties, SymbolTableSelector, TransientSymbolTable,
+    Address, AddressWithContext, FlowKind, RawAddress, SymbolIndex, SymbolProperties,
+    SymbolTableSelector, TransientSymbolTable,
 };
 use fugue_core::lifter::{ContextBitRange, ContextSet, Language};
 use fugue_core::loader::{
-    ImageAddress, ImageLayout, ImageSegment, ImageSegmentContents, Loadable, LoadableAnalysers,
-    LoadableFromFile, LoadableMetadata, LoaderError,
+    ExternalThunkLayout, ImageAddress, ImageLayout, ImageSegment, ImageSegmentContents, Loadable,
+    LoadableAnalysers, LoadableFromFile, LoadableMetadata, LoaderError,
 };
-use fugue_core::storage::{SegmentMappingProvenance, DEFAULT_SPACE_ID};
+use fugue_core::storage::{SegmentMappingProvenance, SegmentProperties, DEFAULT_SPACE_ID};
 use fugue_core::types::AttributeMap;
 use idalib::idb::{IDBOpenOptions, IDB};
 
@@ -33,7 +33,7 @@ pub struct IDABinary {
     database: Rc<IDB>,
     architecture: Arch,
     symbols: TransientSymbolTable<ImageAddress>,
-    extern_segm: Option<ExternSegment>,
+    external_thunks: Option<ExternalThunkLayout>,
     bank_base: RawAddress,
     layout: ImageLayout,
     mark_thumb: bool,
@@ -44,19 +44,19 @@ pub struct IDABinary {
 fn ida_symbols(
     arch: &Arch,
     db: &IDB,
-) -> Result<(TransientSymbolTable, Option<ExternSegment>), LoaderError> {
+) -> Result<(TransientSymbolTable, Option<ExternalThunkLayout>), LoaderError> {
     let mut symbols = TransientSymbolTable::new();
-    let mut externs = db.segment_by_name("extern").map(|segm| {
-        let addr = segm.start_address();
-        let templ = arch.external_thunk_template();
-        let bounds = addr..segm.end_address();
+    let mut external_thunks = db.segment_by_name("extern").map(|segment| {
+        let address = segment.start_address();
+        let template = arch.external_thunk_template();
+        let bounds = address..segment.end_address();
         (
-            ExternSegment::new(
-                addr,
+            ExternalThunkLayout::new(
+                address,
                 arch.language()
                     .address_size()
                     .max(arch.language().address_alignment()),
-                templ,
+                template,
             ),
             bounds,
         )
@@ -67,12 +67,13 @@ fn ida_symbols(
         let name = fcn.name();
         let props = SymbolProperties::FUNCTION;
 
-        if matches!(externs, Some((_, ref bounds)) if bounds.contains(&fcn.start_address())) {
-            externs
+        if matches!(external_thunks, Some((_, ref bounds)) if bounds.contains(&fcn.start_address()))
+        {
+            external_thunks
                 .as_mut()
-                .expect("extern segment exists")
+                .expect("external thunk layout exists")
                 .0
-                .add_extern_at(addr)
+                .allocate_at(addr)
                 .map_err(LoaderError::other)?;
             symbols.insert_extern_with(
                 SymbolIndex::new(FUNCTIONS_SELECTOR, n),
@@ -100,12 +101,12 @@ fn ida_symbols(
 
         let name = name.name();
 
-        if matches!(externs, Some((_, ref bounds)) if bounds.contains(&addr)) {
-            externs
+        if matches!(external_thunks, Some((_, ref bounds)) if bounds.contains(&addr)) {
+            external_thunks
                 .as_mut()
-                .expect("extern segment exists")
+                .expect("external thunk layout exists")
                 .0
-                .add_extern_at(addr)
+                .allocate_at(addr)
                 .map_err(LoaderError::other)?;
             symbols.insert_extern_with(
                 SymbolIndex::new(NAMES_SELECTOR, n),
@@ -123,7 +124,10 @@ fn ida_symbols(
         }
     }
 
-    Ok((symbols, externs.map(|(symbols, _)| symbols)))
+    Ok((
+        symbols,
+        external_thunks.map(|(external_thunks, _)| external_thunks),
+    ))
 }
 
 fn ida_language(database: &IDB) -> Result<&'static Language, LoaderError> {
@@ -166,8 +170,8 @@ impl IDABinary {
         &self.symbols
     }
 
-    pub fn extern_segment(&self) -> Option<&ExternSegment> {
-        self.extern_segm.as_ref()
+    pub fn external_thunks(&self) -> Option<&ExternalThunkLayout> {
+        self.external_thunks.as_ref()
     }
 }
 
@@ -215,7 +219,7 @@ impl LoadableFromFile for IDABinary {
         let language = ida_language(&database)?;
         let architecture = Arch::new(language);
 
-        let (address_symbols, extern_segm) = ida_symbols(&architecture, &database)?;
+        let (address_symbols, external_thunks) = ida_symbols(&architecture, &database)?;
 
         let mut bank_base = RawAddress::MAX;
         let mut bank_end = RawAddress::zero();
@@ -254,7 +258,7 @@ impl LoadableFromFile for IDABinary {
             database: Rc::new(database),
             architecture,
             symbols,
-            extern_segm,
+            external_thunks,
             bank_base,
             layout,
             mark_thumb,
@@ -319,16 +323,18 @@ impl Loadable for IDABinary {
                 properties |= SegmentProperties::UNINITIALISED;
             }
 
-            if type_.is_extern() {
-                properties |= SegmentProperties::EXTERNAL;
-            }
+            let provenance = if type_.is_extern() {
+                SegmentMappingProvenance::External
+            } else {
+                SegmentMappingProvenance::Segment
+            };
 
             Ok(ImageSegment::backed_in_default_bank(
                 name,
                 ImageAddress::in_default_space(start),
                 size,
                 properties,
-                SegmentMappingProvenance::Segment,
+                provenance,
                 bank_base,
             ))
         }))
@@ -359,7 +365,7 @@ impl Loadable for IDABinary {
 
                 if aligned_template_size > address_size {
                     tracing::warn!(
-                        "external thunk template is larger than available space in extern segment; skipping"
+                        "external thunk template is larger than available space in external segment; skipping"
                     );
                 } else {
                     for chunk in bytes.chunks_exact_mut(aligned_template_size) {
@@ -525,12 +531,11 @@ impl AnalysisPass<FunctionDiscoveryContext> for IDAFunctionDiscovery {
         state: &mut FunctionDiscoveryContext,
     ) -> Result<(), AnalysisError> {
         let segms = project.segments();
-        let extern_bounds = segms
+        let external_bounds = segms
             .iter_views(DEFAULT_SPACE_ID)
             .map_err(|e| AnalysisError::pass_failed("ida-function-discovery", e))?
             .find_map(|view| {
-                view.properties()
-                    .contains(SegmentProperties::EXTERNAL)
+                (view.provenance() == SegmentMappingProvenance::External)
                     .then(|| view.start()..=view.last())
             });
 
@@ -541,7 +546,7 @@ impl AnalysisPass<FunctionDiscoveryContext> for IDAFunctionDiscovery {
                 continue;
             }
 
-            if matches!(extern_bounds, Some(ref bounds) if bounds.contains(&addr)) {
+            if matches!(external_bounds, Some(ref bounds) if bounds.contains(&addr)) {
                 continue;
             }
 

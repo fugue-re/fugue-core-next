@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use iset::{Entry, IntervalMap};
 use smallvec::SmallVec;
 
-use super::{CodeBlockIds, CodeBlockIdsByStart, CodeBlockIndex};
+use super::{CodeBlockIds, CodeBlockIdsByAddress, CodeBlockIndex};
 use crate::ir::{Address, AddressRange, CodeBlock, Id, IdAllocator, IdSet};
 use crate::lifter::ContextSet;
 
@@ -61,6 +61,102 @@ impl CodeBlockTable {
 
     pub fn len(&self) -> usize {
         self.index.live
+    }
+
+    pub fn get_by_id(&self, id: Id<CodeBlock>) -> Option<&CodeBlock> {
+        self.get_raw(id)
+    }
+
+    pub fn get_by_address(&self, address: Address) -> impl Iterator<Item = &CodeBlock> + '_ {
+        let space = address.space();
+        let raw = address.raw_address();
+
+        self.index
+            .bounds
+            .get(&space)
+            .into_iter()
+            .flat_map(move |bounds| bounds.values(raw..=raw))
+            .flat_map(move |id_set| {
+                id_set.iter().filter_map(move |id| {
+                    let block = self.get_raw(id)?;
+                    (block.address() == address).then_some(block)
+                })
+            })
+    }
+
+    pub fn get_by_address_and_context<'a>(
+        &'a self,
+        address: Address,
+        context: &'a ContextSet,
+    ) -> impl Iterator<Item = &'a CodeBlock> + 'a {
+        let space = address.space();
+        let raw = address.raw_address();
+
+        self.index
+            .bounds
+            .get(&space)
+            .into_iter()
+            .flat_map(move |bounds| bounds.values(raw..=raw))
+            .flat_map(move |id_set| {
+                id_set.iter().filter_map(move |id| {
+                    let block = self.get_raw(id)?;
+                    (block.address() == address && block.context() == context).then_some(block)
+                })
+            })
+    }
+
+    pub(crate) fn get_ids_by_address(&self, addresses: &[Address]) -> CodeBlockIdsByAddress {
+        let mut ids_by_address = CodeBlockIdsByAddress::with_capacity(addresses.len());
+        for &address in addresses {
+            ids_by_address.push(
+                address,
+                self.get_by_address(address)
+                    .map(CodeBlock::id)
+                    .collect::<CodeBlockIds>(),
+            );
+        }
+        ids_by_address
+    }
+
+    pub fn overlaps_address(&self, addr: Address) -> impl Iterator<Item = &CodeBlock> + '_ {
+        let space = addr.space();
+        let raw = addr.raw_address();
+
+        self.index
+            .bounds
+            .get(&space)
+            .into_iter()
+            .flat_map(move |bounds| bounds.values(raw..=raw))
+            .flat_map(move |id_set| id_set.iter().filter_map(move |id| self.get_raw(id)))
+    }
+
+    pub fn overlaps(&self, range: &AddressRange) -> impl Iterator<Item = &CodeBlock> + '_ {
+        let space = range.space();
+        let start = range.start();
+        let end = range.end();
+        self.index
+            .bounds
+            .get(&space)
+            .into_iter()
+            .flat_map(move |bounds| bounds.values(start..=end))
+            .flat_map(move |ids| ids.iter().filter_map(move |id| self.get_raw(id)))
+    }
+
+    pub(crate) fn find_by_range_and_context(
+        &self,
+        range: AddressRange,
+        context: &ContextSet,
+        mut predicate: impl FnMut(&CodeBlock) -> bool,
+    ) -> Option<&CodeBlock> {
+        let ids = self
+            .index
+            .bounds
+            .get(&range.space())?
+            .get(range.start()..=range.end())?;
+        ids.iter().find_map(|id| {
+            let block = self.get_raw(id)?;
+            (block.context() == context && predicate(block)).then_some(block)
+        })
     }
 
     pub(crate) fn publish_reservations(&mut self, reservations: &[Id<CodeBlock>]) {
@@ -175,101 +271,5 @@ impl CodeBlockTable {
         self.entries[id.index()] = None;
         self.index.allocator.release(id);
         self.index.live -= 1;
-    }
-
-    pub fn get_by_id(&self, id: Id<CodeBlock>) -> Option<&CodeBlock> {
-        self.get_raw(id)
-    }
-
-    pub fn get_by_address(&self, address: Address) -> impl Iterator<Item = &CodeBlock> + '_ {
-        let space = address.space();
-        let raw = address.raw_address();
-
-        self.index
-            .bounds
-            .get(&space)
-            .into_iter()
-            .flat_map(move |bounds| bounds.values(raw..=raw))
-            .flat_map(move |id_set| {
-                id_set.iter().filter_map(move |id| {
-                    let block = self.get_raw(id)?;
-                    (block.address() == address).then_some(block)
-                })
-            })
-    }
-
-    pub fn get_by_address_and_context<'a>(
-        &'a self,
-        address: Address,
-        context: &'a ContextSet,
-    ) -> impl Iterator<Item = &'a CodeBlock> + 'a {
-        let space = address.space();
-        let raw = address.raw_address();
-
-        self.index
-            .bounds
-            .get(&space)
-            .into_iter()
-            .flat_map(move |bounds| bounds.values(raw..=raw))
-            .flat_map(move |id_set| {
-                id_set.iter().filter_map(move |id| {
-                    let block = self.get_raw(id)?;
-                    (block.address() == address && block.context() == context).then_some(block)
-                })
-            })
-    }
-
-    pub(crate) fn find_by_range_and_context(
-        &self,
-        range: AddressRange,
-        context: &ContextSet,
-        mut predicate: impl FnMut(&CodeBlock) -> bool,
-    ) -> Option<&CodeBlock> {
-        let ids = self
-            .index
-            .bounds
-            .get(&range.space())?
-            .get(range.start()..=range.end())?;
-        ids.iter().find_map(|id| {
-            let block = self.get_raw(id)?;
-            (block.context() == context && predicate(block)).then_some(block)
-        })
-    }
-
-    pub(crate) fn ids_at_starts(&self, starts: &[Address]) -> CodeBlockIdsByStart {
-        let mut locations = CodeBlockIdsByStart::with_capacity(starts.len());
-        for &address in starts {
-            locations.push(
-                address,
-                self.get_by_address(address)
-                    .map(CodeBlock::id)
-                    .collect::<CodeBlockIds>(),
-            );
-        }
-        locations
-    }
-
-    pub fn overlaps_address(&self, addr: Address) -> impl Iterator<Item = &CodeBlock> + '_ {
-        let space = addr.space();
-        let raw = addr.raw_address();
-
-        self.index
-            .bounds
-            .get(&space)
-            .into_iter()
-            .flat_map(move |bounds| bounds.values(raw..=raw))
-            .flat_map(move |id_set| id_set.iter().filter_map(move |id| self.get_raw(id)))
-    }
-
-    pub fn overlaps(&self, range: &AddressRange) -> impl Iterator<Item = &CodeBlock> + '_ {
-        let space = range.space();
-        let start = range.start();
-        let end = range.end();
-        self.index
-            .bounds
-            .get(&space)
-            .into_iter()
-            .flat_map(move |bounds| bounds.values(start..=end))
-            .flat_map(move |ids| ids.iter().filter_map(move |id| self.get_raw(id)))
     }
 }

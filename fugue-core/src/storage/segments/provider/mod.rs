@@ -6,9 +6,9 @@ use std::path::{Path, PathBuf};
 
 use smallvec::SmallVec;
 
-use crate::ir::{Address, SegmentProperties};
+use crate::ir::Address;
 use crate::storage::StoragePersistence;
-use crate::storage::segments::SegmentStorageError;
+use crate::storage::segments::{SegmentProperties, SegmentStorageError};
 use crate::types::AttributeMap;
 
 pub(crate) mod memmap;
@@ -223,13 +223,6 @@ impl<'a> SegmentView<'a> {
         view
     }
 
-    pub fn push(&mut self, offset: u64, bytes: impl Into<Cow<'a, [u8]>>) {
-        let bytes = bytes.into();
-        if !bytes.is_empty() {
-            self.chunks.push(SegmentChunk::new(offset, bytes));
-        }
-    }
-
     pub fn size(&self) -> u64 {
         self.size
     }
@@ -256,15 +249,34 @@ impl<'a> SegmentView<'a> {
             .map(SegmentChunk::bytes)
     }
 
-    pub fn read_into(&self, buf: &mut [u8]) {
-        buf.fill(0);
+    pub fn push(&mut self, offset: u64, bytes: impl Into<Cow<'a, [u8]>>) {
+        let bytes = bytes.into();
+        if !bytes.is_empty() {
+            self.chunks.push(SegmentChunk::new(offset, bytes));
+        }
+    }
+
+    pub fn read_into(&self, buffer: &mut [u8]) {
+        self.read_into_with_fill(buffer, 0);
+    }
+
+    pub(crate) fn read_into_with_fill(&self, buffer: &mut [u8], fill: u8) {
+        if let [chunk] = self.chunks.as_slice()
+            && chunk.offset == 0
+            && chunk.bytes.len() >= buffer.len()
+        {
+            buffer.copy_from_slice(&chunk.bytes[..buffer.len()]);
+            return;
+        }
+
+        buffer.fill(fill);
         for chunk in &self.chunks {
             let start = chunk.offset as usize;
-            if start >= buf.len() {
+            if start >= buffer.len() {
                 continue;
             }
-            let end = (start + chunk.bytes.len()).min(buf.len());
-            buf[start..end].copy_from_slice(&chunk.bytes[..end - start]);
+            let end = (start + chunk.bytes.len()).min(buffer.len());
+            buffer[start..end].copy_from_slice(&chunk.bytes[..end - start]);
         }
     }
 }

@@ -37,7 +37,8 @@ use fugue_core::storage::{
     BufferedEntityWriter, DEFAULT_SPACE_ID, EntityBytesReadTransaction,
     EntityBytesWriteTransaction, EntityStorage, EntityStorageError, EntityStorageProvider,
     EntityStorageProviderFromLoadable, InMemoryEntityStorage, InMemorySegmentStorage, PERSISTENT,
-    SegmentStorage, StorageContainer, StoragePersistence, StorageProvider, StorageProviderError,
+    SegmentProperties, SegmentStorage, StorageContainer, StoragePersistence, StorageProvider,
+    StorageProviderError,
 };
 #[cfg(feature = "sqlite")]
 use fugue_core::types::ATTRIBUTE_PROJECT_PATH;
@@ -51,6 +52,8 @@ const PAGE_LIMIT: usize = 64;
 const QUERY_REPETITIONS: usize = 128;
 const REPRESENTATIVE_FIXTURE: &str = "tests/libipmi.so";
 const REPEATED_FUNCTION_REPLACEMENTS: usize = 8193;
+const SEGMENT_MAPPING_REMOVALS: usize = 4096;
+const SEGMENT_MAPPING_SIZE: u64 = 0x1000;
 
 struct MeasuringAllocator;
 
@@ -1060,6 +1063,39 @@ fn bench_byte_writes(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error
     Ok(())
 }
 
+fn bench_mapping_changes(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
+    let mapping_count = u64::try_from(SEGMENT_MAPPING_REMOVALS)?;
+    let provider_size = usize::try_from(mapping_count * SEGMENT_MAPPING_SIZE)?;
+    let mut storage = SegmentStorage::empty();
+    let provider = storage.open_provider(
+        InMemorySegmentStorage::with_size(provider_size),
+        SegmentProperties::PERM_ALL,
+    );
+
+    let (insertion, _) = measure("segment_mapping_insertion", || {
+        for index in 0..mapping_count {
+            let offset = index * SEGMENT_MAPPING_SIZE;
+            let mapping = storage.create_mapping(
+                provider,
+                0x1000u64 + offset,
+                SEGMENT_MAPPING_SIZE,
+                offset,
+                SegmentProperties::PERM_ALL,
+            )?;
+            storage.add_mapping_to_space(DEFAULT_SPACE_ID, mapping)?;
+        }
+        Ok(((), SEGMENT_MAPPING_REMOVALS))
+    })?;
+    results.push(insertion);
+
+    let (removal, _) = measure("segment_mapping_provider_removal", || {
+        storage.close_provider(provider)?;
+        Ok(((), SEGMENT_MAPPING_REMOVALS))
+    })?;
+    results.push(removal);
+    Ok(())
+}
+
 fn bench_latest_change(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
     let (engine, _) = load_engine()?;
     let reader = engine.query_reader()?;
@@ -1437,6 +1473,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if selected_group(selected.as_deref(), "changes") {
         bench_byte_writes(&mut results)?;
+        bench_mapping_changes(&mut results)?;
         bench_latest_change(&mut results)?;
     }
     if selected_group(selected.as_deref(), "concurrency") {

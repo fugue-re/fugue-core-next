@@ -54,6 +54,7 @@ impl Fixture {
             self.queries.project.clone(),
             self.queries.cache.clone(),
             self.queries.changes.clone(),
+            None,
             self.queries.registry.clone(),
         )
     }
@@ -63,7 +64,7 @@ impl Fixture {
     }
 
     fn commit_with<T>(
-        &mut self,
+        &self,
         mutate: impl FnOnce(&mut ProjectTransaction<'_>) -> Result<T, ProjectError>,
     ) -> Result<T, Box<dyn Error>> {
         let (changes, value) = {
@@ -72,7 +73,7 @@ impl Fixture {
             let value = match mutate(&mut transaction) {
                 Ok(value) => value,
                 Err(error) => {
-                    transaction.reject()?;
+                    drop(transaction);
                     return Err(error.into());
                 }
             };
@@ -82,23 +83,23 @@ impl Fixture {
         Ok(value)
     }
 
-    fn commit_function(&mut self, function: IncompleteFunction) -> Result<(), Box<dyn Error>> {
+    fn commit_function(&self, function: IncompleteFunction) -> Result<(), Box<dyn Error>> {
         self.commit_function_with_id(function).map(drop)
     }
 
     fn commit_function_with_id(
-        &mut self,
+        &self,
         function: IncompleteFunction,
     ) -> Result<FunctionId, Box<dyn Error>> {
         self.commit_with(|transaction| transaction.add_function(function))
     }
 
-    fn remove_function(&mut self, entry: Address) -> Result<(), Box<dyn Error>> {
+    fn remove_function(&self, entry: Address) -> Result<(), Box<dyn Error>> {
         self.commit_with(|transaction| transaction.remove_function(entry, ReferenceOrigin::Derived))
             .map(drop)
     }
 
-    fn replace_lifted<T>(&mut self, ir: &mut T) -> Result<(), Box<dyn Error>>
+    fn replace_lifted<T>(&self, ir: &mut T) -> Result<(), Box<dyn Error>>
     where
         T: Clone + PersistableIl,
     {
@@ -107,7 +108,7 @@ impl Fixture {
         self.commit_with(|transaction| transaction.replace_lifted(ir.clone()))
     }
 
-    fn apply(&mut self, changes: &ChangeSet) {
+    fn apply(&self, changes: &ChangeSet) {
         self.queries.apply_changes(changes);
     }
 
@@ -124,7 +125,7 @@ impl Fixture {
         function
     }
 
-    fn pcode_with_span(&self, function: FunctionId, tag: u8, count: u32) -> PCodeIr {
+    fn pcode_with_span(function: FunctionId, tag: u8, count: u32) -> PCodeIr {
         let mut builder = PCodeBuilder::new(IlMetadata::new(function, 0), IlGraph::default());
 
         builder.set_source_spans(vec![IlSourceSpan::new(
@@ -139,7 +140,7 @@ impl Fixture {
             .expect("test pcode ir should build")
     }
 
-    fn pcode_for(&self, function: FunctionId) -> PCodeIr {
+    fn pcode_for(function: FunctionId) -> PCodeIr {
         PCodeBuilder::new(IlMetadata::new(function, 0), IlGraph::default())
             .build(&CancellationToken::default())
             .expect("empty pcode ir should build")
@@ -151,11 +152,8 @@ impl Fixture {
             .expect("empty ecode ir should build")
     }
 
-    fn replace_lifted_chain(
-        &mut self,
-        function: FunctionId,
-    ) -> Result<PublishedIl, Box<dyn Error>> {
-        let mut pcode = self.pcode_for(function);
+    fn replace_lifted_chain(&self, function: FunctionId) -> Result<PublishedIl, Box<dyn Error>> {
+        let mut pcode = Self::pcode_for(function);
         let mut ecode = Self::ecode_for(function);
 
         self.replace_lifted(&mut pcode)?;
@@ -167,8 +165,8 @@ impl Fixture {
 
 #[test]
 fn test_query_reader_reads_materialised_pcode() -> Result<(), Box<dyn Error>> {
-    let mut fixture = Fixture::new()?;
-    let mut ir = fixture.pcode_with_span(FunctionId::default(), 7, 3);
+    let fixture = Fixture::new()?;
+    let mut ir = Fixture::pcode_with_span(FunctionId::default(), 7, 3);
 
     fixture.replace_lifted(&mut ir)?;
 
@@ -183,7 +181,7 @@ fn test_query_reader_reads_materialised_pcode() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_reader_without_intake_declines_generation() -> Result<(), Box<dyn Error>> {
-    let mut fixture = Fixture::new()?;
+    let fixture = Fixture::new()?;
     let entry = Address::from(0x1_0000_0000u64);
     let function = fixture.commit_function_with_id(Fixture::function_at(entry))?;
 
@@ -194,10 +192,10 @@ fn test_reader_without_intake_declines_generation() -> Result<(), Box<dyn Error>
 
 #[test]
 fn test_query_reader_reuses_lifted_reads() -> Result<(), Box<dyn Error>> {
-    let mut fixture = Fixture::new()?;
+    let fixture = Fixture::new()?;
     let entry = Address::from(0x1_0000_0000u64);
     let function = fixture.commit_function_with_id(Fixture::function_at(entry))?;
-    let mut ir = fixture.pcode_for(function);
+    let mut ir = Fixture::pcode_for(function);
     fixture.replace_lifted(&mut ir)?;
     fixture.queries.cache.clear_lifted();
 
@@ -216,10 +214,10 @@ fn test_query_reader_reuses_lifted_reads() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_query_reader_lifted_snapshot_survives_invalidation() -> Result<(), Box<dyn Error>> {
-    let mut fixture = Fixture::new()?;
+    let fixture = Fixture::new()?;
     let entry = Address::from(0x1_0000_0000u64);
     let function = fixture.commit_function_with_id(Fixture::function_at(entry))?;
-    let mut ir = fixture.pcode_for(function);
+    let mut ir = Fixture::pcode_for(function);
 
     fixture.replace_lifted(&mut ir)?;
 
@@ -238,7 +236,7 @@ fn test_query_reader_lifted_snapshot_survives_invalidation() -> Result<(), Box<d
 
 #[test]
 fn test_query_reader_reads_all_lifted_levels() -> Result<(), Box<dyn Error>> {
-    let mut fixture = Fixture::new()?;
+    let fixture = Fixture::new()?;
     let function = FunctionId::default();
 
     let materialised = fixture.replace_lifted_chain(function)?;
@@ -257,7 +255,7 @@ fn test_query_reader_reads_all_lifted_levels() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_query_reader_reads_ssa_derived_tables() -> Result<(), Box<dyn Error>> {
-    let mut fixture = Fixture::new()?;
+    let fixture = Fixture::new()?;
     let function = FunctionId::default();
 
     fixture.replace_lifted_chain(function)?;
@@ -284,7 +282,7 @@ fn test_query_reader_reads_ssa_derived_tables() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_flow_graph_cache_is_exact_per_function() -> Result<(), Box<dyn Error>> {
-    let mut fixture = Fixture::new()?;
+    let fixture = Fixture::new()?;
     let edited = Address::from(0x1_0000_0000u64);
     let same_window = Address::new(edited.space(), edited.offset() + 0x10);
     let distant = Address::from(0x9_0000_0000u64);
@@ -319,7 +317,7 @@ fn test_flow_graph_cache_is_exact_per_function() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_flow_graph_cache_invalidation_property() -> Result<(), Box<dyn Error>> {
-    let mut fixture = Fixture::new()?;
+    let fixture = Fixture::new()?;
     let entries = (0..8u64)
         .map(|index| Address::from(0x1_0000_0000u64 + index * 0x10))
         .collect::<Vec<_>>();
@@ -359,7 +357,7 @@ fn test_flow_graph_cache_invalidation_property() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_function_removal_invalidates_cached_flow_graph() -> Result<(), Box<dyn Error>> {
-    let mut fixture = Fixture::new()?;
+    let fixture = Fixture::new()?;
     let entry = Address::from(0x1_0000_0000u64);
 
     fixture.commit_function(Fixture::function_at(entry))?;
@@ -376,7 +374,7 @@ fn test_function_removal_invalidates_cached_flow_graph() -> Result<(), Box<dyn E
 
 #[test]
 fn test_function_add_invalidates_cached_absence() -> Result<(), Box<dyn Error>> {
-    let mut fixture = Fixture::new()?;
+    let fixture = Fixture::new()?;
     let entry = Address::from(0x1_0000_0000u64);
 
     let reader = fixture.reader();
@@ -392,7 +390,7 @@ fn test_function_add_invalidates_cached_absence() -> Result<(), Box<dyn Error>> 
 
 #[test]
 fn test_byte_write_leaves_flow_graph_cached() -> Result<(), Box<dyn Error>> {
-    let mut fixture = Fixture::new()?;
+    let fixture = Fixture::new()?;
     let entry = Address::from(0x1_0000_0000u64);
 
     fixture.commit_function(Fixture::function_at(entry))?;
@@ -419,7 +417,7 @@ fn test_byte_write_leaves_flow_graph_cached() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_cache_is_pure_derived_state() -> Result<(), Box<dyn Error>> {
-    let mut fixture = Fixture::new()?;
+    let fixture = Fixture::new()?;
     let entry = Address::from(0x1_0000_0000u64);
 
     fixture.commit_function(Fixture::function_with_size(entry, 4))?;
@@ -441,7 +439,7 @@ fn test_cache_is_pure_derived_state() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_latest_change_tracks_region_and_kinds() -> Result<(), Box<dyn Error>> {
-    let mut fixture = Fixture::new()?;
+    let fixture = Fixture::new()?;
     let reader = fixture.reader();
 
     let inside = AddressRange::new(
@@ -484,7 +482,7 @@ fn test_latest_change_tracks_region_and_kinds() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_reference_change_is_observable_from_both_endpoints() -> Result<(), Box<dyn Error>> {
-    let mut fixture = Fixture::new()?;
+    let fixture = Fixture::new()?;
     let reader = fixture.reader();
 
     let from = Address::new(AddressSpaceId::from(0u8), 0x1000u64);
@@ -517,7 +515,7 @@ fn test_reference_change_is_observable_from_both_endpoints() -> Result<(), Box<d
 
 #[test]
 fn test_latest_change_kinds_mask_selects_groups() -> Result<(), Box<dyn Error>> {
-    let mut fixture = Fixture::new()?;
+    let fixture = Fixture::new()?;
     let reader = fixture.reader();
 
     let range = AddressRange::new(
@@ -551,7 +549,7 @@ fn test_latest_change_kinds_mask_selects_groups() -> Result<(), Box<dyn Error>> 
 
 #[test]
 fn test_region_less_changes_are_observable() -> Result<(), Box<dyn Error>> {
-    let mut fixture = Fixture::new()?;
+    let fixture = Fixture::new()?;
     let reader = fixture.reader();
 
     let mut region = AddressRangeSet::new();
@@ -596,7 +594,7 @@ fn test_region_less_changes_are_observable() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_region_bearing_precision_survives_region_less_kinds() -> Result<(), Box<dyn Error>> {
-    let mut fixture = Fixture::new()?;
+    let fixture = Fixture::new()?;
     let reader = fixture.reader();
 
     let touched = AddressRange::new(
@@ -625,7 +623,7 @@ fn test_region_bearing_precision_survives_region_less_kinds() -> Result<(), Box<
 
 #[test]
 fn test_resynchronisation_marks_every_region_changed() -> Result<(), Box<dyn Error>> {
-    let mut fixture = Fixture::new()?;
+    let fixture = Fixture::new()?;
     let reader = fixture.reader();
 
     let baseline = reader.revision()?;
@@ -646,7 +644,7 @@ fn test_resynchronisation_marks_every_region_changed() -> Result<(), Box<dyn Err
 
 #[test]
 fn test_term_recomputes_only_on_dependency_change() -> Result<(), Box<dyn Error>> {
-    let mut fixture = Fixture::new()?;
+    let fixture = Fixture::new()?;
     let reader = fixture.reader();
 
     let inside = AddressRange::new(
@@ -717,7 +715,7 @@ fn test_term_values_need_not_be_clone() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_term_composes_across_inputs() -> Result<(), Box<dyn Error>> {
-    let mut fixture = Fixture::new()?;
+    let fixture = Fixture::new()?;
     let reader = fixture.reader();
 
     let functions = AddressRange::new(
@@ -804,7 +802,7 @@ fn a_term_rejects_undeclared_observed_reads() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_term_region_less_dependency() -> Result<(), Box<dyn Error>> {
-    let mut fixture = Fixture::new()?;
+    let fixture = Fixture::new()?;
     let reader = fixture.reader();
 
     let calls = AtomicUsize::new(0);

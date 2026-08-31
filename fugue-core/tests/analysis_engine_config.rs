@@ -192,7 +192,7 @@ fn zero_lifted_cache_budget_disables_retention_without_disabling_queries()
 
     let reader = engine.query_reader()?;
     let function = reader
-        .function_id_at(entry)?
+        .function_at(entry)?
         .ok_or("fixture entry function missing")?;
 
     let first_pcode = reader.pcode(function)?.ok_or("PCode missing")?;

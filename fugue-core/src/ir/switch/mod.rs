@@ -6,8 +6,8 @@ use crate::ir::{
 };
 use crate::storage::entities::schema::{ENTITY_KEY_SWITCH_ID, ENTITY_SWITCH_ID};
 use crate::storage::entities::{Entity, EntityId, EntityKey, EntityKeyId, MutableEntity};
+use crate::storage::schema::bitflags::archived_bitflags;
 use crate::types::Confidence;
-use crate::types::common::archived_bitflags;
 
 mod table;
 pub(crate) use table::{ATTRIBUTE_SWITCH_CACHE_SIZE, DEFAULT_SWITCH_CACHE_BYTES};
@@ -157,18 +157,6 @@ impl Switch {
         self.default.is_some()
     }
 
-    pub fn add_case(&mut self, case: SwitchCase) {
-        self.cases.push(case);
-    }
-
-    pub fn mark_truncated(&mut self) {
-        self.properties.insert(SwitchProperties::TRUNCATED);
-    }
-
-    pub fn mark_override(&mut self) {
-        self.properties.insert(SwitchProperties::OVERRIDE);
-    }
-
     pub fn targets(&self) -> impl Iterator<Item = &AddressWithContext> + '_ {
         self.cases
             .iter()
@@ -195,6 +183,18 @@ impl Switch {
             .with_origin(ReferenceOrigin::Derived)
         });
         flow.chain(data)
+    }
+
+    pub fn add_case(&mut self, case: SwitchCase) {
+        self.cases.push(case);
+    }
+
+    pub fn mark_truncated(&mut self) {
+        self.properties.insert(SwitchProperties::TRUNCATED);
+    }
+
+    pub fn mark_override(&mut self) {
+        self.properties.insert(SwitchProperties::OVERRIDE);
     }
 }
 

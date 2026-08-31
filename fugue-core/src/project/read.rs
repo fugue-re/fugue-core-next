@@ -16,6 +16,10 @@ impl ReadSet {
         Self::default()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.unbounded.is_empty() && self.bounded.is_empty()
+    }
+
     pub fn record(&mut self, kinds: ChangeKinds, range: AddressRange) -> bool {
         let kinds = kinds.difference(self.unbounded);
         if kinds.is_empty() {
@@ -99,10 +103,6 @@ impl ReadSet {
         self.bounded
             .iter()
             .fold(self.unbounded, |kinds, (observed, _)| kinds | *observed)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.unbounded.is_empty() && self.bounded.is_empty()
     }
 
     pub fn merge(&mut self, other: &Self) -> bool {

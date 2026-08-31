@@ -134,11 +134,11 @@ impl FunctionRecoveryPatternMatcher {
     }
 
     fn analyse_space(
-        &mut self,
+        &self,
         project: &ProjectView<'_>,
         state: &mut FunctionDiscoveryContext,
         space_id: AddressSpaceId,
-    ) -> Result<(), AnalysisError> {
+    ) {
         let segments = project.segments();
         let available = state
             .available_ranges(space_id)
@@ -146,7 +146,7 @@ impl FunctionRecoveryPatternMatcher {
 
         if available.is_empty() {
             tracing::debug!("no gaps to analyse");
-            return Ok(());
+            return;
         }
 
         let arch = project.arch();
@@ -167,7 +167,7 @@ impl FunctionRecoveryPatternMatcher {
                 available,
                 |range_in_space, bytes| {
                     for pat in self.patterns.iter() {
-                        for (range, ctx, confidence) in pat.matches(bytes) {
+                        for (range, context, confidence) in pat.matches(bytes) {
                             let start =
                                 Address::new(space_id, *range_in_space.start() + range.start);
                             let Some(matched) =
@@ -186,7 +186,7 @@ impl FunctionRecoveryPatternMatcher {
                                 continue;
                             }
 
-                            let ctx = ctx
+                            let context = context
                                 .variables()
                                 .filter_map(|(var, val)| {
                                     let bits = language.context_variable_by_name(var)?;
@@ -195,19 +195,17 @@ impl FunctionRecoveryPatternMatcher {
                                 .collect::<ContextSet>();
 
                             tracing::debug!(
-                                "adding candidate at {start} with context {ctx:?} (confidence: {confidence})"
+                                "adding candidate at {start} with context {context:?} (confidence: {confidence})"
                             );
 
                             state.add_candidate(AddressWithContext::new_with(
-                                start, ctx, confidence,
+                                start, context, confidence,
                             ));
                         }
                     }
                 },
             );
         }
-
-        Ok(())
     }
 }
 
@@ -221,7 +219,7 @@ impl AnalysisPass<FunctionDiscoveryContext> for FunctionRecoveryPatternMatcher {
         let spaces = segments.spaces();
 
         for space in spaces.map(|s| s.id()) {
-            self.analyse_space(project, state, space)?;
+            self.analyse_space(project, state, space);
         }
 
         Ok(())

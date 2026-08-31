@@ -2,7 +2,7 @@ use object::elf::{R_386_32, R_386_32PLT, R_386_GLOB_DAT, R_386_JMP_SLOT, R_386_R
 use object::read::elf::FileHeader;
 use object::{ReadRef, Relocation, RelocationKind};
 
-use super::ElfSegmentRelocator;
+use super::{ElfSegmentRelocator, elf_relocation_type};
 use crate::loader::ImageSegmentContents;
 
 impl<'data, 'file, Elf, R> ElfSegmentRelocator<'data, 'file, Elf, R>
@@ -23,7 +23,7 @@ where
             return;
         }
 
-        let Some(reloc_type) = self.elf_relocation_type(reloc) else {
+        let Some(reloc_type) = elf_relocation_type(reloc) else {
             return;
         };
 

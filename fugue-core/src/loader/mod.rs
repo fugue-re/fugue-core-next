@@ -17,8 +17,8 @@ use crate::types::{AttributeMap, BytesOrMapping};
 pub(crate) mod elf;
 pub use elf::extensions::{
     AnalysisContext as ElfAnalysisContext, ArchResolver as ElfArchResolver,
-    FunctionRecoveryHandler as ElfFunctionRecoveryHandler, ImageContext as ElfImageContext,
-    RelocationContext as ElfRelocationContext, RelocationHandler as ElfRelocationHandler,
+    FunctionRecoveryExtension as ElfFunctionRecoveryExtension, ImageContext as ElfImageContext,
+    RelocationContext as ElfRelocationContext, RelocationExtension as ElfRelocationExtension,
 };
 pub use elf::{
     ATTRIBUTE_LOAD_HEADERS as ATTRIBUTE_ELF_LOAD_HEADERS,
@@ -41,8 +41,8 @@ pub(crate) use image::{ImageBankLayout, ImageCoveredRegions, ImageRegionBankMap}
 pub(crate) mod pe;
 pub use pe::extensions::{
     AnalysisContext as PeAnalysisContext, ArchResolver as PeArchResolver,
-    FunctionRecoveryHandler as PeFunctionRecoveryHandler, ImageContext as PeImageContext,
-    RelocationContext as PeRelocationContext, RelocationHandler as PeRelocationHandler,
+    FunctionRecoveryExtension as PeFunctionRecoveryExtension, ImageContext as PeImageContext,
+    RelocationContext as PeRelocationContext, RelocationExtension as PeRelocationExtension,
 };
 pub use pe::{
     ATTRIBUTE_LOAD_HEADERS as ATTRIBUTE_PE_LOAD_HEADERS, ATTRIBUTE_PERMISSIVE, PE_EXPORT_SELECTOR,
@@ -51,6 +51,9 @@ pub use pe::{
 
 pub(crate) mod shellcode;
 pub use shellcode::Shellcode;
+
+pub(crate) mod thunk;
+pub use thunk::{ExternalThunkLayout, ExternalThunkLayoutError};
 
 #[derive(Debug, Error)]
 pub enum LoaderError {
@@ -175,18 +178,6 @@ impl LoadableMetadata {
         }
     }
 
-    fn compute_hashes(bytes: &[u8]) -> ([u8; 16], [u8; 32]) {
-        let mut md5 = md5::Md5::new();
-        let mut sha256 = sha2::Sha256::new();
-
-        for chunk in bytes.chunks(Self::BLOCK_SIZE) {
-            md5.update(chunk);
-            sha256.update(chunk);
-        }
-
-        (md5.finalize().into(), sha256.finalize().into())
-    }
-
     /// Returns the original path of the loadable object, if any.
     pub fn path(&self) -> Option<&str> {
         self.path.as_deref()
@@ -195,11 +186,6 @@ impl LoadableMetadata {
     /// Sets the path of the loadable object.
     pub fn set_path(&mut self, path: impl Into<String>) {
         self.path = Some(path.into());
-    }
-
-    /// Clears the path of the loadable object.
-    pub fn clear_path(&mut self) {
-        self.path = None;
     }
 
     /// Sets the path of the loadable object.
@@ -218,14 +204,31 @@ impl LoadableMetadata {
         self.sha256
     }
 
+    /// Returns the loader version string.
+    pub fn loader(&self) -> &str {
+        &self.loader
+    }
+
+    /// Clears the path of the loadable object.
+    pub fn clear_path(&mut self) {
+        self.path = None;
+    }
+
     /// Returns the default (strongest) hash of the loadable object.
     pub fn digest(&self) -> [u8; 32] {
         self.sha256()
     }
 
-    /// Returns the loader version string.
-    pub fn loader(&self) -> &str {
-        &self.loader
+    fn compute_hashes(bytes: &[u8]) -> ([u8; 16], [u8; 32]) {
+        let mut md5 = md5::Md5::new();
+        let mut sha256 = sha2::Sha256::new();
+
+        for chunk in bytes.chunks(Self::BLOCK_SIZE) {
+            md5.update(chunk);
+            sha256.update(chunk);
+        }
+
+        (md5.finalize().into(), sha256.finalize().into())
     }
 }
 

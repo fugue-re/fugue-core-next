@@ -3,8 +3,8 @@ use std::borrow::Borrow;
 use bitflags::bitflags;
 use clone_dyn::clone_dyn;
 
-use crate::arch::BytesProperties;
-use crate::ir::{Endian, ExternFunctionTemplate, RawAddress, Symbol};
+use crate::arch::{BytesProperties, ExternalThunkTemplate};
+use crate::ir::{Endian, RawAddress, Symbol};
 use crate::lifter::{
     ContextHint, ContextSet, Disassembler, Language, Lifter, LiftingContext, Varnode,
 };
@@ -119,7 +119,7 @@ pub trait Arch: Send + Sync + 'static {
         self.canonicalise_address(addr)
     }
 
-    fn external_function_template(&self) -> ExternFunctionTemplate;
+    fn external_thunk_template(&self) -> ExternalThunkTemplate;
 
     fn flags(&self) -> &[Flag] {
         &[]
@@ -134,7 +134,7 @@ pub trait Arch: Send + Sync + 'static {
     }
 
     #[allow(unused)]
-    fn is_halt_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
+    fn is_halt_intrinsic(&self, user_op: u16, args: &[Varnode]) -> bool {
         false
     }
 
@@ -157,17 +157,17 @@ pub trait Arch: Send + Sync + 'static {
     }
 
     #[allow(unused)]
-    fn is_service_call(&self, op: u16, args: &[Varnode]) -> bool {
+    fn is_service_call(&self, user_op: u16, args: &[Varnode]) -> bool {
         false
     }
 
     #[allow(unused)]
-    fn is_skip_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
+    fn is_skip_intrinsic(&self, user_op: u16, args: &[Varnode]) -> bool {
         false
     }
 
     #[allow(unused)]
-    fn is_trap_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
+    fn is_trap_intrinsic(&self, user_op: u16, args: &[Varnode]) -> bool {
         false
     }
 

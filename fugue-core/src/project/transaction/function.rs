@@ -140,7 +140,7 @@ impl ProjectTransaction<'_> {
         })
     }
 
-    pub fn set_function_properties(
+    pub fn update_function_properties(
         &mut self,
         entry: Address,
         properties: FunctionProperties,

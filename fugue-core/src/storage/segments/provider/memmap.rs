@@ -1,15 +1,17 @@
 use std::fs::{self, File, OpenOptions};
 use std::io;
-use std::ops::RangeInclusive;
+use std::ops::{Range, RangeInclusive};
 use std::path::{Path, PathBuf};
 
 use fugue_core_derive::SegmentStorageProvider;
 use memmap2::MmapMut;
 use range_set_blaze::RangeSetBlaze;
+#[allow(deprecated)]
+use range_set_blaze::Rog;
 use thiserror::Error;
 
 use super::{
-    SegmentRangeOverlap, SegmentStorageProvider, SegmentStorageProviderFromSegmentRange,
+    SegmentStorageProvider, SegmentStorageProviderFromSegmentRange,
     SegmentStorageProviderFromStorage, SegmentStorageProviderId, SegmentView,
 };
 use crate::ir::{Address, AddressRangeExt};
@@ -20,6 +22,45 @@ use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
 
 const PROJECT_MEMORY_MAPPING_DATA: &str = "segment.data.bin";
 const PROJECT_MEMORY_MAPPING_META: &str = "segment.data.meta";
+
+#[derive(Default)]
+struct WrittenExtents {
+    ranges: RangeSetBlaze<usize>,
+}
+
+impl WrittenExtents {
+    fn iter(&self) -> impl Iterator<Item = Range<usize>> + '_ {
+        self.ranges
+            .ranges()
+            .map(|range| *range.start()..range.end().saturating_add(1))
+    }
+
+    #[allow(deprecated)]
+    fn run_at(&self, offset: usize) -> Option<Range<usize>> {
+        match self.ranges.rogs_get(offset) {
+            Rog::Range(range) => Some(*range.start()..range.end().saturating_add(1)),
+            Rog::Gap(_) => None,
+        }
+    }
+
+    #[allow(deprecated)]
+    fn runs_in(&self, range: Range<usize>) -> impl Iterator<Item = Range<usize>> + '_ {
+        let rogs = (!range.is_empty()).then(|| self.ranges.rogs_range(range.start..=range.end - 1));
+
+        rogs.into_iter().flatten().filter_map(|rog| match rog {
+            Rog::Range(range) => Some(*range.start()..range.end().saturating_add(1)),
+            Rog::Gap(_) => None,
+        })
+    }
+
+    fn insert(&mut self, range: Range<usize>) {
+        if range.is_empty() {
+            return;
+        }
+
+        self.ranges.ranges_insert(range.start..=range.end - 1);
+    }
+}
 
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 struct PackExtent {
@@ -82,7 +123,7 @@ impl ExtentPlacement {
 )]
 pub struct MemoryMappedSegmentStorage<const PERSISTENCE: StoragePersistence> {
     backing: MmapMut,
-    written: RangeSetBlaze<usize>,
+    written: WrittenExtents,
     project: PathBuf,
 }
 
@@ -172,7 +213,7 @@ impl<const PERSISTENCE: StoragePersistence> MemoryMappedSegmentStorage<PERSISTEN
 
         Ok(Self {
             backing,
-            written: RangeSetBlaze::new(),
+            written: WrittenExtents::default(),
             project: project.to_owned(),
         })
     }
@@ -208,10 +249,8 @@ impl<const PERSISTENCE: StoragePersistence> MemoryMappedSegmentStorage<PERSISTEN
         let backing = unsafe { MmapMut::map_mut(&file) }
             .map_err(MemoryMappedSegmentStorageError::CreateMapping)?;
 
-        let mut written = RangeSetBlaze::new();
-        if file_len > 0 {
-            written.ranges_insert(0..=file_len as usize - 1);
-        }
+        let mut written = WrittenExtents::default();
+        written.insert(0..file_len as usize);
 
         Ok(Self {
             backing,
@@ -234,7 +273,7 @@ impl<const PERSISTENCE: StoragePersistence> MemoryMappedSegmentStorage<PERSISTEN
 
         let logical_size = metadata.logical_size.to_native();
 
-        let mut written = RangeSetBlaze::new();
+        let mut written = WrittenExtents::default();
         let mut placements = Vec::with_capacity(metadata.extents.len());
         let mut compacted = 0usize;
         for extent in metadata.extents.iter() {
@@ -246,9 +285,7 @@ impl<const PERSISTENCE: StoragePersistence> MemoryMappedSegmentStorage<PERSISTEN
             })?;
             placements.push(ExtentPlacement::new(offset, compacted, size));
             compacted += size;
-            if size > 0 {
-                written.ranges_insert(offset..=offset + size - 1);
-            }
+            written.insert(offset..offset + size);
         }
 
         file.set_len(logical_size)
@@ -262,12 +299,12 @@ impl<const PERSISTENCE: StoragePersistence> MemoryMappedSegmentStorage<PERSISTEN
 
         let dirty_end = compacted;
         let mut cursor = 0usize;
-        for range in written.ranges() {
-            let start = (*range.start()).min(dirty_end);
+        for range in written.iter() {
+            let start = range.start.min(dirty_end);
             if cursor < start {
                 backing[cursor..start].fill(0);
             }
-            cursor = cursor.max(range.end().saturating_add(1));
+            cursor = cursor.max(range.end);
             if cursor >= dirty_end {
                 break;
             }
@@ -293,9 +330,9 @@ impl<const PERSISTENCE: StoragePersistence> MemoryMappedSegmentStorage<PERSISTEN
 
         let mut extents = Vec::new();
         let mut compacted = 0usize;
-        for range in self.written.ranges() {
-            let offset = *range.start();
-            let size = (*range.end() - *range.start()).saturating_add(1);
+        for range in self.written.iter() {
+            let offset = range.start;
+            let size = range.end - range.start;
             if offset != compacted {
                 self.backing.copy_within(offset..offset + size, compacted);
             }
@@ -435,9 +472,7 @@ impl<const PERSISTENCE: StoragePersistence> SegmentStorageProvider
 
         self.backing[offset..offset + write_size].copy_from_slice(&bytes[..write_size]);
 
-        if write_size > 0 {
-            self.written.ranges_insert(offset..=offset + write_size - 1);
-        }
+        self.written.insert(offset..offset + write_size);
 
         Ok(write_size)
     }
@@ -454,19 +489,11 @@ impl<const PERSISTENCE: StoragePersistence> SegmentStorageProvider
             .ok_or(SegmentStorageError::InvalidSize)?;
 
         let mut view = SegmentView::new(n as u64);
-        for run in self.written.ranges() {
-            let run_start = *run.start();
-            if run_start >= end {
-                break;
-            }
-            let run_end = run.end().saturating_add(1);
-            if let Some(o) = SegmentRangeOverlap::new(run_start, run_end - run_start, offset, end) {
-                let window = o.window();
-                view.push(
-                    o.window_offset() as u64,
-                    &self.backing[offset + window.start..offset + window.end],
-                );
-            }
+        for run in self.written.runs_in(offset..end) {
+            view.push(
+                (run.start - offset) as u64,
+                &self.backing[run.start..run.end],
+            );
         }
 
         Ok(view)
@@ -479,18 +506,9 @@ impl<const PERSISTENCE: StoragePersistence> SegmentStorageProvider
         }
 
         let mut view = SegmentView::default();
-        for run in self.written.ranges() {
-            let run_start = *run.start();
-            let run_end = run.end().saturating_add(1);
-            if run_end <= offset {
-                continue;
-            }
-            if run_start > offset {
-                break;
-            }
-            view.push(0, &self.backing[offset..run_end]);
-            view.set_size((run_end - offset) as u64);
-            break;
+        if let Some(run) = self.written.run_at(offset) {
+            view.push(0, &self.backing[offset..run.end]);
+            view.set_size((run.end - offset) as u64);
         }
 
         Ok(view)
@@ -511,6 +529,31 @@ impl<const PERSISTENCE: StoragePersistence> SegmentStorageProvider
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn test_sparse_view_queries_written_extents() -> Result<(), SegmentStorageError> {
+        let dir = tempfile::tempdir().map_err(SegmentStorageError::backing)?;
+        let mut store = MemoryMappedSegmentStorage::<{ TRANSIENT }>::with_size(&dir, 0x40)?;
+        store.write_bytes(0x10, b"ab")?;
+        store.write_bytes(0x12, b"cd")?;
+        store.write_bytes(0x20, b"wxyz")?;
+
+        let view = store.view_bytes(0x11, 0x12)?;
+        assert_eq!(view.size(), 0x12);
+        assert_eq!(view.chunks().len(), 2);
+        assert_eq!(view.chunks()[0].offset(), 0);
+        assert_eq!(view.chunks()[0].bytes(), b"bcd");
+        assert_eq!(view.chunks()[1].offset(), 0x0f);
+        assert_eq!(view.chunks()[1].bytes(), b"wxy");
+
+        let run = store.view_bytes_from(0x11)?;
+        assert_eq!(run.as_contiguous(), Some(&b"bcd"[..]));
+
+        let gap = store.view_bytes_from(0x18)?;
+        assert!(gap.is_empty());
+        assert!(gap.chunks().is_empty());
+        Ok(())
+    }
 
     #[test]
     fn test_pack_roundtrip_sparse() -> Result<(), SegmentStorageError> {

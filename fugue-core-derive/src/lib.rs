@@ -6,20 +6,11 @@ use syn::{
     Result as SynResult, Token, Type, parse_macro_input,
 };
 
+#[derive(Default)]
 struct ProviderAttr {
     concrete: Option<Type>,
     tag: Option<String>,
     persistent: Option<bool>,
-}
-
-impl Default for ProviderAttr {
-    fn default() -> Self {
-        Self {
-            concrete: None,
-            tag: None,
-            persistent: None,
-        }
-    }
 }
 
 impl ProviderAttr {

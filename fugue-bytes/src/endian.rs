@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::fmt;
 
 #[derive(
     Debug,
@@ -20,8 +20,8 @@ pub enum Endian {
     Little,
 }
 
-impl Display for Endian {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for Endian {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(if self.is_big() { "BE" } else { "LE" })
     }
 }

@@ -2,6 +2,7 @@ use std::fmt::{self, Display, Formatter};
 use std::marker::PhantomData;
 use std::ops::{Bound, Deref, DerefMut};
 use std::sync::Arc;
+use std::{iter, thread};
 
 use bytes::Bytes;
 use quick_cache::Weighter;
@@ -143,7 +144,7 @@ where
     E: MutableEntity,
 {
     fn drop(&mut self) {
-        if std::thread::panicking() {
+        if thread::panicking() {
             return;
         }
 
@@ -266,7 +267,7 @@ where
             WriteSink::Worker(WriteBackWorker::new(storage.clone())?)
         };
 
-        Ok(Self::build(storage, sink, capacity))
+        Ok(Self::new_with(storage, sink, capacity))
     }
 
     pub fn with_worker(
@@ -274,7 +275,7 @@ where
         worker: Arc<WriteBackWorker>,
         capacity: usize,
     ) -> Self {
-        Self::build(storage, WriteSink::Worker(worker), capacity)
+        Self::new_with(storage, WriteSink::Worker(worker), capacity)
     }
 
     pub fn from_storage(
@@ -288,7 +289,7 @@ where
         }
     }
 
-    fn build(storage: EntityStorage, sink: WriteSink, capacity: usize) -> Self {
+    fn new_with(storage: EntityStorage, sink: WriteSink, capacity: usize) -> Self {
         let weight_capacity = capacity.max(1) as u64;
         let estimated_items = (capacity / ENTITY_CACHE_ESTIMATED_ENTRY_SIZE).max(1);
         let entities = Cache::with_weighter(estimated_items, weight_capacity, ByteWeighter);
@@ -329,6 +330,10 @@ where
         Ok(Some(self.admit(key.clone(), Arc::new(entity), weight)))
     }
 
+    pub fn get(&self, key: &K) -> Option<CachedRef<'_, E>> {
+        self.try_get(key).unwrap_or_else(|error| error.into_fatal())
+    }
+
     fn admit(&self, key: K, entity: Arc<E>, weight: u32) -> CachedRef<'_, E> {
         self.entities.insert(
             key,
@@ -339,10 +344,6 @@ where
         );
 
         CachedRef::from_arc(entity)
-    }
-
-    pub fn get(&self, key: &K) -> Option<CachedRef<'_, E>> {
-        self.try_get(key).unwrap_or_else(|error| error.into_fatal())
     }
 
     pub fn try_insert(
@@ -521,7 +522,7 @@ where
         let mut pending = pending.into_iter().peekable();
         let mut buffered = None;
 
-        std::iter::from_fn(move || {
+        iter::from_fn(move || {
             loop {
                 if buffered.is_none() {
                     buffered = backing.next();

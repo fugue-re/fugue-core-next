@@ -11,7 +11,7 @@ use crate::ir::{
 };
 use crate::storage::entities::schema::{ENTITY_FUNCTION_ID, ENTITY_KEY_FUNCTION_ID};
 use crate::storage::entities::{Entity, EntityId, EntityKey, EntityKeyId, MutableEntity};
-use crate::types::common::archived_bitflags;
+use crate::storage::schema::bitflags::archived_bitflags;
 use crate::types::{Confidence, Revision};
 
 pub(crate) mod frame;
@@ -169,10 +169,14 @@ impl Function {
         self.blocks.iter().map(|(addr, blk)| (*addr, *blk))
     }
 
-    pub fn has_successors(&self, block: CodeBlockId) -> bool {
-        self.edges
-            .binary_search_by_key(&block, |(source, _)| *source)
-            .is_ok()
+    pub fn blocks_at(&self, address: Address) -> impl ExactSizeIterator<Item = CodeBlockId> + '_ {
+        let start = self
+            .blocks
+            .partition_point(|(candidate, _)| *candidate < address);
+        let end = self
+            .blocks
+            .partition_point(|(candidate, _)| *candidate <= address);
+        self.blocks[start..end].iter().map(|(_, block)| *block)
     }
 
     pub(crate) fn edges(&self) -> impl ExactSizeIterator<Item = (CodeBlockId, CodeBlockId)> + '_ {
@@ -268,12 +272,51 @@ impl Function {
         self
     }
 
-    pub fn clear_name(&mut self) {
-        self.name = None;
+    pub fn has_successors(&self, block: CodeBlockId) -> bool {
+        self.edges
+            .binary_search_by_key(&block, |(source, _)| *source)
+            .is_ok()
+    }
+
+    pub fn successors(
+        &self,
+        block: CodeBlockId,
+    ) -> impl ExactSizeIterator<Item = CodeBlockId> + '_ {
+        let start = self.edges.partition_point(|(source, _)| *source < block);
+        let end = self.edges.partition_point(|(source, _)| *source <= block);
+        self.edges[start..end]
+            .iter()
+            .map(|(_, successor)| *successor)
     }
 
     pub fn is_exit_block(&self, block: CodeBlockId) -> bool {
         self.blocks.iter().any(|(_, candidate)| *candidate == block) && !self.has_successors(block)
+    }
+
+    pub fn flow_targets<'a>(
+        &'a self,
+        blocks: &'a CodeBlockTable,
+    ) -> impl Iterator<Item = FlowTarget> + 'a {
+        let mut ids = self.blocks();
+        let mut pending = SmallVec::<[FlowTarget; 2]>::new().into_iter();
+
+        iter::from_fn(move || {
+            loop {
+                if let Some(target) = pending.next() {
+                    return Some(self.classify_flow_target(target));
+                }
+
+                let block = ids.find_map(|(_, id)| blocks.get_by_id(id))?;
+                pending = block
+                    .flow_targets()
+                    .collect::<SmallVec<[FlowTarget; 2]>>()
+                    .into_iter();
+            }
+        })
+    }
+
+    pub fn clear_name(&mut self) {
+        self.name = None;
     }
 
     pub fn add_block(&mut self, address: Address, block: CodeBlockId) {
@@ -290,27 +333,6 @@ impl Function {
         for (address, block) in blocks {
             self.add_block(address, block);
         }
-    }
-
-    pub fn blocks_at(&self, address: Address) -> impl ExactSizeIterator<Item = CodeBlockId> + '_ {
-        let start = self
-            .blocks
-            .partition_point(|(candidate, _)| *candidate < address);
-        let end = self
-            .blocks
-            .partition_point(|(candidate, _)| *candidate <= address);
-        self.blocks[start..end].iter().map(|(_, block)| *block)
-    }
-
-    pub fn successors(
-        &self,
-        block: CodeBlockId,
-    ) -> impl ExactSizeIterator<Item = CodeBlockId> + '_ {
-        let start = self.edges.partition_point(|(source, _)| *source < block);
-        let end = self.edges.partition_point(|(source, _)| *source <= block);
-        self.edges[start..end]
-            .iter()
-            .map(|(_, successor)| *successor)
     }
 
     fn reachable_blocks(
@@ -508,28 +530,6 @@ impl Function {
             target = FlowTarget::new(target.from(), target.to(), FlowKind::TailCallBranch);
         }
         target
-    }
-
-    pub fn flow_targets<'a>(
-        &'a self,
-        blocks: &'a CodeBlockTable,
-    ) -> impl Iterator<Item = FlowTarget> + 'a {
-        let mut ids = self.blocks();
-        let mut pending = SmallVec::<[FlowTarget; 2]>::new().into_iter();
-
-        iter::from_fn(move || {
-            loop {
-                if let Some(target) = pending.next() {
-                    return Some(self.classify_flow_target(target));
-                }
-
-                let block = ids.find_map(|(_, id)| blocks.get_by_id(id))?;
-                pending = block
-                    .flow_targets()
-                    .collect::<SmallVec<[FlowTarget; 2]>>()
-                    .into_iter();
-            }
-        })
     }
 
     pub(crate) fn flow_references(&self, blocks: &CodeBlockTable) -> Vec<Reference> {

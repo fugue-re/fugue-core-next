@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::fmt::Display;
+use std::fmt::{self, Display};
 use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 
@@ -14,7 +14,7 @@ pub enum BytesOrSlice<'a> {
 }
 
 impl Display for BytesOrSlice<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         Hex(self.as_slice()).fmt(f)
     }
 }
@@ -77,10 +77,9 @@ impl<'a> PartialEq for BytesOrSlice<'a> {
 
 impl<'a> Eq for BytesOrSlice<'a> {}
 
-#[allow(clippy::non_canonical_partial_ord_impl)]
 impl<'a> PartialOrd for BytesOrSlice<'a> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.as_slice().partial_cmp(other.as_slice())
+        Some(self.cmp(other))
     }
 }
 

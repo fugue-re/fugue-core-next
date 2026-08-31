@@ -18,6 +18,8 @@ use crate::storage::{PERSISTENT, StoragePersistence, TRANSIENT};
 use crate::types::any::Out;
 use crate::types::{AttributeMap, BytesOrSlice};
 
+pub(crate) mod cursor;
+
 pub(crate) mod dummy;
 pub use dummy::DummyEntityStorage;
 
@@ -118,10 +120,6 @@ impl EntityStorageError {
         Self::WriteBackPoisoned(message.into())
     }
 
-    pub fn is_write_back_poisoned(&self) -> bool {
-        matches!(self, Self::WriteBackPoisoned(_))
-    }
-
     pub fn unsupported<E: std::error::Error + Send + Sync + 'static>(err: E) -> Self {
         Self::Unsupported(anyhow::Error::from(err))
     }
@@ -131,6 +129,10 @@ impl EntityStorageError {
         M: std::fmt::Debug + std::fmt::Display + Send + Sync + 'static,
     {
         Self::Unsupported(anyhow::Error::msg(msg))
+    }
+
+    pub fn is_write_back_poisoned(&self) -> bool {
+        matches!(self, Self::WriteBackPoisoned(_))
     }
 
     pub(crate) fn into_fatal(self) -> ! {
@@ -232,6 +234,14 @@ impl EntityWriteBatch {
         }
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        self.writes.is_empty()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.writes.len()
+    }
+
     pub(crate) fn clear(&mut self) {
         self.writes.clear();
     }
@@ -249,14 +259,6 @@ impl EntityWriteBatch {
             rkyv::to_bytes::<rkyv::rancor::Error>(entity).map_err(EntityStorageError::encode)?;
         self.push(EntityWrite::insert_archived(E::ID.key_for(key), encoded));
         Ok(())
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.writes.is_empty()
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.writes.len()
     }
 
     pub(crate) fn push(&mut self, write: EntityWrite) {
@@ -303,6 +305,11 @@ impl Deref for EntityWriteBatch {
     }
 }
 
+/// A stable read view supplied by an entity storage provider.
+///
+/// All reads through one transaction must observe the same backing-store version. Providers that
+/// cannot supply that guarantee must return [`EntityStorageError::Unsupported`] from
+/// [`EntityStorageProvider::read_transaction`].
 pub trait EntityStorageReadTransaction {
     fn get(&self, key: &[u8]) -> Result<Option<BytesOrSlice<'_>>, EntityStorageError>;
     fn contains(&self, key: &[u8]) -> Result<bool, EntityStorageError>;
@@ -346,6 +353,12 @@ impl<'a> EntityReadTransaction<'a> {
     }
 }
 
+/// A staged entity write transaction.
+///
+/// Writes must remain unpublished until [`Self::commit`]. Dropping the transaction discards them,
+/// and a failed commit must not leave a partially admitted write set. Successful commits preserve
+/// the order in which writes were supplied. A backend may reject a commit when concurrent writes
+/// conflict with the transaction.
 pub trait EntityStorageWriteTransaction {
     fn insert(&mut self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError>;
     fn remove(&mut self, key: &[u8]) -> Result<(), EntityStorageError>;
@@ -463,6 +476,11 @@ enum BufferedEntityWrite {
     Remove(Bytes),
 }
 
+/// A write buffer for providers whose validated `insert` and `remove` operations are infallible.
+///
+/// This helper validates and owns each write before commit, but applies them through the provider
+/// one at a time. Providers that can fail while applying a validated write must use a native
+/// transaction so that a commit error can roll the whole write set back.
 pub struct BufferedEntityWriter<'a, S>
 where
     S: EntityStorageProvider + ?Sized,
@@ -816,8 +834,8 @@ impl EntityStorage {
                 result.and_then(|(key, value)| {
                     let key = EntityKeyPrefix::extract::<K, E>(key)
                         .ok_or(EntityStorageError::InvalidKeyFormat)?;
-                    let val = decode_entity::<E>(value.as_slice())?;
-                    Ok((key, val))
+                    let value = decode_entity::<E>(value.as_slice())?;
+                    Ok((key, value))
                 })
             })) as EntityIterator<'_, K, E>
         })
@@ -844,8 +862,8 @@ impl EntityStorage {
                 result.and_then(|(key, value)| {
                     let key = EntityKeyPrefix::extract::<K, E>(key)
                         .ok_or(EntityStorageError::InvalidKeyFormat)?;
-                    let val = decode_entity::<E>(value.as_slice())?;
-                    Ok((key, val))
+                    let value = decode_entity::<E>(value.as_slice())?;
+                    Ok((key, value))
                 })
             })) as EntityIterator<'_, K, E>
         })

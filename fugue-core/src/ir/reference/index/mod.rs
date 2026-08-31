@@ -113,6 +113,56 @@ impl ReferenceIndex {
         matches!(self, Self::Persistent(_))
     }
 
+    pub(crate) fn get(
+        &self,
+        from: Address,
+        target: ReferenceTarget,
+    ) -> Result<Option<Reference>, EntityStorageError> {
+        match self {
+            Self::Persistent(index) => index.get(from, target),
+            Self::Transient(index) => Ok(index.get(from, target)),
+        }
+    }
+
+    pub(crate) fn references_from(
+        &self,
+        from: Address,
+        after: Option<&Reference>,
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<Reference, EntityStorageError>> + '_>,
+        EntityStorageError,
+    > {
+        match self {
+            Self::Persistent(index) => Ok(Box::new(index.references_from(from, after)?)),
+            Self::Transient(index) => Ok(Box::new(index.references_from(from, after))),
+        }
+    }
+
+    pub(crate) fn references_to(
+        &self,
+        target: ReferenceTarget,
+        after: Option<&Reference>,
+    ) -> Result<
+        Box<dyn Iterator<Item = Result<Reference, EntityStorageError>> + '_>,
+        EntityStorageError,
+    > {
+        match self {
+            Self::Persistent(index) => Ok(Box::new(index.references_to(target, after)?)),
+            Self::Transient(index) => Ok(Box::new(index.references_to(target, after))),
+        }
+    }
+
+    pub(crate) fn references_in(
+        &self,
+        coverage: &AddressRangeSet,
+    ) -> Result<Vec<Reference>, EntityStorageError> {
+        let mut references = Vec::new();
+        for range in coverage.ranges() {
+            self.collect_range(range, &mut references)?;
+        }
+        Ok(references)
+    }
+
     pub(crate) fn insert(&mut self, reference: &Reference) -> Result<(), EntityStorageError> {
         match self {
             Self::Persistent(index) => index.insert(reference),
@@ -134,17 +184,6 @@ impl ReferenceIndex {
                 index.remove(from, target);
                 Ok(())
             }
-        }
-    }
-
-    pub(crate) fn get(
-        &self,
-        from: Address,
-        target: ReferenceTarget,
-    ) -> Result<Option<Reference>, EntityStorageError> {
-        match self {
-            Self::Persistent(index) => index.get(from, target),
-            Self::Transient(index) => Ok(index.get(from, target)),
         }
     }
 
@@ -186,34 +225,6 @@ impl ReferenceIndex {
         }
     }
 
-    pub(crate) fn references_from(
-        &self,
-        from: Address,
-        after: Option<&Reference>,
-    ) -> Result<
-        Box<dyn Iterator<Item = Result<Reference, EntityStorageError>> + '_>,
-        EntityStorageError,
-    > {
-        match self {
-            Self::Persistent(index) => Ok(Box::new(index.references_from(from, after)?)),
-            Self::Transient(index) => Ok(Box::new(index.references_from(from, after))),
-        }
-    }
-
-    pub(crate) fn references_to(
-        &self,
-        target: ReferenceTarget,
-        after: Option<&Reference>,
-    ) -> Result<
-        Box<dyn Iterator<Item = Result<Reference, EntityStorageError>> + '_>,
-        EntityStorageError,
-    > {
-        match self {
-            Self::Persistent(index) => Ok(Box::new(index.references_to(target, after)?)),
-            Self::Transient(index) => Ok(Box::new(index.references_to(target, after))),
-        }
-    }
-
     pub(crate) fn ensure_current<'a>(
         &mut self,
         functions: impl IntoIterator<Item = FunctionRef<'a>>,
@@ -238,17 +249,6 @@ impl ReferenceIndex {
             Self::Persistent(index) => index.mark_current(revision),
             Self::Transient(_) => Ok(()),
         }
-    }
-
-    pub(crate) fn references_in(
-        &self,
-        coverage: &AddressRangeSet,
-    ) -> Result<Vec<Reference>, EntityStorageError> {
-        let mut references = Vec::new();
-        for range in coverage.ranges() {
-            self.collect_range(range, &mut references)?;
-        }
-        Ok(references)
     }
 
     pub(crate) fn derived_kind_matches(

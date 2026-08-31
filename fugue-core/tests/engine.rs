@@ -30,8 +30,8 @@ use fugue_core::il::pcode::PCodeIr;
 use fugue_core::ir::{
     Address, AddressRange, AddressRangeSet, AddressTable, AddressWithContext, Endian, FlowKind,
     ProblemKind, ProblemScope, RawAddress, Reference, ReferenceOrigin, ReferenceProperties,
-    ReferenceTarget, SegmentProperties, Switch, SwitchCase, SwitchId, SwitchModel, SymbolEntry,
-    SymbolIndex, SymbolProperties, SymbolTableSelector,
+    ReferenceTarget, Switch, SwitchCase, SwitchId, SwitchModel, SymbolEntry, SymbolIndex,
+    SymbolProperties, SymbolTableSelector,
 };
 use fugue_core::lifter::{ContextSet, resolve_language};
 use fugue_core::loader::{
@@ -48,8 +48,9 @@ use fugue_core::storage::{
     EntityBytesWriteTransaction, EntityStorage, EntityStorageError, EntityStorageProvider,
     EntityStorageProviderFromLoadable, EntityStorageWriteTransaction, InMemoryEntityStorage,
     InMemorySegmentStorage, PERSISTENT, ProjectEntity, SegmentMappingBuilder, SegmentMappingFlags,
-    SegmentMappingKind, SegmentMappingProvenance, SegmentStorage, StorageContainer,
-    StoragePersistence, StorageProvider, StorageProviderError, TransientStorageProvider,
+    SegmentMappingKind, SegmentMappingProvenance, SegmentProperties, SegmentStorage,
+    StorageContainer, StoragePersistence, StorageProvider, StorageProviderError,
+    TransientStorageProvider,
 };
 #[cfg(feature = "sqlite")]
 use fugue_core::storage::{
@@ -1235,8 +1236,8 @@ fn test_recovery_requires_executable_cause_start() -> Result<(), Box<dyn Error>>
 
     let engine = AnalysisEngine::new(project)?;
     engine.analyse()?;
-    assert!(engine.query_reader()?.function_id_at(boundary)?.is_none());
-    assert!(engine.query_reader()?.function_id_at(data)?.is_none());
+    assert!(engine.query_reader()?.function_at(boundary)?.is_none());
+    assert!(engine.query_reader()?.function_at(data)?.is_none());
 
     let mut boundary_region = AddressRangeSet::new();
     boundary_region.insert_range(AddressRange::new(
@@ -1246,13 +1247,13 @@ fn test_recovery_requires_executable_cause_start() -> Result<(), Box<dyn Error>>
     ));
     engine.schedule_ranges(ChangeKinds::BYTES_WRITTEN, boundary_region)?;
     engine.analyse()?;
-    assert!(engine.query_reader()?.function_id_at(boundary)?.is_none());
+    assert!(engine.query_reader()?.function_at(boundary)?.is_none());
 
     let mut data_region = AddressRangeSet::new();
     data_region.insert(data);
     engine.schedule_ranges(ChangeKinds::BYTES_WRITTEN, data_region)?;
     engine.analyse()?;
-    assert!(engine.query_reader()?.function_id_at(data)?.is_none());
+    assert!(engine.query_reader()?.function_at(data)?.is_none());
 
     Ok(())
 }
@@ -1301,7 +1302,7 @@ fn test_function_boundary_retraction_reconciles_callers() -> Result<(), Box<dyn 
     }
     assert!(project.functions().get_by_address(target).is_none());
     recovery.set_commit_hook(DeferredFunctionCommit { entry: target });
-    recovery.config_mut().enable_commit_pending_functions(false);
+    recovery.config_mut().set_commit_pending_functions(false);
     recovery.add_candidate(target);
     recovery.analyse(&mut project)?;
 
@@ -1318,7 +1319,7 @@ fn test_function_boundary_retraction_reconciles_callers() -> Result<(), Box<dyn 
     );
     drop(function);
 
-    recovery.config_mut().enable_commit_pending_functions(true);
+    recovery.config_mut().set_commit_pending_functions(true);
     recovery.analyse(&mut project)?;
 
     assert!(project.functions().get_by_address(target).is_some());
@@ -1397,8 +1398,8 @@ fn test_function_recovery_bounds_candidate_instructions() -> Result<(), Box<dyn 
         .ok_or_else(|| io::Error::other("fixture entry missing"))?;
     let mut recovery = FunctionRecovery::new();
     let config = recovery.config_mut();
-    config.enable_segment_function_hints(false);
-    config.enable_symbol_table_function_hints(false);
+    config.set_segment_function_hints(false);
+    config.set_symbol_table_function_hints(false);
     config.set_max_function_insns(1);
 
     recovery.analyse(&mut project)?;
@@ -1428,8 +1429,8 @@ fn test_chunked_function_recovery_converges_after_reopen() -> Result<(), Box<dyn
     )?;
     let mut recovery = FunctionRecovery::new();
     let config = recovery.config_mut();
-    config.enable_segment_function_hints(false);
-    config.enable_symbol_table_function_hints(false);
+    config.set_segment_function_hints(false);
+    config.set_symbol_table_function_hints(false);
     recovery.set_chunk_function_limit(Some(1));
 
     recovery.analyse(&mut project)?;
@@ -1443,8 +1444,8 @@ fn test_chunked_function_recovery_converges_after_reopen() -> Result<(), Box<dyn
     )?;
     let mut resumed = FunctionRecovery::new();
     let config = resumed.config_mut();
-    config.enable_segment_function_hints(false);
-    config.enable_symbol_table_function_hints(false);
+    config.set_segment_function_hints(false);
+    config.set_symbol_table_function_hints(false);
     resumed.analyse(&mut reopened)?;
     assert!(!Analyser::has_pending_work(&resumed));
 
@@ -1452,8 +1453,8 @@ fn test_chunked_function_recovery_converges_after_reopen() -> Result<(), Box<dyn
     let mut clean = Project::new_transient(&loader)?;
     let mut clean_recovery = FunctionRecovery::new();
     let config = clean_recovery.config_mut();
-    config.enable_segment_function_hints(false);
-    config.enable_symbol_table_function_hints(false);
+    config.set_segment_function_hints(false);
+    config.set_symbol_table_function_hints(false);
     clean_recovery.analyse(&mut clean)?;
 
     assert!(clean.functions().len() > 1);
@@ -1845,7 +1846,7 @@ fn test_engine_ensure_lifted_materialises_requested_chain() -> Result<(), Box<dy
     let function = {
         let reader = engine.query_reader()?;
         reader
-            .function_id_at(entry)?
+            .function_at(entry)?
             .ok_or_else(|| io::Error::other("function ID missing after add"))?
     };
 
@@ -1908,7 +1909,7 @@ fn test_engine_ensure_lifted_cancelled_is_rejected_without_materialising()
 
     let reader = engine.query_reader()?;
     let function = reader
-        .function_id_at(entry)?
+        .function_at(entry)?
         .ok_or_else(|| io::Error::other("function ID missing after add"))?;
     let revision = reader.revision()?;
 
@@ -1953,7 +1954,7 @@ fn test_query_reader_lifted_reads_build_on_miss() -> Result<(), Box<dyn Error>> 
 
     let reader = engine.query_reader()?;
     let function = reader
-        .function_id_at(entry)?
+        .function_at(entry)?
         .ok_or_else(|| io::Error::other("function ID missing after add"))?;
 
     assert!(reader.project()?.pcode(function)?.is_none());
@@ -1976,7 +1977,7 @@ fn every_recovered_function_lifts_to_mcode() -> Result<(), Box<dyn Error>> {
 
     let reader = engine.query_reader()?;
     let restored_function = reader
-        .function_id_at(Address::from(0x10b70u64))?
+        .function_at(Address::from(0x10b70u64))?
         .ok_or_else(|| io::Error::other("RBP restoration fixture function missing"))?;
     let rbp_register = RegisterId::new(
         resolve_language("x86:LE:64")?
@@ -2085,7 +2086,7 @@ fn engine_pcode_materialisation_is_idempotent() -> Result<(), Box<dyn Error>> {
     let function = {
         let reader = engine.query_reader()?;
         reader
-            .function_id_at(entry)?
+            .function_at(entry)?
             .ok_or_else(|| io::Error::other("function ID missing after add"))?
     };
 
@@ -2100,7 +2101,7 @@ fn engine_pcode_materialisation_is_idempotent() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn test_engine_partial_write_rolls_back_without_materialising() -> Result<(), Box<dyn Error>> {
+fn test_engine_partial_write_is_rejected_without_materialising() -> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
     let address = project
@@ -2362,8 +2363,14 @@ fn test_engine_mapping_edits_materialise_changes() -> Result<(), Box<dyn Error>>
     let old_start = mapping.start();
     let old_size = mapping.size();
     let old_range = (mapping.start().raw_address(), mapping.last().raw_address());
-    let new_start = old_start
-        .checked_add(old_size + 0x1000)
+    let mapped_last = project
+        .segments()
+        .iter_views(DEFAULT_SPACE_ID)?
+        .map(|view| view.last())
+        .max()
+        .ok_or_else(|| io::Error::other("fixture mapping missing"))?;
+    let new_start = mapped_last
+        .checked_add(0x1000u64)
         .ok_or_else(|| io::Error::other("fixture mapping cannot be safely remapped"))?;
     let remapped_last = new_start
         .checked_add(old_size - 1)
@@ -2639,7 +2646,7 @@ fn test_into_project_returns_project_to_existing_persistence_lifecycle()
     engine.analyse()?;
 
     let reader = engine.query_reader()?;
-    assert!(reader.function_id_at(entry)?.is_some());
+    assert!(reader.function_at(entry)?.is_some());
     drop(reader);
 
     let mut project = engine.into_project()?;
@@ -2779,7 +2786,7 @@ fn test_drop_reopen_reads_explicitly_materialised_lifted() -> Result<(), Box<dyn
     engine.analyse()?;
     let reader = engine.query_reader()?;
     let function = reader
-        .function_id_at(entry)?
+        .function_at(entry)?
         .ok_or_else(|| io::Error::other("function ID missing after add"))?;
 
     engine.ensure_lifted(function, ECodeIr::FORM)?;
@@ -2803,7 +2810,7 @@ fn test_drop_reopen_reads_explicitly_materialised_lifted() -> Result<(), Box<dyn
     let engine = AnalysisEngine::new(reopened)?;
     let reader = engine.query_reader()?;
     let function = reader
-        .function_id_at(entry)?
+        .function_at(entry)?
         .ok_or_else(|| io::Error::other("reopened function ID missing"))?;
 
     let snapshot = reader.project()?;
@@ -2833,7 +2840,7 @@ fn test_drop_reopen_regenerates_query_views_without_persisting() -> Result<(), B
 
     let reader = engine.query_reader()?;
     let function = reader
-        .function_id_at(entry)?
+        .function_at(entry)?
         .ok_or_else(|| io::Error::other("function ID missing after analysis"))?;
     let pcode = reader
         .pcode(function)?
@@ -3318,17 +3325,29 @@ fn test_failed_storage_admission_keeps_revision_and_tables_unchanged() -> Result
         .ok_or_else(|| io::Error::other("fixture entry missing"))?
         .checked_add(0x4000_0000u64)
         .ok_or_else(|| io::Error::other("synthetic function address overflow"))?;
+    let write_address = writable_address(&project, 1)?;
+    let mut original = [0u8; 1];
+    project
+        .segments()
+        .read_bytes_exact(write_address, &mut original)?;
+    let patch = [original[0] ^ 0xff];
     let revision = project.revision();
 
     FAIL_ENTITY_COMMITS.store(true, Ordering::SeqCst);
     let mut transaction = project.transaction("storage failure test");
     transaction.add_function(one_block_function(entry, 1))?;
+    transaction.write_bytes(write_address, &patch)?;
     let result = transaction.commit();
     FAIL_ENTITY_COMMITS.store(false, Ordering::SeqCst);
 
     assert!(result.is_err());
     assert_eq!(project.revision(), revision);
     assert!(project.functions().get_by_address(entry).is_none());
+    let mut unchanged = [0u8; 1];
+    project
+        .segments()
+        .read_bytes_exact(write_address, &mut unchanged)?;
+    assert_eq!(unchanged, original);
 
     Ok(())
 }

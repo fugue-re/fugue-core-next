@@ -1,23 +1,24 @@
+use std::iter::{empty, from_fn};
 use std::ops::Bound;
+use std::sync::Arc;
 
 use bytes::Bytes;
+use crossbeam_skiplist::SkipMap;
+use crossbeam_skiplist::map::Range as SkipMapRange;
 use dashmap::DashMap;
-use dashmap::mapref::one::Ref as DashMapRef;
-use skiplist::SkipMap;
-use skiplist::skipmap::{Iter as SkipMapIter, Keys as SkipMapKeys};
 
 use super::schema::ENTITY_PREFIX_SIZE;
 use super::{
-    BufferedEntityWriter, EntityBytesAsIterator, EntityBytesIterator, EntityBytesReadTransaction,
+    EntityBytesAsIterator, EntityBytesIterator, EntityBytesReadTransaction,
     EntityBytesWriteTransaction, EntityKeyBytesIterator, EntityKeyPrefix, EntityStorageError,
-    EntityStorageProvider, EntityStorageProviderFromLoadable,
+    EntityStorageProvider, EntityStorageProviderFromLoadable, EntityStorageWriteTransaction,
 };
 use crate::loader::Loadable;
 use crate::storage::{StoragePersistence, TRANSIENT};
 use crate::types::{AttributeMap, BytesOrSlice};
 
 pub struct InMemoryEntityStorage {
-    data: DashMap<EntityKeyPrefix, SkipMap<Bytes, Bytes>>,
+    data: DashMap<EntityKeyPrefix, Arc<SkipMap<Bytes, Bytes>>>,
 }
 
 impl Default for InMemoryEntityStorage {
@@ -31,6 +32,15 @@ impl Default for InMemoryEntityStorage {
 impl InMemoryEntityStorage {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn map_for_prefix(&self, prefix: &EntityKeyPrefix) -> Option<Arc<SkipMap<Bytes, Bytes>>> {
+        self.data.get(prefix).map(|map| Arc::clone(map.value()))
+    }
+
+    fn map_for_insert(&self, prefix: EntityKeyPrefix) -> Arc<SkipMap<Bytes, Bytes>> {
+        self.map_for_prefix(&prefix)
+            .unwrap_or_else(|| Arc::clone(self.data.entry(prefix).or_default().value()))
     }
 }
 
@@ -48,12 +58,12 @@ impl EntityStorageProvider for InMemoryEntityStorage {
         let (prefix, key) =
             EntityKeyPrefix::split(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
 
-        let Some(map) = self.data.get(&prefix) else {
+        let Some(map) = self.map_for_prefix(&prefix) else {
             return Ok(None);
         };
 
         if let Some(value) = map.get(key) {
-            return Ok(Some(BytesOrSlice::from(value)));
+            return Ok(Some(BytesOrSlice::from(Bytes::clone(value.value()))));
         }
 
         Ok(None)
@@ -66,12 +76,12 @@ impl EntityStorageProvider for InMemoryEntityStorage {
         let (prefix, key) =
             EntityKeyPrefix::split(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
 
-        let Some(map) = self.data.get(&prefix) else {
+        let Some(map) = self.map_for_prefix(&prefix) else {
             return Ok(None);
         };
 
         if let Some(value) = map.get(key) {
-            return f(value.as_ref()).map(Some);
+            return f(value.value().as_ref()).map(Some);
         }
 
         Ok(None)
@@ -81,7 +91,7 @@ impl EntityStorageProvider for InMemoryEntityStorage {
         let (prefix, key) =
             EntityKeyPrefix::split(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
 
-        let mut map = self.data.entry(prefix).or_default();
+        let map = self.map_for_insert(prefix);
         map.insert(Bytes::copy_from_slice(key), value.into_bytes());
 
         Ok(())
@@ -91,7 +101,7 @@ impl EntityStorageProvider for InMemoryEntityStorage {
         let (prefix, key) =
             EntityKeyPrefix::split(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
 
-        if let Some(mut map) = self.data.get_mut(&prefix) {
+        if let Some(map) = self.map_for_prefix(&prefix) {
             map.remove(key);
         }
 
@@ -102,7 +112,7 @@ impl EntityStorageProvider for InMemoryEntityStorage {
         let (prefix, key) =
             EntityKeyPrefix::split(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
 
-        let Some(map) = self.data.get(&prefix) else {
+        let Some(map) = self.map_for_prefix(&prefix) else {
             return Ok(false);
         };
 
@@ -120,15 +130,15 @@ impl EntityStorageProvider for InMemoryEntityStorage {
         let prefix =
             EntityKeyPrefix::try_from(prefix).map_err(|_| EntityStorageError::InvalidKeyFormat)?;
 
-        let Some(map) = self.data.get(&prefix) else {
-            return Ok(Box::new(std::iter::empty()));
+        let Some(map) = self.map_for_prefix(&prefix) else {
+            return Ok(Box::new(empty()));
         };
+        let mut iter = InMemoryEntityIterator::from_map(map, Bound::Unbounded);
 
-        Ok(Box::new(InMemoryEntityKeyBytesIterator::new(
-            map,
-            prefix,
-            |iter| iter.keys(),
-        )))
+        Ok(Box::new(from_fn(move || {
+            iter.next_key()
+                .map(|key| Ok(BytesOrSlice::from(Bytes::from(prefix.join(key.as_ref())))))
+        })))
     }
 
     fn iter_prefix(&self, prefix: &[u8]) -> Result<EntityBytesIterator<'_>, EntityStorageError> {
@@ -139,15 +149,19 @@ impl EntityStorageProvider for InMemoryEntityStorage {
         let prefix =
             EntityKeyPrefix::try_from(prefix).map_err(|_| EntityStorageError::InvalidKeyFormat)?;
 
-        let Some(map) = self.data.get(&prefix) else {
-            return Ok(Box::new(std::iter::empty()));
+        let Some(map) = self.map_for_prefix(&prefix) else {
+            return Ok(Box::new(empty()));
         };
+        let mut iter = InMemoryEntityIterator::from_map(map, Bound::Unbounded);
 
-        Ok(Box::new(InMemoryEntityBytesIterator::new(
-            map,
-            prefix,
-            |iter| iter.iter(),
-        )))
+        Ok(Box::new(from_fn(move || {
+            iter.next_entry().map(|(key, value)| {
+                Ok((
+                    BytesOrSlice::from(Bytes::from(prefix.join(key.as_ref()))),
+                    BytesOrSlice::from(value),
+                ))
+            })
+        })))
     }
 
     fn iter_range(
@@ -173,22 +187,19 @@ impl EntityStorageProvider for InMemoryEntityStorage {
             Bound::Unbounded => Bound::Unbounded,
         };
 
-        let Some(map) = self.data.get(&prefix) else {
-            return Ok(Box::new(std::iter::empty()));
+        let Some(map) = self.map_for_prefix(&prefix) else {
+            return Ok(Box::new(empty()));
         };
+        let mut iter = InMemoryEntityIterator::from_map(map, start);
 
-        Ok(Box::new(InMemoryEntityBytesIterator::new(
-            map,
-            prefix,
-            |iter| {
-                let start = match &start {
-                    Bound::Included(key) => Bound::Included(key),
-                    Bound::Excluded(key) => Bound::Excluded(key),
-                    Bound::Unbounded => Bound::Unbounded,
-                };
-                iter.range(start, Bound::Unbounded)
-            },
-        )))
+        Ok(Box::new(from_fn(move || {
+            iter.next_entry().map(|(key, value)| {
+                Ok((
+                    BytesOrSlice::from(Bytes::from(prefix.join(key.as_ref()))),
+                    BytesOrSlice::from(value),
+                ))
+            })
+        })))
     }
 
     fn iter_prefix_as<'a, F, T>(
@@ -207,14 +218,16 @@ impl EntityStorageProvider for InMemoryEntityStorage {
         let prefix =
             EntityKeyPrefix::try_from(prefix).map_err(|_| EntityStorageError::InvalidKeyFormat)?;
 
-        let Some(map) = self.data.get(&prefix) else {
-            return Ok(Box::new(std::iter::empty()));
+        let Some(map) = self.map_for_prefix(&prefix) else {
+            return Ok(Box::new(empty()));
         };
+        let mut iter = InMemoryEntityIterator::from_map(map, Bound::Unbounded);
 
-        Ok(Box::new(
-            InMemoryEntityBytesIterator::new(map, prefix, |iter| iter.iter())
-                .map(move |res| res.and_then(|(k, e)| f(k.as_ref(), e.as_ref()))),
-        ))
+        Ok(Box::new(from_fn(move || {
+            let (key, value) = iter.next_entry()?;
+            let key = prefix.join(key.as_ref());
+            Some(f(key.as_ref(), value.as_ref()))
+        })))
     }
 
     fn read_transaction(&self) -> Result<EntityBytesReadTransaction<'_>, EntityStorageError> {
@@ -224,7 +237,7 @@ impl EntityStorageProvider for InMemoryEntityStorage {
     }
 
     fn write_transaction(&self) -> Result<EntityBytesWriteTransaction<'_>, EntityStorageError> {
-        Ok(Box::new(BufferedEntityWriter::new(self)))
+        Ok(Box::new(InMemoryEntityWriter::new(self)))
     }
 
     fn persistence(&self) -> StoragePersistence {
@@ -232,49 +245,88 @@ impl EntityStorageProvider for InMemoryEntityStorage {
     }
 }
 
-#[ouroboros::self_referencing]
-struct InMemoryEntityKeyBytesIterator<'a> {
-    entry: DashMapRef<'a, EntityKeyPrefix, SkipMap<Bytes, Bytes>>,
-    prefix: EntityKeyPrefix,
-    #[covariant]
-    #[borrows(entry)]
-    iter: SkipMapKeys<'this, Bytes, Bytes>,
+enum InMemoryEntityWrite {
+    Insert(EntityKeyPrefix, Bytes, Bytes),
+    Remove(EntityKeyPrefix, Bytes),
 }
 
-impl<'a> Iterator for InMemoryEntityKeyBytesIterator<'a> {
-    type Item = Result<BytesOrSlice<'a>, EntityStorageError>;
+struct InMemoryEntityWriter<'a> {
+    storage: &'a InMemoryEntityStorage,
+    writes: Vec<InMemoryEntityWrite>,
+}
 
-    fn next(&mut self) -> Option<Self::Item> {
-        let prefix = *self.borrow_prefix();
-        self.with_iter_mut(|iter| {
-            iter.next()
-                .map(|key| Ok(BytesOrSlice::from(Bytes::from(prefix.join(key.as_ref())))))
-        })
+impl<'a> InMemoryEntityWriter<'a> {
+    fn new(storage: &'a InMemoryEntityStorage) -> Self {
+        Self {
+            storage,
+            writes: Vec::new(),
+        }
+    }
+
+    fn split_key(key: &[u8]) -> Result<(EntityKeyPrefix, Bytes), EntityStorageError> {
+        let (prefix, key) =
+            EntityKeyPrefix::split(key).ok_or(EntityStorageError::InvalidKeyFormat)?;
+        Ok((prefix, Bytes::copy_from_slice(key)))
+    }
+}
+
+impl EntityStorageWriteTransaction for InMemoryEntityWriter<'_> {
+    fn insert(&mut self, key: &[u8], value: BytesOrSlice<'_>) -> Result<(), EntityStorageError> {
+        let (prefix, key) = Self::split_key(key)?;
+        self.writes
+            .push(InMemoryEntityWrite::Insert(prefix, key, value.into_bytes()));
+        Ok(())
+    }
+
+    fn remove(&mut self, key: &[u8]) -> Result<(), EntityStorageError> {
+        let (prefix, key) = Self::split_key(key)?;
+        self.writes.push(InMemoryEntityWrite::Remove(prefix, key));
+        Ok(())
+    }
+
+    fn commit(self: Box<Self>) -> Result<(), EntityStorageError> {
+        for write in self.writes {
+            match write {
+                InMemoryEntityWrite::Insert(prefix, key, value) => {
+                    self.storage.map_for_insert(prefix).insert(key, value);
+                }
+                InMemoryEntityWrite::Remove(prefix, key) => {
+                    if let Some(map) = self.storage.map_for_prefix(&prefix) {
+                        map.remove(&key);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
 #[ouroboros::self_referencing]
-struct InMemoryEntityBytesIterator<'a> {
-    entry: DashMapRef<'a, EntityKeyPrefix, SkipMap<Bytes, Bytes>>,
-    prefix: EntityKeyPrefix,
+struct InMemoryEntityIterator {
+    map: Arc<SkipMap<Bytes, Bytes>>,
     #[covariant]
-    #[borrows(entry)]
-    iter: SkipMapIter<'this, Bytes, Bytes>,
+    #[borrows(map)]
+    iter: SkipMapRange<'this, Bytes, (Bound<Bytes>, Bound<Bytes>), Bytes, Bytes>,
 }
 
-impl<'a> Iterator for InMemoryEntityBytesIterator<'a> {
-    type Item = Result<(BytesOrSlice<'a>, BytesOrSlice<'a>), EntityStorageError>;
+impl InMemoryEntityIterator {
+    fn from_map(map: Arc<SkipMap<Bytes, Bytes>>, start: Bound<Bytes>) -> Self {
+        InMemoryEntityIteratorBuilder {
+            map,
+            iter_builder: move |map| map.range((start, Bound::Unbounded)),
+        }
+        .build()
+    }
 
-    fn next(&mut self) -> Option<Self::Item> {
-        let prefix = *self.borrow_prefix();
+    fn next_entry(&mut self) -> Option<(Bytes, Bytes)> {
         self.with_iter_mut(|iter| {
-            iter.next().map(|(key, bytes)| {
-                Ok((
-                    BytesOrSlice::from(Bytes::from(prefix.join(key.as_ref()))),
-                    BytesOrSlice::from(bytes),
-                ))
-            })
+            iter.next()
+                .map(|entry| (Bytes::clone(entry.key()), Bytes::clone(entry.value())))
         })
+    }
+
+    fn next_key(&mut self) -> Option<Bytes> {
+        self.with_iter_mut(|iter| iter.next().map(|entry| Bytes::clone(entry.key())))
     }
 }
 
@@ -301,6 +353,63 @@ mod test {
 
     impl Entity for TestEntity {
         const ID: EntityId = EntityId::new(127);
+    }
+
+    #[test]
+    fn dropped_write_transaction_publishes_nothing() -> Result<(), EntityStorageError> {
+        let storage = EntityStorage::new(InMemoryEntityStorage::new());
+        let address = Address::from(1u64);
+        let mut writer = storage.write_transaction()?;
+        writer.insert(&address, &TestEntity::new(1))?;
+        drop(writer);
+
+        assert_eq!(storage.get::<_, TestEntity>(&address)?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn iterators_release_shard_guard_before_iteration() -> Result<(), EntityStorageError> {
+        let storage = InMemoryEntityStorage {
+            data: DashMap::with_shard_amount(2),
+        };
+        let prefix = EntityKeyPrefix::try_from([1, 1].as_slice())
+            .map_err(|_| EntityStorageError::InvalidKeyFormat)?;
+        let key = prefix.join(b"initial");
+        storage.insert(key.as_ref(), BytesOrSlice::from(b"value".as_slice()))?;
+
+        let guard = storage
+            .data
+            .get(&prefix)
+            .expect("the initial entity prefix exists");
+        let colliding_prefix = (0..=u16::MAX)
+            .map(u16::to_be_bytes)
+            .filter_map(|bytes| EntityKeyPrefix::try_from(bytes.as_slice()).ok())
+            .find(|candidate| *candidate != prefix && storage.data.try_entry(*candidate).is_none())
+            .expect("another entity prefix shares one of two shards");
+        drop(guard);
+
+        let entries = storage.iter_prefix(prefix.as_ref())?;
+        let key = colliding_prefix.join(b"prefix");
+        storage.insert(key.as_ref(), BytesOrSlice::from(b"value".as_slice()))?;
+        assert_eq!(entries.collect::<Result<Vec<_>, _>>()?.len(), 1);
+
+        let keys = storage.iter_prefix_keys(prefix.as_ref())?;
+        let key = colliding_prefix.join(b"keys");
+        storage.insert(key.as_ref(), BytesOrSlice::from(b"value".as_slice()))?;
+        assert_eq!(keys.collect::<Result<Vec<_>, _>>()?.len(), 1);
+
+        let start = prefix.join(b"initial");
+        let entries = storage.iter_range(prefix.as_ref(), Bound::Included(start.as_ref()))?;
+        let key = colliding_prefix.join(b"range");
+        storage.insert(key.as_ref(), BytesOrSlice::from(b"value".as_slice()))?;
+        assert_eq!(entries.collect::<Result<Vec<_>, _>>()?.len(), 1);
+
+        let entries =
+            storage.iter_prefix_as(prefix.as_ref(), |key, value| Ok((key.len(), value.len())))?;
+        let key = colliding_prefix.join(b"mapped");
+        storage.insert(key.as_ref(), BytesOrSlice::from(b"value".as_slice()))?;
+        assert_eq!(entries.collect::<Result<Vec<_>, _>>()?.len(), 1);
+        Ok(())
     }
 
     #[test]

@@ -3,8 +3,8 @@ use std::num::NonZeroU32;
 
 use crate::il::common::{IlIndexRange, il_id};
 use crate::lifter::{Language, Op, Varnode};
+use crate::storage::schema::bitflags::archived_bitflags;
 use crate::storage::segments::space::AddressSpaceId;
-use crate::types::common::archived_bitflags;
 
 #[derive(
     Debug,

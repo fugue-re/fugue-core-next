@@ -87,12 +87,12 @@ pub type CodeBlockRef<'a> = EntityRef<'a, CodeBlock>;
 pub(crate) type CodeBlockIds = SmallVec<[Id<CodeBlock>; 2]>;
 
 #[derive(Default)]
-pub(crate) struct CodeBlockIdsByStart {
+pub(crate) struct CodeBlockIdsByAddress {
     additional: FxHashMap<Address, CodeBlockIds>,
     first: FxHashMap<Address, CodeBlockId>,
 }
 
-impl CodeBlockIdsByStart {
+impl CodeBlockIdsByAddress {
     fn with_capacity(capacity: usize) -> Self {
         Self {
             additional: FxHashMap::default(),
@@ -104,29 +104,29 @@ impl CodeBlockIdsByStart {
         self.first.contains_key(&address)
     }
 
-    fn push(&mut self, address: Address, ids: CodeBlockIds) {
-        for id in ids {
-            self.insert(address, id);
-        }
-    }
-
-    pub(in crate::ir) fn append(&mut self, locations: Self) {
-        for (address, id) in locations.first {
-            self.insert(address, id);
-        }
-        for (address, ids) in locations.additional {
-            for id in ids {
-                self.insert(address, id);
-            }
-        }
-    }
-
     pub(in crate::ir) fn ids(&self, address: Address) -> impl Iterator<Item = CodeBlockId> + '_ {
         self.first
             .get(&address)
             .copied()
             .into_iter()
             .chain(self.additional.get(&address).into_iter().flatten().copied())
+    }
+
+    fn push(&mut self, address: Address, ids: CodeBlockIds) {
+        for id in ids {
+            self.insert(address, id);
+        }
+    }
+
+    pub(in crate::ir) fn append(&mut self, ids_by_address: Self) {
+        for (address, id) in ids_by_address.first {
+            self.insert(address, id);
+        }
+        for (address, ids) in ids_by_address.additional {
+            for id in ids {
+                self.insert(address, id);
+            }
+        }
     }
 
     pub(in crate::ir) fn insert(&mut self, address: Address, id: CodeBlockId) {
@@ -221,10 +221,130 @@ impl CodeBlockTable {
         }
     }
 
-    pub fn flush(&self) -> Result<(), EntityStorageError> {
+    pub(crate) fn is_persistent(&self) -> bool {
+        matches!(self, Self::Persistent(_))
+    }
+
+    pub fn get_by_id(&self, id: Id<CodeBlock>) -> Option<CodeBlockRef<'_>> {
+        self.try_get_by_id(id)
+            .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub fn try_get_by_id(
+        &self,
+        id: Id<CodeBlock>,
+    ) -> Result<Option<CodeBlockRef<'_>>, EntityStorageError> {
         match self {
-            Self::Persistent(table) => table.flush(),
-            Self::Transient(_) => Ok(()),
+            Self::Persistent(table) => Ok(table.try_get_by_id(id)?.map(EntityRef::cached)),
+            Self::Transient(table) => Ok(table.get_by_id(id).map(EntityRef::borrowed)),
+        }
+    }
+
+    pub fn get_by_address(
+        &self,
+        address: Address,
+    ) -> Box<dyn Iterator<Item = CodeBlockRef<'_>> + '_> {
+        match self {
+            Self::Persistent(table) => {
+                Box::new(table.get_by_address(address).map(EntityRef::cached))
+            }
+            Self::Transient(table) => {
+                Box::new(table.get_by_address(address).map(EntityRef::borrowed))
+            }
+        }
+    }
+
+    pub fn get_by_address_and_context<'a>(
+        &'a self,
+        address: Address,
+        context: &'a ContextSet,
+    ) -> Box<dyn Iterator<Item = CodeBlockRef<'a>> + 'a> {
+        match self {
+            Self::Persistent(table) => Box::new(
+                table
+                    .get_by_address_and_context(address, context)
+                    .map(EntityRef::cached),
+            ),
+            Self::Transient(table) => Box::new(
+                table
+                    .get_by_address_and_context(address, context)
+                    .map(EntityRef::borrowed),
+            ),
+        }
+    }
+
+    pub(crate) fn try_get_ids_by_address(
+        &self,
+        addresses: &[Address],
+    ) -> Result<CodeBlockIdsByAddress, EntityStorageError> {
+        match self {
+            Self::Persistent(table) => table.try_get_ids_by_address(addresses),
+            Self::Transient(table) => Ok(table.get_ids_by_address(addresses)),
+        }
+    }
+
+    pub fn overlaps_address(
+        &self,
+        addr: Address,
+    ) -> Box<dyn Iterator<Item = CodeBlockRef<'_>> + '_> {
+        match self {
+            Self::Persistent(table) => {
+                Box::new(table.overlaps_address(addr).map(EntityRef::cached))
+            }
+            Self::Transient(table) => {
+                Box::new(table.overlaps_address(addr).map(EntityRef::borrowed))
+            }
+        }
+    }
+
+    pub fn overlaps<'a>(
+        &'a self,
+        range: &'a AddressRange,
+    ) -> Box<dyn Iterator<Item = CodeBlockRef<'a>> + 'a> {
+        match self {
+            Self::Persistent(table) => Box::new(table.overlaps(range).map(EntityRef::cached)),
+            Self::Transient(table) => Box::new(table.overlaps(range).map(EntityRef::borrowed)),
+        }
+    }
+
+    pub fn iter(&self) -> Box<dyn Iterator<Item = CodeBlockRef<'_>> + '_> {
+        match self {
+            Self::Persistent(table) => Box::new(table.iter().map(EntityRef::cached)),
+            Self::Transient(table) => Box::new(table.iter().map(EntityRef::borrowed)),
+        }
+    }
+
+    pub fn coverage(&self, blocks: impl IntoIterator<Item = Id<CodeBlock>>) -> AddressRangeSet {
+        let mut covered = AddressRangeSet::new();
+        self.coverage_into(blocks, &mut covered);
+        covered
+    }
+
+    pub fn coverage_into(
+        &self,
+        blocks: impl IntoIterator<Item = Id<CodeBlock>>,
+        covered: &mut AddressRangeSet,
+    ) {
+        for id in blocks {
+            if let Some(block) = self.get_by_id(id) {
+                block.coverage_into(covered);
+            }
+        }
+    }
+
+    pub(crate) fn find_by_range_and_context(
+        &self,
+        range: AddressRange,
+        context: &ContextSet,
+        predicate: impl FnMut(&CodeBlock) -> bool,
+    ) -> Option<CodeBlockRef<'_>> {
+        match self {
+            Self::Persistent(table) => table
+                .find_by_range_and_context(range, context, predicate)
+                .map(EntityRef::cached),
+            Self::Transient(table) => table
+                .find_by_range_and_context(range, context, predicate)
+                .map(EntityRef::borrowed),
         }
     }
 
@@ -235,8 +355,11 @@ impl CodeBlockTable {
         }
     }
 
-    pub(crate) fn is_persistent(&self) -> bool {
-        matches!(self, Self::Persistent(_))
+    pub fn flush(&self) -> Result<(), EntityStorageError> {
+        match self {
+            Self::Persistent(table) => table.flush(),
+            Self::Transient(_) => Ok(()),
+        }
     }
 
     pub(crate) fn publish_prepared(
@@ -290,129 +413,6 @@ impl CodeBlockTable {
                 id,
                 previous.expect("prepared block removal has a previous range"),
             ),
-        }
-    }
-
-    pub fn get_by_id(&self, id: Id<CodeBlock>) -> Option<CodeBlockRef<'_>> {
-        self.try_get_by_id(id)
-            .unwrap_or_else(|error| error.into_fatal())
-    }
-
-    pub fn try_get_by_id(
-        &self,
-        id: Id<CodeBlock>,
-    ) -> Result<Option<CodeBlockRef<'_>>, EntityStorageError> {
-        match self {
-            Self::Persistent(table) => Ok(table.try_get_by_id(id)?.map(EntityRef::cached)),
-            Self::Transient(table) => Ok(table.get_by_id(id).map(EntityRef::borrowed)),
-        }
-    }
-
-    pub fn coverage(&self, blocks: impl IntoIterator<Item = Id<CodeBlock>>) -> AddressRangeSet {
-        let mut covered = AddressRangeSet::new();
-        self.coverage_into(blocks, &mut covered);
-        covered
-    }
-
-    pub fn coverage_into(
-        &self,
-        blocks: impl IntoIterator<Item = Id<CodeBlock>>,
-        covered: &mut AddressRangeSet,
-    ) {
-        for id in blocks {
-            if let Some(block) = self.get_by_id(id) {
-                block.coverage_into(covered);
-            }
-        }
-    }
-
-    pub fn get_by_address(
-        &self,
-        address: Address,
-    ) -> Box<dyn Iterator<Item = CodeBlockRef<'_>> + '_> {
-        match self {
-            Self::Persistent(table) => {
-                Box::new(table.get_by_address(address).map(EntityRef::cached))
-            }
-            Self::Transient(table) => {
-                Box::new(table.get_by_address(address).map(EntityRef::borrowed))
-            }
-        }
-    }
-
-    pub fn get_by_address_and_context<'a>(
-        &'a self,
-        address: Address,
-        context: &'a ContextSet,
-    ) -> Box<dyn Iterator<Item = CodeBlockRef<'a>> + 'a> {
-        match self {
-            Self::Persistent(table) => Box::new(
-                table
-                    .get_by_address_and_context(address, context)
-                    .map(EntityRef::cached),
-            ),
-            Self::Transient(table) => Box::new(
-                table
-                    .get_by_address_and_context(address, context)
-                    .map(EntityRef::borrowed),
-            ),
-        }
-    }
-
-    pub(crate) fn find_by_range_and_context(
-        &self,
-        range: AddressRange,
-        context: &ContextSet,
-        predicate: impl FnMut(&CodeBlock) -> bool,
-    ) -> Option<CodeBlockRef<'_>> {
-        match self {
-            Self::Persistent(table) => table
-                .find_by_range_and_context(range, context, predicate)
-                .map(EntityRef::cached),
-            Self::Transient(table) => table
-                .find_by_range_and_context(range, context, predicate)
-                .map(EntityRef::borrowed),
-        }
-    }
-
-    pub(crate) fn try_ids_at_starts(
-        &self,
-        starts: &[Address],
-    ) -> Result<CodeBlockIdsByStart, EntityStorageError> {
-        match self {
-            Self::Persistent(table) => table.ids_at_starts(starts),
-            Self::Transient(table) => Ok(table.ids_at_starts(starts)),
-        }
-    }
-
-    pub fn overlaps_address(
-        &self,
-        addr: Address,
-    ) -> Box<dyn Iterator<Item = CodeBlockRef<'_>> + '_> {
-        match self {
-            Self::Persistent(table) => {
-                Box::new(table.overlaps_address(addr).map(EntityRef::cached))
-            }
-            Self::Transient(table) => {
-                Box::new(table.overlaps_address(addr).map(EntityRef::borrowed))
-            }
-        }
-    }
-
-    pub fn overlaps<'a>(
-        &'a self,
-        range: &'a AddressRange,
-    ) -> Box<dyn Iterator<Item = CodeBlockRef<'a>> + 'a> {
-        match self {
-            Self::Persistent(table) => Box::new(table.overlaps(range).map(EntityRef::cached)),
-            Self::Transient(table) => Box::new(table.overlaps(range).map(EntityRef::borrowed)),
-        }
-    }
-
-    pub fn iter(&self) -> Box<dyn Iterator<Item = CodeBlockRef<'_>> + '_> {
-        match self {
-            Self::Persistent(table) => Box::new(table.iter().map(EntityRef::cached)),
-            Self::Transient(table) => Box::new(table.iter().map(EntityRef::borrowed)),
         }
     }
 }

@@ -119,6 +119,16 @@ where
         self.symbols.len() - self.allocator.free_count()
     }
 
+    pub fn get<'a>(
+        &'a self,
+        symbol: impl AsRef<str>,
+    ) -> impl Iterator<Item = (SymbolId, &'a SymbolEntry<A>)> + 'a {
+        let ids = Symbol::from_existing(symbol.as_ref())
+            .and_then(|symbol| self.names.get(&symbol))
+            .map_or(&[] as &[SymbolId], SmallVec::as_slice);
+        SymbolEntryIter::new(ids, &self.symbols)
+    }
+
     pub fn get_mut<'a>(
         &'a mut self,
         symbol: impl AsRef<str>,
@@ -128,11 +138,24 @@ where
         Some(SymbolEntryIterMut::new(ids, &mut self.symbols))
     }
 
+    pub fn get_first(&self, symbol: impl AsRef<str>) -> Option<(SymbolId, &SymbolEntry<A>)> {
+        self.get(symbol).next()
+    }
+
     pub fn get_first_mut(
         &mut self,
         symbol: impl AsRef<str>,
     ) -> Option<(SymbolId, &mut SymbolEntry<A>)> {
         self.get_mut(symbol).and_then(|mut iter| iter.next())
+    }
+
+    pub fn get_by_id(&self, id: SymbolId) -> Option<&SymbolEntry<A>> {
+        let index = id.index();
+        if self.generations.get(index).copied()? != id.generation() {
+            return None;
+        }
+
+        self.symbols.get(index).filter(|entry| entry.is_valid())
     }
 
     pub fn get_by_id_mut(&mut self, id: SymbolId) -> Option<&mut SymbolEntry<A>> {
@@ -144,6 +167,11 @@ where
         self.symbols.get_mut(index).filter(|entry| entry.is_valid())
     }
 
+    pub fn get_by_index(&self, index: SymbolIndex) -> Option<(SymbolId, &SymbolEntry<A>)> {
+        let id = self.indices.get(&index)?;
+        self.get_by_id(*id).map(|sym_entry| (*id, sym_entry))
+    }
+
     pub fn get_by_index_mut(
         &mut self,
         index: SymbolIndex,
@@ -152,6 +180,19 @@ where
         self.symbols
             .get_mut(id.index())
             .map(|sym_entry| (*id, sym_entry))
+    }
+
+    pub fn get_by_address(
+        &self,
+        address: impl Into<A>,
+    ) -> impl Iterator<Item = (SymbolId, &SymbolEntry<A>)> {
+        let address = address.into();
+        let ids = self
+            .addresses
+            .get(&address)
+            .map(|ids| ids.as_slice())
+            .unwrap_or_default();
+        SymbolEntryIter::new(ids, &self.symbols)
     }
 
     pub fn get_by_address_mut(
@@ -167,11 +208,74 @@ where
         SymbolEntryIterMut::new(ids, &mut self.symbols)
     }
 
+    pub fn get_first_by_address(
+        &self,
+        address: impl Into<A>,
+    ) -> Option<(SymbolId, &SymbolEntry<A>)> {
+        self.get_by_address(address).next()
+    }
+
     pub fn get_first_by_address_mut(
         &mut self,
         address: impl Into<A>,
     ) -> Option<(SymbolId, &mut SymbolEntry<A>)> {
         self.get_by_address_mut(address).next()
+    }
+
+    // Iterator over all symbol entries in insertion order.
+    pub fn iter<'a>(&'a self) -> impl Iterator<Item = (SymbolId, &'a SymbolEntry<A>)> + 'a {
+        self.symbols
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.is_valid())
+            .map(|(i, entry)| {
+                let id = SymbolId::with_generation(i as u32, self.generations[i]);
+                (id, entry)
+            })
+    }
+
+    // Iterator over all symbol entries for a given selector.
+    pub fn iter_by_selector<'a>(
+        &'a self,
+        selector: SymbolTableSelector,
+    ) -> impl Iterator<Item = (SymbolId, &'a SymbolEntry<A>)> + 'a {
+        self.indices.iter().filter_map(move |(&index, &id)| {
+            if index.selector() == selector {
+                Some((id, &self.symbols[id.index()]))
+            } else {
+                None
+            }
+        })
+    }
+
+    // Iterator over all symbol entries in (ascending) order by address.
+    pub fn iter_by_address<'a>(
+        &'a self,
+    ) -> impl Iterator<Item = (SymbolId, &'a SymbolEntry<A>)> + 'a {
+        self.addresses
+            .values()
+            .flat_map(move |ids| SymbolEntryIter::new(ids, &self.symbols))
+    }
+
+    pub fn range_by_address<'a, R>(
+        &'a self,
+        range: R,
+    ) -> impl Iterator<Item = (SymbolId, &'a SymbolEntry<A>)> + 'a
+    where
+        R: RangeBounds<A>,
+    {
+        self.addresses
+            .range(range)
+            .flat_map(move |(_, ids)| SymbolEntryIter::new(ids, &self.symbols))
+    }
+
+    // Iterator over all symbol entries by their original symbol table indices.
+    pub fn iter_by_index<'a>(
+        &'a self,
+    ) -> impl Iterator<Item = (SymbolIndex, SymbolId, &'a SymbolEntry<A>)> + 'a {
+        self.indices
+            .iter()
+            .map(move |(&index, &id)| (index, id, &self.symbols[id.index()]))
     }
 
     fn clear_entry(&mut self, id: SymbolId) -> bool {
@@ -256,60 +360,12 @@ where
         self.allocator.release(id);
     }
 
-    pub fn get<'a>(
-        &'a self,
-        symbol: impl AsRef<str>,
-    ) -> impl Iterator<Item = (SymbolId, &'a SymbolEntry<A>)> + 'a {
-        let ids = Symbol::from_existing(symbol.as_ref())
-            .and_then(|symbol| self.names.get(&symbol))
-            .map_or(&[] as &[SymbolId], SmallVec::as_slice);
-        SymbolEntryIter::new(ids, &self.symbols)
-    }
-
-    pub fn get_first(&self, symbol: impl AsRef<str>) -> Option<(SymbolId, &SymbolEntry<A>)> {
-        self.get(symbol).next()
-    }
-
-    pub fn get_by_id(&self, id: SymbolId) -> Option<&SymbolEntry<A>> {
-        let index = id.index();
-        if self.generations.get(index).copied()? != id.generation() {
-            return None;
-        }
-
-        self.symbols.get(index).filter(|entry| entry.is_valid())
-    }
-
-    pub fn get_by_index(&self, index: SymbolIndex) -> Option<(SymbolId, &SymbolEntry<A>)> {
-        let id = self.indices.get(&index)?;
-        self.get_by_id(*id).map(|sym_entry| (*id, sym_entry))
-    }
-
     pub fn modify_by_id<R>(
         &mut self,
         id: SymbolId,
         f: impl FnOnce(&mut SymbolEntry<A>) -> R,
     ) -> Option<R> {
         self.get_by_id_mut(id).map(f)
-    }
-
-    pub fn get_by_address(
-        &self,
-        address: impl Into<A>,
-    ) -> impl Iterator<Item = (SymbolId, &SymbolEntry<A>)> {
-        let address = address.into();
-        let ids = self
-            .addresses
-            .get(&address)
-            .map(|ids| ids.as_slice())
-            .unwrap_or_default();
-        SymbolEntryIter::new(ids, &self.symbols)
-    }
-
-    pub fn get_first_by_address(
-        &self,
-        address: impl Into<A>,
-    ) -> Option<(SymbolId, &SymbolEntry<A>)> {
-        self.get_by_address(address).next()
     }
 
     pub fn insert_local(
@@ -462,62 +518,6 @@ where
                 self.insert(index, address, symbol, properties)
             }
         }
-    }
-
-    // Iterator over all symbol entries in insertion order.
-    pub fn iter<'a>(&'a self) -> impl Iterator<Item = (SymbolId, &'a SymbolEntry<A>)> + 'a {
-        self.symbols
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| entry.is_valid())
-            .map(|(i, entry)| {
-                let id = SymbolId::with_generation(i as u32, self.generations[i]);
-                (id, entry)
-            })
-    }
-
-    // Iterator over all symbol entries for a given selector.
-    pub fn iter_by_selector<'a>(
-        &'a self,
-        selector: SymbolTableSelector,
-    ) -> impl Iterator<Item = (SymbolId, &'a SymbolEntry<A>)> + 'a {
-        self.indices.iter().filter_map(move |(&index, &id)| {
-            if index.selector() == selector {
-                Some((id, &self.symbols[id.index()]))
-            } else {
-                None
-            }
-        })
-    }
-
-    // Iterator over all symbol entries in (ascending) order by address.
-    pub fn iter_by_address<'a>(
-        &'a self,
-    ) -> impl Iterator<Item = (SymbolId, &'a SymbolEntry<A>)> + 'a {
-        self.addresses
-            .values()
-            .flat_map(move |ids| SymbolEntryIter::new(ids, &self.symbols))
-    }
-
-    pub fn range_by_address<'a, R>(
-        &'a self,
-        range: R,
-    ) -> impl Iterator<Item = (SymbolId, &'a SymbolEntry<A>)> + 'a
-    where
-        R: RangeBounds<A>,
-    {
-        self.addresses
-            .range(range)
-            .flat_map(move |(_, ids)| SymbolEntryIter::new(ids, &self.symbols))
-    }
-
-    // Iterator over all symbol entries by their original symbol table indices.
-    pub fn iter_by_index<'a>(
-        &'a self,
-    ) -> impl Iterator<Item = (SymbolIndex, SymbolId, &'a SymbolEntry<A>)> + 'a {
-        self.indices
-            .iter()
-            .map(move |(&index, &id)| (index, id, &self.symbols[id.index()]))
     }
 
     pub fn remove(&mut self, symbol: impl AsRef<str>) -> usize {

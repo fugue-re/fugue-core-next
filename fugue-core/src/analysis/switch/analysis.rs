@@ -12,7 +12,7 @@ use crate::il::common::{IlArtefact, IlError, IlGenerationError};
 use crate::il::ecode::ECodeIr;
 use crate::ir::{FlowKind, FunctionId, SwitchId, SwitchProperties};
 use crate::project::Project;
-use crate::types::common::Revision;
+use crate::types::Revision;
 
 pub(crate) const SWITCH_RECOVERY_ANALYSER: &str = "switch-recovery";
 
@@ -204,7 +204,7 @@ impl FunctionRecoveryExtension {
     const NAME: &str = "switch";
 
     fn apply(_project: &Project, recovery: &mut FunctionRecovery) -> Result<(), AnalysisError> {
-        if recovery.config().use_switch_analysis() {
+        if recovery.config().switch_analysis() {
             recovery
                 .add_builder_post_structuring_pass(SWITCH_RECOVERY_ANALYSER, SwitchRecovery::new());
         }

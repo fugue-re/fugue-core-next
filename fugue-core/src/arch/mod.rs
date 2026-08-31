@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 
-use crate::ir::{Endian, ExternFunctionTemplate, RawAddress, Symbol};
+use crate::ir::{Endian, RawAddress, Symbol};
 use crate::lifter::{
     ContextHint, ContextSet, Disassembler, Language, Lifter, LiftingContext, Varnode,
     resolve_language,
@@ -15,6 +15,7 @@ pub(crate) mod aarch64;
 pub(crate) mod arm;
 pub(crate) mod mips;
 pub(crate) mod registry;
+pub(crate) mod thunk;
 pub(crate) mod x86;
 pub(crate) mod x86_64;
 
@@ -22,6 +23,7 @@ pub use aarch64::AArch64;
 pub use arm::Arm;
 pub use mips::Mips;
 pub use registry::{ArchError, ArchProvider, LanguageProvider, provide_arch, provide_language};
+pub use thunk::ExternalThunkTemplate;
 pub use x86::X86;
 pub use x86_64::X86_64;
 
@@ -138,8 +140,8 @@ impl<S: rkyv::rancor::Fallible + ?Sized + rkyv::ser::Allocator + rkyv::ser::Writ
 where
     S::Error: rkyv::rancor::Source,
 {
-    fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
-        self.0.language().to_string().serialize(serializer)
+    fn serialize(&self, serialiser: &mut S) -> Result<Self::Resolver, S::Error> {
+        self.0.language().to_string().serialize(serialiser)
     }
 }
 
@@ -147,8 +149,8 @@ impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<Arch, D> for Archived
 where
     D::Error: rkyv::rancor::Source,
 {
-    fn deserialize(&self, deserializer: &mut D) -> Result<Arch, D::Error> {
-        let variant_str = rkyv::Deserialize::<String, D>::deserialize(&self.0, deserializer)?;
+    fn deserialize(&self, deserialiser: &mut D) -> Result<Arch, D::Error> {
+        let variant_str = rkyv::Deserialize::<String, D>::deserialize(&self.0, deserialiser)?;
         Ok(Arch::new(
             resolve_language(&variant_str).expect("invalid language variant"),
         ))
@@ -195,8 +197,8 @@ impl Arch {
         self.0.canonicalise_address_with(addr.into(), context)
     }
 
-    pub fn external_thunk_template(&self) -> ExternFunctionTemplate {
-        self.0.external_function_template()
+    pub fn external_thunk_template(&self) -> ExternalThunkTemplate {
+        self.0.external_thunk_template()
     }
 
     pub fn flags(&self) -> &[Flag] {
@@ -211,8 +213,8 @@ impl Arch {
         self.0.gprs()
     }
 
-    pub fn is_halt_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
-        self.0.is_halt_intrinsic(op, args)
+    pub fn is_halt_intrinsic(&self, user_op: u16, args: &[Varnode]) -> bool {
+        self.0.is_halt_intrinsic(user_op, args)
     }
 
     pub fn classify_bytes(&self, bytes: &[u8]) -> BytesProperties {
@@ -240,16 +242,16 @@ impl Arch {
         self.classify_bytes(bytes).is_entry_marker()
     }
 
-    pub fn is_service_call(&self, op: u16, args: &[Varnode]) -> bool {
-        self.0.is_service_call(op, args)
+    pub fn is_service_call(&self, user_op: u16, args: &[Varnode]) -> bool {
+        self.0.is_service_call(user_op, args)
     }
 
-    pub fn is_skip_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
-        self.0.is_skip_intrinsic(op, args)
+    pub fn is_skip_intrinsic(&self, user_op: u16, args: &[Varnode]) -> bool {
+        self.0.is_skip_intrinsic(user_op, args)
     }
 
-    pub fn is_trap_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
-        self.0.is_trap_intrinsic(op, args)
+    pub fn is_trap_intrinsic(&self, user_op: u16, args: &[Varnode]) -> bool {
+        self.0.is_trap_intrinsic(user_op, args)
     }
 
     pub fn resolve_mapping_symbol(&self, symbol: impl Into<Symbol>) -> Option<ContextHint> {

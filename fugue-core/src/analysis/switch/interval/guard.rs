@@ -89,6 +89,18 @@ impl SwitchGuard {
 }
 
 impl<'analysis> SwitchIntervalRecovery<'analysis> {
+    fn conditional_branch_within_instruction(&self, branch: Address) -> Option<&ECodeOp> {
+        let mut conditional = None;
+        for (_, operation) in self.ssa.ops_for_source(branch) {
+            match operation.opcode() {
+                ECodeOpcode::ConditionalBranch => conditional = Some(operation),
+                ECodeOpcode::BranchIndirect => break,
+                _ => {}
+            }
+        }
+        conditional
+    }
+
     pub(crate) fn guard_for_index(&self, index: IlValueId, branch: Address) -> Option<SwitchGuard> {
         if let Some(guard) = self.guard_within_branch_instruction(index, branch) {
             tracing::trace!("switch at {branch}: using intra-instruction guard");
@@ -181,18 +193,6 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
             interval,
             default_block: None,
         })
-    }
-
-    fn conditional_branch_within_instruction(&self, branch: Address) -> Option<&ECodeOp> {
-        let mut conditional = None;
-        for (_, operation) in self.ssa.ops_for_source(branch) {
-            match operation.opcode() {
-                ECodeOpcode::ConditionalBranch => conditional = Some(operation),
-                ECodeOpcode::BranchIndirect => break,
-                _ => {}
-            }
-        }
-        conditional
     }
 
     fn index_interval_from_condition(

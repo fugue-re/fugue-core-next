@@ -119,7 +119,7 @@ impl<'context, 'analysis> SwitchTargetEvaluator<'context, 'analysis> {
     }
 
     fn apply(
-        &mut self,
+        &self,
         value: IlValueId,
         operation: &ECodeOp,
         read_memory: &mut impl FnMut(Address, usize) -> Option<BitVec>,
@@ -149,7 +149,7 @@ impl<'context, 'analysis> SwitchTargetEvaluator<'context, 'analysis> {
     }
 
     fn load(
-        &mut self,
+        &self,
         operation: &ECodeOp,
         pointer: &BitVec,
         read_memory: &mut impl FnMut(Address, usize) -> Option<BitVec>,
