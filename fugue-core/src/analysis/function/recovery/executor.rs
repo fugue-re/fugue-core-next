@@ -3,17 +3,20 @@ use std::thread;
 use rayon::prelude::*;
 use rayon::{ThreadPool, ThreadPoolBuilder};
 
-use super::builder::{FunctionBuilderInputs, FunctionCandidateOutcome, FunctionCandidateState};
-use super::{FUNCTION_RECOVERY_ANALYSER, FunctionBuilder};
 use crate::analysis::AnalysisError;
 use crate::analysis::control::CancellationToken;
+use crate::analysis::function::recovery::FUNCTION_RECOVERY_ANALYSER;
+use crate::analysis::function::recovery::analysis::FunctionRecoveryContext;
+use crate::analysis::function::recovery::builder::{
+    FunctionBuilder, FunctionCandidateOutcome, FunctionCandidateState,
+};
 use crate::engine::ProjectView;
 use crate::ir::AddressWithContext;
 use crate::lifter::InsnResolver;
 
 pub(crate) struct FunctionCandidateBatch<'a, 'p> {
     candidates: Vec<AddressWithContext>,
-    inputs: FunctionBuilderInputs<'a>,
+    context: &'a FunctionRecoveryContext,
     project: &'a ProjectView<'p>,
     token: &'a CancellationToken,
     worker_limit: usize,
@@ -22,14 +25,14 @@ pub(crate) struct FunctionCandidateBatch<'a, 'p> {
 impl<'a, 'p> FunctionCandidateBatch<'a, 'p> {
     pub(crate) fn new(
         project: &'a ProjectView<'p>,
-        inputs: FunctionBuilderInputs<'a>,
+        context: &'a FunctionRecoveryContext,
         candidates: Vec<AddressWithContext>,
         token: &'a CancellationToken,
         worker_limit: usize,
     ) -> Self {
         Self {
             candidates,
-            inputs,
+            context,
             project,
             token,
             worker_limit,
@@ -56,7 +59,7 @@ impl FunctionRecoveryExecutor {
     ) -> Result<Vec<AddressWithContext>, AnalysisError> {
         let FunctionCandidateBatch {
             candidates,
-            inputs,
+            context,
             project,
             token,
             worker_limit,
@@ -66,7 +69,7 @@ impl FunctionRecoveryExecutor {
             let mut candidates = candidates.into_iter();
             while let Some(candidate) = candidates.next() {
                 let outcome =
-                    builder.analyse_candidate(project, inputs, resolver, candidate, token);
+                    builder.analyse_candidate(project, context, resolver, candidate, token);
                 if on_outcome(outcome)? {
                     return Ok(candidates.collect());
                 }
@@ -99,19 +102,19 @@ impl FunctionRecoveryExecutor {
                     tasks.par_iter_mut().for_each_init(
                         || InsnResolver::new(arch),
                         |resolver, task| {
-                            task.resolve(&config, inputs, token, resolver, avoidance_baseline);
+                            task.resolve(&config, context, token, resolver, avoidance_baseline);
                         },
                     );
                 });
 
                 let mut pending = false;
                 for task in &mut tasks {
-                    task.run_post_structuring(
+                    task.apply_post_structuring_passes(
                         &config,
                         builder.post_structuring_passes_mut(),
                         token,
                     );
-                    pending |= !task.is_complete();
+                    pending |= !task.is_finished();
                 }
                 if !pending {
                     break;
@@ -162,7 +165,7 @@ impl FunctionRecoveryExecutor {
         candidate_count: usize,
         worker_limit: usize,
     ) -> usize {
-        if !builder.initialisation_passes().is_empty() {
+        if !builder.pre_resolution_passes().is_empty() {
             return 1;
         }
 

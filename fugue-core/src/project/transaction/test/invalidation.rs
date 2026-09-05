@@ -443,8 +443,8 @@ fn rejecting_byte_write_preserves_lifted_ir() -> Result<(), Box<dyn std::error::
 #[test]
 fn mapping_removal_invalidates_lifted() -> Result<(), Box<dyn std::error::Error>> {
     let mut project = Project::from_file_transient("tests/ls.elf")?;
-    let (space, mapping, range) = first_mapping_placement(&project);
-    let entry = Address::new(space, range.0);
+    let (_, mapping, range) = first_mapping_placement(&project);
+    let entry = range.start_address();
 
     let function = {
         let mut transaction = project.transaction("test");
@@ -486,8 +486,8 @@ fn mapping_removal_invalidates_lifted() -> Result<(), Box<dyn std::error::Error>
 #[test]
 fn rejecting_mapping_removal_preserves_lifted_ir() -> Result<(), Box<dyn std::error::Error>> {
     let mut project = Project::from_file_transient("tests/ls.elf")?;
-    let (space, mapping, range) = first_mapping_placement(&project);
-    let entry = Address::new(space, range.0);
+    let (_, mapping, range) = first_mapping_placement(&project);
+    let entry = range.start_address();
 
     let function = {
         let mut transaction = project.transaction("test");
@@ -521,7 +521,7 @@ fn rejecting_mapping_removal_preserves_lifted_ir() -> Result<(), Box<dyn std::er
 fn mapping_remap_invalidates_old_and_new_ranges() -> Result<(), Box<dyn std::error::Error>> {
     let mut project = Project::from_file_transient("tests/ls.elf")?;
     let (space, mapping, old_range) = first_mapping_placement(&project);
-    let old_entry = Address::new(space, old_range.0);
+    let old_entry = old_range.start_address();
     let new_start = project
         .segments()
         .mapping(mapping)

@@ -1,15 +1,12 @@
 use object::read::elf::{ElfFile, FileHeader};
 use object::{ReadRef, elf};
 
-use crate::analysis::AnalysisError;
-use crate::analysis::function::FunctionRecovery;
 use crate::arch::Arch;
 use crate::extension::{self, Registration};
 use crate::ir::RawAddress;
 use crate::lifter::{LanguageId, LanguageSource};
 use crate::loader::elf::ElfFileRepr;
-use crate::loader::{Elf, ImageSegmentContents, LoaderError};
-use crate::platform::{CallingConvention, Platform};
+use crate::loader::{ImageSegmentContents, LoaderError};
 use crate::types::AttributeMap;
 
 pub struct ImageContext<'a> {
@@ -174,87 +171,6 @@ extension::collect!(ArchResolver);
 extension::submit! {
     ArchResolver::new("elf-builtins", ArchResolver::resolve_builtin)
 }
-
-pub struct AnalysisContext<'a> {
-    elf: &'a Elf<'a>,
-    arch: Arch,
-    platform: Platform,
-}
-
-impl<'a> AnalysisContext<'a> {
-    pub(crate) fn new(elf: &'a Elf<'a>, arch: Arch, platform: Platform) -> Self {
-        Self {
-            elf,
-            arch,
-            platform,
-        }
-    }
-
-    pub fn elf(&self) -> &'a Elf<'a> {
-        self.elf
-    }
-
-    pub fn arch(&self) -> &Arch {
-        &self.arch
-    }
-
-    pub fn platform(&self) -> &Platform {
-        &self.platform
-    }
-
-    pub fn calling_convention(&self) -> CallingConvention {
-        self.platform.calling_convention()
-    }
-
-    pub fn apply_function_recovery_extensions(
-        &self,
-        recovery: &mut FunctionRecovery,
-    ) -> Result<(), AnalysisError> {
-        for extension in extension::iter::<FunctionRecoveryExtension>() {
-            self.apply_function_recovery_extension(extension, recovery)?;
-        }
-
-        Ok(())
-    }
-
-    pub fn apply_function_recovery_extension(
-        &self,
-        extension: &FunctionRecoveryExtension,
-        recovery: &mut FunctionRecovery,
-    ) -> Result<(), AnalysisError> {
-        extension.apply(self, recovery)
-    }
-}
-
-type FunctionRecoveryExtensionFn =
-    fn(&AnalysisContext<'_>, &mut FunctionRecovery) -> Result<(), AnalysisError>;
-
-pub struct FunctionRecoveryExtension {
-    name: &'static str,
-    apply: FunctionRecoveryExtensionFn,
-}
-
-impl FunctionRecoveryExtension {
-    pub const fn new(name: &'static str, apply: FunctionRecoveryExtensionFn) -> Self {
-        Self { name, apply }
-    }
-
-    pub fn apply(
-        &self,
-        context: &AnalysisContext<'_>,
-        recovery: &mut FunctionRecovery,
-    ) -> Result<(), AnalysisError> {
-        (self.apply)(context, recovery)
-    }
-}
-
-impl Registration for FunctionRecoveryExtension {
-    fn name(&self) -> &'static str {
-        self.name
-    }
-}
-
-extension::collect!(FunctionRecoveryExtension);
 
 pub struct RelocationContext<'a, 'data> {
     machine: u16,

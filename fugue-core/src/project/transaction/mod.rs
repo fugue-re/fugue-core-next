@@ -5,7 +5,6 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 use tracing::Span;
 
-use super::segment::SegmentStorageStaging;
 use super::{
     ChangeKinds, ChangeRecord, ChangeSet, ChangeSource, FunctionChangeKind,
     MAX_DETAILED_CHANGE_RECORDS, Project, ProjectError, ReadSet,
@@ -22,6 +21,7 @@ use crate::ir::{
 use crate::storage::entities::{Entity, EntityWrite, EntityWriteBatch};
 use crate::storage::segments::SegmentStorage;
 use crate::storage::segments::mapping::SegmentMappingId;
+use crate::storage::segments::staging::SegmentStorageStaging;
 use crate::storage::{EntityRef, EntityStorageError};
 use crate::types::Revision;
 

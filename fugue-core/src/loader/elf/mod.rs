@@ -32,8 +32,7 @@ use crate::loader::{
     ExternalThunkLayout, ImageAddress, ImageBacking, ImageBank, ImageBankHandle, ImageBankLayout,
     ImageCoveredRegions, ImageLayout, ImageRegionBankMap, ImageSegment, ImageSegmentContents,
     ImageSegmentContentsIterator, ImageSegmentIterator, ImageSpace, ImageSpaceHandle, ImageSpaces,
-    Loadable, LoadableAnalysers, LoadableFromBytes, LoadableFromFile, LoadableMetadata,
-    LoaderError,
+    Loadable, LoadableFromBytes, LoadableFromFile, LoadableMetadata, LoaderError,
 };
 use crate::platform::{Format, OperatingSystem, Platform};
 use crate::storage::segments::SegmentProperties;
@@ -41,8 +40,7 @@ use crate::storage::segments::mapping::SegmentMappingProvenance;
 use crate::types::attributes::{ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE};
 use crate::types::{AttributeMap, BytesOrMapping};
 
-mod analysers;
-pub use analysers::ElfAnalysers;
+mod function_recovery;
 
 pub mod extensions;
 
@@ -2171,10 +2169,6 @@ impl Loadable for Elf<'_> {
                 }
             }
         )
-    }
-
-    fn analysers(&self) -> impl LoadableAnalysers {
-        ElfAnalysers::new(self)
     }
 }
 

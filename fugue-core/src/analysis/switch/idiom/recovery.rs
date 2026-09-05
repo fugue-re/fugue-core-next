@@ -2,13 +2,15 @@ use std::mem;
 
 use fugue_bv::BitVec;
 
-use super::SwitchIdiomMatcher;
-use crate::analysis::switch::{RecoveredSwitch, SwitchRecoveryConfig, SwitchTargetResolver};
-use crate::ir::{
-    Address, AddressTable, IncompleteCodeBlockId, IncompleteFunction, SwitchCase, SwitchCaseLabel,
-    SwitchModel, SwitchProperties,
+use super::{SwitchIdiomMatch, SwitchIdiomMatcher};
+use crate::analysis::switch::{
+    RecoveredSwitch, SwitchCaseEnumerator, SwitchRecoveryConfig, SwitchResolver,
 };
-use crate::lifter::{InsnResolver, LiftingContext, RawPCodeOp};
+use crate::ir::{
+    Address, AddressTable, IncompleteCodeBlockId, IncompleteFunction, SwitchCase, SwitchModel,
+    SwitchProperties,
+};
+use crate::lifter::RawPCodeOp;
 
 pub(crate) struct SwitchIdiomRecovery {
     cases: Vec<SwitchCase>,
@@ -27,126 +29,80 @@ impl SwitchIdiomRecovery {
 
     pub(crate) fn recover(
         &mut self,
-        insn_resolver: &mut InsnResolver,
         function: &IncompleteFunction,
         predecessor: Option<IncompleteCodeBlockId>,
         block: IncompleteCodeBlockId,
         branch: Address,
-        target_resolver: &mut SwitchTargetResolver<'_>,
+        resolver: &mut SwitchResolver<'_, '_>,
     ) -> Option<RecoveredSwitch> {
         self.operations.clear();
         if let Some(predecessor) = predecessor {
-            self.lift_block(insn_resolver, function, predecessor, target_resolver)?;
+            resolver.lift_block(function, predecessor, &mut self.operations)?;
         }
-        self.lift_block(insn_resolver, function, block, target_resolver)?;
-        self.recover_operations(branch, insn_resolver.context(), target_resolver)
+        resolver.lift_block(function, block, &mut self.operations)?;
+        let matched = SwitchIdiomMatcher::new(&self.operations, self.config.max_trace_depth())?
+            .match_idiom()?;
+        self.resolve_match(branch, matched, resolver)
     }
 
-    fn lift_block(
-        &mut self,
-        insn_resolver: &mut InsnResolver,
-        function: &IncompleteFunction,
-        block: IncompleteCodeBlockId,
-        target_resolver: &mut SwitchTargetResolver<'_>,
-    ) -> Option<()> {
-        let block = function.block(block)?;
-        block
-            .context()
-            .apply(block.address(), insn_resolver.context_mut());
-
-        let view = target_resolver.contiguous_view_from(block.address())?;
-        let bytes = view.as_contiguous()?.get(..block.size())?;
-        let output_start = self.operations.len();
-
-        for &insn_id in block.insn_ids() {
-            let insn = function.insn(insn_id)?;
-            let offset = usize::from(insn.address() - block.address());
-            if insn_resolver
-                .lift_into(insn.address(), bytes.get(offset..)?, &mut self.operations)
-                .is_err()
-            {
-                self.operations.truncate(output_start);
-                return None;
-            }
-        }
-
-        Some(())
-    }
-
-    fn recover_operations(
+    fn resolve_match(
         &mut self,
         branch: Address,
-        context: &LiftingContext,
-        target_resolver: &mut SwitchTargetResolver<'_>,
+        matched: SwitchIdiomMatch,
+        resolver: &mut SwitchResolver<'_, '_>,
     ) -> Option<RecoveredSwitch> {
-        let idiom = SwitchIdiomMatcher::new(&self.operations, self.config.max_trace_depth())?
-            .match_idiom()?;
-        let element_size = idiom.element_size();
+        let element_size = matched.element_size();
         if element_size == 0 || element_size > self.config.max_element_size() {
             return None;
         }
 
-        let space = branch.space();
-        let mut table = AddressTable::new(Address::new(space, idiom.table()), element_size)
-            .with_shift(idiom.shift());
-        target_resolver.set_space(space);
-        let cap = u64::from(self.config.max_cases());
-        let limit = idiom
+        let mut table =
+            AddressTable::new(Address::new(branch.space(), matched.table()), element_size)
+                .with_shift(matched.shift());
+        let expected_count = matched
             .bound()
             .and_then(BitVec::to_u64)
-            .map_or(cap, |bound| bound.saturating_add(1).min(cap));
-
-        self.cases.clear();
-        for index in 0..limit {
-            let raw = match target_resolver
-                .read_bitvec(table.entry_address(index as u32), element_size as usize)
-            {
-                Some(raw) => raw,
-                None => break,
-            };
-            let value = if table.shift() == 0 {
-                raw
-            } else {
-                let bits = element_size * 8 + u32::from(table.shift());
-                raw.unsigned_cast(bits) << BitVec::from_u64(u64::from(table.shift()), bits)
-            };
-            let target_value = match idiom.base() {
-                Some(base) => {
-                    let offset = if base.is_signed() {
-                        value.signed_cast(u64::BITS)
-                    } else {
-                        value.unsigned_cast(u64::BITS)
-                    };
-                    BitVec::from_u64(base.address().offset(), u64::BITS) + offset
-                }
-                None => value.unsigned_cast(u64::BITS),
-            };
-            let Some(target) = target_resolver.resolve_value(&target_value, context) else {
-                break;
-            };
-
-            let mut case = SwitchCase::new(target);
-            case.add_label(SwitchCaseLabel::new(
-                (index as i64).wrapping_add(idiom.label_offset()) as u64,
-            ));
-            self.cases.push(case);
-        }
-
-        if self.cases.is_empty() {
-            return None;
-        }
+            .map(|bound| bound.saturating_add(1));
+        let values =
+            (0..expected_count.unwrap_or(u64::MAX)).map(|index| BitVec::from_u64(index, u64::BITS));
+        let enumeration = SwitchCaseEnumerator::new(self.config.max_cases());
+        let properties = enumeration.enumerate(
+            &mut self.cases,
+            values,
+            expected_count,
+            matched.bound().is_some(),
+            matched.label_offset(),
+            |value| {
+                let index = u32::try_from(value.to_u64()?).ok()?;
+                let raw =
+                    resolver.read_bitvec(table.entry_address(index), element_size as usize)?;
+                let value = if table.shift() == 0 {
+                    raw
+                } else {
+                    let bits = element_size * 8 + u32::from(table.shift());
+                    raw.unsigned_cast(bits) << BitVec::from_u64(u64::from(table.shift()), bits)
+                };
+                let target = match matched.base() {
+                    Some(base) => {
+                        let offset = if base.is_signed() {
+                            value.signed_cast(u64::BITS)
+                        } else {
+                            value.unsigned_cast(u64::BITS)
+                        };
+                        BitVec::from_u64(base.address().offset(), u64::BITS) + offset
+                    }
+                    None => value.unsigned_cast(u64::BITS),
+                };
+                resolver.resolve_value(branch, &target)
+            },
+        )?;
 
         table.set_element_count(self.cases.len() as u32);
-        let guarded = idiom.bound().is_some();
-        let truncated = idiom
-            .bound()
-            .and_then(BitVec::to_u64)
-            .is_some_and(|bound| (self.cases.len() as u64) <= bound);
-        let table_start = Address::new(space, idiom.table());
-        let properties = SwitchProperties::from_recovery(guarded, truncated)
+        let table_address = table.address();
+        let properties = properties
             | SwitchProperties::CONTIGUOUS_ENTRIES
-            | target_resolver.properties_for_table(table_start, &self.cases);
-        let model = match idiom.base() {
+            | resolver.properties_for_table(table_address, &self.cases);
+        let model = match matched.base() {
             Some(base) => SwitchModel::OffsetRelative {
                 table,
                 base: base.address(),

@@ -26,6 +26,7 @@ pub(crate) mod overlay;
 pub(crate) mod properties;
 pub(crate) mod provider;
 pub(crate) mod space;
+pub(crate) mod staging;
 pub(crate) mod view;
 
 pub use cache::SegmentMappingCache;
@@ -414,7 +415,7 @@ impl SegmentStorage {
         path: &Path,
         attributes: &mut AttributeMap,
     ) -> Result<Self, SegmentStorageError> {
-        let mut metadata = Self::load_storage_metadata(path)?;
+        let mut metadata = Self::read_metadata(path)?;
         let mut storage = Self::empty();
 
         for prov_meta in mem::take(&mut metadata.providers) {
@@ -572,6 +573,12 @@ impl SegmentStorage {
         self.mappings.get(&id)
     }
 
+    fn is_mapping_in_space(&self, space: AddressSpaceId, mapping: SegmentMappingId) -> bool {
+        self.spaces
+            .get(&space)
+            .is_some_and(|space| space.contains_mapping(mapping))
+    }
+
     pub(crate) fn mapping_space_ids(&self, id: SegmentMappingId) -> SmallVec<[AddressSpaceId; 4]> {
         self.spaces
             .values()
@@ -645,12 +652,13 @@ impl SegmentStorage {
     pub fn mapping_placements(
         &self,
         id: SegmentMappingId,
-    ) -> impl Iterator<Item = (AddressSpaceId, (RawAddress, RawAddress))> + '_ {
+    ) -> impl Iterator<Item = AddressRange> + '_ {
         self.mappings.get(&id).into_iter().flat_map(move |mapping| {
-            let range = (mapping.start().raw_address(), mapping.last().raw_address());
+            let range = mapping.range();
             self.spaces
                 .values()
-                .filter_map(move |space| space.contains_mapping(id).then_some((space.id(), range)))
+                .filter(move |space| space.contains_mapping(id))
+                .map(move |space| AddressRange::new(space.id(), range.start(), range.end()))
         })
     }
 
@@ -901,7 +909,7 @@ impl SegmentStorage {
         Ok(())
     }
 
-    fn load_storage_metadata(
+    fn read_metadata(
         path: impl AsRef<Path>,
     ) -> Result<SegmentStorageMetadata, SegmentStorageError> {
         let meta_path = path.as_ref().join(SEGMENT_STORAGE_FILE);

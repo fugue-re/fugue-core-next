@@ -2,46 +2,70 @@ use fugue_bv::BitVec;
 use fugue_bytes::Endian;
 
 use crate::arch::Arch;
-use crate::ir::{Address, AddressWithContext, RawAddress, SwitchCase, SwitchProperties};
-use crate::lifter::{ContextSet, InsnResolver, LiftingContext};
-use crate::storage::segments::provider::SegmentView;
-use crate::storage::{AddressSpaceId, SegmentMappingCache, SegmentStorage};
+use crate::ir::{
+    Address, AddressWithContext, IncompleteCodeBlockId, IncompleteFunction, RawAddress, SwitchCase,
+    SwitchProperties,
+};
+use crate::lifter::{ContextSet, InsnResolver, RawPCodeOp};
+use crate::storage::{SegmentMappingCache, SegmentStorage};
 
-pub(crate) struct SwitchTargetResolver<'a> {
-    arch: &'a Arch,
+pub(crate) struct SwitchResolver<'project, 'resolver> {
+    arch: &'project Arch,
+    resolver: &'resolver mut InsnResolver,
     mapping_cache: SegmentMappingCache,
     read_buffer: Vec<u8>,
-    segments: &'a SegmentStorage,
-    space: AddressSpaceId,
+    segments: &'project SegmentStorage,
 }
 
-impl<'a> SwitchTargetResolver<'a> {
-    pub(crate) fn new(arch: &'a Arch, segments: &'a SegmentStorage, space: AddressSpaceId) -> Self {
+impl<'project, 'resolver> SwitchResolver<'project, 'resolver> {
+    pub(crate) fn new(
+        arch: &'project Arch,
+        segments: &'project SegmentStorage,
+        resolver: &'resolver mut InsnResolver,
+    ) -> Self {
         Self {
             arch,
+            resolver,
             mapping_cache: SegmentMappingCache::new(),
             read_buffer: Vec::new(),
             segments,
-            space,
         }
     }
 
-    pub(crate) fn set_space(&mut self, space: AddressSpaceId) {
-        self.space = space;
+    pub(crate) fn apply_context(&mut self, address: Address, context: &ContextSet) {
+        context.apply(address, self.resolver.context_mut());
     }
 
-    pub(crate) fn resolve_value(
+    pub(crate) fn lift_block(
         &mut self,
-        value: &BitVec,
-        context: &LiftingContext,
-    ) -> Option<AddressWithContext> {
-        self.resolve_address(RawAddress::from(value.to_u64()?), context)
-    }
+        function: &IncompleteFunction,
+        block: IncompleteCodeBlockId,
+        output: &mut Vec<RawPCodeOp>,
+    ) -> Option<()> {
+        let block = function.block(block)?;
+        block
+            .context()
+            .apply(block.address(), self.resolver.context_mut());
+        let view = self
+            .mapping_cache
+            .contiguous_view_from(self.segments, block.address())
+            .ok()?;
+        let bytes = view.as_contiguous()?.get(..block.size())?;
+        let output_start = output.len();
 
-    pub(crate) fn contiguous_view_from(&mut self, address: Address) -> Option<SegmentView<'a>> {
-        self.mapping_cache
-            .contiguous_view_from(self.segments, address)
-            .ok()
+        for &insn_id in block.insn_ids() {
+            let insn = function.insn(insn_id)?;
+            let offset = usize::from(insn.address() - block.address());
+            if self
+                .resolver
+                .lift_into(insn.address(), bytes.get(offset..)?, output)
+                .is_err()
+            {
+                output.truncate(output_start);
+                return None;
+            }
+        }
+        Some(())
     }
 
     pub(crate) fn read_bitvec(&mut self, address: Address, size: usize) -> Option<BitVec> {
@@ -60,13 +84,28 @@ impl<'a> SwitchTargetResolver<'a> {
         Some(value)
     }
 
+    pub(crate) fn resolve_value(
+        &mut self,
+        source: Address,
+        value: &BitVec,
+    ) -> Option<AddressWithContext> {
+        self.resolve_address(source, RawAddress::from(value.to_u64()?))
+    }
+
     pub(crate) fn resolve_address(
         &mut self,
+        source: Address,
         value: RawAddress,
-        context: &LiftingContext,
     ) -> Option<AddressWithContext> {
-        let (canonical, context) = self.arch.canonicalise_address_with(value, context)?;
-        self.resolve_canonical_address(canonical, context)
+        let (canonical, context) = self
+            .arch
+            .canonicalise_address_with(value, self.resolver.context())?;
+        let address = Address::new(source.space(), canonical);
+        let executable = self
+            .mapping_cache
+            .mapping_properties(self.segments, address)
+            .is_some_and(|properties| properties.is_executable());
+        executable.then(|| AddressWithContext::new(address, context))
     }
 
     pub(crate) fn resolve_branch_target(
@@ -74,15 +113,14 @@ impl<'a> SwitchTargetResolver<'a> {
         address: Address,
         expected_size: Option<usize>,
         context: &ContextSet,
-        resolver: &mut InsnResolver,
     ) -> Option<AddressWithContext> {
         let view = self
             .mapping_cache
             .contiguous_view_from(self.segments, address)
             .ok()?;
         let bytes = view.as_contiguous()?;
-        context.apply(address, resolver.context_mut());
-        let instruction = resolver.resolve(address, bytes).ok()?;
+        context.apply(address, self.resolver.context_mut());
+        let instruction = self.resolver.resolve(address, bytes).ok()?;
         let instruction = instruction.as_ref();
         if expected_size.is_some_and(|size| instruction.size() != size)
             || !instruction.is_branch()
@@ -98,7 +136,7 @@ impl<'a> SwitchTargetResolver<'a> {
         if targets.next().is_some() {
             return None;
         }
-        self.resolve_address(target.raw_address(), resolver.context())
+        self.resolve_address(address, target.raw_address())
     }
 
     pub(crate) fn properties_for_table(
@@ -128,18 +166,5 @@ impl<'a> SwitchTargetResolver<'a> {
         } else {
             SwitchProperties::empty()
         }
-    }
-
-    fn resolve_canonical_address(
-        &mut self,
-        canonical: RawAddress,
-        context: ContextSet,
-    ) -> Option<AddressWithContext> {
-        let address = Address::new(self.space, canonical);
-        let executable = self
-            .mapping_cache
-            .mapping_properties(self.segments, address)
-            .is_some_and(|properties| properties.is_executable());
-        executable.then(|| AddressWithContext::new(address, context))
     }
 }

@@ -3,21 +3,37 @@ use std::collections::VecDeque;
 use fugue_bv::BitVec;
 use rustc_hash::FxHashSet;
 
-use super::SwitchIntervalRecovery;
+use crate::analysis::switch::SwitchRecoveryConfig;
 use crate::il::common::IlValueId;
-use crate::il::ecode::ECodeOpcode;
+use crate::il::ecode::{ECodeBlockArgInputs, ECodeIr, ECodeOpcode};
 use crate::ir::RawAddress;
 
-pub(crate) struct SwitchTableLayout {
-    address: RawAddress,
-    element_size: u32,
-    index: IlValueId,
+pub(crate) enum SwitchTableLayout {
+    Inline {
+        address: RawAddress,
+        index: IlValueId,
+        stride: u32,
+    },
+    Loaded {
+        address: RawAddress,
+        element_size: u32,
+        index: IlValueId,
+        target: IlValueId,
+    },
 }
 
-pub(crate) struct SwitchInlineTableLayout {
-    address: RawAddress,
-    stride: u32,
-    index: IlValueId,
+impl SwitchTableLayout {
+    pub(crate) fn index(&self) -> IlValueId {
+        match self {
+            Self::Inline { index, .. } | Self::Loaded { index, .. } => *index,
+        }
+    }
+}
+
+pub(crate) struct SwitchLayoutAnalysis<'analysis> {
+    block_arg_inputs: &'analysis ECodeBlockArgInputs,
+    config: SwitchRecoveryConfig,
+    ssa: &'analysis ECodeIr,
 }
 
 struct BaseScaleIndex {
@@ -31,53 +47,42 @@ impl BaseScaleIndex {
         Self { base, scale, index }
     }
 
-    fn base(&self) -> RawAddress {
-        self.base
-    }
-
-    fn index(&self) -> IlValueId {
-        self.index
-    }
-
-    fn scale(&self) -> Option<u64> {
-        self.scale
-    }
-
     fn stride(&self) -> u64 {
         self.scale.unwrap_or(1)
     }
 }
 
-impl SwitchTableLayout {
-    pub(crate) fn address(&self) -> RawAddress {
-        self.address
+impl<'analysis> SwitchLayoutAnalysis<'analysis> {
+    pub(crate) fn new(
+        ssa: &'analysis ECodeIr,
+        block_arg_inputs: &'analysis ECodeBlockArgInputs,
+        config: SwitchRecoveryConfig,
+    ) -> Self {
+        Self {
+            block_arg_inputs,
+            config,
+            ssa,
+        }
     }
 
-    pub(crate) fn element_size(&self) -> u32 {
-        self.element_size
+    pub(crate) fn discover(&self, target: IlValueId) -> Option<SwitchTableLayout> {
+        if let Some((address, element_size, index)) = self.table_layout(target) {
+            return Some(SwitchTableLayout::Loaded {
+                address,
+                element_size,
+                index,
+                target,
+            });
+        }
+        let (address, stride, index) = self.inline_table_layout(target)?;
+        Some(SwitchTableLayout::Inline {
+            address,
+            index,
+            stride,
+        })
     }
 
-    pub(crate) fn index(&self) -> IlValueId {
-        self.index
-    }
-}
-
-impl SwitchInlineTableLayout {
-    pub(crate) fn address(&self) -> RawAddress {
-        self.address
-    }
-
-    pub(crate) fn stride(&self) -> u32 {
-        self.stride
-    }
-
-    pub(crate) fn index(&self) -> IlValueId {
-        self.index
-    }
-}
-
-impl SwitchIntervalRecovery<'_> {
-    pub(crate) fn table_layout(&self, target: IlValueId) -> Option<SwitchTableLayout> {
+    fn table_layout(&self, target: IlValueId) -> Option<(RawAddress, u32, IlValueId)> {
         let mut queue = VecDeque::from([target]);
         let mut visited = FxHashSet::default();
         let mut steps = 0usize;
@@ -99,11 +104,7 @@ impl SwitchIntervalRecovery<'_> {
                     if let Some(pointer) = self.ssa.pointer_operand(operation) {
                         let element_size = operation.width().div_ceil(8);
                         if let Some((address, index)) = self.table_pointer(pointer, element_size) {
-                            return Some(SwitchTableLayout {
-                                address,
-                                element_size,
-                                index,
-                            });
+                            return Some((address, element_size, index));
                         }
                         queue.push_back(pointer);
                     }
@@ -133,10 +134,10 @@ impl SwitchIntervalRecovery<'_> {
         element_size: u32,
     ) -> Option<(RawAddress, IlValueId)> {
         let indexed = self.base_scale_index(pointer)?;
-        (indexed.stride() == u64::from(element_size)).then_some((indexed.base(), indexed.index()))
+        (indexed.stride() == u64::from(element_size)).then_some((indexed.base, indexed.index))
     }
 
-    pub(crate) fn inline_table_layout(&self, target: IlValueId) -> Option<SwitchInlineTableLayout> {
+    fn inline_table_layout(&self, target: IlValueId) -> Option<(RawAddress, u32, IlValueId)> {
         let mut target = self.canonical_value(target);
         if let Some(operation) = self.ssa.defining_op(target)
             && operation.opcode() == ECodeOpcode::And
@@ -153,16 +154,12 @@ impl SwitchIntervalRecovery<'_> {
         }
 
         let indexed = self.base_scale_index(target)?;
-        let stride = u32::try_from(indexed.scale()?).ok()?;
+        let stride = u32::try_from(indexed.scale?).ok()?;
         if stride == 0 || stride > self.config.max_element_size() {
             return None;
         }
 
-        Some(SwitchInlineTableLayout {
-            address: indexed.base(),
-            stride,
-            index: indexed.index(),
-        })
+        Some((indexed.base, stride, indexed.index))
     }
 
     fn base_scale_index(&self, value: IlValueId) -> Option<BaseScaleIndex> {
@@ -203,6 +200,27 @@ impl SwitchIntervalRecovery<'_> {
             Some(scale),
             self.canonical_value(index),
         ))
+    }
+
+    fn canonical_value(&self, value: IlValueId) -> IlValueId {
+        let mut current = self.ssa.underlying_value(value);
+        for _ in 0..self.config.max_trace_depth() {
+            let Some(inputs) = self.block_arg_inputs.inputs_for(current) else {
+                break;
+            };
+            let Some(&first) = inputs.first() else {
+                break;
+            };
+            if inputs.iter().any(|&input| input != first) {
+                break;
+            }
+            let next = self.ssa.underlying_value(first);
+            if next == current {
+                break;
+            }
+            current = next;
+        }
+        current
     }
 
     fn constant_and_value(&self, a: IlValueId, b: IlValueId) -> Option<(BitVec, IlValueId)> {

@@ -19,9 +19,9 @@ use crate::il::pcode::{
 };
 use crate::ir::{
     AddressRange, AddressRangeSet, AddressWithContext, IncompleteCodeBlock, IncompleteFunction,
-    Insn, InsnEntry, InsnProperties, ProblemKind, RawAddress, Reference, ReferenceKind,
-    ReferenceOrigin, ReferenceProperties, ReferenceTarget, Switch, SwitchCase, SwitchModel,
-    SymbolEntry, SymbolIndex, SymbolProperties, SymbolTableSelector,
+    Insn, InsnEntry, InsnProperties, ProblemKind, Reference, ReferenceKind, ReferenceOrigin,
+    ReferenceProperties, ReferenceTarget, Switch, SwitchCase, SwitchModel, SymbolEntry,
+    SymbolIndex, SymbolProperties, SymbolTableSelector,
 };
 use crate::lifter::{ContextSet, Op, RawPCodeOp, Varnode, resolve_language};
 use crate::project::FunctionChangeKind;
@@ -281,9 +281,7 @@ fn mcode_for_test(function: FunctionId, graph: IlGraph) -> MCodeIr {
         .expect("test MCode should verify")
 }
 
-fn first_mapping_placement(
-    project: &Project,
-) -> (AddressSpaceId, SegmentMappingId, (RawAddress, RawAddress)) {
+fn first_mapping_placement(project: &Project) -> (AddressSpaceId, SegmentMappingId, AddressRange) {
     let (space, mapping) = project
         .segments()
         .spaces()
@@ -297,7 +295,7 @@ fn first_mapping_placement(
     let range = project
         .segments()
         .mapping_placements(mapping)
-        .find_map(|(mapped_space, range)| (mapped_space == space).then_some(range))
+        .find(|range| range.space() == space)
         .expect("mapping should have a placement in its priority space");
 
     (space, mapping, range)

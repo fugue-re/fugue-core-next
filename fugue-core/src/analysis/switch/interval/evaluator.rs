@@ -65,7 +65,9 @@ impl<'context, 'analysis> SwitchTargetEvaluator<'context, 'analysis> {
                         }
 
                         let Some(operation) = self.context.ssa.defining_op(value) else {
-                            if let Some(input) = self.context.common_block_arg_input(value) {
+                            if let Some(input) =
+                                self.context.block_arg_inputs.common_input_for(value)
+                            {
                                 self.stack.push(EvaluationStep::Forward { value, input });
                                 if !self.memo.contains_key(&input) {
                                     self.stack.push(EvaluationStep::Evaluate(input));

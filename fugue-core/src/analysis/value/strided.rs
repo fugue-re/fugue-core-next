@@ -1,4 +1,5 @@
 use std::iter;
+use std::ops::{Add, BitAnd, BitOr, Mul, Shl, Shr, Sub};
 
 use fugue_bv::BitVec;
 
@@ -275,98 +276,6 @@ impl StridedInterval {
         )
     }
 
-    pub fn add(&self, other: &Self) -> Self {
-        let (
-            StridedIntervalRepr::Interval {
-                lo: l1,
-                hi: h1,
-                stride: s1,
-            },
-            StridedIntervalRepr::Interval {
-                lo: l2,
-                hi: h2,
-                stride: s2,
-            },
-        ) = (&self.0, &other.0)
-        else {
-            return Self(StridedIntervalRepr::Empty(self.width()));
-        };
-        let headroom = &BitVec::max_value_with(l1.bits(), false) - h2;
-        if h1 > &headroom {
-            return Self::full(l1.bits());
-        }
-        Self::range(l1 + l2, h1 + h2, s1.gcd(s2))
-    }
-
-    pub fn sub(&self, other: &Self) -> Self {
-        let (
-            StridedIntervalRepr::Interval {
-                lo: l1,
-                hi: h1,
-                stride: s1,
-            },
-            StridedIntervalRepr::Interval {
-                lo: l2,
-                hi: h2,
-                stride: s2,
-            },
-        ) = (&self.0, &other.0)
-        else {
-            return Self(StridedIntervalRepr::Empty(self.width()));
-        };
-        if l1 < h2 {
-            return Self::full(l1.bits());
-        }
-        Self::range(l1 - h2, h1 - l2, s1.gcd(s2))
-    }
-
-    pub fn mul(&self, other: &Self) -> Self {
-        match (self.to_value(), other.to_value()) {
-            (Some(factor), _) => other.scale(&factor),
-            (_, Some(factor)) => self.scale(&factor),
-            _ => Self::full(self.width()),
-        }
-    }
-
-    pub fn shift_left(&self, amount: &Self) -> Self {
-        match amount.to_value().and_then(|value| value.to_u64()) {
-            Some(shift) if shift < u64::from(self.width()) => {
-                let factor = BitVec::one(self.width()) << BitVec::from_u64(shift, self.width());
-                self.scale(&factor)
-            }
-            _ => Self::full(self.width()),
-        }
-    }
-
-    pub fn and(&self, other: &Self) -> Self {
-        match (self.to_value(), other.to_value()) {
-            (Some(a), Some(b)) => Self::single(a & b),
-            (Some(mask), None) | (None, Some(mask)) => Self::masked(&mask),
-            (None, None) => Self::full(self.width()),
-        }
-    }
-
-    pub fn or(&self, other: &Self) -> Self {
-        match (self.to_value(), other.to_value()) {
-            (Some(a), Some(b)) => Self::single(a | b),
-            _ => Self::full(self.width()),
-        }
-    }
-
-    pub fn shift_right(&self, amount: &Self) -> Self {
-        let Some(shift) = amount.to_value().and_then(|value| value.to_u64()) else {
-            return Self::full(self.width());
-        };
-        if shift >= u64::from(self.width()) {
-            return Self::single(BitVec::zero(self.width()));
-        }
-        let StridedIntervalRepr::Interval { lo, hi, .. } = &self.0 else {
-            return Self(StridedIntervalRepr::Empty(self.width()));
-        };
-        let places = BitVec::from_u64(shift, self.width());
-        Self::range(lo >> &places, hi >> &places, BitVec::one(self.width()))
-    }
-
     fn scale(&self, factor: &BitVec) -> Self {
         let StridedIntervalRepr::Interval { lo, hi, stride } = &self.0 else {
             return Self(StridedIntervalRepr::Empty(self.width()));
@@ -390,3 +299,159 @@ impl StridedInterval {
         }
     }
 }
+
+impl Add<&StridedInterval> for &StridedInterval {
+    type Output = StridedInterval;
+
+    fn add(self, other: &StridedInterval) -> Self::Output {
+        let (
+            StridedIntervalRepr::Interval {
+                lo: l1,
+                hi: h1,
+                stride: s1,
+            },
+            StridedIntervalRepr::Interval {
+                lo: l2,
+                hi: h2,
+                stride: s2,
+            },
+        ) = (&self.0, &other.0)
+        else {
+            return StridedInterval(StridedIntervalRepr::Empty(self.width()));
+        };
+        let headroom = &BitVec::max_value_with(l1.bits(), false) - h2;
+        if h1 > &headroom {
+            return StridedInterval::full(l1.bits());
+        }
+        StridedInterval::range(l1 + l2, h1 + h2, s1.gcd(s2))
+    }
+}
+
+impl Sub<&StridedInterval> for &StridedInterval {
+    type Output = StridedInterval;
+
+    fn sub(self, other: &StridedInterval) -> Self::Output {
+        let (
+            StridedIntervalRepr::Interval {
+                lo: l1,
+                hi: h1,
+                stride: s1,
+            },
+            StridedIntervalRepr::Interval {
+                lo: l2,
+                hi: h2,
+                stride: s2,
+            },
+        ) = (&self.0, &other.0)
+        else {
+            return StridedInterval(StridedIntervalRepr::Empty(self.width()));
+        };
+        if l1 < h2 {
+            return StridedInterval::full(l1.bits());
+        }
+        StridedInterval::range(l1 - h2, h1 - l2, s1.gcd(s2))
+    }
+}
+
+impl Mul<&StridedInterval> for &StridedInterval {
+    type Output = StridedInterval;
+
+    fn mul(self, other: &StridedInterval) -> Self::Output {
+        match (self.to_value(), other.to_value()) {
+            (Some(factor), _) => other.scale(&factor),
+            (_, Some(factor)) => self.scale(&factor),
+            _ => StridedInterval::full(self.width()),
+        }
+    }
+}
+
+impl Shl<&StridedInterval> for &StridedInterval {
+    type Output = StridedInterval;
+
+    fn shl(self, amount: &StridedInterval) -> Self::Output {
+        match amount.to_value().and_then(|value| value.to_u64()) {
+            Some(shift) if shift < u64::from(self.width()) => {
+                let factor = BitVec::one(self.width()) << BitVec::from_u64(shift, self.width());
+                self.scale(&factor)
+            }
+            _ => StridedInterval::full(self.width()),
+        }
+    }
+}
+
+impl Shr<&StridedInterval> for &StridedInterval {
+    type Output = StridedInterval;
+
+    fn shr(self, amount: &StridedInterval) -> Self::Output {
+        let Some(shift) = amount.to_value().and_then(|value| value.to_u64()) else {
+            return StridedInterval::full(self.width());
+        };
+        if shift >= u64::from(self.width()) {
+            return StridedInterval::single(BitVec::zero(self.width()));
+        }
+        let StridedIntervalRepr::Interval { lo, hi, .. } = &self.0 else {
+            return StridedInterval(StridedIntervalRepr::Empty(self.width()));
+        };
+        let places = BitVec::from_u64(shift, self.width());
+        StridedInterval::range(lo >> &places, hi >> &places, BitVec::one(self.width()))
+    }
+}
+
+impl BitAnd<&StridedInterval> for &StridedInterval {
+    type Output = StridedInterval;
+
+    fn bitand(self, other: &StridedInterval) -> Self::Output {
+        match (self.to_value(), other.to_value()) {
+            (Some(a), Some(b)) => StridedInterval::single(a & b),
+            (Some(mask), None) | (None, Some(mask)) => StridedInterval::masked(&mask),
+            (None, None) => StridedInterval::full(self.width()),
+        }
+    }
+}
+
+impl BitOr<&StridedInterval> for &StridedInterval {
+    type Output = StridedInterval;
+
+    fn bitor(self, other: &StridedInterval) -> Self::Output {
+        match (self.to_value(), other.to_value()) {
+            (Some(a), Some(b)) => StridedInterval::single(a | b),
+            _ => StridedInterval::full(self.width()),
+        }
+    }
+}
+
+macro_rules! impl_owned_binary_op {
+    ($trait:ident, $method:ident) => {
+        impl $trait<StridedInterval> for StridedInterval {
+            type Output = StridedInterval;
+
+            fn $method(self, other: StridedInterval) -> Self::Output {
+                (&self).$method(&other)
+            }
+        }
+
+        impl $trait<&StridedInterval> for StridedInterval {
+            type Output = StridedInterval;
+
+            fn $method(self, other: &StridedInterval) -> Self::Output {
+                (&self).$method(other)
+            }
+        }
+
+        impl $trait<StridedInterval> for &StridedInterval {
+            type Output = StridedInterval;
+
+            fn $method(self, other: StridedInterval) -> Self::Output {
+                self.$method(&other)
+            }
+        }
+    };
+}
+
+impl_owned_binary_op!(Add, add);
+impl_owned_binary_op!(BitAnd, bitand);
+impl_owned_binary_op!(BitOr, bitor);
+impl_owned_binary_op!(Mul, mul);
+impl_owned_binary_op!(Shl, shl);
+impl_owned_binary_op!(Shr, shr);
+impl_owned_binary_op!(Sub, sub);

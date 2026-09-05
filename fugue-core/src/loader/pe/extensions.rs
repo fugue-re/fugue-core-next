@@ -2,15 +2,12 @@ use object::endian::LittleEndian;
 use object::read::pe::{ImageNtHeaders, PeFile};
 use object::{ReadRef, pe};
 
-use crate::analysis::AnalysisError;
-use crate::analysis::function::FunctionRecovery;
 use crate::arch::Arch;
 use crate::extension::{self, Registration};
 use crate::ir::{Endian, RawAddress};
 use crate::lifter::{LanguageId, LanguageSource};
 use crate::loader::pe::PeFileRepr;
-use crate::loader::{ImageSegmentContents, LoaderError, Pe};
-use crate::platform::{CallingConvention, Platform};
+use crate::loader::{ImageSegmentContents, LoaderError};
 use crate::types::AttributeMap;
 
 pub struct ImageContext<'a> {
@@ -178,83 +175,6 @@ extension::collect!(ArchResolver);
 extension::submit! {
     ArchResolver::new("pe-builtins", ArchResolver::resolve_builtin)
 }
-
-pub struct AnalysisContext<'a> {
-    pe: &'a Pe<'a>,
-    arch: Arch,
-    platform: Platform,
-}
-
-impl<'a> AnalysisContext<'a> {
-    pub(crate) fn new(pe: &'a Pe<'a>, arch: Arch, platform: Platform) -> Self {
-        Self { pe, arch, platform }
-    }
-
-    pub fn pe(&self) -> &'a Pe<'a> {
-        self.pe
-    }
-
-    pub fn arch(&self) -> &Arch {
-        &self.arch
-    }
-
-    pub fn platform(&self) -> &Platform {
-        &self.platform
-    }
-
-    pub fn calling_convention(&self) -> CallingConvention {
-        self.platform.calling_convention()
-    }
-
-    pub fn apply_function_recovery_extensions(
-        &self,
-        recovery: &mut FunctionRecovery,
-    ) -> Result<(), AnalysisError> {
-        for extension in extension::iter::<FunctionRecoveryExtension>() {
-            self.apply_function_recovery_extension(extension, recovery)?;
-        }
-
-        Ok(())
-    }
-
-    pub fn apply_function_recovery_extension(
-        &self,
-        extension: &FunctionRecoveryExtension,
-        recovery: &mut FunctionRecovery,
-    ) -> Result<(), AnalysisError> {
-        extension.apply(self, recovery)
-    }
-}
-
-type FunctionRecoveryExtensionFn =
-    fn(&AnalysisContext<'_>, &mut FunctionRecovery) -> Result<(), AnalysisError>;
-
-pub struct FunctionRecoveryExtension {
-    name: &'static str,
-    apply: FunctionRecoveryExtensionFn,
-}
-
-impl FunctionRecoveryExtension {
-    pub const fn new(name: &'static str, apply: FunctionRecoveryExtensionFn) -> Self {
-        Self { name, apply }
-    }
-
-    pub fn apply(
-        &self,
-        context: &AnalysisContext<'_>,
-        recovery: &mut FunctionRecovery,
-    ) -> Result<(), AnalysisError> {
-        (self.apply)(context, recovery)
-    }
-}
-
-impl Registration for FunctionRecoveryExtension {
-    fn name(&self) -> &'static str {
-        self.name
-    }
-}
-
-extension::collect!(FunctionRecoveryExtension);
 
 pub struct RelocationContext<'a, 'data> {
     machine: u16,

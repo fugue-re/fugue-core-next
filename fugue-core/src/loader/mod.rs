@@ -5,8 +5,6 @@ use digest::Digest as _;
 use fallible_iterator::FallibleIterator;
 use thiserror::Error;
 
-use crate::analysis::AnalysisError;
-use crate::analysis::function::recovery::{FunctionRecovery, FunctionRecoveryConfig};
 use crate::arch::Arch;
 use crate::ir::Address;
 use crate::ir::symbol::TransientSymbolTable;
@@ -16,15 +14,14 @@ use crate::types::{AttributeMap, BytesOrMapping};
 
 pub(crate) mod elf;
 pub use elf::extensions::{
-    AnalysisContext as ElfAnalysisContext, ArchResolver as ElfArchResolver,
-    FunctionRecoveryExtension as ElfFunctionRecoveryExtension, ImageContext as ElfImageContext,
+    ArchResolver as ElfArchResolver, ImageContext as ElfImageContext,
     RelocationContext as ElfRelocationContext, RelocationExtension as ElfRelocationExtension,
 };
 pub use elf::{
     ATTRIBUTE_LOAD_HEADERS as ATTRIBUTE_ELF_LOAD_HEADERS,
     ATTRIBUTE_OVERRIDE_SEGMENT_PERMISSIONS as ATTRIBUTE_ELF_OVERRIDE_SEGMENT_PERMISSIONS,
     ATTRIBUTE_PRESERVE_RELOCATABLE_SECTION_ADDRESSES, ATTRIBUTE_SKIP_NOTE_SECTIONS,
-    ELF_DYNSYM_SELECTOR, ELF_SYMTAB_SELECTOR, Elf, ElfAnalysers, ElfFileRepr, ElfSegmentRelocator,
+    ELF_DYNSYM_SELECTOR, ELF_SYMTAB_SELECTOR, Elf, ElfFileRepr, ElfSegmentRelocator,
 };
 
 pub(crate) mod image;
@@ -40,13 +37,12 @@ pub(crate) use image::{ImageBankLayout, ImageCoveredRegions, ImageRegionBankMap}
 
 pub(crate) mod pe;
 pub use pe::extensions::{
-    AnalysisContext as PeAnalysisContext, ArchResolver as PeArchResolver,
-    FunctionRecoveryExtension as PeFunctionRecoveryExtension, ImageContext as PeImageContext,
+    ArchResolver as PeArchResolver, ImageContext as PeImageContext,
     RelocationContext as PeRelocationContext, RelocationExtension as PeRelocationExtension,
 };
 pub use pe::{
     ATTRIBUTE_LOAD_HEADERS as ATTRIBUTE_PE_LOAD_HEADERS, ATTRIBUTE_PERMISSIVE, PE_EXPORT_SELECTOR,
-    PE_IMPORT_SELECTOR, Pe, PeAnalysers, PeSegmentRelocator,
+    PE_IMPORT_SELECTOR, Pe, PeSegmentRelocator,
 };
 
 pub(crate) mod shellcode;
@@ -294,60 +290,6 @@ pub trait Loadable {
     fn image_contents<'a>(
         &'a self,
     ) -> impl FallibleIterator<Item = ImageSegmentContents<'a>, Error = LoaderError> + 'a;
-
-    fn analysers(&self) -> impl LoadableAnalysers {
-        DefaultLoadableAnalysers
-    }
-}
-
-pub trait LoadableAnalysers {
-    fn function_recovery(&self) -> Result<FunctionRecovery, AnalysisError> {
-        self.function_recovery_with(FunctionRecoveryConfig::default())
-    }
-
-    fn function_recovery_with(
-        &self,
-        config: FunctionRecoveryConfig,
-    ) -> Result<FunctionRecovery, AnalysisError> {
-        Ok(FunctionRecovery::new_with(config))
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct DefaultLoadableAnalysers;
-
-impl LoadableAnalysers for DefaultLoadableAnalysers {}
-
-impl<T> LoadableAnalysers for Box<T>
-where
-    T: LoadableAnalysers + ?Sized,
-{
-    fn function_recovery(&self) -> Result<FunctionRecovery, AnalysisError> {
-        self.as_ref().function_recovery()
-    }
-
-    fn function_recovery_with(
-        &self,
-        config: FunctionRecoveryConfig,
-    ) -> Result<FunctionRecovery, AnalysisError> {
-        self.as_ref().function_recovery_with(config)
-    }
-}
-
-impl<T> LoadableAnalysers for &T
-where
-    T: LoadableAnalysers + ?Sized,
-{
-    fn function_recovery(&self) -> Result<FunctionRecovery, AnalysisError> {
-        (*self).function_recovery()
-    }
-
-    fn function_recovery_with(
-        &self,
-        config: FunctionRecoveryConfig,
-    ) -> Result<FunctionRecovery, AnalysisError> {
-        (*self).function_recovery_with(config)
-    }
 }
 
 pub enum Loader<'a> {
@@ -487,13 +429,6 @@ impl Loadable for Loader<'_> {
         match self {
             Self::Elf(elf) => Box::new(elf.image_contents()) as ImageSegmentContentsIterator<'a>,
             Self::Pe(pe) => Box::new(pe.image_contents()) as ImageSegmentContentsIterator<'a>,
-        }
-    }
-
-    fn analysers(&self) -> impl LoadableAnalysers {
-        match self {
-            Self::Elf(elf) => Box::new(elf.analysers()) as Box<dyn LoadableAnalysers>,
-            Self::Pe(pe) => Box::new(pe.analysers()) as Box<dyn LoadableAnalysers>,
         }
     }
 }

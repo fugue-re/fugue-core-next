@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use crate::ir::{
     Address, AddressRangeSet, FunctionId, FunctionProperties, IncompleteFunction, ProblemKind,
-    Reference, ReferenceKind, ReferenceOrigin, ReferenceTarget, Switch, SymbolEntry, SymbolIndex,
+    Reference, ReferenceKind, ReferenceOrigin, ReferenceTarget, Switch, SymbolEntry, SymbolId,
+    SymbolIndex, SymbolProperties,
 };
 use crate::project::{ChangeSet, ProjectError, ProjectTransaction};
 use crate::storage::segments::mapping::{
@@ -181,6 +182,26 @@ impl FunctionRemoval {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SymbolRemoval {
     index: SymbolIndex,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SymbolPropertiesUpdate {
+    id: SymbolId,
+    properties: SymbolProperties,
+}
+
+impl SymbolPropertiesUpdate {
+    fn new(id: SymbolId, properties: SymbolProperties) -> Self {
+        Self { id, properties }
+    }
+
+    fn id(&self) -> SymbolId {
+        self.id
+    }
+
+    fn properties(&self) -> SymbolProperties {
+        self.properties
+    }
 }
 
 impl SymbolRemoval {
@@ -476,6 +497,7 @@ enum ProjectOperation {
     ResizeMapping(MappingResize),
     UpdateFunctionProperties(FunctionPropertiesUpdate),
     UpdateMappingMetadata(MappingMetadataUpdate),
+    UpdateSymbolProperties(SymbolPropertiesUpdate),
     WriteBytes(ByteWrite),
 }
 
@@ -623,6 +645,12 @@ impl ProjectUpdate {
         Self::new(ProjectOperation::UpdateMappingMetadata(update))
     }
 
+    pub fn update_symbol_properties(id: SymbolId, properties: SymbolProperties) -> Self {
+        Self::new(ProjectOperation::UpdateSymbolProperties(
+            SymbolPropertiesUpdate::new(id, properties),
+        ))
+    }
+
     pub fn write_bytes(address: impl Into<Address>, bytes: impl Into<Arc<[u8]>>) -> Self {
         Self::new(ProjectOperation::WriteBytes(ByteWrite::new(address, bytes)))
     }
@@ -741,6 +769,10 @@ impl ProjectUpdate {
                 update.provenance(),
                 update.flags(),
             ),
+            ProjectOperation::UpdateSymbolProperties(update) => {
+                transaction.update_symbol_properties(update.id(), update.properties())?;
+                Ok(())
+            }
             ProjectOperation::WriteBytes(write) => {
                 transaction.write_bytes(write.address(), write.bytes())
             }
@@ -780,6 +812,7 @@ mod test {
         ResizeMapping,
         UpdateFunctionProperties,
         UpdateMappingMetadata,
+        UpdateSymbolProperties,
         WriteBytes,
     }
 
@@ -824,6 +857,7 @@ mod test {
                 TransactionVerb::UpdateFunctionProperties
             }
             ProjectOperation::UpdateMappingMetadata(_) => TransactionVerb::UpdateMappingMetadata,
+            ProjectOperation::UpdateSymbolProperties(_) => TransactionVerb::UpdateSymbolProperties,
             ProjectOperation::WriteBytes(_) => TransactionVerb::WriteBytes,
         }
     }
@@ -963,6 +997,11 @@ mod test {
                 "update_mapping_metadata",
                 ProjectUpdate::update_mapping_metadata(MappingMetadataUpdate::new(mapping)),
                 TransactionVerb::UpdateMappingMetadata,
+            ),
+            (
+                "update_symbol_properties",
+                ProjectUpdate::update_symbol_properties(SymbolId::INVALID, SymbolProperties::NONE),
+                TransactionVerb::UpdateSymbolProperties,
             ),
             (
                 "write_bytes",

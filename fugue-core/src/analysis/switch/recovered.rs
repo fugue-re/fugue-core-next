@@ -1,8 +1,55 @@
+use fugue_bv::BitVec;
+
 use crate::ir::{
-    Address, AddressTable, AddressWithContext, FunctionId, Switch, SwitchCase, SwitchId,
-    SwitchModel, SwitchProperties,
+    Address, AddressTable, AddressWithContext, FunctionId, Switch, SwitchCase, SwitchCaseLabel,
+    SwitchId, SwitchModel, SwitchProperties,
 };
 use crate::types::Confidence;
+
+pub(crate) struct SwitchCaseEnumerator {
+    maximum: usize,
+}
+
+impl SwitchCaseEnumerator {
+    pub(crate) fn new(maximum: u32) -> Self {
+        Self {
+            maximum: maximum as usize,
+        }
+    }
+
+    pub(crate) fn enumerate(
+        &self,
+        cases: &mut Vec<SwitchCase>,
+        values: impl IntoIterator<Item = BitVec>,
+        expected_count: Option<u64>,
+        guarded: bool,
+        label_offset: i64,
+        mut resolve: impl FnMut(&BitVec) -> Option<AddressWithContext>,
+    ) -> Option<SwitchProperties> {
+        cases.clear();
+        for value in values.into_iter().take(self.maximum) {
+            let Some(target) = resolve(&value) else {
+                break;
+            };
+            let mut case = SwitchCase::new(target);
+            if let Some(raw) = value.to_u64() {
+                case.add_label(SwitchCaseLabel::new(raw.wrapping_add(label_offset as u64)));
+            }
+            cases.push(case);
+        }
+        if cases.is_empty() {
+            return None;
+        }
+
+        let mut properties = SwitchProperties::TARGETS_IN_EXECUTABLE;
+        properties.set(SwitchProperties::GUARD_FOUND, guarded);
+        properties.set(
+            SwitchProperties::TRUNCATED,
+            expected_count.is_some_and(|count| (cases.len() as u64) < count),
+        );
+        Some(properties)
+    }
+}
 
 pub(crate) struct RecoveredSwitch {
     model: SwitchModel,

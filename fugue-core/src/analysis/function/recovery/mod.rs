@@ -9,43 +9,38 @@ pub(crate) mod analysis;
 pub(crate) use analysis::FUNCTION_RECOVERY_ANALYSER;
 pub use analysis::{
     FunctionDiscoveryContext, FunctionRecovery, FunctionRecoveryExtension,
-    FunctionStructuringContext,
+    InterFunctionStructuringContext,
 };
 
 pub(crate) mod builder;
-pub use builder::{FunctionBuilder, FunctionBuilderContext, FunctionRecoveryState};
+pub use builder::{FunctionBuilderContext, StructuredFunctionContext};
 
 mod executor;
 
 pub(crate) mod hooks;
-pub use hooks::{FunctionRecoveryCommitContext, FunctionRecoveryCommitHook};
+pub use hooks::{FunctionCommitContext, FunctionCommitPolicy};
 
 pub(crate) mod patterns;
 pub use patterns::{FunctionRecoveryPatternMatcher, FunctionRecoveryPatternMatcherError};
 
 mod structuring;
 
-pub const DEFAULT_MAX_BLOCK_INSNS: usize = u16::MAX as usize;
-pub const DEFAULT_MAX_FUNCTION_BLOCKS: usize = u16::MAX as usize;
-pub const DEFAULT_MAX_FUNCTION_INSNS: usize = u16::MAX as usize;
-const FUNCTION_RECOVERY_BLOCKING_PROBLEMS: [ProblemKind; 7] = [
-    ProblemKind::HinderedByAssertedFact,
-    ProblemKind::AvoidedBytes,
-    ProblemKind::CannotCreateFunction,
-    ProblemKind::DecodeFailed,
-    ProblemKind::FunctionTooLarge,
-    ProblemKind::PassFailed,
-    ProblemKind::Unknown,
-];
+const MAX_BLOCK_INSN_COUNT: usize = u16::MAX as usize;
+const MAX_FUNCTION_BLOCK_COUNT: usize = u16::MAX as usize;
+const MAX_FUNCTION_INSN_COUNT: usize = u16::MAX as usize;
+
+const DEFAULT_INVOCATION_CANDIDATE_LIMIT: usize = 8192;
+const DEFAULT_INVOCATION_FUNCTION_LIMIT: usize = 8192;
+const DEFAULT_INVOCATION_OUTPUT_BYTE_LIMIT: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum FunctionRecoveryError {
-    #[error("commit hook failed: {0}")]
-    CommitHook(AnalysisError),
+    #[error("commit policy failed: {0}")]
+    CommitPolicy(AnalysisError),
     #[error(transparent)]
     Disassembly(#[from] DisassemblerError),
-    #[error("initialisation pass failed: {0}")]
-    InitialisationPass(AnalysisError),
+    #[error("pre-resolution pass failed: {0}")]
+    PreResolutionPass(AnalysisError),
     #[error(transparent)]
     Insn(#[from] InsnError),
     #[error("invalid block id: {0:?}")]
@@ -139,7 +134,7 @@ impl FunctionRecoveryError {
 
     pub fn problem_kind(&self) -> ProblemKind {
         match self {
-            Self::CommitHook(_) | Self::InitialisationPass(_) | Self::PostStructuringPass(_) => {
+            Self::CommitPolicy(_) | Self::PreResolutionPass(_) | Self::PostStructuringPass(_) => {
                 ProblemKind::PassFailed
             }
             Self::Disassembly(_) | Self::Insn(_) | Self::Lifting(_) => ProblemKind::DecodeFailed,
@@ -164,12 +159,6 @@ impl From<InsnResolverError> for FunctionRecoveryError {
     }
 }
 
-// NOTE: we use the following conventions for function recovery configuration:
-// - If an option is a flag (boolean), then we use `set_<option>` to set it and
-//   `with_<option>` to create a new config with the option set.
-// - If an option is a value (e.g., usize), then we use `set_<option>` to set it and
-//   `with_<option>` to create a new config with the option set.
-// - For accessors, we use the option name directly (e.g., `max_function_blocks()`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FunctionRecoveryConfig {
     // This flag controls whether to automatically commit remaining pending functions after
@@ -181,6 +170,15 @@ pub struct FunctionRecoveryConfig {
     max_function_insns: usize,
     // This value controls the maximum number of instructions allowed in a single basic block.
     max_block_insns: usize,
+    // This value controls the maximum number of candidate functions that can be processed in a
+    // single invocation of the function recovery analyser.
+    max_candidates_per_invocation: usize,
+    // This value controls the maximum number of functions that can be recovered in a single
+    // invocation of the function recovery analyser.
+    max_functions_per_invocation: usize,
+    // This value controls the maximum number of bytes that can be output in a single invocation
+    // of the function recovery analyser.
+    max_output_bytes_per_invocation: usize,
     // This flag controls whether to use fine-grained block coverage when computing function
     // coverage and gaps during recovery. We consider fine-grained block coverage to be coverage
     // tracked at the level of individual blocks, rather than at the function level, i.e., whether
@@ -196,6 +194,7 @@ pub struct FunctionRecoveryConfig {
     segment_mapping_hints: bool,
     // This flag controls whether to use symbol table function hints when recovering functions.
     symbol_table_function_hints: bool,
+    // This flag controls whether to perform switch analysis during function recovery.
     switch_analysis: bool,
 }
 
@@ -203,10 +202,13 @@ impl Default for FunctionRecoveryConfig {
     fn default() -> Self {
         FunctionRecoveryConfig {
             commit_pending_functions: true,
-            max_function_blocks: DEFAULT_MAX_FUNCTION_BLOCKS,
-            max_function_insns: DEFAULT_MAX_FUNCTION_INSNS,
-            max_block_insns: DEFAULT_MAX_BLOCK_INSNS,
             fine_grained_block_coverage: false,
+            max_function_blocks: MAX_FUNCTION_BLOCK_COUNT,
+            max_function_insns: MAX_FUNCTION_INSN_COUNT,
+            max_block_insns: MAX_BLOCK_INSN_COUNT,
+            max_candidates_per_invocation: DEFAULT_INVOCATION_CANDIDATE_LIMIT,
+            max_functions_per_invocation: DEFAULT_INVOCATION_FUNCTION_LIMIT,
+            max_output_bytes_per_invocation: DEFAULT_INVOCATION_OUTPUT_BYTE_LIMIT,
             non_returning_analysis: false,
             segment_function_hints: true,
             segment_mapping_hints: true,
@@ -235,7 +237,7 @@ impl FunctionRecoveryConfig {
     }
 
     pub fn set_max_function_blocks(&mut self, max: usize) {
-        self.max_function_blocks = max.clamp(1, DEFAULT_MAX_FUNCTION_BLOCKS);
+        self.max_function_blocks = max.clamp(1, MAX_FUNCTION_BLOCK_COUNT);
     }
 
     pub fn with_max_function_blocks(mut self, max: usize) -> Self {
@@ -248,7 +250,7 @@ impl FunctionRecoveryConfig {
     }
 
     pub fn set_max_function_insns(&mut self, max: usize) {
-        self.max_function_insns = max.clamp(1, DEFAULT_MAX_FUNCTION_INSNS);
+        self.max_function_insns = max.clamp(1, MAX_FUNCTION_INSN_COUNT);
     }
 
     pub fn with_max_function_insns(mut self, max: usize) -> Self {
@@ -261,11 +263,50 @@ impl FunctionRecoveryConfig {
     }
 
     pub fn set_max_block_insns(&mut self, max: usize) {
-        self.max_block_insns = max.clamp(1, DEFAULT_MAX_BLOCK_INSNS);
+        self.max_block_insns = max.clamp(1, MAX_BLOCK_INSN_COUNT);
     }
 
     pub fn with_max_block_insns(mut self, max: usize) -> Self {
         self.set_max_block_insns(max);
+        self
+    }
+
+    pub fn max_candidates_per_invocation(&self) -> usize {
+        self.max_candidates_per_invocation
+    }
+
+    pub fn set_max_candidates_per_invocation(&mut self, limit: usize) {
+        self.max_candidates_per_invocation = limit.max(1);
+    }
+
+    pub fn with_max_candidates_per_invocation(mut self, limit: usize) -> Self {
+        self.set_max_candidates_per_invocation(limit);
+        self
+    }
+
+    pub fn max_functions_per_invocation(&self) -> usize {
+        self.max_functions_per_invocation
+    }
+
+    pub fn set_max_functions_per_invocation(&mut self, limit: usize) {
+        self.max_functions_per_invocation = limit.max(1);
+    }
+
+    pub fn with_max_functions_per_invocation(mut self, limit: usize) -> Self {
+        self.set_max_functions_per_invocation(limit);
+        self
+    }
+
+    pub fn max_output_bytes_per_invocation(&self) -> usize {
+        self.max_output_bytes_per_invocation
+    }
+
+    pub fn set_max_output_bytes_per_invocation(&mut self, limit: usize) {
+        self.max_output_bytes_per_invocation = limit.max(1);
+    }
+
+    pub fn with_max_output_bytes_per_invocation(mut self, limit: usize) -> Self {
+        self.set_max_output_bytes_per_invocation(limit);
         self
     }
 
@@ -345,72 +386,5 @@ impl FunctionRecoveryConfig {
     pub fn with_symbol_table_function_hints(mut self, enabled: bool) -> Self {
         self.set_symbol_table_function_hints(enabled);
         self
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use tracing_subscriber::filter::EnvFilter;
-    use tracing_subscriber::fmt::format::FmtSpan;
-
-    use crate::loader::{Loadable, LoadableAnalysers, Loader, Shellcode};
-    use crate::project::Project;
-
-    #[test]
-    #[ignore = "requires local language data and binary fixtures"]
-    fn test_control_flow_recovery_ls() -> Result<(), Box<dyn std::error::Error>> {
-        let subscriber = tracing_subscriber::fmt()
-            .with_env_filter(EnvFilter::from_default_env())
-            .with_line_number(true)
-            .with_file(true)
-            .with_span_events(FmtSpan::CLOSE)
-            .finish();
-
-        tracing::subscriber::with_default(subscriber, || {
-            let loader = Loader::from_file("tests/ls.elf")?;
-            let mut project = Project::new_transient(&loader)?;
-            let mut cfr = loader.analysers().function_recovery()?;
-
-            cfr.add_candidate(0x4da0u64);
-            cfr.add_candidate(0x6dd0u64);
-            cfr.analyse(&mut project)?;
-
-            Ok(())
-        })
-    }
-
-    #[test]
-    #[ignore = "requires FUGUE_LANGUAGE_DIR"]
-    fn test_control_flow_recovery_overlap() -> Result<(), Box<dyn std::error::Error>> {
-        let subscriber = tracing_subscriber::fmt()
-            .with_env_filter(EnvFilter::from_default_env())
-            .with_line_number(true)
-            .with_file(true)
-            .with_span_events(FmtSpan::CLOSE)
-            .finish();
-
-        tracing::subscriber::with_default(subscriber, || {
-            let shellcode = [
-                0x55, 0x8B, 0xEC, 0x51, 0x51, 0x56, 0x8B, 0x75, 0x0C, 0x57, 0x33, 0xFF, 0x39, 0x3D,
-                0x6C, 0x50, 0x40, 0x00, 0x75, 0x26, 0x56, 0xFF, 0x75, 0x08, 0x68, 0x18, 0x12, 0x40,
-                0x00, 0xFF, 0x15, 0xF0, 0x10, 0x40, 0x00, 0x85, 0xC0, 0x74, 0x13, 0x68, 0xE0, 0x12,
-                0x40, 0x00, 0xFF, 0x75, 0x08, 0xFF, 0x15, 0xEC, 0x10, 0x40, 0x00, 0x33, 0xC0, 0x40,
-                0xEB, 0x43, 0x8D, 0x45, 0x0C, 0x50, 0x68, 0x28, 0x13, 0x40, 0x00, 0x68, 0x02, 0x00,
-                0x00, 0x80, 0xFF, 0x15, 0x08, 0x10, 0x40, 0x00, 0x85, 0xC0, 0x75, 0x29, 0x8D, 0x45,
-                0xFC, 0x50, 0xFF, 0x75, 0x08, 0x8D, 0x45, 0xF8, 0x50, 0x57, 0x57, 0xFF, 0x75, 0x0C,
-                0x89, 0x75, 0xFC, 0xFF, 0x15, 0x00, 0x10, 0x40, 0x00, 0x85, 0xC0, 0x75, 0x03, 0x33,
-                0xFF, 0x47, 0xFF, 0x75, 0x0C, 0xFF, 0x15, 0x24, 0x10, 0x40, 0x00, 0x8B, 0xC7, 0x5F,
-                0x5E, 0xC9, 0xC2, 0x08, 0x00,
-            ];
-
-            let loader = Shellcode::new("x86:LE:64", 0x4EB14u64, &shellcode)?;
-            let mut project = Project::new_transient(&loader)?;
-            let mut cfr = loader.analysers().function_recovery()?;
-
-            cfr.add_candidate(0x4EB14u64);
-            cfr.analyse(&mut project)?;
-
-            Ok(())
-        })
     }
 }

@@ -7,9 +7,10 @@ use itertools::Either;
 use rustc_hash::FxBuildHasher;
 use smallvec::SmallVec;
 
-use super::structuring::CodeBlockStructurer;
-use super::{FunctionRecoveryConfig, FunctionRecoveryError};
 use crate::analysis::control::{CancellationToken, Cancelled};
+use crate::analysis::function::recovery::analysis::FunctionRecoveryContext;
+use crate::analysis::function::recovery::structuring::FunctionStructurer;
+use crate::analysis::function::recovery::{FunctionRecoveryConfig, FunctionRecoveryError};
 use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
 use crate::arch::Arch;
 use crate::engine::ProjectView;
@@ -25,7 +26,7 @@ use crate::types::Confidence;
 
 const INSN_CANCELLATION_CHECK_INTERVAL: usize = 64;
 
-pub struct FunctionRecoveryState {
+pub struct StructuredFunctionContext {
     cancellation: CancellationToken,
     config: FunctionRecoveryConfig,
     context: FunctionBuilderContext,
@@ -33,39 +34,21 @@ pub struct FunctionRecoveryState {
     resolver: Option<InsnResolver>,
 }
 
-struct CandidateAnalysis<'a, 'p> {
-    inputs: FunctionBuilderInputs<'a>,
+struct FunctionCandidateAnalysis<'a, 'p> {
+    context: &'a FunctionRecoveryContext,
     project: &'a ProjectView<'p>,
     resolver_slot: &'a mut Option<InsnResolver>,
     candidate: AddressWithContext,
     token: &'a CancellationToken,
     config: &'a FunctionRecoveryConfig,
-    initialisation_passes: &'a mut AnalysisGroup<FunctionBuilderContext>,
-    post_structuring_passes: &'a mut AnalysisGroup<FunctionRecoveryState>,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct FunctionBuilderInputs<'a> {
-    function_entries: &'a [Address],
-    non_returning_targets: &'a [Address],
-}
-
-impl<'a> FunctionBuilderInputs<'a> {
-    pub(crate) fn new(
-        function_entries: &'a [Address],
-        non_returning_targets: &'a [Address],
-    ) -> Self {
-        Self {
-            function_entries,
-            non_returning_targets,
-        }
-    }
+    pre_resolution_passes: &'a mut AnalysisGroup<FunctionBuilderContext>,
+    post_structuring_passes: &'a mut AnalysisGroup<StructuredFunctionContext>,
 }
 
 struct InsnResolution<'a, 'p> {
     avoidance_baseline: Option<&'a AddressRangeSet>,
     config: &'a FunctionRecoveryConfig,
-    inputs: FunctionBuilderInputs<'a>,
+    context: &'a FunctionRecoveryContext,
     project: &'a ProjectView<'p>,
     token: &'a CancellationToken,
 }
@@ -129,15 +112,19 @@ impl FunctionCandidateOutcome {
 pub(crate) struct FunctionCandidateState<'p> {
     address: Address,
     candidate: AddressWithContext,
-    cancelled: Option<Cancelled>,
-    complete: bool,
     confidence: Confidence,
     context: FunctionBuilderContext,
-    failure: Option<FunctionRecoveryError>,
     function: IncompleteFunction,
-    previous_local_targets: usize,
-    structured: bool,
+    phase: FunctionCandidatePhase,
     view: ProjectView<'p>,
+}
+
+enum FunctionCandidatePhase {
+    Resolving,
+    Structured(usize),
+    Finished,
+    Failed(FunctionRecoveryError),
+    Cancelled(Cancelled),
 }
 
 enum BlockContexts {
@@ -249,15 +236,15 @@ pub struct FunctionBuilderContext {
     global_targets: IndexSet<AddressWithContext, FxBuildHasher>,
     insn_index: FunctionInsnIndex,
     mapping_cache: SegmentMappingCache,
-    structurer: CodeBlockStructurer,
+    structurer: FunctionStructurer,
     problems: SmallVec<[(Address, ProblemKind); 4]>,
 }
 
-pub struct FunctionBuilder {
+pub(crate) struct FunctionBuilder {
     config: FunctionRecoveryConfig,
     context: FunctionBuilderContext,
-    initialisation_passes: AnalysisGroup<FunctionBuilderContext>,
-    post_structuring_passes: AnalysisGroup<FunctionRecoveryState>,
+    pre_resolution_passes: AnalysisGroup<FunctionBuilderContext>,
+    post_structuring_passes: AnalysisGroup<StructuredFunctionContext>,
 }
 
 impl FunctionBuilder {
@@ -265,7 +252,7 @@ impl FunctionBuilder {
         FunctionBuilder {
             config,
             context: FunctionBuilderContext::new(),
-            initialisation_passes: AnalysisGroup::new(),
+            pre_resolution_passes: AnalysisGroup::new(),
             post_structuring_passes: AnalysisGroup::new(),
         }
     }
@@ -278,24 +265,24 @@ impl FunctionBuilder {
         &mut self.config
     }
 
-    pub fn initialisation_passes(&self) -> &AnalysisGroup<FunctionBuilderContext> {
-        &self.initialisation_passes
+    pub(crate) fn pre_resolution_passes(&self) -> &AnalysisGroup<FunctionBuilderContext> {
+        &self.pre_resolution_passes
     }
 
-    pub fn initialisation_passes_mut(&mut self) -> &mut AnalysisGroup<FunctionBuilderContext> {
-        &mut self.initialisation_passes
+    pub(crate) fn pre_resolution_passes_mut(
+        &mut self,
+    ) -> &mut AnalysisGroup<FunctionBuilderContext> {
+        &mut self.pre_resolution_passes
     }
 
-    pub fn post_structuring_passes(&self) -> &AnalysisGroup<FunctionRecoveryState> {
+    pub(crate) fn post_structuring_passes(&self) -> &AnalysisGroup<StructuredFunctionContext> {
         &self.post_structuring_passes
     }
 
-    pub fn post_structuring_passes_mut(&mut self) -> &mut AnalysisGroup<FunctionRecoveryState> {
+    pub(crate) fn post_structuring_passes_mut(
+        &mut self,
+    ) -> &mut AnalysisGroup<StructuredFunctionContext> {
         &mut self.post_structuring_passes
-    }
-
-    pub fn context(&self) -> &FunctionBuilderContext {
-        &self.context
     }
 
     pub fn context_mut(&mut self) -> &mut FunctionBuilderContext {
@@ -310,45 +297,37 @@ impl FunctionBuilder {
         &mut self.context.avoids
     }
 
-    pub fn local_targets(&self) -> impl ExactSizeIterator<Item = &FlowTarget> {
-        self.context.local_targets.iter()
-    }
-
-    pub fn global_targets(&self) -> impl ExactSizeIterator<Item = &AddressWithContext> {
-        self.context.global_targets.iter()
-    }
-
     fn analyse(
         &mut self,
         project: &ProjectView<'_>,
-        inputs: FunctionBuilderInputs<'_>,
+        context: &FunctionRecoveryContext,
         resolver_slot: &mut Option<InsnResolver>,
         candidate: impl Into<AddressWithContext>,
         token: &CancellationToken,
     ) -> Result<ControlFlow<Cancelled, IncompleteFunction>, FunctionRecoveryError> {
-        self.context.analyse(CandidateAnalysis {
-            inputs,
+        self.context.analyse(FunctionCandidateAnalysis {
+            context,
             project,
             resolver_slot,
             candidate: candidate.into(),
             token,
             config: &self.config,
-            initialisation_passes: &mut self.initialisation_passes,
+            pre_resolution_passes: &mut self.pre_resolution_passes,
             post_structuring_passes: &mut self.post_structuring_passes,
         })
     }
 
-    pub(crate) fn analyse_candidate(
+    pub(super) fn analyse_candidate(
         &mut self,
         project: &ProjectView<'_>,
-        inputs: FunctionBuilderInputs<'_>,
+        context: &FunctionRecoveryContext,
         resolver_slot: &mut Option<InsnResolver>,
         candidate: AddressWithContext,
         token: &CancellationToken,
     ) -> FunctionCandidateOutcome {
         let address = candidate.address();
         let confidence = candidate.confidence();
-        let result = self.analyse(project, inputs, resolver_slot, candidate, token);
+        let result = self.analyse(project, context, resolver_slot, candidate, token);
         FunctionCandidateOutcome::from_result(
             address,
             confidence,
@@ -358,24 +337,24 @@ impl FunctionBuilder {
         )
     }
 
-    pub fn add_initialisation_pass(
+    pub(crate) fn add_pre_resolution_pass(
         &mut self,
         name: impl Into<String>,
         pass: impl AnalysisPass<FunctionBuilderContext> + 'static,
     ) {
-        self.initialisation_passes.add_pass(name, pass);
+        self.pre_resolution_passes.add_pass(name, pass);
     }
 
     pub fn add_post_structuring_pass(
         &mut self,
         name: impl Into<String>,
-        pass: impl AnalysisPass<FunctionRecoveryState> + 'static,
+        pass: impl AnalysisPass<StructuredFunctionContext> + 'static,
     ) {
         self.post_structuring_passes.add_pass(name, pass);
     }
 }
 
-impl FunctionRecoveryState {
+impl StructuredFunctionContext {
     pub fn cancellation(&self) -> &CancellationToken {
         &self.cancellation
     }
@@ -463,7 +442,8 @@ impl FunctionBuilderContext {
         self.block_contexts.iter(&self.empty_context)
     }
 
-    fn queue_block_candidate(&mut self, candidate: AddressWithContext) {
+    pub fn add_candidate(&mut self, candidate: impl Into<AddressWithContext>) {
+        let candidate = candidate.into();
         let address = candidate.address();
         let index = self
             .candidates
@@ -471,16 +451,14 @@ impl FunctionBuilderContext {
         self.candidates.insert(index, candidate);
     }
 
-    pub fn add_candidate(&mut self, address: impl Into<Address>) {
-        self.add_candidate_with_context(address, ContextSet::new());
-    }
-
     pub fn add_candidate_with_context(&mut self, address: impl Into<Address>, context: ContextSet) {
-        self.queue_block_candidate(AddressWithContext::new(address, context));
+        self.add_candidate(AddressWithContext::new(address, context));
     }
 
     pub fn add_candidates(&mut self, addresses: impl IntoIterator<Item = impl Into<Address>>) {
-        self.add_candidates_with_context(addresses.into_iter().map(|addr| addr.into()));
+        for address in addresses {
+            self.add_candidate(address.into());
+        }
     }
 
     pub fn add_candidates_with_context(
@@ -488,7 +466,7 @@ impl FunctionBuilderContext {
         candidates: impl IntoIterator<Item = impl Into<AddressWithContext>>,
     ) {
         for candidate in candidates {
-            self.queue_block_candidate(candidate.into());
+            self.add_candidate(candidate);
         }
     }
 
@@ -517,7 +495,7 @@ impl FunctionBuilderContext {
             .local_targets
             .insert(FlowTarget::new(from, address, kind))
         {
-            self.queue_block_candidate(to);
+            self.add_candidate(to);
         }
     }
 
@@ -568,16 +546,19 @@ impl FunctionBuilderContext {
         let InsnResolution {
             avoidance_baseline,
             config,
-            inputs,
+            context,
             project,
             token,
         } = resolution;
+
         let is_avoided = |additions: &AddressRangeSet, address| {
             additions.contains(address)
                 || avoidance_baseline.is_some_and(|baseline| baseline.contains(address))
         };
-        let function_entries = inputs.function_entries;
-        let non_returning_targets = inputs.non_returning_targets;
+
+        let function_entries = context.function_entries();
+        let non_returning_targets = context.non_returning_targets();
+
         let arch = project.arch();
         let segments = project.segments();
         let use_mapping_hints = config.segment_mapping_hints();
@@ -701,10 +682,7 @@ impl FunctionBuilderContext {
                         if let Some(hinted) = hint.context() {
                             boundary_context.merge(hinted);
                         }
-                        self.queue_block_candidate(AddressWithContext::new(
-                            address,
-                            boundary_context,
-                        ));
+                        self.add_candidate(AddressWithContext::new(address, boundary_context));
                         continue 'outer;
                     }
                 }
@@ -838,9 +816,7 @@ impl FunctionBuilderContext {
                                     };
 
                                     if self.local_targets.insert(target) {
-                                        self.queue_block_candidate(AddressWithContext::new(
-                                            addr, context,
-                                        ));
+                                        self.add_candidate(AddressWithContext::new(addr, context));
                                     }
                                 } else if !is_avoided(&self.avoids, addr) {
                                     self.global_targets
@@ -870,7 +846,7 @@ impl FunctionBuilderContext {
             }
 
             let boundary = block + offset;
-            self.queue_block_candidate(AddressWithContext::new(boundary, context));
+            self.add_candidate(AddressWithContext::new(boundary, context));
         }
 
         Ok(ControlFlow::Continue(()))
@@ -893,14 +869,14 @@ impl FunctionBuilderContext {
 
     fn analyse(
         &mut self,
-        analysis: CandidateAnalysis<'_, '_>,
+        analysis: FunctionCandidateAnalysis<'_, '_>,
     ) -> Result<ControlFlow<Cancelled, IncompleteFunction>, FunctionRecoveryError> {
         // We have three main stages:
         //
-        // 1. We first initialise the function builder with the entry point and the context
+        // 1. We first prepare the function builder with the entry point and the context
         //    of the entry block.
         // 2. We enter the main loop where we resolve instructions block by block, and add newly
-        //    discovered blocks (and edges) to the candidates queue.
+        //    discovered blocks (and edges) to the pending candidates.
         // 3. We structure the blocks into a basic function-like structure; we use this
         //    structure as input to resolve jump tables, indirect jumps, etc. this part of
         //    the analysis provides new candidates and new edges.
@@ -938,18 +914,18 @@ impl FunctionBuilderContext {
             }
         }
 
-        self.candidates.push_back(candidate);
+        self.add_candidate(candidate);
 
-        // Run the initialisation passes
+        // Apply the pre-resolution passes
         match analysis
-            .initialisation_passes
+            .pre_resolution_passes
             .analyse_with(analysis.project, self)
         {
             Ok(()) => {}
             Err(AnalysisError::Cancelled(cancelled)) => {
                 return Ok(ControlFlow::Break(cancelled));
             }
-            Err(e) => return Err(FunctionRecoveryError::InitialisationPass(e)),
+            Err(e) => return Err(FunctionRecoveryError::PreResolutionPass(e)),
         }
 
         let mut incomplete = IncompleteFunction::with_recycled_insn_index(
@@ -965,13 +941,13 @@ impl FunctionBuilderContext {
             let resolver = analysis
                 .resolver_slot
                 .as_mut()
-                .expect("function builder resolver must be initialised");
+                .expect("function builder resolver must be available");
 
             match self.resolve_insns(
                 &InsnResolution {
                     avoidance_baseline: None,
                     config: analysis.config,
-                    inputs: analysis.inputs,
+                    context: analysis.context,
                     project: analysis.project,
                     token: analysis.token,
                 },
@@ -991,7 +967,7 @@ impl FunctionBuilderContext {
 
             let num_local_targets = self.local_targets.len();
 
-            let mut state = FunctionRecoveryState {
+            let mut structured = StructuredFunctionContext {
                 cancellation: analysis.token.clone(),
                 config: *analysis.config,
                 context: mem::take(self),
@@ -1002,11 +978,11 @@ impl FunctionBuilderContext {
             // Run post-structuring passes
             let result = analysis
                 .post_structuring_passes
-                .analyse_with(analysis.project, &mut state);
+                .analyse_with(analysis.project, &mut structured);
 
-            *self = state.context;
-            incomplete = state.function;
-            *analysis.resolver_slot = state.resolver;
+            *self = structured.context;
+            incomplete = structured.function;
+            *analysis.resolver_slot = structured.resolver;
 
             match result {
                 Ok(()) => {}
@@ -1048,7 +1024,7 @@ impl<'p> FunctionCandidateState<'p> {
         context.entry = candidate.address();
         let confidence = candidate.confidence();
 
-        let mut failure = None;
+        let mut phase = FunctionCandidatePhase::Resolving;
         if config.segment_mapping_hints() {
             let mapping = view
                 .segments()
@@ -1056,49 +1032,50 @@ impl<'p> FunctionCandidateState<'p> {
                 .expect("valid function entry");
             if let Some(hint) = mapping.mapping_hint_at(context.entry) {
                 if hint.is_data() {
-                    failure = Some(FunctionRecoveryError::InvalidFunction);
+                    phase = FunctionCandidatePhase::Failed(FunctionRecoveryError::InvalidFunction);
                 } else if let Some(hinted) = hint.context() {
                     candidate.merge_context(hinted);
                 }
             }
         }
-        if failure.is_none() {
-            context.candidates.push_back(candidate.clone());
+        if matches!(phase, FunctionCandidatePhase::Resolving) {
+            context.add_candidate(candidate.clone());
         }
 
         let function = IncompleteFunction::new(context.entry);
         Self {
             address: context.entry,
             candidate,
-            cancelled: None,
-            complete: false,
             confidence,
             context,
-            failure,
             function,
-            previous_local_targets: 0,
-            structured: false,
+            phase,
             view,
         }
     }
 
-    pub(crate) fn is_complete(&self) -> bool {
-        self.complete || self.failure.is_some() || self.cancelled.is_some()
+    pub(crate) fn is_finished(&self) -> bool {
+        matches!(
+            self.phase,
+            FunctionCandidatePhase::Finished
+                | FunctionCandidatePhase::Failed(_)
+                | FunctionCandidatePhase::Cancelled(_)
+        )
     }
 
-    pub(crate) fn resolve(
+    pub(super) fn resolve(
         &mut self,
         config: &FunctionRecoveryConfig,
-        inputs: FunctionBuilderInputs<'_>,
+        context: &FunctionRecoveryContext,
         token: &CancellationToken,
         resolver: &mut InsnResolver,
         avoidance_baseline: &AddressRangeSet,
     ) {
-        if self.is_complete() || self.structured {
+        if !matches!(self.phase, FunctionCandidatePhase::Resolving) {
             return;
         }
         if let Err(cancelled) = token.check() {
-            self.cancelled = Some(cancelled);
+            self.phase = FunctionCandidatePhase::Cancelled(cancelled);
             return;
         }
 
@@ -1106,7 +1083,7 @@ impl<'p> FunctionCandidateState<'p> {
             &InsnResolution {
                 avoidance_baseline: Some(avoidance_baseline),
                 config,
-                inputs,
+                context,
                 project: &self.view,
                 token,
             },
@@ -1115,74 +1092,75 @@ impl<'p> FunctionCandidateState<'p> {
         ) {
             Ok(ControlFlow::Continue(())) => {}
             Ok(ControlFlow::Break(cancelled)) => {
-                self.cancelled = Some(cancelled);
+                self.phase = FunctionCandidatePhase::Cancelled(cancelled);
                 return;
             }
             Err(error) => {
-                self.failure = Some(error);
+                self.phase = FunctionCandidatePhase::Failed(error);
                 return;
             }
         }
         if !self.function.has_insns() {
-            self.failure = Some(FunctionRecoveryError::InvalidFunction);
+            self.phase = FunctionCandidatePhase::Failed(FunctionRecoveryError::InvalidFunction);
             return;
         }
         if let Err(error) = self.context.structure_blocks(&mut self.function, config) {
-            self.failure = Some(error);
+            self.phase = FunctionCandidatePhase::Failed(error);
             return;
         }
 
-        self.previous_local_targets = self.context.local_targets.len();
-        self.structured = true;
+        self.phase = FunctionCandidatePhase::Structured(self.context.local_targets.len());
     }
 
-    pub(crate) fn run_post_structuring(
+    pub(crate) fn apply_post_structuring_passes(
         &mut self,
         config: &FunctionRecoveryConfig,
-        passes: &mut AnalysisGroup<FunctionRecoveryState>,
+        passes: &mut AnalysisGroup<StructuredFunctionContext>,
         token: &CancellationToken,
     ) {
-        if !self.structured || self.is_complete() {
+        let FunctionCandidatePhase::Structured(previous_local_targets) = self.phase else {
             return;
-        }
+        };
 
-        let mut state = FunctionRecoveryState {
+        let mut structured = StructuredFunctionContext {
             cancellation: token.clone(),
             config: *config,
             context: mem::take(&mut self.context),
             function: mem::take(&mut self.function),
             resolver: None,
         };
-        let result = passes.analyse_with(&self.view, &mut state);
-        self.context = state.context;
-        self.function = state.function;
-        self.structured = false;
+        let result = passes.analyse_with(&self.view, &mut structured);
+        self.context = structured.context;
+        self.function = structured.function;
 
         match result {
             Ok(()) => {}
             Err(AnalysisError::Cancelled(cancelled)) => {
-                self.cancelled = Some(cancelled);
+                self.phase = FunctionCandidatePhase::Cancelled(cancelled);
                 return;
             }
             Err(error) => {
-                self.failure = Some(FunctionRecoveryError::PostStructuringPass(error));
+                self.phase = FunctionCandidatePhase::Failed(
+                    FunctionRecoveryError::PostStructuringPass(error),
+                );
                 return;
             }
         }
         if let Err(cancelled) = token.check() {
-            self.cancelled = Some(cancelled);
+            self.phase = FunctionCandidatePhase::Cancelled(cancelled);
             return;
         }
         if self.context.candidates.is_empty()
-            && self.context.local_targets.len() == self.previous_local_targets
+            && self.context.local_targets.len() == previous_local_targets
         {
-            self.complete = true;
+            self.phase = FunctionCandidatePhase::Finished;
+        } else {
+            self.phase = FunctionCandidatePhase::Resolving;
         }
     }
 
     pub(crate) fn finish(mut self) -> (ReadSet, FunctionCandidateOutcome) {
-        let succeeded = self.failure.is_none() && self.cancelled.is_none();
-        if succeeded {
+        if matches!(self.phase, FunctionCandidatePhase::Finished) {
             self.function.set_tail_call_sites(
                 self.context
                     .local_targets
@@ -1192,12 +1170,13 @@ impl<'p> FunctionCandidateState<'p> {
             );
             self.context.insn_index = self.function.recycle_insn_index();
         }
-        let result = if let Some(error) = self.failure {
-            Err(error)
-        } else if let Some(cancelled) = self.cancelled {
-            Ok(ControlFlow::Break(cancelled))
-        } else {
-            Ok(ControlFlow::Continue(self.function))
+        let result = match self.phase {
+            FunctionCandidatePhase::Finished => Ok(ControlFlow::Continue(self.function)),
+            FunctionCandidatePhase::Failed(error) => Err(error),
+            FunctionCandidatePhase::Cancelled(cancelled) => Ok(ControlFlow::Break(cancelled)),
+            FunctionCandidatePhase::Resolving | FunctionCandidatePhase::Structured(_) => {
+                unreachable!("candidate must be finished before producing its outcome")
+            }
         };
         let outcome = FunctionCandidateOutcome {
             address: self.address,

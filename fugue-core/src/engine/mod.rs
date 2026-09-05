@@ -284,7 +284,7 @@ impl AnalysisContext {
         self
     }
 
-    fn with_work(
+    pub(crate) fn with_work(
         mut self,
         phase: AnalysisPhase,
         causes: impl IntoIterator<Item = WorkCause>,

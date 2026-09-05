@@ -65,6 +65,12 @@ impl ECodeBlockArgInputs {
     pub(crate) fn iter(&self) -> impl Clone + Iterator<Item = (IlValueId, &[IlValueId])> {
         self.inputs.iter()
     }
+
+    pub(crate) fn common_input_for(&self, arg: IlValueId) -> Option<IlValueId> {
+        let inputs = self.inputs_for(arg)?;
+        let first = *inputs.first()?;
+        inputs.iter().all(|&input| input == first).then_some(first)
+    }
 }
 
 impl IlAnalysis<ECodeIr> for ECodeBlockArgInputs {

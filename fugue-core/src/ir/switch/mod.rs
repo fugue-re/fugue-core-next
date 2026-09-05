@@ -323,13 +323,6 @@ bitflags::bitflags! {
 }
 
 impl SwitchProperties {
-    pub(crate) fn from_recovery(guarded: bool, truncated: bool) -> Self {
-        let mut properties = Self::TARGETS_IN_EXECUTABLE;
-        properties.set(Self::GUARD_FOUND, guarded);
-        properties.set(Self::TRUNCATED, truncated);
-        properties
-    }
-
     pub(crate) fn confidence(self) -> Confidence {
         if self.contains(Self::GUARD_FOUND) && !self.contains(Self::TRUNCATED) {
             Confidence::somewhat_certain()

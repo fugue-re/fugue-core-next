@@ -207,7 +207,7 @@ impl SegmentStorageStaging {
         mapping: SegmentMappingId,
     ) -> bool {
         self.placement_order.contains_key(&(space, mapping))
-            || mapping_is_in_space(storage, space, mapping)
+            || storage.is_mapping_in_space(space, mapping)
     }
 
     fn staged_mapping_mut(
@@ -712,7 +712,7 @@ impl PreparedSegmentBatch {
         }
         for (_, placement) in self.placements {
             match (
-                mapping_is_in_space(storage, placement.space(), placement.mapping()),
+                storage.is_mapping_in_space(placement.space(), placement.mapping()),
                 placement,
             ) {
                 (false, StagedMappingPlacementRecord::Bottom { mapping, space }) => storage
@@ -735,15 +735,4 @@ impl PreparedSegmentBatch {
                 .expect("staged mapping removal was validated before publication");
         }
     }
-}
-
-fn mapping_is_in_space(
-    storage: &SegmentStorage,
-    space: AddressSpaceId,
-    mapping: SegmentMappingId,
-) -> bool {
-    storage
-        .spaces()
-        .find(|candidate| candidate.id() == space)
-        .is_some_and(|space| space.contains_mapping(mapping))
 }

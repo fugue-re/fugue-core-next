@@ -99,14 +99,14 @@ impl ECodeStridedIntervals {
             ECodeOpcode::ZeroExtend => unary(operand(0), StridedInterval::zero_extend),
             ECodeOpcode::SignExtend => unary(operand(0), StridedInterval::sign_extend),
             ECodeOpcode::Truncate => unary(operand(0), StridedInterval::truncate),
-            ECodeOpcode::Add => binary(operand(0), operand(1), StridedInterval::add),
-            ECodeOpcode::Sub => binary(operand(0), operand(1), StridedInterval::sub),
-            ECodeOpcode::Mul => binary(operand(0), operand(1), StridedInterval::mul),
-            ECodeOpcode::LeftShift => binary(operand(0), operand(1), StridedInterval::shift_left),
-            ECodeOpcode::And => binary(operand(0), operand(1), StridedInterval::and),
-            ECodeOpcode::Or => binary(operand(0), operand(1), StridedInterval::or),
+            ECodeOpcode::Add => binary(operand(0), operand(1), |left, right| left + right),
+            ECodeOpcode::Sub => binary(operand(0), operand(1), |left, right| left - right),
+            ECodeOpcode::Mul => binary(operand(0), operand(1), |left, right| left * right),
+            ECodeOpcode::LeftShift => binary(operand(0), operand(1), |left, right| left << right),
+            ECodeOpcode::And => binary(operand(0), operand(1), |left, right| left & right),
+            ECodeOpcode::Or => binary(operand(0), operand(1), |left, right| left | right),
             ECodeOpcode::LogicalRightShift => {
-                binary(operand(0), operand(1), StridedInterval::shift_right)
+                binary(operand(0), operand(1), |left, right| left >> right)
             }
             _ => None,
         };

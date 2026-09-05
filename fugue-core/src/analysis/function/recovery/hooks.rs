@@ -1,13 +1,13 @@
-use super::FunctionRecoveryError;
+use crate::analysis::function::recovery::FunctionRecoveryError;
 use crate::engine::ProjectView;
 use crate::ir::IncompleteFunction;
 use crate::types::Confidence;
 
-pub struct FunctionRecoveryCommitContext {
+pub struct FunctionCommitContext {
     function: IncompleteFunction,
 }
 
-impl FunctionRecoveryCommitContext {
+impl FunctionCommitContext {
     pub fn new(function: IncompleteFunction, confidence: Confidence) -> Self {
         Self {
             function: function.with_confidence(confidence),
@@ -27,49 +27,48 @@ impl FunctionRecoveryCommitContext {
     }
 }
 
-pub trait FunctionRecoveryCommitHook: Send {
-    fn should_commit(
+pub trait FunctionCommitPolicy: Send {
+    fn should_commit_immediately(
         &self,
         project: &ProjectView<'_>,
-        context: &FunctionRecoveryCommitContext,
+        context: &FunctionCommitContext,
     ) -> Result<bool, FunctionRecoveryError>;
 }
 
-impl<F> FunctionRecoveryCommitHook for F
+impl<F> FunctionCommitPolicy for F
 where
-    F: Fn(&ProjectView<'_>, &FunctionRecoveryCommitContext) -> Result<bool, FunctionRecoveryError>
-        + Send,
+    F: Fn(&ProjectView<'_>, &FunctionCommitContext) -> Result<bool, FunctionRecoveryError> + Send,
 {
-    fn should_commit(
+    fn should_commit_immediately(
         &self,
         project: &ProjectView<'_>,
-        context: &FunctionRecoveryCommitContext,
+        context: &FunctionCommitContext,
     ) -> Result<bool, FunctionRecoveryError> {
         (self)(project, context)
     }
 }
 
-impl FunctionRecoveryCommitHook for Box<dyn FunctionRecoveryCommitHook + 'static> {
-    fn should_commit(
+impl FunctionCommitPolicy for Box<dyn FunctionCommitPolicy + 'static> {
+    fn should_commit_immediately(
         &self,
         project: &ProjectView<'_>,
-        context: &FunctionRecoveryCommitContext,
+        context: &FunctionCommitContext,
     ) -> Result<bool, FunctionRecoveryError> {
-        self.as_ref().should_commit(project, context)
+        self.as_ref().should_commit_immediately(project, context)
     }
 }
 
-impl<T> FunctionRecoveryCommitHook for Option<T>
+impl<T> FunctionCommitPolicy for Option<T>
 where
-    T: FunctionRecoveryCommitHook,
+    T: FunctionCommitPolicy,
 {
-    fn should_commit(
+    fn should_commit_immediately(
         &self,
         project: &ProjectView<'_>,
-        context: &FunctionRecoveryCommitContext,
+        context: &FunctionCommitContext,
     ) -> Result<bool, FunctionRecoveryError> {
         match self {
-            Some(hook) => hook.should_commit(project, context),
+            Some(policy) => policy.should_commit_immediately(project, context),
             None => Ok(true),
         }
     }

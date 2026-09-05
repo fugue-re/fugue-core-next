@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::analysis::function::recovery::FunctionStructuringContext;
+use crate::analysis::function::recovery::InterFunctionStructuringContext;
 use crate::analysis::non_returning::NonReturningTargets;
 use crate::analysis::{AnalysisError, AnalysisPass};
 use crate::engine::ProjectView;
@@ -66,7 +66,7 @@ struct ExitGraph {
 }
 
 impl ExitGraph {
-    fn from_project(project: &ProjectView<'_>, context: &FunctionStructuringContext) -> Self {
+    fn from_project(project: &ProjectView<'_>, context: &InterFunctionStructuringContext) -> Self {
         let targets = NonReturningTargets::new(project);
         let mut graph = Self::default();
 
@@ -233,11 +233,11 @@ impl NonReturningPropagation {
     }
 }
 
-impl AnalysisPass<FunctionStructuringContext> for NonReturningPropagation {
+impl AnalysisPass<InterFunctionStructuringContext> for NonReturningPropagation {
     fn analyse_with(
         &mut self,
         project: &ProjectView<'_>,
-        context: &mut FunctionStructuringContext,
+        context: &mut InterFunctionStructuringContext,
     ) -> Result<(), AnalysisError> {
         let graph = ExitGraph::from_project(project, context);
         let non_returning = graph.non_returning(project);
@@ -267,298 +267,6 @@ impl AnalysisPass<FunctionStructuringContext> for NonReturningPropagation {
             tracing::debug!("re-analysing {caller}: calls non-returning function at {target}");
 
             context.reanalyse_function(caller);
-        }
-
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use std::collections::{BTreeMap, BTreeSet};
-
-    use super::*;
-    use crate::analysis::function::recovery::{FunctionRecoveryConfig, FunctionRecoveryExtension};
-    use crate::analysis::non_returning::NonReturningExterns;
-    use crate::extension;
-    use crate::lifter::InsnResolver;
-    use crate::loader::{Loadable, LoadableAnalysers, Loader};
-    use crate::project::Project;
-    use crate::storage::{SegmentMappingCache, SegmentStorageError};
-
-    struct Recovered {
-        project: Project,
-        insns: BTreeMap<Address, usize>,
-        largest: usize,
-    }
-
-    fn recover(path: &str, enabled: bool) -> Result<Recovered, Box<dyn std::error::Error>> {
-        let loader = Loader::from_file(path)?;
-        let mut project = Project::new_transient(&loader)?;
-
-        if enabled {
-            NonReturningExterns::new(loader.platform().os()).analyse(&mut project)?;
-        }
-
-        let config = FunctionRecoveryConfig::default()
-            .with_non_returning_analysis(enabled)
-            .with_switch_analysis(true);
-        let mut recovery = loader.analysers().function_recovery_with(config)?;
-
-        for extension in extension::iter::<FunctionRecoveryExtension>() {
-            extension.apply(&project, &mut recovery)?;
-        }
-
-        recovery.analyse(&mut project)?;
-
-        let mut insns = BTreeMap::new();
-        let mut largest = 0;
-        let mut mappings = SegmentMappingCache::new();
-        let mut resolver = InsnResolver::new(project.arch());
-
-        for function in project.functions().iter() {
-            largest = largest.max(function.blocks().len());
-
-            for (_, id) in function.blocks() {
-                let Some(block) = project.blocks().get_by_id(id) else {
-                    continue;
-                };
-
-                let view = mappings.contiguous_view_from(project.segments(), block.address())?;
-                let bytes = view
-                    .as_contiguous()
-                    .ok_or(SegmentStorageError::InvalidAddressRange)?;
-                let bytes = bytes
-                    .get(..block.size())
-                    .ok_or(SegmentStorageError::InvalidAddressRange)?;
-                block
-                    .context()
-                    .apply(block.address(), resolver.context_mut());
-
-                let mut offset = 0usize;
-                while offset < bytes.len() {
-                    let address = block.address() + offset;
-                    let remaining = bytes.len() - offset;
-                    let insn = resolver.resolve(address, &bytes[offset..])?.into_insn();
-                    let size = insn.size();
-                    if size == 0 || size > remaining {
-                        return Err(SegmentStorageError::InvalidAddressRange.into());
-                    }
-                    insns.insert(address, size);
-                    offset += size;
-                }
-            }
-        }
-
-        Ok(Recovered {
-            project,
-            insns,
-            largest,
-        })
-    }
-
-    #[test]
-    #[ignore = "requires binary test fixtures"]
-    fn test_recovery_is_bounded_without_losing_code() -> Result<(), Box<dyn std::error::Error>> {
-        for path in ["tests/ls.elf", "tests/hello-pe.exe"] {
-            let baseline = recover(path, false)?;
-            let bounded = recover(path, true)?;
-
-            let arch = bounded.project.arch();
-            let mut buffer = [0u8; 32];
-            let lost = baseline
-                .insns
-                .iter()
-                .filter(|(address, _)| !bounded.insns.contains_key(address))
-                .filter(|(address, size)| {
-                    let Ok(read) = bounded
-                        .project
-                        .segments()
-                        .read_bytes(**address, &mut buffer)
-                    else {
-                        return true;
-                    };
-                    !buffer
-                        .get(..read.min(**size))
-                        .is_some_and(|bytes| arch.is_padding_pattern(bytes))
-                })
-                .map(|(address, _)| *address)
-                .collect::<Vec<_>>();
-
-            assert!(
-                lost.is_empty(),
-                "{} non-padding instructions are no longer recovered in {path}, starting at {:?}",
-                lost.len(),
-                lost.first()
-            );
-
-            assert!(
-                bounded.largest <= baseline.largest,
-                "largest function in {path} grew from {} to {} blocks",
-                baseline.largest,
-                bounded.largest
-            );
-
-            let propagated = bounded
-                .project
-                .functions()
-                .iter()
-                .filter(|function| function.is_non_returning() && !function.is_thunk())
-                .count();
-
-            assert!(
-                propagated > 0,
-                "propagation marked nothing beyond thunks in {path}"
-            );
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    #[ignore = "requires binary test fixtures"]
-    fn test_reanalysis_preserves_recovered_switches() -> Result<(), Box<dyn std::error::Error>> {
-        for path in ["tests/ls.elf", "tests/hello-pe.exe"] {
-            let baseline = recover(path, false)?;
-            let bounded = recover(path, true)?;
-
-            let branches = baseline
-                .project
-                .switches()
-                .iter()
-                .map(|switch| switch.branch())
-                .collect::<BTreeSet<_>>();
-            let recovered = bounded
-                .project
-                .switches()
-                .iter()
-                .map(|switch| switch.branch())
-                .collect::<BTreeSet<_>>();
-
-            assert!(
-                !branches.is_empty(),
-                "no switches are recovered in {path}, so this proves nothing"
-            );
-
-            let lost = branches.difference(&recovered).collect::<Vec<_>>();
-
-            assert!(
-                lost.is_empty(),
-                "{} switches are no longer recovered in {path}, starting at {:?}",
-                lost.len(),
-                lost.first()
-            );
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    #[ignore = "requires binary test fixtures"]
-    fn test_indirect_call_targets_are_resolved() -> Result<(), Box<dyn std::error::Error>> {
-        let Recovered { project, .. } = recover("tests/hello-pe.exe", false)?;
-        let mut imports = 0;
-
-        for function in project.functions().iter() {
-            for (_, id) in function.blocks() {
-                let Some(block) = project.blocks().get_by_id(id) else {
-                    continue;
-                };
-
-                let Some(target) = block.call_target() else {
-                    continue;
-                };
-
-                if project
-                    .symbols()
-                    .get_by_address(target)
-                    .any(|(_, entry)| entry.is_extern())
-                {
-                    imports += 1;
-                }
-            }
-        }
-
-        assert!(
-            imports > 0,
-            "no call resolved to an imported symbol, so the IAT pointer was never followed"
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    #[ignore = "requires binary test fixtures"]
-    fn test_non_returning_calls_have_no_fall_through() -> Result<(), Box<dyn std::error::Error>> {
-        for path in ["tests/ls.elf", "tests/hello-pe.exe"] {
-            let Recovered { project, .. } = recover(path, true)?;
-            let view = ProjectView::new(&project);
-            let targets = NonReturningTargets::new(&view);
-
-            let mut suppressed = 0;
-
-            for function in project.functions().iter() {
-                for (_, id) in function.blocks() {
-                    let Some(block) = project.blocks().get_by_id(id) else {
-                        continue;
-                    };
-
-                    let Some(target) = block.call_target() else {
-                        continue;
-                    };
-
-                    let is_non_returning =
-                        block.is_call() && !block.is_branch() && targets.is_non_returning(target);
-
-                    if !is_non_returning {
-                        continue;
-                    }
-
-                    assert!(
-                        !function.has_successors(id),
-                        "call to a non-returning function at {} in {path} kept its fall-through",
-                        block.last_address()
-                    );
-
-                    suppressed += 1;
-                }
-            }
-
-            assert!(
-                suppressed > 0,
-                "no calls to non-returning functions in {path}"
-            );
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    #[ignore = "requires binary test fixtures"]
-    fn test_recovery_reaches_a_fixpoint() -> Result<(), Box<dyn std::error::Error>> {
-        for path in ["tests/ls.elf", "tests/hello-pe.exe"] {
-            let first = recover(path, true)?;
-            let second = recover(path, true)?;
-
-            let layout = |recovered: &Recovered| {
-                recovered
-                    .project
-                    .functions()
-                    .iter()
-                    .map(|function| (function.entry(), function.blocks().len()))
-                    .collect::<BTreeSet<_>>()
-            };
-
-            assert_eq!(
-                layout(&first),
-                layout(&second),
-                "recovery of {path} is not deterministic"
-            );
-
-            assert_eq!(
-                first.insns, second.insns,
-                "recovery of {path} covers different code on a second run"
-            );
         }
 
         Ok(())

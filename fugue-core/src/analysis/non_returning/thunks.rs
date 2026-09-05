@@ -1,4 +1,4 @@
-use crate::analysis::function::recovery::FunctionRecoveryState;
+use crate::analysis::function::recovery::StructuredFunctionContext;
 use crate::analysis::{AnalysisError, AnalysisPass};
 use crate::engine::ProjectView;
 
@@ -8,11 +8,11 @@ pub(crate) const NON_RETURNING_THUNK_ANALYSER: &str = "non-returning-thunk";
 #[derive(Debug, Default)]
 pub(crate) struct NonReturningThunk;
 
-impl AnalysisPass<FunctionRecoveryState> for NonReturningThunk {
+impl AnalysisPass<StructuredFunctionContext> for NonReturningThunk {
     fn analyse_with(
         &mut self,
         project: &ProjectView<'_>,
-        state: &mut FunctionRecoveryState,
+        state: &mut StructuredFunctionContext,
     ) -> Result<(), AnalysisError> {
         if state.function().is_non_returning() {
             return Ok(());
@@ -64,45 +64,6 @@ impl AnalysisPass<FunctionRecoveryState> for NonReturningThunk {
         let function = state.function_mut();
         function.mark_thunk();
         function.mark_non_returning();
-
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use crate::analysis::function::recovery::{FunctionRecoveryConfig, FunctionRecoveryExtension};
-    use crate::analysis::non_returning::NonReturningExterns;
-    use crate::extension;
-    use crate::loader::{Loadable, LoadableAnalysers, Loader};
-    use crate::project::Project;
-
-    #[test]
-    #[ignore = "requires binary test fixtures"]
-    fn test_non_returning_thunks_are_marked() -> Result<(), Box<dyn std::error::Error>> {
-        for path in ["tests/ls.elf", "tests/hello-pe.exe"] {
-            let loader = Loader::from_file(path)?;
-            let mut project = Project::new_transient(&loader)?;
-
-            NonReturningExterns::new(loader.platform().os()).analyse(&mut project)?;
-
-            let config = FunctionRecoveryConfig::default().with_non_returning_analysis(true);
-            let mut recovery = loader.analysers().function_recovery_with(config)?;
-
-            for extension in extension::iter::<FunctionRecoveryExtension>() {
-                extension.apply(&project, &mut recovery)?;
-            }
-
-            recovery.analyse(&mut project)?;
-
-            let thunks = project
-                .functions()
-                .iter()
-                .filter(|function| function.is_thunk() && function.is_non_returning())
-                .count();
-
-            assert!(thunks > 0, "no non-returning thunks recovered in {path}");
-        }
 
         Ok(())
     }

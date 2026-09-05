@@ -32,7 +32,7 @@ impl<'a> NonReturningTargets<'a> {
 impl FunctionRecoveryExtension {
     const NAME: &str = "non-returning";
 
-    fn apply(_project: &Project, recovery: &mut FunctionRecovery) -> Result<(), AnalysisError> {
+    fn configure(_: &Project, recovery: &mut FunctionRecovery) -> Result<(), AnalysisError> {
         if !recovery.config().non_returning_analysis() {
             return Ok(());
         }
@@ -41,7 +41,7 @@ impl FunctionRecoveryExtension {
             NON_RETURNING_PROPAGATION_ANALYSER,
             NonReturningPropagation::new(),
         );
-        recovery.add_builder_post_structuring_pass(NON_RETURNING_THUNK_ANALYSER, NonReturningThunk);
+        recovery.add_post_structuring_pass(NON_RETURNING_THUNK_ANALYSER, NonReturningThunk);
 
         Ok(())
     }

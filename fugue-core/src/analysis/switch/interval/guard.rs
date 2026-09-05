@@ -1,13 +1,20 @@
 use fugue_bv::BitVec;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::SwitchIntervalRecovery;
-use crate::analysis::switch::SwitchTargetResolver;
+use crate::analysis::switch::{SwitchRecoveryConfig, SwitchResolver};
 use crate::analysis::value::StridedInterval;
-use crate::il::common::{IlBlockId, IlValueId};
-use crate::il::ecode::{ECodeOp, ECodeOpcode};
+use crate::il::common::{IlBlockId, IlDominance, IlValueId};
+use crate::il::ecode::{ECodeBlockArgInputs, ECodeIr, ECodeOp, ECodeOpcode};
 use crate::ir::{Address, AddressRange, AddressWithContext};
-use crate::lifter::{ContextSet, InsnResolver};
+use crate::lifter::ContextSet;
+
+pub(crate) struct SwitchGuardAnalysis<'context, 'analysis> {
+    block_arg_inputs: &'context ECodeBlockArgInputs,
+    blocks_by_source: &'context FxHashMap<Address, IlBlockId>,
+    config: SwitchRecoveryConfig,
+    dominance: &'context IlDominance,
+    ssa: &'analysis ECodeIr,
+}
 
 pub(crate) struct SwitchGuard {
     interval: StridedInterval,
@@ -88,7 +95,23 @@ impl SwitchGuard {
     }
 }
 
-impl<'analysis> SwitchIntervalRecovery<'analysis> {
+impl<'context, 'analysis> SwitchGuardAnalysis<'context, 'analysis> {
+    pub(crate) fn new(
+        ssa: &'analysis ECodeIr,
+        blocks_by_source: &'context FxHashMap<Address, IlBlockId>,
+        config: SwitchRecoveryConfig,
+        dominance: &'context IlDominance,
+        block_arg_inputs: &'context ECodeBlockArgInputs,
+    ) -> Self {
+        Self {
+            block_arg_inputs,
+            blocks_by_source,
+            config,
+            dominance,
+            ssa,
+        }
+    }
+
     fn conditional_branch_within_instruction(&self, branch: Address) -> Option<&ECodeOp> {
         let mut conditional = None;
         for (_, operation) in self.ssa.ops_for_source(branch) {
@@ -511,8 +534,7 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
         guard: Option<&SwitchGuard>,
         branch: Address,
         context: &ContextSet,
-        insn_resolver: &mut InsnResolver,
-        target_resolver: &mut SwitchTargetResolver<'_>,
+        resolver: &mut SwitchResolver<'_, '_>,
     ) -> Option<AddressWithContext> {
         if let Some(address) = self
             .conditional_branch_within_instruction(branch)
@@ -521,20 +543,41 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
             tracing::trace!(
                 "switch at {branch}: resolving intra-instruction default branch at {address}"
             );
-            target_resolver.set_space(address.space());
-            return target_resolver
-                .resolve_branch_target(address, None, context, insn_resolver)
+            return resolver
+                .resolve_branch_target(address, None, context)
                 .or_else(|| {
-                    context.apply(address, insn_resolver.context_mut());
-                    target_resolver.resolve_address(address.raw_address(), insn_resolver.context())
+                    resolver.apply_context(address, context);
+                    resolver.resolve_address(address, address.raw_address())
                 });
         }
 
         let block = guard?.default_block?;
         let address = self.ssa.block_address(block)?;
         tracing::trace!("switch at {branch}: resolving guard default block {block:?} at {address}");
-        context.apply(address, insn_resolver.context_mut());
-        target_resolver.set_space(address.space());
-        target_resolver.resolve_address(address.raw_address(), insn_resolver.context())
+        resolver.apply_context(address, context);
+        resolver.resolve_address(address, address.raw_address())
+    }
+
+    fn canonical_value(&self, value: IlValueId) -> IlValueId {
+        let mut current = self.ssa.underlying_value(value);
+        for _ in 0..self.config.max_trace_depth() {
+            let Some(input) = self.block_arg_inputs.common_input_for(current) else {
+                break;
+            };
+            let next = self.ssa.underlying_value(input);
+            if next == current {
+                break;
+            }
+            current = next;
+        }
+        current
+    }
+
+    fn block_for_source(&self, address: Address) -> Option<IlBlockId> {
+        if let Some(&block) = self.blocks_by_source.get(&address) {
+            return Some(block);
+        }
+        let (operation, _) = self.ssa.ops_for_source(address).next()?;
+        self.ssa.block_for_op(operation)
     }
 }

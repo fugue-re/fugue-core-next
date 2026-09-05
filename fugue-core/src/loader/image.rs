@@ -1,8 +1,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, btree_map};
-use std::fmt;
-use std::mem;
 use std::ops::{Add, RangeInclusive};
+use std::{fmt, mem};
 
 use arrayvec::ArrayVec;
 use fallible_iterator::FallibleIterator;

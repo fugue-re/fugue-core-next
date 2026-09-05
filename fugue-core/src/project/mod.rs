@@ -52,7 +52,6 @@ pub use change::{
 pub(crate) mod read;
 pub use read::ReadSet;
 
-mod segment;
 pub(crate) mod transaction;
 pub use transaction::ProjectTransaction;
 

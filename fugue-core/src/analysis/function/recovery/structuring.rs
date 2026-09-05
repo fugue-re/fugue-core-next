@@ -1,20 +1,20 @@
 use indexmap::IndexSet;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 
-use super::{FunctionRecoveryConfig, FunctionRecoveryError};
+use crate::analysis::function::recovery::{FunctionRecoveryConfig, FunctionRecoveryError};
 use crate::ir::{
     Address, FlowTarget, IncompleteCodeBlock, IncompleteCodeBlockId, IncompleteFunction, InsnId,
 };
 use crate::lifter::ContextSet;
 
 #[derive(Default)]
-pub(crate) struct CodeBlockStructurer {
+pub(crate) struct FunctionStructurer {
     block_starts: FxHashMap<Address, IncompleteCodeBlockId>,
     block_ends: FxHashMap<Address, IncompleteCodeBlockId>,
     cut_positions: Vec<usize>,
 }
 
-impl CodeBlockStructurer {
+impl FunctionStructurer {
     pub(crate) fn block_starts(
         &self,
     ) -> impl ExactSizeIterator<Item = (Address, IncompleteCodeBlockId)> {
