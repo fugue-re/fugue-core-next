@@ -5,6 +5,11 @@ mod analysis;
 mod extension;
 mod storage;
 
+/// Derives `fugue_core::engine::AnalysisData` for a value supplied to an analysis engine.
+///
+/// `#[analysis_data(delegate)]` exposes contained analysis data through the derived type. Apply it
+/// to a single-field tuple struct, to an enum whose variants each contain one field, or to the one
+/// delegated field in each struct or enum variant.
 #[proc_macro_derive(AnalysisData, attributes(analysis_data))]
 pub fn derive_analysis_data(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
