@@ -2,11 +2,7 @@ use std::mem::size_of;
 use std::path::Path;
 
 use fugue_core::analysis::AnalysisError;
-use fugue_core::analysis::control::CancellationToken;
-use fugue_core::engine::{
-    AnalyserProvider, AnalysisContext, AnalysisEngine, AnalysisEngineConfig, ProjectUpdate,
-    ProjectView,
-};
+use fugue_core::engine::{AnalyserProvider, AnalysisContext, AnalysisEngine, AnalysisEngineConfig};
 use fugue_core::extension::submit;
 use fugue_core::il::common::{
     ControlFlowIl, DialectId, IlAnalyser, IlAnalysis, IlArtefact, IlBlockArgId, IlBlockId,
@@ -389,7 +385,6 @@ fn an_external_control_flow_dialect_builds_analyses_and_persists() {
 
 #[test]
 fn built_in_dialects_have_target_native_external_build_apis() {
-    let cancellation = CancellationToken::default();
     let metadata = IlMetadata::new(FunctionId::default(), 0u64);
 
     let mut pcode = PCodeBuilder::new(metadata, IlGraph::default());
@@ -425,7 +420,7 @@ fn built_in_dialects_have_target_native_external_build_apis() {
             )
             .expect("the PCode branch is emitted");
     }
-    let pcode = pcode.build(&cancellation).expect("the PCode is valid");
+    let pcode = pcode.build().expect("the PCode is valid");
     assert_eq!(pcode.ops().len(), 2);
     assert_eq!(pcode.targets().len(), 1);
     assert!(pcode.display().to_string().contains("copy"));
@@ -489,7 +484,7 @@ fn built_in_dialects_have_target_native_external_build_apis() {
         .expect("the ECode source span is valid"),
     ]);
     ecode.set_parent_spans(vec![IlParentSpan::new(ecode_operations, ecode_operations)]);
-    let ecode = ecode.build(&cancellation).expect("the ECode is valid");
+    let ecode = ecode.build().expect("the ECode is valid");
     assert_eq!(ecode.ops().len(), 2);
     assert_eq!(ecode.graph().blocks().len(), 1);
     assert_eq!(ecode.block_args().len(), 1);
@@ -565,7 +560,7 @@ fn built_in_dialects_have_target_native_external_build_apis() {
         .expect("the MCode source span is valid"),
     ]);
     mcode.set_parent_spans(vec![IlParentSpan::new(mcode_operations, mcode_operations)]);
-    let mcode = mcode.build(&cancellation).expect("the MCode is valid");
+    let mcode = mcode.build().expect("the MCode is valid");
     assert_eq!(mcode.ops().len(), 2);
     assert_eq!(mcode.graph().blocks().len(), 1);
     assert_eq!(
@@ -608,25 +603,24 @@ impl IlAnalyser for AcmeIlAnalyser {
 
     fn analyse(
         &mut self,
-        project: &ProjectView<'_>,
+        context: &mut AnalysisContext<'_, '_>,
         _function: FunctionId,
         input: &Self::Input,
-        _cx: &AnalysisContext,
-        updates: &mut Vec<ProjectUpdate>,
     ) -> Result<(), AnalysisError> {
+        let project = &context.project;
         let function = input.metadata().function();
         let Some(function) = project.functions().get_by_id(function) else {
             return Ok(());
         };
 
-        updates.push(ProjectUpdate::add_symbol(
+        context.updates.add_symbol(
             SymbolIndex::new(SymbolTableSelector::new(250), self.next_symbol),
             SymbolEntry::new(
                 function.entry(),
                 "acme_il_analyser",
                 SymbolProperties::LOCAL,
             ),
-        ));
+        );
         self.next_symbol += 1;
         Ok(())
     }
@@ -881,7 +875,6 @@ impl IlTransformer for AcmeBlockCountTransformer {
         &mut self,
         source: &Self::Input,
         _context: &IlGenerationContext<'_>,
-        _cancellation: &CancellationToken,
     ) -> Result<Self::Output, IlGenerationError> {
         Ok(AcmeBlockCount {
             metadata: *source.metadata(),
@@ -928,7 +921,6 @@ impl IlTransformer for ConfiguredBlockCountTransformer {
         &mut self,
         source: &Self::Input,
         _context: &IlGenerationContext<'_>,
-        _cancellation: &CancellationToken,
     ) -> Result<Self::Output, IlGenerationError> {
         self.generated += 1;
         Ok(ConfiguredBlockCount {
@@ -972,7 +964,6 @@ impl IlProducer for ConfiguredFunctionSummaryProducer {
     fn produce(
         &mut self,
         context: &IlGenerationContext<'_>,
-        _cancellation: &CancellationToken,
     ) -> Result<Self::Output, IlGenerationError> {
         self.generated += 1;
         Ok(ConfiguredFunctionSummary {

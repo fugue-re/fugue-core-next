@@ -2,11 +2,8 @@ use std::error::Error;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use fugue_core::analysis::AnalysisError;
-use fugue_core::engine::{
-    Analyser, AnalyserProvider, AnalysisContext, AnalysisEngine, ProjectUpdate, ProjectView,
-};
+use fugue_core::engine::{Analyser, AnalyserProvider, AnalysisContext, AnalysisEngine};
 use fugue_core::extension;
-use fugue_core::ir::AddressRangeSet;
 use fugue_core::loader::Loader;
 use fugue_core::project::{ChangeKinds, Project};
 use fugue_core::storage::TransientStorageProvider;
@@ -35,19 +32,11 @@ impl Analyser for AddresslessAnalyser {
             .unwrap_or(false)
     }
 
-    fn analyse(
-        &mut self,
-        project: &ProjectView<'_>,
-        regions: &AddressRangeSet,
-        cx: &AnalysisContext,
-        updates: &mut Vec<ProjectUpdate>,
-    ) -> Result<(), AnalysisError> {
-        let _ = project;
-        let _ = updates;
+    fn analyse(&mut self, context: &mut AnalysisContext<'_, '_>) -> Result<(), AnalysisError> {
         ADDRESSLESS_RUNS.fetch_add(1, Ordering::SeqCst);
         ADDRESSLESS_CAUSE_OBSERVED.store(
-            regions.is_empty()
-                && cx.causes().iter().any(|cause| {
+            context.regions().is_empty()
+                && context.causes().iter().any(|cause| {
                     cause.kind() == ChangeKinds::SPACE_CREATED && cause.range().is_none()
                 }),
             Ordering::SeqCst,
@@ -61,7 +50,7 @@ fn build_addressless_analyser(_project: &Project) -> Result<Box<dyn Analyser>, A
 }
 
 extension::submit! {
-    AnalyserProvider::new("addressless-test", build_addressless_analyser)
+    AnalyserProvider::new::<AddresslessAnalyser>("addressless-test", build_addressless_analyser)
 }
 
 #[test]

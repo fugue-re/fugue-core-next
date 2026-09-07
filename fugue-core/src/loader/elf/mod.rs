@@ -21,6 +21,7 @@ use object::{
 };
 use smallvec::{SmallVec, smallvec};
 
+use crate::AnalysisData;
 use crate::arch::Arch;
 use crate::ir::{
     RawAddress, RawAddressRangeSet, Symbol, SymbolIndex, SymbolProperties, SymbolTableSelector,
@@ -113,6 +114,7 @@ impl<'this, 'data> ElfFileRepr<'this, 'data> {
     }
 }
 
+#[derive(AnalysisData)]
 pub struct Elf<'a> {
     object: ElfInner<'a>,
     architecture: Arch,

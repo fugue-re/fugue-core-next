@@ -3,7 +3,6 @@ use std::mem;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
-use crate::analysis::control::CancellationToken;
 use crate::il::common::{
     IlArtefact, IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlError, IlGenerationContext,
     IlGenerationError, IlGraph, IlIndexRange, IlMetadata, IlOpId, IlProducer, IlSourceSpan,
@@ -12,7 +11,7 @@ use crate::il::common::{
 use crate::il::pcode::raw::remap_target_position;
 use crate::il::pcode::{
     PCodeAddressAnnotationRole, PCodeBuilder, PCodeError, PCodeIr, PCodeLocation, PCodeLocationId,
-    PCodeOpSpec, PCodeOpcode, RawPCodeFlow, RawPCodeFlows,
+    PCodeOpSpec, PCodeOpcode,
 };
 use crate::ir::{
     Address, CodeBlockId, CodeBlockTable, FlowTarget, FunctionId, FunctionTable,
@@ -76,14 +75,12 @@ impl PCodeCanonicaliser {
         function: &IncompleteFunction,
         segments: &SegmentStorage,
         input_revision: Revision,
-        cancellation: &CancellationToken,
     ) -> Result<PCodeIr, PCodeError> {
         let source = PCodeFunctionSource::Speculative {
             language,
             function,
             segments,
             input_revision,
-            cancellation,
         };
         PCodeFunctionLifter::new(source, &mut self.scratch).lift()
     }
@@ -95,7 +92,6 @@ impl IlProducer for PCodeCanonicaliser {
     fn produce(
         &mut self,
         context: &IlGenerationContext<'_>,
-        cancellation: &CancellationToken,
     ) -> Result<Self::Output, IlGenerationError> {
         let pcode = match context.subject() {
             IlSubject::Admitted(function) => {
@@ -106,7 +102,6 @@ impl IlProducer for PCodeCanonicaliser {
                     context.segments(),
                     function,
                     context.input_revision(),
-                    cancellation,
                 ))?
             }
             IlSubject::Speculative {
@@ -117,7 +112,6 @@ impl IlProducer for PCodeCanonicaliser {
                 function,
                 context.segments(),
                 input_revision,
-                cancellation,
             )?,
         };
 
@@ -140,7 +134,6 @@ pub struct PCodeFunctionInput<'a> {
     segments: &'a SegmentStorage,
     function: FunctionId,
     input_revision: Revision,
-    cancellation: &'a CancellationToken,
 }
 
 impl<'a> PCodeFunctionInput<'a> {
@@ -151,7 +144,6 @@ impl<'a> PCodeFunctionInput<'a> {
         segments: &'a SegmentStorage,
         function: FunctionId,
         input_revision: Revision,
-        cancellation: &'a CancellationToken,
     ) -> Self {
         Self {
             language,
@@ -160,7 +152,6 @@ impl<'a> PCodeFunctionInput<'a> {
             segments,
             function,
             input_revision,
-            cancellation,
         }
     }
 }
@@ -172,7 +163,6 @@ enum PCodeFunctionSource<'a> {
         function: &'a IncompleteFunction,
         segments: &'a SegmentStorage,
         input_revision: Revision,
-        cancellation: &'a CancellationToken,
     },
 }
 
@@ -188,13 +178,6 @@ impl<'a> PCodeFunctionSource<'a> {
         match self {
             Self::Admitted(input) => input.segments,
             Self::Speculative { segments, .. } => segments,
-        }
-    }
-
-    const fn cancellation(&self) -> &'a CancellationToken {
-        match self {
-            Self::Admitted(input) => input.cancellation,
-            Self::Speculative { cancellation, .. } => cancellation,
         }
     }
 
@@ -300,7 +283,6 @@ struct PCodeFunctionLifter<'source, 'scratch> {
     source: Option<PCodeFunctionSource<'source>>,
     scratch: &'scratch mut PCodeCanonicaliserScratch,
     language: &'static Language,
-    cancellation: &'source CancellationToken,
     builder: PCodeBuilder,
     mapping_cache: SegmentMappingCache,
     segments: &'source SegmentStorage,
@@ -322,14 +304,12 @@ impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
         scratch: &'scratch mut PCodeCanonicaliserScratch,
     ) -> Self {
         let language = source.language();
-        let cancellation = source.cancellation();
         let metadata = source.metadata();
         let segments = source.segments();
         Self {
             source: Some(source),
             scratch,
             language,
-            cancellation,
             builder: PCodeBuilder::new(metadata, IlGraph::default()),
             mapping_cache: SegmentMappingCache::new(),
             segments,
@@ -371,8 +351,6 @@ impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
         }
 
         for index in 0..self.scratch.code_block_ids.len() {
-            self.cancellation.check()?;
-
             let code_block_id = self.scratch.code_block_ids[index];
             let Some(code_block) = input.blocks.get_by_id(code_block_id) else {
                 return Err(IlError::missing_artefact(input.function, PCodeIr::FORM).into());
@@ -412,8 +390,6 @@ impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
             .extend(function.blocks().iter().map(|block| block.address()));
 
         for block in function.blocks() {
-            self.cancellation.check()?;
-
             self.scratch.block_successors.clear();
             for successor in block.successors().iter() {
                 self.scratch
@@ -508,7 +484,7 @@ impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
             let source_start = self.builder.emitter().op_count();
 
             self.annotations.clear();
-            let emitted = self.push_address_annotations(address, lifted_size, source_start)?;
+            let emitted = self.push_address_annotations(address, source_start)?;
             let annotations = mem::take(&mut self.annotations);
             let mut context = PCodeAddressContext::new(&annotations);
             let result = self.lift_ops(&mut context);
@@ -534,10 +510,8 @@ impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
     fn push_address_annotations(
         &mut self,
         address: Address,
-        length: usize,
         starting_ordinal: usize,
     ) -> Result<usize, PCodeError> {
-        let flows = RawPCodeFlows::new(self.language, address, length, &self.operations);
         let mut semantic_count = 0usize;
         let mut index = 0usize;
 
@@ -553,22 +527,9 @@ impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
                 .ok_or_else(|| PCodeError::invalid_opcode(ordinal.value()))?;
 
             if opcode.requires_address() {
-                if let Some(target) = u16::try_from(index)
-                    .ok()
-                    .and_then(|index| flows.flow_for(index))
-                    .and_then(|flow| match flow {
-                        RawPCodeFlow::Branch(Some(location))
-                        | RawPCodeFlow::Call(Some(location))
-                        | RawPCodeFlow::FallThrough(location) => Some(*location),
-                        RawPCodeFlow::Return(Some(return_address)) => {
-                            Some((*return_address).into())
-                        }
-                        RawPCodeFlow::Branch(None)
-                        | RawPCodeFlow::Call(None)
-                        | RawPCodeFlow::Return(None)
-                        | RawPCodeFlow::Intrinsic => None,
-                    })
-                {
+                if let Some(target) = u16::try_from(index).ok().and_then(|position| {
+                    Location::absolute_from(self.language, address, operation.inputs()[0], position)
+                }) {
                     let target = remap_target_position(&self.operations, address, target)
                         .ok_or_else(|| {
                             PCodeError::invalid_local_target(ordinal.value(), target.position())
@@ -704,7 +665,7 @@ impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
         );
         self.builder.set_source_spans(self.source_spans);
 
-        Ok(self.builder.build(self.cancellation)?)
+        Ok(self.builder.build()?)
     }
 }
 
@@ -790,7 +751,7 @@ mod test {
         let metadata = IlMetadata::new(FunctionId::default(), 3);
         let builder = PCodeBuilder::new(metadata, IlGraph::default());
 
-        let ir = builder.build(&CancellationToken::default()).unwrap();
+        let ir = builder.build().unwrap();
 
         assert!(ir.ops().is_empty());
         assert_eq!(ir.metadata().input_revision().value(), 3);

@@ -3,13 +3,12 @@ use interval::SwitchIntervalRecovery;
 use recovered::{RecoveredSwitch, SwitchCaseEnumerator};
 use resolver::SwitchResolver;
 
-use crate::analysis::control::Cancelled;
 use crate::analysis::function::recovery::{
     FunctionRecovery, FunctionRecoveryExtension, StructuredFunctionContext,
 };
 use crate::analysis::{AnalysisError, AnalysisPass};
-use crate::engine::ProjectView;
-use crate::il::common::{IlArtefact, IlError, IlGenerationError};
+use crate::engine::AnalysisContext;
+use crate::il::common::{IlArtefact, IlError};
 use crate::il::ecode::ECodeIr;
 use crate::ir::{FlowKind, FunctionId, SwitchId, SwitchProperties};
 use crate::project::Project;
@@ -117,12 +116,12 @@ impl SwitchRecovery {
 impl AnalysisPass<StructuredFunctionContext> for SwitchRecovery {
     fn analyse_with(
         &mut self,
-        project: &ProjectView<'_>,
+        context: &mut AnalysisContext<'_, '_>,
         state: &mut StructuredFunctionContext,
     ) -> Result<(), AnalysisError> {
+        let project = &context.project;
         let mut resolved = Vec::new();
         {
-            let cancellation = state.cancellation().clone();
             let arch = project.arch();
             let (function, insns) = state.function_and_resolver(arch);
             let mut branches = function
@@ -189,13 +188,8 @@ impl AnalysisPass<StructuredFunctionContext> for SwitchRecovery {
 
             if !unresolved.is_empty() || !retry.is_empty() {
                 let ssa = project
-                    .speculative_il::<ECodeIr>(function, Revision::default(), &cancellation)
-                    .map_err(|error| match error {
-                        IlGenerationError::Il(IlError::Cancelled) => {
-                            AnalysisError::Cancelled(Cancelled)
-                        }
-                        error => AnalysisError::pass_failed(SWITCH_RECOVERY_ANALYSER, error),
-                    })?
+                    .speculative_il::<ECodeIr>(function, Revision::default())
+                    .map_err(|e| AnalysisError::pass_failed(SWITCH_RECOVERY_ANALYSER, e))?
                     .ok_or_else(|| {
                         AnalysisError::pass_failed(
                             SWITCH_RECOVERY_ANALYSER,

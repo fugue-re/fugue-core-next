@@ -1,6 +1,5 @@
 use thiserror::Error;
 
-use crate::analysis::control::Cancelled;
 use crate::il::common::{IlError, IlGenerationError};
 use crate::ir::Address;
 use crate::lifter::LifterError;
@@ -145,12 +144,6 @@ impl PCodeError {
             expected,
             found,
         }
-    }
-}
-
-impl From<Cancelled> for PCodeError {
-    fn from(cancelled: Cancelled) -> Self {
-        Self::Common(IlError::from(cancelled))
     }
 }
 

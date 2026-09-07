@@ -32,8 +32,8 @@ fn overflowing_arithmetic_saturates_to_full() {
     let full = StridedInterval::full(8);
     let one = StridedInterval::single(value(1, 8));
 
-    assert_eq!(full.add(&one), full);
-    assert_eq!(full.sub(&one), full);
+    assert_eq!(&full + &one, full);
+    assert_eq!(&full - &one, full);
 }
 
 #[test]

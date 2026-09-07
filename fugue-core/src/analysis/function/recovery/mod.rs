@@ -8,7 +8,7 @@ use crate::storage::SegmentStorageError;
 pub(crate) mod analysis;
 pub(crate) use analysis::FUNCTION_RECOVERY_ANALYSER;
 pub use analysis::{
-    FunctionDiscoveryContext, FunctionRecovery, FunctionRecoveryExtension,
+    FunctionDiscoveryContext, FunctionDiscoveryRanges, FunctionRecovery, FunctionRecoveryExtension,
     InterFunctionStructuringContext,
 };
 

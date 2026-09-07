@@ -176,13 +176,21 @@ impl ECodeLiveness {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::analysis::control::CancellationToken;
     use crate::il::common::{
-        IlArtefact, IlBlock, IlBlockProperties, IlEdgeKinds, IlGraph, IlIndexRange, IlMetadata,
+        IlArtefact, IlBlock, IlBlockProperties, IlEdgeKinds, IlError, IlGraph, IlIndexRange,
+        IlMetadata, IlValueId,
     };
-    use crate::il::ecode::test::emit_value;
     use crate::il::ecode::{ECodeBuilder, ECodeOpSpec, ECodeOpcode};
     use crate::ir::FunctionId;
+
+    fn emit_value(
+        builder: &mut ECodeBuilder,
+        spec: ECodeOpSpec,
+        operands: impl IntoIterator<Item = IlValueId>,
+    ) -> Result<IlValueId, IlError> {
+        let (_, results) = builder.emitter().emit(spec, operands, 1)?;
+        IlValueId::try_from_index(results.start())
+    }
 
     #[test]
     fn liveness_tracks_value_across_linear_edge() {
@@ -217,7 +225,7 @@ mod test {
             .emit(ECodeOpSpec::new(ECodeOpcode::Return, 0), [value], 0)
             .unwrap();
 
-        let ir = builder.build(&CancellationToken::default()).unwrap();
+        let ir = builder.build().unwrap();
         let liveness = ir.analyse::<ECodeLiveness>();
 
         assert_eq!(liveness.live_in(block0), &[]);
@@ -251,7 +259,7 @@ mod test {
             .emit(ECodeOpSpec::new(ECodeOpcode::Return, 0), [value], 0)
             .unwrap();
 
-        let ir = builder.build(&CancellationToken::default()).unwrap();
+        let ir = builder.build().unwrap();
         let liveness = ir.analyse::<ECodeLiveness>();
 
         assert_eq!(liveness.live_in(block), &[]);
@@ -278,7 +286,7 @@ mod test {
             .emit(ECodeOpSpec::new(ECodeOpcode::Return, 0), [arg], 0)
             .unwrap();
 
-        let ir = builder.build(&CancellationToken::default()).unwrap();
+        let ir = builder.build().unwrap();
         let liveness = ir.analyse::<ECodeLiveness>();
 
         assert_eq!(liveness.live_in(block), &[]);
@@ -323,7 +331,7 @@ mod test {
 
         builder.emitter().emit_edge_args([value]).unwrap();
 
-        let ir = builder.build(&CancellationToken::default()).unwrap();
+        let ir = builder.build().unwrap();
         let liveness = ir.analyse::<ECodeLiveness>();
 
         assert_eq!(liveness.live_out(block0), &[value]);

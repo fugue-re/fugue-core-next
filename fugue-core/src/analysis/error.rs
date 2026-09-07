@@ -2,12 +2,12 @@ use std::error::Error;
 
 use thiserror::Error;
 
-use super::control::Cancelled;
+use crate::engine::AnalysisDataError;
 
 #[derive(Debug, Error)]
 pub enum AnalysisError {
     #[error(transparent)]
-    Cancelled(#[from] Cancelled),
+    AnalysisData(#[from] AnalysisDataError),
     #[error("analysis pass forms a cyclic dependency: {0} -> {1}")]
     CyclicDependency(String, String),
     #[error("analysis pass configuration `{name}` failed: {error}")]

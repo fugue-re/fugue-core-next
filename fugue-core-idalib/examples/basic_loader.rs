@@ -1,12 +1,14 @@
+use std::error::Error;
 use std::time::Instant;
 
 use fallible_iterator::FallibleIterator;
 use fugue_core::attributes;
-use fugue_core::loader::{Loadable, LoadableAnalysers, LoadableFromFile};
+use fugue_core::engine::AnalysisEngine;
+use fugue_core::loader::{Loadable, LoadableFromFile};
 use fugue_core::project::Project;
 use fugue_core_idalib::{IDABinary, ATTRIBUTE_IDA_DATABASE_PATH};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn Error>> {
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::filter::EnvFilter::from_default_env())
         .with_line_number(true)
@@ -26,14 +28,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         )?;
 
-        let mut claims = binary.image_segments();
-        while let Some(claim) = claims.next()? {
-            tracing::info!(
-                "{}-{} ({:?})",
-                claim.address(),
-                claim.address() + claim.size() as usize,
-                claim.name()
-            );
+        {
+            let mut claims = binary.image_segments();
+            while let Some(claim) = claims.next()? {
+                tracing::info!(
+                    "{}-{} ({:?})",
+                    claim.address(),
+                    claim.address() + claim.size() as usize,
+                    claim.name()
+                );
+            }
         }
         tracing::info!("architecture: {}", binary.architecture());
 
@@ -45,14 +49,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        let mut project = Project::new_transient(&binary)?;
-        let mut analyser = binary.analysers().function_recovery()?;
+        let project = Project::new_transient(&binary)?;
 
         let t0 = Instant::now();
 
         tracing::info!("recovering functions via idalib");
 
-        analyser.analyse(&mut project)?;
+        let engine = AnalysisEngine::new(project)?.with_data(binary)?;
+        engine.analyse()?;
+        let project = engine.into_project()?;
 
         let tt = t0.elapsed();
 

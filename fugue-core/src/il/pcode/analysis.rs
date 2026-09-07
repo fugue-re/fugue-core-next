@@ -1,5 +1,5 @@
 use crate::analysis::AnalysisError;
-use crate::engine::{AnalyserProvider, AnalysisContext, ProjectUpdate, ProjectView};
+use crate::engine::{AnalyserProvider, AnalysisContext};
 use crate::extension;
 use crate::il::common::IlAnalyser;
 use crate::il::pcode::PCodeIr;
@@ -30,12 +30,11 @@ impl IlAnalyser for PCodeReferenceAnalyser {
 
     fn analyse(
         &mut self,
-        project: &ProjectView<'_>,
+        context: &mut AnalysisContext<'_, '_>,
         function: FunctionId,
         pcode: &PCodeIr,
-        _cx: &AnalysisContext,
-        updates: &mut Vec<ProjectUpdate>,
     ) -> Result<(), AnalysisError> {
+        let project = &context.project;
         let mut coverage = AddressRangeSet::new();
         pcode.reference_coverage_into(&mut coverage);
         if let Some(function) = project.functions().get_by_id(function) {
@@ -44,11 +43,11 @@ impl IlAnalyser for PCodeReferenceAnalyser {
                 .coverage_into(function.blocks().map(|(_, block)| block), &mut coverage);
         }
 
-        updates.push(ProjectUpdate::replace_derived_references(
+        context.updates.replace_derived_references(
             coverage,
             ReferenceKind::Data,
             pcode.data_references().collect(),
-        ));
+        );
         Ok(())
     }
 

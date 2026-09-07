@@ -126,10 +126,10 @@ impl Insn {
         for (index, flow) in RawPCodeFlows::new(language, address, size, operations).iter() {
             let target = match flow {
                 RawPCodeFlow::Branch(Some(location)) => {
-                    if is_local(location) {
-                        InsnTarget::IntraIns(*location, false)
-                    } else if is_fall_through(location) {
-                        InsnTarget::IntraBlk(*location, false)
+                    if is_local(&location) {
+                        InsnTarget::IntraIns(location, false)
+                    } else if is_fall_through(&location) {
+                        InsnTarget::IntraBlk(location, false)
                     } else {
                         InsnTarget::InterBlk(location.address())
                     }
@@ -137,22 +137,22 @@ impl Insn {
                 RawPCodeFlow::Branch(None) => InsnTarget::Unresolved,
                 RawPCodeFlow::Call(Some(location)) => {
                     if location.position() != 0 {
-                        InsnTarget::IntraIns(*location, false)
+                        InsnTarget::IntraIns(location, false)
                     } else {
                         InsnTarget::InterSub(location.address())
                     }
                 }
                 RawPCodeFlow::Call(None) => InsnTarget::InterSubIndirect(None),
                 RawPCodeFlow::FallThrough(location) => {
-                    if is_local(location) {
-                        InsnTarget::IntraIns(*location, true)
+                    if is_local(&location) {
+                        InsnTarget::IntraIns(location, true)
                     } else {
-                        InsnTarget::IntraBlk(*location, true)
+                        InsnTarget::IntraBlk(location, true)
                     }
                 }
                 RawPCodeFlow::Intrinsic => InsnTarget::Intrinsic,
                 RawPCodeFlow::Return(return_address) => {
-                    InsnTarget::InterRet(*return_address, index + 1 == operation_count)
+                    InsnTarget::InterRet(return_address, index + 1 == operation_count)
                 }
             };
             targets.push((index, target));

@@ -1,14 +1,14 @@
-use std::collections::BTreeMap;
-use std::rc::Rc;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, SyncSender};
+use std::thread::{self, JoinHandle};
 
 use fallible_iterator::FallibleIterator;
 use fugue_core::analysis::function::{
-    FunctionBuilderContext, FunctionDiscoveryContext, FunctionRecovery, FunctionRecoveryConfig,
+    FunctionBuilderContext, FunctionDiscoveryContext, FunctionRecovery, FunctionRecoveryExtension,
 };
 use fugue_core::analysis::{AnalysisError, AnalysisPass};
 use fugue_core::arch::{AArch64, Arch, Arm, X86, X86_64};
-use fugue_core::engine::ProjectView;
+use fugue_core::engine::AnalysisContext;
 use fugue_core::ir::{
     Address, AddressWithContext, FlowKind, RawAddress, SymbolIndex, SymbolProperties,
     SymbolTableSelector, TransientSymbolTable,
@@ -16,11 +16,14 @@ use fugue_core::ir::{
 use fugue_core::lifter::{ContextBitRange, ContextSet, Language};
 use fugue_core::loader::{
     ExternalThunkLayout, ImageAddress, ImageLayout, ImageSegment, ImageSegmentContents, Loadable,
-    LoadableAnalysers, LoadableFromFile, LoadableMetadata, LoaderError,
+    LoadableFromFile, LoadableMetadata, LoaderError,
 };
+use fugue_core::project::Project;
 use fugue_core::storage::{SegmentMappingProvenance, SegmentProperties, DEFAULT_SPACE_ID};
 use fugue_core::types::AttributeMap;
 use idalib::idb::{IDBOpenOptions, IDB};
+use idalib::IDAError;
+use thiserror::Error;
 
 pub const ATTRIBUTE_IDA_DATABASE_PATH: &str = "ida.database.path";
 pub const ATTRIBUTE_IDA_DATABASE_ANALYSE: &str = "ida.database.analyse";
@@ -28,17 +31,99 @@ pub const ATTRIBUTE_IDA_DATABASE_PERSIST: &str = "ida.database.persist";
 
 const FUNCTIONS_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(0);
 const NAMES_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(1);
+const FUNCTION_HINT_BATCH_SIZE: usize = 1024;
+const PROXY_REQUEST_CAPACITY: usize = 8;
 
-pub struct IDABinary {
-    database: Rc<IDB>,
+#[derive(Debug, Error)]
+enum IDAProxyError {
+    #[error("IDA proxy disconnected")]
+    Disconnected,
+    #[error(transparent)]
+    Operation(#[from] IDAError),
+    #[error("IDA segment not found: {index}")]
+    SegmentNotFound { index: usize },
+}
+
+struct IDALoader {
     architecture: Arch,
-    symbols: TransientSymbolTable<ImageAddress>,
-    external_thunks: Option<ExternalThunkLayout>,
     bank_base: RawAddress,
+    external_thunks: Option<ExternalThunkLayout>,
     layout: ImageLayout,
-    mark_thumb: bool,
     metadata: LoadableMetadata,
+    segment_count: usize,
+    symbols: TransientSymbolTable<ImageAddress>,
+}
+
+struct IDASegment {
+    name: String,
+    properties: SegmentProperties,
+    provenance: SegmentMappingProvenance,
+    size: u64,
+    start: u64,
+}
+
+struct IDASegmentContents {
+    bytes: Vec<u8>,
+    external: bool,
+    size: usize,
+    start: u64,
+}
+
+struct IDAFunctionEntry {
+    address: u64,
+    thumb: bool,
+}
+
+struct IDAFunctionEntries {
+    entries: Vec<IDAFunctionEntry>,
+    next: Option<usize>,
+}
+
+struct IDAFunctionBlock {
+    indirect: bool,
+    last_insn: u64,
+    start: u64,
+    successors: Vec<u64>,
+}
+
+enum IDARequest {
+    FunctionBlocks {
+        entry: u64,
+        reply: SyncSender<Result<Option<Vec<IDAFunctionBlock>>, IDAProxyError>>,
+    },
+    FunctionEntries {
+        cursor: usize,
+        limit: usize,
+        reply: SyncSender<Result<IDAFunctionEntries, IDAProxyError>>,
+    },
+    SegmentContents {
+        index: usize,
+        reply: SyncSender<Result<IDASegmentContents, IDAProxyError>>,
+    },
+    Segments {
+        reply: SyncSender<Result<Vec<IDASegment>, IDAProxyError>>,
+    },
+    Shutdown,
+}
+
+#[derive(fugue_core::AnalysisData)]
+struct IDAAnalysis {
+    requests: Option<SyncSender<IDARequest>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+#[derive(fugue_core::AnalysisData)]
+pub struct IDABinary {
+    #[analysis_data(delegate)]
+    analysis: IDAAnalysis,
+    architecture: Arch,
     attributes: AttributeMap,
+    bank_base: RawAddress,
+    external_thunks: Option<ExternalThunkLayout>,
+    layout: ImageLayout,
+    metadata: LoadableMetadata,
+    segment_count: usize,
+    symbols: TransientSymbolTable<ImageAddress>,
 }
 
 fn ida_symbols(
@@ -161,11 +246,324 @@ fn ida_language(database: &IDB) -> Result<&'static Language, LoaderError> {
     Err(LoaderError::UnsupportedArch)
 }
 
-impl IDABinary {
-    pub fn database(&self) -> &IDB {
-        &self.database
+fn ida_loader(database: &IDB) -> Result<IDALoader, LoaderError> {
+    let is_32 = database.meta().is_32bit_exactly();
+    let is_64 = database.meta().is_64bit();
+    if !is_32 && !is_64 {
+        return Err(LoaderError::UnsupportedArch);
     }
 
+    let language = ida_language(database)?;
+    let architecture = Arch::new(language);
+    let (address_symbols, external_thunks) = ida_symbols(&architecture, database)?;
+
+    let mut bank_base = RawAddress::MAX;
+    let mut bank_end = RawAddress::zero();
+    for (_, segment) in database.segments() {
+        bank_base = bank_base.min(segment.start_address().into());
+        bank_end = bank_end.max(segment.end_address().into());
+    }
+    let layout = ImageLayout::single_bank(bank_end.offset().saturating_sub(bank_base.offset()))?;
+
+    let mut symbols = TransientSymbolTable::<ImageAddress>::new();
+    for (index, _, symbol) in address_symbols.iter_by_index() {
+        symbols.insert(
+            index,
+            ImageAddress::in_default_space(symbol.address().offset()),
+            symbol.symbol(),
+            symbol.properties(),
+        );
+    }
+
+    let version = idalib::version().map_err(LoaderError::other)?;
+    let metadata = LoadableMetadata::from_hashes_with(
+        database.meta().input_file_md5(),
+        database.meta().input_file_sha256(),
+        database.meta().input_file_path(),
+        format!(
+            "IDA Pro v{}.{}.{} Loader",
+            version.major(),
+            version.minor(),
+            version.build()
+        ),
+    );
+
+    Ok(IDALoader {
+        architecture,
+        bank_base,
+        external_thunks,
+        layout,
+        metadata,
+        segment_count: database.segment_count(),
+        symbols,
+    })
+}
+
+fn ida_segments(database: &IDB) -> Vec<IDASegment> {
+    database
+        .segments()
+        .map(|(_, segment)| {
+            let permissions = segment.permissions();
+            let segment_type = segment.r#type();
+            let mut properties = SegmentProperties::default();
+
+            if permissions.is_readable() {
+                properties |= SegmentProperties::PERM_READ;
+            }
+            if permissions.is_writable() {
+                properties |= SegmentProperties::PERM_WRITE;
+            }
+            if permissions.is_executable() {
+                properties |= SegmentProperties::PERM_EXECUTE;
+            }
+            if segment_type.is_bss() {
+                properties |= SegmentProperties::UNINITIALISED;
+            }
+
+            IDASegment {
+                name: segment.name().unwrap_or_else(|| String::from("LOAD")),
+                properties,
+                provenance: if segment_type.is_extern() {
+                    SegmentMappingProvenance::External
+                } else {
+                    SegmentMappingProvenance::Segment
+                },
+                size: segment.end_address().wrapping_sub(segment.start_address()),
+                start: segment.start_address(),
+            }
+        })
+        .collect()
+}
+
+fn ida_segment_contents(database: &IDB, index: usize) -> Result<IDASegmentContents, IDAProxyError> {
+    let segment = database
+        .segment_by_id(index)
+        .ok_or(IDAProxyError::SegmentNotFound { index })?;
+    let start = segment.start_address();
+    let size = segment.end_address().wrapping_sub(start) as usize;
+
+    Ok(IDASegmentContents {
+        bytes: segment.bytes(),
+        external: segment.r#type().is_extern(),
+        size,
+        start,
+    })
+}
+
+fn ida_function_entries(database: &IDB, mut cursor: usize, limit: usize) -> IDAFunctionEntries {
+    let processor = database.processor();
+    let mark_thumb = processor.family().is_arm() && database.meta().is_32bit_exactly();
+    let function_count = database.function_count();
+    let mut entries = Vec::with_capacity(limit.min(function_count.saturating_sub(cursor)));
+
+    while cursor < function_count && entries.len() < limit {
+        let index = cursor;
+        cursor += 1;
+        let Some(function) = database.function_by_id(index) else {
+            continue;
+        };
+        let address = function.start_address();
+        entries.push(IDAFunctionEntry {
+            address,
+            thumb: mark_thumb && processor.is_thumb_at(address),
+        });
+    }
+
+    IDAFunctionEntries {
+        entries,
+        next: (cursor < function_count).then_some(cursor),
+    }
+}
+
+fn ida_function_blocks(
+    database: &IDB,
+    entry: u64,
+) -> Result<Option<Vec<IDAFunctionBlock>>, IDAProxyError> {
+    let Some(function) = database.function_at(entry) else {
+        return Ok(None);
+    };
+    let graph = function.cfg()?;
+    let mut blocks = Vec::with_capacity(graph.blocks_count());
+
+    for block in graph.blocks() {
+        let mut address = block.start_address();
+        let Some((last_insn, indirect)) = (loop {
+            let Some(insn) = database.insn_at(address) else {
+                break None;
+            };
+            if insn.is_basic_block_end(false) {
+                break Some((insn.address(), insn.is_indirect_jump()));
+            }
+            let length = insn.len() as u64;
+            if length == 0 {
+                break None;
+            }
+            address = address.wrapping_add(length);
+            if address >= block.end_address() {
+                break None;
+            }
+        }) else {
+            continue;
+        };
+        let successors = if indirect {
+            block
+                .succs_with(&graph)
+                .map(|successor| successor.start_address())
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        blocks.push(IDAFunctionBlock {
+            indirect,
+            last_insn,
+            start: block.start_address(),
+            successors,
+        });
+    }
+
+    Ok(Some(blocks))
+}
+
+fn ida_proxy(
+    path: PathBuf,
+    database_path: Option<String>,
+    analyse: bool,
+    persist: bool,
+) -> Result<(IDAAnalysis, IDALoader), LoaderError> {
+    let (requests, request_receiver) = mpsc::sync_channel(PROXY_REQUEST_CAPACITY);
+    let (initialisation_sender, initialisation_receiver) = mpsc::sync_channel(1);
+    let thread = thread::Builder::new()
+        .name(String::from("ida-proxy"))
+        .spawn(move || {
+            let result = (|| {
+                let mut options = IDBOpenOptions::new();
+                options.save(persist).auto_analyse(analyse);
+                if let Some(database_path) = database_path {
+                    options.idb(database_path);
+                }
+                let database = options.open(path).map_err(LoaderError::other)?;
+                let initialisation = ida_loader(&database)?;
+                Ok::<_, LoaderError>((database, initialisation))
+            })();
+
+            let (database, initialisation) = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    let _ = initialisation_sender.send(Err(error));
+                    return;
+                }
+            };
+            if initialisation_sender.send(Ok(initialisation)).is_err() {
+                return;
+            }
+
+            while let Ok(request) = request_receiver.recv() {
+                match request {
+                    IDARequest::FunctionBlocks { entry, reply } => {
+                        let _ = reply.send(ida_function_blocks(&database, entry));
+                    }
+                    IDARequest::FunctionEntries {
+                        cursor,
+                        limit,
+                        reply,
+                    } => {
+                        let _ = reply.send(Ok(ida_function_entries(&database, cursor, limit)));
+                    }
+                    IDARequest::SegmentContents { index, reply } => {
+                        let _ = reply.send(ida_segment_contents(&database, index));
+                    }
+                    IDARequest::Segments { reply } => {
+                        let _ = reply.send(Ok(ida_segments(&database)));
+                    }
+                    IDARequest::Shutdown => break,
+                }
+            }
+        })
+        .map_err(LoaderError::other)?;
+
+    match initialisation_receiver.recv() {
+        Ok(Ok(initialisation)) => Ok((
+            IDAAnalysis {
+                requests: Some(requests),
+                thread: Some(thread),
+            },
+            initialisation,
+        )),
+        Ok(Err(error)) => {
+            let _ = thread.join();
+            Err(error)
+        }
+        Err(_) => {
+            let _ = thread.join();
+            Err(LoaderError::other(IDAProxyError::Disconnected))
+        }
+    }
+}
+
+impl IDAAnalysis {
+    fn send(&self, request: IDARequest) -> Result<(), IDAProxyError> {
+        self.requests
+            .as_ref()
+            .ok_or(IDAProxyError::Disconnected)?
+            .send(request)
+            .map_err(|_| IDAProxyError::Disconnected)
+    }
+
+    fn function_blocks(
+        &self,
+        entry: Address,
+    ) -> Result<Option<Vec<IDAFunctionBlock>>, IDAProxyError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.send(IDARequest::FunctionBlocks {
+            entry: entry.offset(),
+            reply,
+        })?;
+        response.recv().map_err(|_| IDAProxyError::Disconnected)?
+    }
+
+    fn function_entries(
+        &self,
+        cursor: usize,
+        limit: usize,
+    ) -> Result<IDAFunctionEntries, IDAProxyError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.send(IDARequest::FunctionEntries {
+            cursor,
+            limit,
+            reply,
+        })?;
+        response.recv().map_err(|_| IDAProxyError::Disconnected)?
+    }
+
+    fn segment_contents(&self, index: usize) -> Result<IDASegmentContents, IDAProxyError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.send(IDARequest::SegmentContents { index, reply })?;
+        response.recv().map_err(|_| IDAProxyError::Disconnected)?
+    }
+
+    fn segments(&self) -> Result<Vec<IDASegment>, IDAProxyError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.send(IDARequest::Segments { reply })?;
+        response.recv().map_err(|_| IDAProxyError::Disconnected)?
+    }
+}
+
+impl Drop for IDAAnalysis {
+    fn drop(&mut self) {
+        if let Some(requests) = self.requests.take() {
+            let _ = requests.send(IDARequest::Shutdown);
+        }
+
+        if let Some(thread) = self.thread.take() {
+            if thread.join().is_err() {
+                tracing::error!("IDA proxy thread panicked");
+            }
+        }
+    }
+}
+
+impl IDABinary {
     pub fn symbols(&self) -> &TransientSymbolTable<ImageAddress> {
         &self.symbols
     }
@@ -177,94 +575,86 @@ impl IDABinary {
 
 impl LoadableFromFile for IDABinary {
     fn from_file_with(
-        path: impl AsRef<std::path::Path>,
+        path: impl AsRef<Path>,
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, LoaderError>
     where
         Self: Sized,
     {
-        let path = path.as_ref();
+        let path = path.as_ref().to_path_buf();
         let attributes = attributes.into();
-
-        let mut database_opts = IDBOpenOptions::new();
 
         let persist = attributes
             .get_attr::<bool>(ATTRIBUTE_IDA_DATABASE_PERSIST)
             .unwrap_or_default();
-
-        database_opts.save(persist);
-
         let analyse = attributes
             .get_attr::<bool>(ATTRIBUTE_IDA_DATABASE_ANALYSE)
             .unwrap_or(true);
-
-        database_opts.auto_analyse(analyse);
-
-        if let Some(idb) = attributes.get_attr::<String>(ATTRIBUTE_IDA_DATABASE_PATH) {
-            database_opts.idb(idb);
-        }
-
-        let database = database_opts.open(path).map_err(LoaderError::other)?;
-        let processor = database.processor();
-
-        let is_32 = database.meta().is_32bit_exactly();
-        let is_64 = database.meta().is_64bit();
-
-        if !is_32 && !is_64 {
-            return Err(LoaderError::UnsupportedArch);
-        }
-
-        let mark_thumb = processor.family().is_arm() && is_32;
-
-        let language = ida_language(&database)?;
-        let architecture = Arch::new(language);
-
-        let (address_symbols, external_thunks) = ida_symbols(&architecture, &database)?;
-
-        let mut bank_base = RawAddress::MAX;
-        let mut bank_end = RawAddress::zero();
-        for (_, segm) in database.segments() {
-            bank_base = bank_base.min(segm.start_address().into());
-            bank_end = bank_end.max(segm.end_address().into());
-        }
-        let layout =
-            ImageLayout::single_bank(bank_end.offset().saturating_sub(bank_base.offset()))?;
-
-        let mut symbols = TransientSymbolTable::<ImageAddress>::new();
-        for (index, _, symbol) in address_symbols.iter_by_index() {
-            symbols.insert(
-                index,
-                ImageAddress::in_default_space(symbol.address().offset()),
-                symbol.symbol(),
-                symbol.properties(),
-            );
-        }
-
-        let version = idalib::version().map_err(LoaderError::other)?;
-
-        let metadata = LoadableMetadata::from_hashes_with(
-            database.meta().input_file_md5(),
-            database.meta().input_file_sha256(),
-            database.meta().input_file_path(),
-            format!(
-                "IDA Pro v{}.{}.{} Loader",
-                version.major(),
-                version.minor(),
-                version.build()
-            ),
-        );
+        let database_path = attributes.get_attr::<String>(ATTRIBUTE_IDA_DATABASE_PATH);
+        let (analysis, initialisation) = ida_proxy(path, database_path, analyse, persist)?;
 
         Ok(IDABinary {
-            database: Rc::new(database),
-            architecture,
-            symbols,
-            external_thunks,
-            bank_base,
-            layout,
-            mark_thumb,
-            metadata,
+            analysis,
+            architecture: initialisation.architecture,
             attributes,
+            bank_base: initialisation.bank_base,
+            external_thunks: initialisation.external_thunks,
+            layout: initialisation.layout,
+            metadata: initialisation.metadata,
+            segment_count: initialisation.segment_count,
+            symbols: initialisation.symbols,
         })
+    }
+}
+
+struct IDAImageContents<'a> {
+    binary: &'a IDABinary,
+    index: usize,
+}
+
+impl<'a> FallibleIterator for IDAImageContents<'a> {
+    type Error = LoaderError;
+    type Item = ImageSegmentContents<'a>;
+
+    fn next(&mut self) -> Result<Option<Self::Item>, Self::Error> {
+        if self.index == self.binary.segment_count {
+            return Ok(None);
+        }
+
+        let segment = self
+            .binary
+            .analysis
+            .segment_contents(self.index)
+            .map_err(LoaderError::other)?;
+        self.index += 1;
+
+        let mut bytes = segment.bytes;
+        if bytes.len() < segment.size {
+            bytes.resize(segment.size, 0);
+        }
+
+        if segment.external {
+            let address_size = self.binary.architecture.language().address_size();
+            let template = self.binary.architecture.external_thunk_template();
+            let template_size = template.size();
+            let aligned_template_size = template_size.next_multiple_of(address_size);
+
+            if aligned_template_size > address_size {
+                tracing::warn!(
+                    "external thunk template is larger than available space in external segment; skipping"
+                );
+            } else {
+                for chunk in bytes.chunks_exact_mut(aligned_template_size) {
+                    chunk[..template_size].copy_from_slice(template.bytes());
+                }
+            }
+        }
+
+        Ok(Some(ImageSegmentContents::new(
+            segment.start.wrapping_sub(self.binary.bank_base.offset()),
+            self.binary.architecture.endian(),
+            bytes,
+        )))
     }
 }
 
@@ -297,229 +687,58 @@ impl Loadable for IDABinary {
         &'a self,
     ) -> impl FallibleIterator<Item = ImageSegment<'a>, Error = LoaderError> + 'a {
         let bank_base = self.bank_base;
-
-        fallible_iterator::convert(self.database.segments().map(move |(_, segm)| {
-            let start = segm.start_address();
-            let size = segm.end_address().wrapping_sub(start);
-            let name = segm.name().unwrap_or_else(|| String::from("LOAD"));
-            let permissions = segm.permissions();
-            let type_ = segm.r#type();
-
-            let mut properties = SegmentProperties::default();
-
-            if permissions.is_readable() {
-                properties |= SegmentProperties::PERM_READ;
-            }
-
-            if permissions.is_writable() {
-                properties |= SegmentProperties::PERM_WRITE;
-            }
-
-            if permissions.is_executable() {
-                properties |= SegmentProperties::PERM_EXECUTE;
-            }
-
-            if type_.is_bss() {
-                properties |= SegmentProperties::UNINITIALISED;
-            }
-
-            let provenance = if type_.is_extern() {
-                SegmentMappingProvenance::External
-            } else {
-                SegmentMappingProvenance::Segment
-            };
-
-            Ok(ImageSegment::backed_in_default_bank(
-                name,
-                ImageAddress::in_default_space(start),
-                size,
-                properties,
-                provenance,
-                bank_base,
-            ))
-        }))
+        let segments = match self.analysis.segments() {
+            Ok(segments) => segments
+                .into_iter()
+                .map(move |segment| {
+                    Ok(ImageSegment::backed_in_default_bank(
+                        segment.name,
+                        ImageAddress::in_default_space(segment.start),
+                        segment.size,
+                        segment.properties,
+                        segment.provenance,
+                        bank_base,
+                    ))
+                })
+                .collect(),
+            Err(error) => vec![Err(LoaderError::other(error))],
+        };
+        fallible_iterator::convert(segments.into_iter())
     }
 
     fn image_contents<'a>(
         &'a self,
     ) -> impl FallibleIterator<Item = ImageSegmentContents<'a>, Error = LoaderError> + 'a {
-        let bank_base = self.bank_base.offset();
-        let endian = self.architecture.endian();
-        let address_size = self.architecture.language().address_size();
-        let template = self.architecture.external_thunk_template();
-
-        fallible_iterator::convert(self.database.segments().map(move |(_, segm)| {
-            let start = segm.start_address();
-            let size = segm.end_address().wrapping_sub(start) as usize;
-            let type_ = segm.r#type();
-
-            let mut bytes = segm.bytes();
-
-            if bytes.len() < size {
-                bytes.resize(size, 0);
-            }
-
-            if type_.is_extern() {
-                let template_size = template.size();
-                let aligned_template_size = template_size.next_multiple_of(address_size);
-
-                if aligned_template_size > address_size {
-                    tracing::warn!(
-                        "external thunk template is larger than available space in external segment; skipping"
-                    );
-                } else {
-                    for chunk in bytes.chunks_exact_mut(aligned_template_size) {
-                        chunk[..template_size].copy_from_slice(template.bytes());
-                    }
-                }
-            }
-
-            Ok(ImageSegmentContents::new(
-                start.wrapping_sub(bank_base),
-                endian,
-                bytes,
-            ))
-        }))
-    }
-}
-
-pub struct IDAAnalysers<'a> {
-    binary: &'a IDABinary,
-}
-
-#[derive(Clone)]
-struct IDAFunctionFacts {
-    blocks: Arc<BTreeMap<u64, Arc<[IDABlockHint]>>>,
-    functions: Arc<[IDAFunctionHint]>,
-}
-
-#[derive(Clone, Copy)]
-struct IDAFunctionHint {
-    address: u64,
-    thumb: bool,
-}
-
-#[derive(Clone)]
-struct IDABlockHint {
-    start: u64,
-    last_insn: u64,
-    indirect: bool,
-    successors: Arc<[u64]>,
-}
-
-impl IDAFunctionFacts {
-    fn new(binary: &IDABinary) -> Self {
-        let database = binary.database();
-        let processor = database.processor();
-        let mut functions = Vec::new();
-        let mut blocks = BTreeMap::new();
-
-        for (_, function) in database.functions() {
-            let entry = function.start_address();
-            functions.push(IDAFunctionHint {
-                address: entry,
-                thumb: binary.mark_thumb && processor.is_thumb_at(entry),
-            });
-
-            let Ok(cfg) = function.cfg() else {
-                continue;
-            };
-
-            let mut block_hints = Vec::new();
-            for block in cfg.blocks() {
-                let Some((last_insn, indirect)) =
-                    Self::last_block_instruction(database, block.start_address())
-                else {
-                    continue;
-                };
-                let successors = if indirect {
-                    block
-                        .succs_with(&cfg)
-                        .map(|successor| successor.start_address())
-                        .collect::<Vec<_>>()
-                } else {
-                    Vec::new()
-                };
-
-                block_hints.push(IDABlockHint {
-                    start: block.start_address(),
-                    last_insn,
-                    indirect,
-                    successors: successors.into(),
-                });
-            }
-
-            blocks.insert(entry, block_hints.into());
-        }
-
-        Self {
-            blocks: Arc::new(blocks),
-            functions: functions.into(),
+        IDAImageContents {
+            binary: self,
+            index: 0,
         }
     }
-
-    fn last_block_instruction(database: &IDB, start: u64) -> Option<(u64, bool)> {
-        let mut address = start;
-        loop {
-            let insn = database.insn_at(address)?;
-            if insn.is_basic_block_end(false) {
-                return Some((insn.address(), insn.is_indirect_jump()));
-            }
-            address += insn.len() as u64;
-        }
-    }
-
-    fn blocks(&self, entry: Address) -> Option<&[IDABlockHint]> {
-        self.blocks
-            .get(&entry.offset())
-            .map(|blocks| blocks.as_ref())
-    }
 }
 
-impl<'a> LoadableAnalysers for IDAAnalysers<'a> {
-    fn function_recovery_with(
-        &self,
-        config: FunctionRecoveryConfig,
-    ) -> Result<FunctionRecovery, AnalysisError> {
-        let mut recovery = FunctionRecovery::new_with(
-            config
-                .with_segment_function_hints(false)
-                .with_symbol_table_function_hints(false),
-        );
+#[fugue_core::extension]
+impl FunctionRecoveryExtension {
+    const NAME: &str = "ida";
 
-        let facts = IDAFunctionFacts::new(self.binary);
-
+    fn configure(project: &Project, recovery: &mut FunctionRecovery) -> Result<(), AnalysisError> {
         recovery.add_candidate_discovery_pass(
             "ida-function-discovery",
-            IDAFunctionDiscovery::new(
-                &facts,
-                self.binary.architecture.language(),
-                self.binary.mark_thumb,
-            ),
+            IDAFunctionDiscovery::new(project.arch().language()),
         );
+        recovery.add_pre_resolution_pass("ida-function-builder", IDAFunctionBuilder);
 
-        recovery.add_builder_initialisation_pass(
-            "ida-function-builder",
-            IDAFunctionBuilder::new(&facts),
-        );
-
-        Ok(recovery)
+        Ok(())
     }
 }
 
 pub struct IDAFunctionDiscovery {
-    facts: IDAFunctionFacts,
     t_mode: Option<ContextBitRange>,
 }
 
 impl IDAFunctionDiscovery {
-    fn new(facts: &IDAFunctionFacts, language: &'static Language, mark_thumb: bool) -> Self {
-        let t_mode = mark_thumb
-            .then(|| language.context_variable_by_name("TMode"))
-            .flatten();
+    fn new(language: &'static Language) -> Self {
         Self {
-            facts: facts.clone(),
-            t_mode,
+            t_mode: language.context_variable_by_name("TMode"),
         }
     }
 }
@@ -527,9 +746,13 @@ impl IDAFunctionDiscovery {
 impl AnalysisPass<FunctionDiscoveryContext> for IDAFunctionDiscovery {
     fn analyse_with(
         &mut self,
-        project: &ProjectView<'_>,
+        context: &mut AnalysisContext<'_, '_>,
         state: &mut FunctionDiscoveryContext,
     ) -> Result<(), AnalysisError> {
+        let Some(analysis) = context.analysis_data.get::<IDAAnalysis>()? else {
+            return Ok(());
+        };
+        let project = &context.project;
         let segms = project.segments();
         let external_bounds = segms
             .iter_views(DEFAULT_SPACE_ID)
@@ -539,58 +762,69 @@ impl AnalysisPass<FunctionDiscoveryContext> for IDAFunctionDiscovery {
                     .then(|| view.start()..=view.last())
             });
 
-        for function in self.facts.functions.iter() {
-            let addr = Address::from(function.address);
+        let mut cursor = 0;
+        loop {
+            let functions = analysis
+                .function_entries(cursor, FUNCTION_HINT_BATCH_SIZE)
+                .map_err(|error| AnalysisError::pass_failed("ida-function-discovery", error))?;
+            for function in functions.entries {
+                let addr = Address::from(function.address);
 
-            if state.functions().contains_key(&addr) {
-                continue;
+                if state.functions().contains_key(&addr) {
+                    continue;
+                }
+
+                if matches!(external_bounds, Some(ref bounds) if bounds.contains(&addr)) {
+                    continue;
+                }
+
+                if let Some(t_mode) = self.t_mode {
+                    let value = u32::from(function.thumb);
+                    state.add_candidate(AddressWithContext::new(
+                        addr,
+                        ContextSet::single(t_mode, value),
+                    ));
+                } else {
+                    state.add_candidate(addr);
+                }
             }
 
-            if matches!(external_bounds, Some(ref bounds) if bounds.contains(&addr)) {
-                continue;
-            }
-
-            if let Some(t_mode) = self.t_mode {
-                let value = u32::from(function.thumb);
-                state.add_candidate(AddressWithContext::new(
-                    addr,
-                    ContextSet::single(t_mode, value),
-                ));
-            } else {
-                state.add_candidate(addr);
-            }
+            let Some(next) = functions.next else {
+                break;
+            };
+            cursor = next;
         }
 
         Ok(())
     }
 }
 
-pub struct IDAFunctionBuilder {
-    facts: IDAFunctionFacts,
-}
-
-impl IDAFunctionBuilder {
-    fn new(facts: &IDAFunctionFacts) -> Self {
-        Self {
-            facts: facts.clone(),
-        }
-    }
-}
+pub struct IDAFunctionBuilder;
 
 impl AnalysisPass<FunctionBuilderContext> for IDAFunctionBuilder {
+    fn can_analyse(&self, context: &AnalysisContext<'_, '_>) -> bool {
+        !matches!(context.analysis_data.get::<IDAAnalysis>(), Ok(None))
+    }
+
     fn analyse_with(
         &mut self,
-        _project: &ProjectView<'_>,
+        context: &mut AnalysisContext<'_, '_>,
         builder: &mut FunctionBuilderContext,
     ) -> Result<(), AnalysisError> {
+        let Some(analysis) = context.analysis_data.get::<IDAAnalysis>()? else {
+            return Ok(());
+        };
         let entry = builder.entry();
-        let Some(blocks) = self.facts.blocks(entry) else {
+        let Some(blocks) = analysis
+            .function_blocks(entry)
+            .map_err(|error| AnalysisError::pass_failed("ida-function-builder", error))?
+        else {
             return Ok(());
         };
 
         for block in blocks {
             if block.indirect {
-                for successor in block.successors.iter().copied() {
+                for successor in block.successors {
                     builder.add_local_target(block.last_insn, successor, FlowKind::IBranch);
                 }
             }

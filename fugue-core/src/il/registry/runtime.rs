@@ -3,7 +3,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::{IlProduced, IlRegistry};
-use crate::analysis::control::CancellationToken;
 use crate::il::common::{
     IlArtefact, IlError, IlFormId, IlGenerationContext, IlGenerationError, IlProducer,
     IlTransformer,
@@ -40,7 +39,6 @@ pub(crate) trait ErasedIlTransformer: Send {
         &mut self,
         source: &(dyn Any + Send + Sync),
         context: &IlGenerationContext<'_>,
-        cancellation: &CancellationToken,
     ) -> Result<IlProduced, IlGenerationError>;
 }
 
@@ -49,13 +47,12 @@ impl<T: IlTransformer> ErasedIlTransformer for T {
         &mut self,
         source: &(dyn Any + Send + Sync),
         context: &IlGenerationContext<'_>,
-        cancellation: &CancellationToken,
     ) -> Result<IlProduced, IlGenerationError> {
         let source = source
             .downcast_ref::<T::Input>()
             .ok_or_else(|| IlGenerationError::Il(IlError::mismatched_source(T::Input::FORM)))?;
 
-        Ok(Box::new(T::transform(self, source, context, cancellation)?))
+        Ok(Box::new(T::transform(self, source, context)?))
     }
 }
 
@@ -63,7 +60,6 @@ pub(crate) trait ErasedIlProducer: Send {
     fn produce(
         &mut self,
         context: &IlGenerationContext<'_>,
-        cancellation: &CancellationToken,
     ) -> Result<IlProduced, IlGenerationError>;
 }
 
@@ -71,9 +67,8 @@ impl<T: IlProducer> ErasedIlProducer for T {
     fn produce(
         &mut self,
         context: &IlGenerationContext<'_>,
-        cancellation: &CancellationToken,
     ) -> Result<IlProduced, IlGenerationError> {
-        Ok(Box::new(T::produce(self, context, cancellation)?))
+        Ok(Box::new(T::produce(self, context)?))
     }
 }
 
@@ -165,7 +160,6 @@ impl IlGenerationSession {
         form: &IlFormId,
         existing: impl IntoIterator<Item = Option<Arc<dyn Any + Send + Sync>>>,
         context: &IlGenerationContext<'_>,
-        cancellation: &CancellationToken,
     ) -> Result<GeneratedIl, IlGenerationError> {
         if registry.form(form).is_none() {
             return Err(IlError::unregistered_form(form.clone()).into());
@@ -187,7 +181,7 @@ impl IlGenerationSession {
                 return Err(IlError::missing_recipe(step.clone()).into());
             };
             let artefact = match recipe {
-                IlRecipeExecutor::Producer(producer) => producer.produce(context, cancellation)?,
+                IlRecipeExecutor::Producer(producer) => producer.produce(context)?,
                 IlRecipeExecutor::Transformer(transformer) => {
                     let source = if produced_previous {
                         generated
@@ -201,7 +195,7 @@ impl IlGenerationSession {
                             ))
                         })?
                     };
-                    transformer.transform(source, context, cancellation)?
+                    transformer.transform(source, context)?
                 }
             };
 

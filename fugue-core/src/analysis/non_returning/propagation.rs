@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::analysis::function::recovery::InterFunctionStructuringContext;
 use crate::analysis::non_returning::NonReturningTargets;
 use crate::analysis::{AnalysisError, AnalysisPass};
-use crate::engine::ProjectView;
+use crate::engine::{AnalysisContext, ProjectView};
 use crate::ir::{Address, CodeBlock, FunctionProperties, Insn};
 
 pub(crate) const NON_RETURNING_PROPAGATION_ANALYSER: &str = "non-returning-propagation";
@@ -236,10 +236,11 @@ impl NonReturningPropagation {
 impl AnalysisPass<InterFunctionStructuringContext> for NonReturningPropagation {
     fn analyse_with(
         &mut self,
-        project: &ProjectView<'_>,
-        context: &mut InterFunctionStructuringContext,
+        analysis: &mut AnalysisContext<'_, '_>,
+        state: &mut InterFunctionStructuringContext,
     ) -> Result<(), AnalysisError> {
-        let graph = ExitGraph::from_project(project, context);
+        let project = &analysis.project;
+        let graph = ExitGraph::from_project(project, state);
         let non_returning = graph.non_returning(project);
 
         for &entry in non_returning.iter() {
@@ -249,11 +250,11 @@ impl AnalysisPass<InterFunctionStructuringContext> for NonReturningPropagation {
                 let properties = function.properties() | FunctionProperties::NON_RETURNING;
                 drop(function);
 
-                context.update_function_properties(entry, properties);
+                state.update_function_properties(entry, properties);
                 continue;
             }
 
-            context
+            state
                 .modify_pending_function(entry, |function| {
                     function.mark_non_returning();
                     Ok(())
@@ -266,7 +267,7 @@ impl AnalysisPass<InterFunctionStructuringContext> for NonReturningPropagation {
         for &StaleCall { caller, target } in graph.stale_calls(&targets, &non_returning) {
             tracing::debug!("re-analysing {caller}: calls non-returning function at {target}");
 
-            context.reanalyse_function(caller);
+            state.reanalyse_function(caller);
         }
 
         Ok(())

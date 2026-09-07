@@ -2,13 +2,12 @@ use std::cmp::Ordering;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::mem;
-use std::ops::{ControlFlow, RangeInclusive};
+use std::ops::RangeInclusive;
 use std::time::Instant;
 
 use rustc_hash::FxHashSet;
 use tracing::Level;
 
-use crate::analysis::control::CancellationToken;
 use crate::analysis::function::recovery::builder::{FunctionBuilder, FunctionCandidateOutcome};
 use crate::analysis::function::recovery::executor::{
     FunctionCandidateBatch, FunctionRecoveryExecutor,
@@ -19,12 +18,12 @@ use crate::analysis::function::recovery::{
 };
 use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
 use crate::engine::{
-    Analyser, AnalyserProvider, AnalysisContext, Priority, ProjectUpdate, ProjectView,
+    Analyser, AnalyserProvider, AnalysisContext, Priority, ProjectUpdates, ProjectView,
 };
 use crate::extension::{self, Registration, submit};
 use crate::ir::{
-    Address, AddressRange, AddressRangeSet, AddressWithContext, CodeBlockTable, FunctionProperties,
-    FunctionTable, IncompleteFunction, ProblemKind, RawAddressRangeSet,
+    Address, AddressRange, AddressRangeExt, AddressRangeSet, AddressWithContext, CodeBlockTable,
+    FunctionProperties, FunctionTable, IncompleteFunction, ProblemKind, RawAddressRangeSet,
 };
 use crate::lifter::InsnResolver;
 use crate::project::{AnalysisPhase, ChangeKinds, Project};
@@ -112,7 +111,6 @@ pub struct FunctionRecovery {
     reanalysis_candidates: FxHashSet<Address>,
     discovered_targets: Vec<AddressWithContext>,
     executor: FunctionRecoveryExecutor,
-    cancellation: CancellationToken,
     context: Option<FunctionRecoveryContext>,
 }
 
@@ -171,6 +169,33 @@ pub struct FunctionDiscoveryContext {
     coverage: FunctionCoverage,
     functions: FunctionConfidenceMap,
     new_functions: FunctionConfidenceMap,
+}
+
+pub struct FunctionDiscoveryRanges<'a, Ranges> {
+    ranges: Ranges,
+    avoids: &'a AddressRangeSet,
+    candidates: &'a mut VecDeque<AddressWithContext>,
+}
+
+impl<Ranges> FunctionDiscoveryRanges<'_, Ranges> {
+    pub fn is_avoided(&self, address: impl Into<Address>) -> bool {
+        self.avoids.contains(address.into())
+    }
+
+    pub fn add_candidate(&mut self, candidate: impl Into<AddressWithContext>) {
+        self.candidates.push_back(candidate.into());
+    }
+}
+
+impl<Ranges> Iterator for FunctionDiscoveryRanges<'_, Ranges>
+where
+    Ranges: Iterator<Item = AddressRange>,
+{
+    type Item = AddressRange;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.ranges.next()
+    }
 }
 
 #[derive(Default)]
@@ -340,8 +365,15 @@ impl FunctionDiscoveryContext {
         &self.coverage.covered
     }
 
-    pub fn gaps(&self, space_id: AddressSpaceId) -> AddressRangeSet {
-        self.coverage.gaps(space_id)
+    pub fn unclaimed_ranges(
+        &mut self,
+        space_id: AddressSpaceId,
+    ) -> FunctionDiscoveryRanges<'_, impl Iterator<Item = AddressRange> + use<'_>> {
+        FunctionDiscoveryRanges {
+            ranges: self.coverage.unclaimed_ranges(space_id),
+            avoids: &self.avoids,
+            candidates: &mut self.candidates,
+        }
     }
 
     pub fn add_candidate(&mut self, candidate: impl Into<AddressWithContext>) {
@@ -380,14 +412,14 @@ impl FunctionCoverage {
         };
 
         for space_id in segments.spaces().map(|space| space.id()) {
-            let mut gaps = RawAddressRangeSet::new();
+            let mut available = RawAddressRangeSet::new();
             for view in segments.iter_views(space_id)?.filter(|view| {
                 view.properties().is_executable()
                     && view.provenance() != SegmentMappingProvenance::External
             }) {
-                gaps.insert_range(view.start().raw_address()..=view.last().raw_address());
+                available.insert_range(view.start().raw_address()..=view.last().raw_address());
             }
-            coverage.available.insert(space_id, gaps);
+            coverage.available.insert(space_id, available);
         }
 
         for function in ftable.iter() {
@@ -422,21 +454,28 @@ impl FunctionCoverage {
         Ok(coverage)
     }
 
-    fn gaps(&self, space_id: AddressSpaceId) -> AddressRangeSet {
-        let mut gaps = AddressRangeSet::new();
-        if let Some(available) = self.available.get(&space_id) {
-            let covered = self
-                .covered
-                .spaces()
-                .find_map(|(space, ranges)| (space == space_id).then_some(ranges));
-            let ranges = covered
-                .map(|covered| available.difference(covered))
-                .unwrap_or_else(|| available.clone());
-            for range in ranges.ranges() {
-                gaps.insert_raw_range(space_id, range);
-            }
-        }
-        gaps
+    fn unclaimed_ranges(
+        &self,
+        space_id: AddressSpaceId,
+    ) -> impl Iterator<Item = AddressRange> + use<'_> {
+        let available = self
+            .available
+            .get(&space_id)
+            .into_iter()
+            .flat_map(|ranges| ranges.ranges());
+        let covered = self
+            .covered
+            .spaces()
+            .find_map(|(space, ranges)| (space == space_id).then_some(ranges));
+        available
+            .flat_map(move |range| {
+                let excluded = covered
+                    .map(|covered| covered.overlapping_ranges(range.clone()))
+                    .into_iter()
+                    .flatten();
+                range.difference(excluded)
+            })
+            .map(move |range| AddressRange::new(space_id, *range.start(), *range.end()))
     }
 
     fn insert(&mut self, function: &IncompleteFunction) {
@@ -503,14 +542,12 @@ impl FunctionCoverage {
 }
 
 fn stage_function_updates(
-    updates: &mut Vec<ProjectUpdate>,
+    updates: &mut ProjectUpdates,
     address: Address,
-    mut function: IncompleteFunction,
+    function: IncompleteFunction,
 ) {
     tracing::debug!("staging recovered function at {address}");
-    let switches = function.take_pending_switches();
-    updates.push(ProjectUpdate::add_function(function));
-    updates.extend(switches.into_iter().map(ProjectUpdate::add_derived_switch));
+    updates.add_function(function);
 }
 
 impl FunctionBoundaries {
@@ -700,7 +737,6 @@ impl FunctionRecovery {
             reanalysis_candidates: FxHashSet::default(),
             discovered_targets: Vec::new(),
             executor: FunctionRecoveryExecutor::new(),
-            cancellation: CancellationToken::default(),
             context: None,
         }
     }
@@ -711,14 +747,6 @@ impl FunctionRecovery {
 
     pub fn config_mut(&mut self) -> &mut FunctionRecoveryConfig {
         self.builder.config_mut()
-    }
-
-    pub fn cancellation_token(&self) -> CancellationToken {
-        self.cancellation.clone()
-    }
-
-    pub fn set_cancellation_token(&mut self, token: CancellationToken) {
-        self.cancellation = token;
     }
 
     pub fn candidate_discovery_passes(&self) -> &AnalysisGroup<FunctionDiscoveryContext> {
@@ -865,8 +893,7 @@ impl FunctionRecovery {
         Ok(())
     }
 
-    fn add_project_candidates(&mut self, project: &ProjectView<'_>) -> Result<(), AnalysisError> {
-        self.cancellation.check()?;
+    fn add_project_candidates(&mut self, project: &ProjectView<'_>) {
         let mut candidates = BTreeSet::new();
 
         if let Some(entry) = project.entry_point() {
@@ -880,7 +907,6 @@ impl FunctionRecovery {
                 .iter_by_address()
                 .filter(|(_, s)| s.is_function())
             {
-                self.cancellation.check()?;
                 tracing::debug!(
                     source = "symbol-table",
                     "function hint: {} (name: {})",
@@ -893,7 +919,6 @@ impl FunctionRecovery {
 
         if self.config().segment_function_hints() {
             for hint in project.segments().function_hints() {
-                self.cancellation.check()?;
                 tracing::debug!(source = "segment", "function hint: {hint}");
                 candidates.insert(hint.into());
             }
@@ -903,7 +928,6 @@ impl FunctionRecovery {
         let blocks = project.blocks();
         let functions = project.functions();
         for function in functions.iter() {
-            self.cancellation.check()?;
             for target in function
                 .flow_targets(blocks)
                 .filter(|target| target.kind().is_global())
@@ -925,16 +949,11 @@ impl FunctionRecovery {
         }
         self.candidates.extend(candidates);
         self.project_candidates_added = true;
-
-        Ok(())
     }
 
-    fn add_region_candidates(
-        &mut self,
-        project: &ProjectView<'_>,
-        regions: &AddressRangeSet,
-        context: &AnalysisContext,
-    ) -> Result<(), AnalysisError> {
+    fn add_region_candidates(&mut self, context: &AnalysisContext) {
+        let project = &context.project;
+        let regions = context.regions();
         for address in context
             .causes()
             .iter()
@@ -946,7 +965,6 @@ impl FunctionRecovery {
             .filter_map(|cause| cause.range().map(|range| range.start_address()))
             .filter(|address| regions.contains(*address))
         {
-            self.cancellation.check()?;
             self.add_candidate(address);
         }
 
@@ -957,7 +975,6 @@ impl FunctionRecovery {
                 .filter(|(_, s)| s.is_function())
                 .filter(|(_, entry)| regions.contains(entry.address()))
             {
-                self.cancellation.check()?;
                 tracing::debug!(
                     source = "symbol-table",
                     "function hint: {} (name: {})",
@@ -974,36 +991,27 @@ impl FunctionRecovery {
                 .function_hints()
                 .filter(|hint| regions.contains(*hint))
             {
-                self.cancellation.check()?;
                 tracing::debug!(source = "segment", "function hint: {hint}");
                 self.add_candidate(hint);
             }
         }
-
-        Ok(())
     }
 
-    fn add_analysis_candidates(
-        &mut self,
-        project: &ProjectView<'_>,
-        regions: &AddressRangeSet,
-        context: &AnalysisContext,
-    ) -> Result<(), AnalysisError> {
+    fn add_analysis_candidates(&mut self, context: &AnalysisContext) {
+        let project = &context.project;
         let functions_empty = project.functions().is_empty();
         let first_project_scan = !self.project_candidates_added;
         if first_project_scan {
-            self.add_project_candidates(project)?;
+            self.add_project_candidates(project);
         }
         if !functions_empty || !first_project_scan {
-            self.add_region_candidates(project, regions, context)?;
+            self.add_region_candidates(context);
         }
-
-        Ok(())
     }
 
     fn stage_pending_functions(
         &mut self,
-        updates: &mut Vec<ProjectUpdate>,
+        updates: &mut ProjectUpdates,
         budget: &mut FunctionRecoveryBudget,
     ) {
         loop {
@@ -1024,8 +1032,7 @@ impl FunctionRecovery {
 
     fn structure_functions(
         &mut self,
-        project: &ProjectView<'_>,
-        updates: &mut Vec<ProjectUpdate>,
+        analysis: &mut AnalysisContext<'_, '_>,
         budget: &mut FunctionRecoveryBudget,
         functions: &mut FunctionConfidenceMap,
         new_functions: &mut FunctionConfidenceMap,
@@ -1034,7 +1041,7 @@ impl FunctionRecovery {
             "performing {} function restructuring pass(es)",
             self.inter_function_structuring_passes.len()
         );
-        let mut context = InterFunctionStructuringContext {
+        let mut state = InterFunctionStructuringContext {
             config: *self.builder.config(),
             avoids: mem::take(self.builder.avoids_mut()),
             candidates: VecDeque::new(),
@@ -1045,61 +1052,63 @@ impl FunctionRecovery {
             changed_functions: BTreeMap::new(),
             removed_functions: BTreeSet::new(),
         };
-        let updates_before = updates.len();
+        let updates_before = analysis.updates.len();
         let functions_before = budget.staged_functions;
         let result = self
             .inter_function_structuring_passes
-            .analyse_with(project, &mut context)
+            .analyse_with(analysis, &mut state)
             .map_err(|error| match error {
-                error @ AnalysisError::Cancelled(_) => error,
+                error @ AnalysisError::AnalysisData(_) => error,
                 error => AnalysisError::pass_failed(FUNCTION_RECOVERY_ANALYSER, error),
             });
         if let Err(error) = result {
-            *self.builder.avoids_mut() = context.avoids;
+            *self.builder.avoids_mut() = state.avoids;
             return Err(error);
         }
 
         if let Some(coverage) = self.continuation_coverage.as_mut() {
-            for function in context.pending_functions.values() {
+            for function in state.pending_functions.values() {
                 coverage.insert(function);
             }
             coverage.flush();
         }
-        self.candidates.append(&mut context.candidates);
-        for entry in context.removed_functions {
-            if context.pending_functions.remove(&entry).is_none() {
-                updates.push(ProjectUpdate::remove_function(entry));
+        self.candidates.append(&mut state.candidates);
+        for entry in state.removed_functions {
+            if state.pending_functions.remove(&entry).is_none() {
+                analysis.updates.remove_function(entry);
             }
         }
-        for (entry, properties) in context.changed_functions {
-            updates.push(ProjectUpdate::update_function_properties(entry, properties));
+        for (entry, properties) in state.changed_functions {
+            analysis
+                .updates
+                .update_function_properties(entry, properties);
         }
-        for entry in context.committed_functions {
-            let Some(function) = context.pending_functions.get(&entry) else {
+        for entry in state.committed_functions {
+            let Some(function) = state.pending_functions.get(&entry) else {
                 continue;
             };
             let function_bytes = function.estimate_size();
             if !budget.try_consume_function(function_bytes) {
                 break;
             }
-            let Some(function) = context.pending_functions.remove(&entry) else {
+            let Some(function) = state.pending_functions.remove(&entry) else {
                 continue;
             };
-            stage_function_updates(updates, entry, function);
+            stage_function_updates(&mut analysis.updates, entry, function);
         }
 
-        self.pending_functions = context.pending_functions;
-        *self.builder.avoids_mut() = context.avoids;
-        *functions = context.functions;
-        *new_functions = context.new_functions;
-        Ok(updates.len() != updates_before
+        self.pending_functions = state.pending_functions;
+        *self.builder.avoids_mut() = state.avoids;
+        *functions = state.functions;
+        *new_functions = state.new_functions;
+        Ok(analysis.updates.len() != updates_before
             || budget.staged_functions != functions_before
             || !self.pending_functions.is_empty())
     }
 
     fn discover_candidates(
         &mut self,
-        project: &ProjectView<'_>,
+        analysis: &mut AnalysisContext<'_, '_>,
         functions: &mut FunctionConfidenceMap,
         new_functions: &mut FunctionConfidenceMap,
     ) -> Result<(), AnalysisError> {
@@ -1110,8 +1119,7 @@ impl FunctionRecovery {
             "performing {} candidate discovery pass(es)",
             self.candidate_discovery_passes.len()
         );
-        self.cancellation.check()?;
-        let mut context = FunctionDiscoveryContext {
+        let mut state = FunctionDiscoveryContext {
             config: *self.builder.config(),
             candidates: mem::take(&mut self.candidates),
             avoids: mem::take(self.builder.avoids_mut()),
@@ -1124,23 +1132,22 @@ impl FunctionRecovery {
         };
         let result = self
             .candidate_discovery_passes
-            .analyse_with(project, &mut context)
+            .analyse_with(analysis, &mut state)
             .map_err(|error| match error {
-                error @ AnalysisError::Cancelled(_) => error,
+                error @ AnalysisError::AnalysisData(_) => error,
                 error => AnalysisError::pass_failed(FUNCTION_RECOVERY_ANALYSER, error),
             });
-        self.candidates = context.candidates;
-        *self.builder.avoids_mut() = context.avoids;
-        self.continuation_coverage = Some(context.coverage);
-        *functions = context.functions;
-        *new_functions = context.new_functions;
+        self.candidates = state.candidates;
+        *self.builder.avoids_mut() = state.avoids;
+        self.continuation_coverage = Some(state.coverage);
+        *functions = state.functions;
+        *new_functions = state.new_functions;
         result
     }
 
     fn analyse_candidates(
         &mut self,
-        project: &ProjectView<'_>,
-        updates: &mut Vec<ProjectUpdate>,
+        analysis: &mut AnalysisContext<'_, '_>,
         worker_limit: usize,
         budget: &mut FunctionRecoveryBudget,
         functions: &FunctionConfidenceMap,
@@ -1151,10 +1158,8 @@ impl FunctionRecovery {
             .context
             .as_ref()
             .expect("function recovery context must be available");
-        let mut resolver_slot = Some(InsnResolver::new(project.arch()));
-        let project_functions = project.functions();
+        let mut resolver_slot = Some(InsnResolver::new(analysis.project.arch()));
         let coverage = &mut self.continuation_coverage;
-        self.cancellation.check()?;
         let mut yield_after_pass = false;
 
         while !self.candidates.is_empty() {
@@ -1173,7 +1178,6 @@ impl FunctionRecovery {
                 };
                 let original_address = candidate.address();
                 let replacing = self.reanalysis_candidates.contains(&original_address);
-                self.cancellation.check()?;
                 budget.consume_candidate();
                 let at_limit = !self.candidates.is_empty() && budget.is_exhausted();
                 let candidate = match resolver_slot.as_mut() {
@@ -1183,8 +1187,8 @@ impl FunctionRecovery {
                         self.builder
                             .context_mut()
                             .function_entry_after_padding(
-                                project.segments(),
-                                project.arch(),
+                                analysis.project.segments(),
+                                analysis.project.arch(),
                                 resolver,
                                 address,
                             )
@@ -1199,7 +1203,7 @@ impl FunctionRecovery {
                     tracing::trace!("skipping candidate: not executable");
                     if replacing {
                         self.reanalysis_candidates.remove(&original_address);
-                        updates.push(ProjectUpdate::remove_function(original_address));
+                        analysis.updates.remove_function(original_address);
                         function_changes = true;
                     }
                     if at_limit {
@@ -1214,19 +1218,19 @@ impl FunctionRecovery {
                     tracing::trace!("skipping {address}: in avoidance set");
                     if replacing {
                         self.reanalysis_candidates.remove(&original_address);
-                        updates.push(ProjectUpdate::remove_function(original_address));
+                        analysis.updates.remove_function(original_address);
                         function_changes = true;
                     }
                 } else if context.excluded_candidates().contains(&address) {
                     tracing::trace!("skipping {address}: blocked by a recorded problem");
                     if replacing {
                         self.reanalysis_candidates.remove(&original_address);
-                        updates.push(ProjectUpdate::remove_function(original_address));
+                        analysis.updates.remove_function(original_address);
                         function_changes = true;
                     }
                 } else if (!replacing
                     && FunctionConfidenceMap::candidate_known(
-                        project_functions,
+                        analysis.project.functions(),
                         &self.pending_functions,
                         functions,
                         new_functions,
@@ -1256,15 +1260,16 @@ impl FunctionRecovery {
             }
 
             let builder = &mut self.builder;
-            let cancellation = &self.cancellation;
             let commit_policy = &self.commit_policy;
             let pending_functions = &mut self.pending_functions;
             let reanalysis_candidates = &mut self.reanalysis_candidates;
             let candidates = &mut self.candidates;
             let discovered_targets = &mut self.discovered_targets;
-            let mut handle_outcome = |mut outcome: FunctionCandidateOutcome,
+            let mut handle_outcome = |analysis: &mut AnalysisContext<'_, '_>,
+                                      mut outcome: FunctionCandidateOutcome,
                                       discovered_targets: &mut Vec<AddressWithContext>|
              -> Result<bool, AnalysisError> {
+                let project = &analysis.project;
                 let address = outcome.address();
                 let confidence = outcome.confidence();
                 let replacement = replacements.remove(&address);
@@ -1272,18 +1277,25 @@ impl FunctionRecovery {
                     reanalysis_candidates.remove(&replacement);
                 }
                 for (problem_address, kind) in outcome.drain_problems() {
-                    updates.push(ProjectUpdate::add_problem(problem_address, kind));
+                    analysis.updates.add_problem(problem_address, kind);
                 }
 
                 let function = match outcome.take_result() {
-                    Ok(ControlFlow::Continue(function)) => function,
-                    Ok(ControlFlow::Break(cancelled)) => return Err(cancelled.into()),
+                    Ok(function) => function,
+                    Err(
+                        FunctionRecoveryError::PreResolutionPass(
+                            error @ AnalysisError::AnalysisData(_),
+                        )
+                        | FunctionRecoveryError::PostStructuringPass(
+                            error @ AnalysisError::AnalysisData(_),
+                        ),
+                    ) => return Err(error),
                     Err(error) => {
                         let kind = error.problem_kind();
                         tracing::trace!("failed to analyse {address}: {error}");
-                        updates.push(ProjectUpdate::add_problem(address, kind));
+                        analysis.updates.add_problem(address, kind);
                         if let Some(replacement) = replacement {
-                            updates.push(ProjectUpdate::remove_function(replacement));
+                            analysis.updates.remove_function(replacement);
                             function_changes = true;
                         }
                         return Ok(false);
@@ -1301,12 +1313,12 @@ impl FunctionRecovery {
                 let function = commit_context.into_function();
                 let function_bytes = function.estimate_size();
                 if let Some(replacement) = replacement.filter(|&entry| entry != address) {
-                    updates.push(ProjectUpdate::remove_function(replacement));
+                    analysis.updates.remove_function(replacement);
                     function_changes = true;
                 }
                 let budget_reached = should_commit && !budget.try_consume_function(function_bytes);
                 if should_commit && !budget_reached {
-                    stage_function_updates(updates, address, function);
+                    stage_function_updates(&mut analysis.updates, address, function);
                     function_changes = true;
                 } else {
                     tracing::debug!("deferring commit of function at {address}");
@@ -1318,7 +1330,7 @@ impl FunctionRecovery {
                 for candidate in outcome.drain_targets() {
                     let start = candidate.address();
                     if !FunctionConfidenceMap::candidate_known(
-                        project_functions,
+                        project.functions(),
                         pending_functions,
                         functions,
                         new_functions,
@@ -1332,14 +1344,14 @@ impl FunctionRecovery {
                 Ok(budget_reached)
             };
 
-            let batch =
-                FunctionCandidateBatch::new(project, context, batch, cancellation, worker_limit);
+            let batch = FunctionCandidateBatch::new(context, batch, worker_limit);
             let remaining = self.executor.analyse_candidates(
+                analysis,
                 builder,
                 &mut resolver_slot,
                 batch,
-                |outcome| {
-                    let budget_reached = handle_outcome(outcome, discovered_targets)?;
+                |analysis, outcome| {
+                    let budget_reached = handle_outcome(analysis, outcome, discovered_targets)?;
                     candidates.extend(discovered_targets.drain(..));
                     Ok(budget_reached)
                 },
@@ -1404,22 +1416,14 @@ impl Analyser for FunctionRecovery {
         true
     }
 
-    fn analyse(
-        &mut self,
-        project: &ProjectView<'_>,
-        regions: &AddressRangeSet,
-        cx: &AnalysisContext,
-        updates: &mut Vec<ProjectUpdate>,
-    ) -> Result<(), AnalysisError> {
-        self.set_cancellation_token(cx.cancellation().clone());
-
-        if !cx.is_continuation() {
+    fn analyse(&mut self, context: &mut AnalysisContext<'_, '_>) -> Result<(), AnalysisError> {
+        if !context.is_continuation() {
             self.continuation_coverage = None;
             self.context = None;
-            self.update_function_boundaries(project)?;
-            self.add_analysis_candidates(project, regions, cx)?;
+            self.update_function_boundaries(&context.project)?;
+            self.add_analysis_candidates(context);
         } else if self.boundary_update_pending {
-            self.update_function_boundaries(project)?;
+            self.update_function_boundaries(&context.project)?;
             self.boundary_update_pending = false;
         }
         if self.context.is_none() {
@@ -1429,7 +1433,10 @@ impl Analyser for FunctionRecovery {
                 .expect("function boundaries must be established before recovery")
                 .entries()
                 .to_vec();
-            self.context = Some(FunctionRecoveryContext::new(project, function_entries));
+            self.context = Some(FunctionRecoveryContext::new(
+                &context.project,
+                function_entries,
+            ));
         }
         let mut budget = FunctionRecoveryBudget::new(self.config());
         let expected_functions = budget.remaining_functions().min(
@@ -1437,14 +1444,14 @@ impl Analyser for FunctionRecovery {
                 .len()
                 .saturating_add(self.pending_functions.len()),
         );
-        updates.reserve(expected_functions);
+        context.updates.reserve(expected_functions);
         if !self.candidate_discovery_passes.is_empty() && self.continuation_coverage.is_none() {
             self.continuation_coverage = Some(
                 FunctionCoverage::new(
                     self.builder.config(),
-                    project.functions(),
-                    project.blocks(),
-                    project.segments(),
+                    context.project.functions(),
+                    context.project.blocks(),
+                    context.project.segments(),
                 )
                 .map_err(|error| AnalysisError::pass_failed(FUNCTION_RECOVERY_ANALYSER, error))?,
             );
@@ -1460,7 +1467,7 @@ impl Analyser for FunctionRecovery {
 
         let function_changes = 'recovery: {
             if self.config().commit_pending_functions() {
-                self.stage_pending_functions(updates, &mut budget);
+                self.stage_pending_functions(&mut context.updates, &mut budget);
                 if budget.staged_functions != 0 {
                     break 'recovery true;
                 }
@@ -1468,13 +1475,12 @@ impl Analyser for FunctionRecovery {
 
             let mut functions = FunctionConfidenceMap::default();
             let mut new_functions = FunctionConfidenceMap::default();
-            tracing::debug!("existing functions: {}", project.functions().len());
+            tracing::debug!("existing functions: {}", context.project.functions().len());
             loop {
-                self.cancellation.check()?;
+                let worker_limit = context.worker_limit();
                 let (function_changes, budget_reached) = self.analyse_candidates(
-                    project,
-                    updates,
-                    cx.worker_limit(),
+                    context,
+                    worker_limit,
                     &mut budget,
                     &functions,
                     &mut new_functions,
@@ -1487,22 +1493,21 @@ impl Analyser for FunctionRecovery {
                     functions.insert(address, confidence);
                 });
                 if self.structure_functions(
-                    project,
-                    updates,
+                    context,
                     &mut budget,
                     &mut functions,
                     &mut new_functions,
                 )? {
                     break 'recovery true;
                 }
-                self.discover_candidates(project, &mut functions, &mut new_functions)?;
+                self.discover_candidates(context, &mut functions, &mut new_functions)?;
                 if self.candidates.is_empty() {
                     break;
                 }
             }
 
             if self.config().commit_pending_functions() {
-                self.stage_pending_functions(updates, &mut budget);
+                self.stage_pending_functions(&mut context.updates, &mut budget);
                 if budget.staged_functions != 0 {
                     break 'recovery true;
                 }
@@ -1511,7 +1516,7 @@ impl Analyser for FunctionRecovery {
             let elapsed = started.elapsed();
             drop(function_recovery_span);
             drop(span);
-            let num_functions = project.functions().len() + budget.staged_functions;
+            let num_functions = context.project.functions().len() + budget.staged_functions;
             tracing::debug!(
                 "function recovery completed in {}s ({}ms) with {num_functions} functions",
                 elapsed.as_secs(),
@@ -1545,5 +1550,8 @@ impl Analyser for FunctionRecovery {
 }
 
 submit! {
-    AnalyserProvider::new(FUNCTION_RECOVERY_ANALYSER, FunctionRecovery::new_analyser)
+    AnalyserProvider::new::<FunctionRecovery>(
+        FUNCTION_RECOVERY_ANALYSER,
+        FunctionRecovery::new_analyser,
+    )
 }

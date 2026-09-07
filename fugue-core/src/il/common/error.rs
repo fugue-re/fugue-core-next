@@ -1,13 +1,10 @@
 use thiserror::Error;
 
-use crate::analysis::control::Cancelled;
 use crate::il::common::IlFormId;
 use crate::ir::FunctionId;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum IlError {
-    #[error("build cancelled")]
-    Cancelled,
     #[error("no dialect is registered for stored form `{form}`")]
     DialectUnavailable { form: String },
     #[error("function mismatch: expected {expected:?}, found {found:?}")]
@@ -175,11 +172,5 @@ impl IlError {
 
     pub fn width_mismatch(form: IlFormId) -> Self {
         Self::WidthMismatch { form }
-    }
-}
-
-impl From<Cancelled> for IlError {
-    fn from(_: Cancelled) -> Self {
-        Self::Cancelled
     }
 }

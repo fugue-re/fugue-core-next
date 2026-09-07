@@ -3,9 +3,7 @@ use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use fugue_core::analysis::AnalysisError;
-use fugue_core::engine::{
-    Analyser, AnalyserProvider, AnalysisContext, AnalysisEngine, ProjectUpdate, ProjectView,
-};
+use fugue_core::engine::{Analyser, AnalyserProvider, AnalysisContext, AnalysisEngine};
 use fugue_core::extension;
 use fugue_core::ir::{Address, AddressRange, AddressRangeSet, ProblemKind, ProblemScope};
 use fugue_core::loader::Loader;
@@ -37,21 +35,12 @@ impl Analyser for RejectingCollapseAnalyser {
             .unwrap_or(false)
     }
 
-    fn analyse(
-        &mut self,
-        project: &ProjectView<'_>,
-        regions: &AddressRangeSet,
-        context: &AnalysisContext,
-        updates: &mut Vec<ProjectUpdate>,
-    ) -> Result<(), AnalysisError> {
-        let _ = project;
-        let _ = regions;
-        let _ = context;
+    fn analyse(&mut self, context: &mut AnalysisContext<'_, '_>) -> Result<(), AnalysisError> {
         ANALYSER_RUNS.fetch_add(1, Ordering::SeqCst);
 
         let missing = SegmentMappingId::try_from(u32::MAX as usize)
             .expect("u32 maximum must fit a segment mapping identifier");
-        updates.push(ProjectUpdate::remove_mapping(missing));
+        context.updates.remove_mapping(missing);
         Ok(())
     }
 }
@@ -63,7 +52,7 @@ fn build_rejecting_collapse_analyser(
 }
 
 extension::submit! {
-    AnalyserProvider::new(
+    AnalyserProvider::new::<RejectingCollapseAnalyser>(
         "rejecting-collapse-test",
         build_rejecting_collapse_analyser,
     )

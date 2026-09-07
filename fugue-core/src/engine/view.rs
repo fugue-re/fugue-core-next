@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use rangemap::RangeInclusiveMap;
 
-use crate::analysis::control::CancellationToken;
 use crate::arch::Arch;
 use crate::engine::scheduler::{AnalyserId, IlAnalysisInputs};
 use crate::il::common::{IlArtefact, IlError, IlGenerationContext, IlGenerationError, IlSubject};
@@ -17,10 +16,6 @@ use crate::ir::{
 };
 use crate::lifter::Language;
 use crate::platform::Platform;
-#[cfg(test)]
-use crate::project::ChangeSet;
-#[cfg(test)]
-use crate::project::read::MAX_READ_RANGES;
 use crate::project::{ChangeKinds, Project, ProjectError, ReadSet};
 use crate::storage::segments::{AddressSpaceId, SegmentStorage, SegmentStorageError};
 use crate::types::Revision;
@@ -173,7 +168,7 @@ impl<'a> ProjectView<'a> {
         self.collapsed.get()
     }
 
-    pub(crate) fn fork(&self) -> Self {
+    pub fn fork(&self) -> Self {
         Self {
             project: self.project,
             registry: self.registry,
@@ -183,9 +178,11 @@ impl<'a> ProjectView<'a> {
         }
     }
 
-    pub(crate) fn merge_reads(&self, reads: &ReadSet) {
-        let collapsed = self.reads.borrow_mut().merge(reads);
-        self.collapsed.set(self.collapsed.get() || collapsed);
+    pub fn merge(&self, fork: &Self) {
+        let reads = fork.reads.borrow();
+        let collapsed = self.reads.borrow_mut().merge(&reads);
+        self.collapsed
+            .set(self.collapsed.get() || fork.collapsed.get() || collapsed);
     }
 
     fn record(&self, kinds: ChangeKinds, range: AddressRange) {
@@ -364,7 +361,6 @@ impl<'a> ProjectView<'a> {
         &self,
         function: &IncompleteFunction,
         input_revision: Revision,
-        cancellation: &CancellationToken,
     ) -> Result<Option<T>, IlGenerationError> {
         let mut generation = IlGenerationSession::new(self.registry);
         self.generate_il(
@@ -374,7 +370,6 @@ impl<'a> ProjectView<'a> {
             },
             input_revision,
             &mut generation,
-            cancellation,
         )
     }
 
@@ -416,7 +411,6 @@ impl<'a> ProjectView<'a> {
         subject: IlSubject<'_>,
         input_revision: Revision,
         generation: &mut IlGenerationSession,
-        cancellation: &CancellationToken,
     ) -> Result<Option<T>, IlGenerationError> {
         let context = IlGenerationContext::new(
             subject,
@@ -428,13 +422,7 @@ impl<'a> ProjectView<'a> {
             input_revision,
         );
 
-        let generated = generation.generate(
-            self.registry,
-            &T::FORM,
-            iter::empty(),
-            &context,
-            cancellation,
-        )?;
+        let generated = generation.generate(self.registry, &T::FORM, iter::empty(), &context)?;
         let Some(artefact) = generated.into_requested() else {
             return Ok(None);
         };
@@ -462,7 +450,8 @@ impl<'a> ProjectView<'a> {
 mod test {
     use super::*;
     use crate::ir::Address;
-    use crate::project::ChangeRecord;
+    use crate::project::read::MAX_READ_RANGES;
+    use crate::project::{ChangeRecord, ChangeSet};
     use crate::storage::segments::DEFAULT_SPACE_ID;
 
     fn range(start: u64, end: u64) -> AddressRange {

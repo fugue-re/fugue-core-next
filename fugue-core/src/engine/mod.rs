@@ -1,16 +1,22 @@
+use std::any::{TypeId, type_name};
 use std::cmp::Ordering;
 use std::fmt::{self, Display, Formatter};
+use std::mem;
 use std::sync::{Arc, OnceLock};
 use std::thread::{Builder, JoinHandle};
 
+use change::ChangeFilter;
+use downcast_rs::{Downcast, impl_downcast};
 use flume::{Receiver, RecvError, Selector, Sender, TryRecvError};
 use parking_lot::RwLock;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
+use smol_str::SmolStr;
 use thiserror::Error;
+use update::ProjectUpdate;
+use worker::Worker;
 
-use self::change::ChangeFilter;
 use crate::analysis::AnalysisError;
-use crate::analysis::control::CancellationToken;
 use crate::extension::{self, Registration};
 use crate::il::common::{IlAnalyser, IlArtefact, IlFormId};
 use crate::il::registry::IlRegistry;
@@ -27,27 +33,21 @@ use crate::storage::segments::space::AddressSpaceId;
 use crate::types::Revision;
 
 pub mod change;
-
 pub(crate) mod metrics;
-pub use metrics::{EngineMetrics, EngineMetricsSnapshot};
-
 mod scheduler;
-
 mod subscription;
+mod update;
+pub(crate) mod view;
+mod worker;
+
+pub use metrics::{EngineMetrics, EngineMetricsSnapshot};
 pub(crate) use subscription::Subscriber;
 pub use subscription::{Subscription, SubscriptionBuilder};
-
-pub(crate) mod view;
-pub use view::ProjectView;
-
-mod update;
 pub use update::{
-    MappingCreationResult, MappingMetadataUpdate, ProjectUpdate, SpaceCreationResult,
+    MappingCreationResult, MappingMetadataUpdate, ProjectUpdates, SpaceCreationResult,
 };
-
-mod worker;
+pub use view::ProjectView;
 pub(crate) use worker::Intake;
-use worker::Worker;
 
 const DEFAULT_CHANNEL_CAPACITY: usize = 1024;
 const DEFAULT_LIFTED_CACHE_BYTES: usize = 64 * 1024 * 1024;
@@ -57,6 +57,144 @@ const MAX_COMPLETION_ROUNDS: usize = 256;
 const RETRACTED_BY_BYTE_CHANGE: &[AnalysisPhase] =
     &[AnalysisPhase::Decode, AnalysisPhase::Partition];
 const WORK_BATCH_ITEMS: usize = 1024;
+
+pub trait AnalysisData: Downcast + Send {
+    #[doc(hidden)]
+    fn delegated(&self) -> Option<&dyn AnalysisData> {
+        None
+    }
+
+    #[doc(hidden)]
+    fn delegated_mut(&mut self) -> Option<&mut dyn AnalysisData> {
+        None
+    }
+}
+
+impl_downcast!(AnalysisData);
+
+#[derive(Debug, Error)]
+pub enum AnalysisDataError {
+    #[error("multiple analysis data values expose `{0}`")]
+    Ambiguous(&'static str),
+    #[error("analysis data not found: `{0}`")]
+    Missing(&'static str),
+}
+
+impl AnalysisDataError {
+    fn ambiguous<T>() -> Self {
+        Self::Ambiguous(type_name::<T>())
+    }
+
+    fn missing<T>() -> Self {
+        Self::Missing(type_name::<T>())
+    }
+}
+
+#[derive(Default)]
+pub struct AnalysisDataStore {
+    entries: FxHashMap<TypeId, Box<dyn AnalysisData>>,
+}
+
+impl AnalysisDataStore {
+    pub fn get<T>(&self) -> Result<Option<&T>, AnalysisDataError>
+    where
+        T: AnalysisData,
+    {
+        let Some(root) = self.root_for::<T>()? else {
+            return Ok(None);
+        };
+        let mut data = self
+            .entries
+            .get(&root)
+            .expect("analysis data root must remain installed")
+            .as_ref();
+
+        loop {
+            if data.is::<T>() {
+                return Ok(data.downcast_ref::<T>());
+            }
+            data = data
+                .delegated()
+                .expect("selected analysis data root must expose the requested type");
+        }
+    }
+
+    pub fn get_mut<T>(&mut self) -> Result<Option<&mut T>, AnalysisDataError>
+    where
+        T: AnalysisData,
+    {
+        let Some(root) = self.root_for::<T>()? else {
+            return Ok(None);
+        };
+        let mut data = self
+            .entries
+            .get_mut(&root)
+            .expect("analysis data root must remain installed")
+            .as_mut();
+
+        loop {
+            if data.is::<T>() {
+                return Ok(data.downcast_mut::<T>());
+            }
+            data = data
+                .delegated_mut()
+                .expect("selected analysis data root must expose the requested type");
+        }
+    }
+
+    pub fn require<T>(&self) -> Result<&T, AnalysisDataError>
+    where
+        T: AnalysisData,
+    {
+        self.get::<T>()?.ok_or_else(AnalysisDataError::missing::<T>)
+    }
+
+    pub fn require_mut<T>(&mut self) -> Result<&mut T, AnalysisDataError>
+    where
+        T: AnalysisData,
+    {
+        self.get_mut::<T>()?
+            .ok_or_else(AnalysisDataError::missing::<T>)
+    }
+
+    pub(crate) fn set(&mut self, root: TypeId, value: Box<dyn AnalysisData>) {
+        self.entries.insert(root, value);
+    }
+
+    fn root_for<T>(&self) -> Result<Option<TypeId>, AnalysisDataError>
+    where
+        T: AnalysisData,
+    {
+        let mut selected = None;
+
+        for (root, data) in &self.entries {
+            if !Self::exposes::<T>(data.as_ref()) {
+                continue;
+            }
+            if selected.is_some() {
+                return Err(AnalysisDataError::ambiguous::<T>());
+            }
+            selected = Some(*root);
+        }
+
+        Ok(selected)
+    }
+
+    fn exposes<T>(mut data: &dyn AnalysisData) -> bool
+    where
+        T: AnalysisData,
+    {
+        loop {
+            if data.is::<T>() {
+                return true;
+            }
+            let Some(delegated) = data.delegated() else {
+                return false;
+            };
+            data = delegated;
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkCause {
@@ -154,15 +292,27 @@ impl Display for Priority {
 
 #[derive(Debug, Clone)]
 pub struct AnalysisEngineConfig {
+    analyser_names: FxHashMap<SmolStr, bool>,
+    analyser_types: FxHashMap<TypeId, AnalyserTypeSelection>,
+    analysers_enabled: bool,
     channel_capacity: usize,
     lifted_cache_bytes: usize,
     registry: Arc<IlRegistry>,
     worker_limit: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct AnalyserTypeSelection {
+    enabled: bool,
+    type_name: &'static str,
+}
+
 impl Default for AnalysisEngineConfig {
     fn default() -> Self {
         Self {
+            analyser_names: FxHashMap::default(),
+            analyser_types: FxHashMap::default(),
+            analysers_enabled: true,
             channel_capacity: DEFAULT_CHANNEL_CAPACITY,
             lifted_cache_bytes: DEFAULT_LIFTED_CACHE_BYTES,
             registry: IlRegistry::standard().clone(),
@@ -224,37 +374,105 @@ impl AnalysisEngineConfig {
         self
     }
 
+    fn set_analyser_enabled<T: 'static>(&mut self, enabled: bool) {
+        self.analyser_types.insert(
+            TypeId::of::<T>(),
+            AnalyserTypeSelection {
+                enabled,
+                type_name: type_name::<T>(),
+            },
+        );
+    }
+
     fn registry_handle(&self) -> Arc<IlRegistry> {
         self.registry.clone()
     }
+
+    fn analyser_enabled(&self, provider: &AnalyserProvider) -> bool {
+        self.analyser_names
+            .get(provider.name())
+            .copied()
+            .or_else(|| {
+                self.analyser_types
+                    .get(&provider.type_id())
+                    .map(|selection| selection.enabled)
+            })
+            .unwrap_or(self.analysers_enabled)
+    }
+
+    pub fn disable_all_analysers(&mut self) {
+        self.analyser_names.clear();
+        self.analyser_types.clear();
+        self.analysers_enabled = false;
+    }
+
+    pub fn disable_analyser<T: 'static>(&mut self) {
+        self.set_analyser_enabled::<T>(false);
+    }
+
+    pub fn disable_named_analyser(&mut self, name: impl Into<SmolStr>) {
+        self.analyser_names.insert(name.into(), false);
+    }
+
+    pub fn enable_all_analysers(&mut self) {
+        self.analyser_names.clear();
+        self.analyser_types.clear();
+        self.analysers_enabled = true;
+    }
+
+    pub fn enable_analyser<T: 'static>(&mut self) {
+        self.set_analyser_enabled::<T>(true);
+    }
+
+    pub fn enable_named_analyser(&mut self, name: impl Into<SmolStr>) {
+        self.analyser_names.insert(name.into(), true);
+    }
+
+    fn validate_analysers(&self) -> Result<(), EngineError> {
+        let mut names = FxHashSet::default();
+        let mut types = FxHashSet::default();
+
+        for provider in extension::iter::<AnalyserProvider>() {
+            if !names.insert(provider.name()) {
+                return Err(EngineError::DuplicateAnalyserName(provider.name()));
+            }
+            types.insert(provider.type_id());
+        }
+
+        if let Some(selection) = self
+            .analyser_types
+            .iter()
+            .find_map(|(id, selection)| (!types.contains(id)).then_some(selection))
+        {
+            return Err(EngineError::UnregisteredAnalyserType(selection.type_name));
+        }
+
+        if let Some(name) = self
+            .analyser_names
+            .keys()
+            .find(|name| !names.contains(name.as_str()))
+        {
+            return Err(EngineError::UnregisteredAnalyserName(String::from(
+                name.as_str(),
+            )));
+        }
+
+        Ok(())
+    }
 }
 
-#[derive(Clone)]
-pub struct AnalysisContext {
-    cancellation: CancellationToken,
+pub struct AnalysisContext<'a, 'p> {
+    pub project: ProjectView<'p>,
+    pub updates: ProjectUpdates,
+    pub analysis_data: &'a mut AnalysisDataStore,
     causes: SmallVec<[WorkCause; 4]>,
     continuation: bool,
     phase: AnalysisPhase,
+    regions: &'a AddressRangeSet,
     worker_limit: usize,
 }
 
-impl Default for AnalysisContext {
-    fn default() -> Self {
-        Self::new(CancellationToken::default())
-    }
-}
-
-impl AnalysisContext {
-    pub fn new(cancellation: CancellationToken) -> Self {
-        Self {
-            cancellation,
-            causes: SmallVec::new(),
-            continuation: false,
-            phase: AnalysisPhase::default(),
-            worker_limit: 1,
-        }
-    }
-
+impl<'a, 'p> AnalysisContext<'a, 'p> {
     pub fn causes(&self) -> &[WorkCause] {
         &self.causes
     }
@@ -267,33 +485,23 @@ impl AnalysisContext {
         self.continuation
     }
 
-    pub fn cancellation(&self) -> &CancellationToken {
-        &self.cancellation
+    pub fn regions(&self) -> &'a AddressRangeSet {
+        self.regions
     }
 
     pub fn worker_limit(&self) -> usize {
         self.worker_limit
     }
 
-    fn set_worker_limit(&mut self, limit: usize) {
-        self.worker_limit = limit.max(1);
-    }
-
-    fn with_worker_limit(mut self, limit: usize) -> Self {
-        self.set_worker_limit(limit);
-        self
-    }
-
-    pub(crate) fn with_work(
-        mut self,
-        phase: AnalysisPhase,
-        causes: impl IntoIterator<Item = WorkCause>,
-        continuation: bool,
-    ) -> Self {
-        self.causes.extend(causes);
-        self.continuation = continuation;
-        self.phase = phase;
-        self
+    pub fn with_project<R>(
+        &mut self,
+        project: &mut ProjectView<'p>,
+        operation: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        mem::swap(&mut self.project, project);
+        let result = operation(self);
+        mem::swap(&mut self.project, project);
+        result
     }
 }
 
@@ -312,13 +520,7 @@ pub trait Analyser: Send {
 
     fn can_analyse(&self, project: &Project) -> bool;
 
-    fn analyse(
-        &mut self,
-        project: &ProjectView<'_>,
-        regions: &AddressRangeSet,
-        cx: &AnalysisContext,
-        updates: &mut Vec<ProjectUpdate>,
-    ) -> Result<(), AnalysisError>;
+    fn analyse(&mut self, context: &mut AnalysisContext<'_, '_>) -> Result<(), AnalysisError>;
 
     fn produces(&self) -> ChangeKinds {
         ChangeKinds::empty()
@@ -326,13 +528,9 @@ pub trait Analyser: Send {
 
     fn analysis_ended(
         &mut self,
-        project: &ProjectView<'_>,
-        cx: &AnalysisContext,
-        updates: &mut Vec<ProjectUpdate>,
+        context: &mut AnalysisContext<'_, '_>,
     ) -> Result<(), AnalysisError> {
-        let _ = project;
-        let _ = cx;
-        let _ = updates;
+        let _ = context;
         Ok(())
     }
 
@@ -351,14 +549,16 @@ pub struct AnalyserProvider {
     build: AnalyserBuildFn,
     il_input: Option<IlFormId>,
     name: &'static str,
+    type_id: TypeId,
 }
 
 impl AnalyserProvider {
-    pub const fn new(name: &'static str, build: AnalyserBuildFn) -> Self {
+    pub const fn new<T: Analyser + 'static>(name: &'static str, build: AnalyserBuildFn) -> Self {
         Self {
             build,
             il_input: None,
             name,
+            type_id: TypeId::of::<T>(),
         }
     }
 
@@ -367,11 +567,16 @@ impl AnalyserProvider {
             build: Self::build_il_analyser::<A>,
             il_input: Some(A::Input::FORM),
             name: A::NAME,
+            type_id: TypeId::of::<A>(),
         }
     }
 
     pub(crate) fn il_input(&self) -> Option<IlFormId> {
         self.il_input.clone()
+    }
+
+    pub(crate) fn type_id(&self) -> TypeId {
+        self.type_id
     }
 
     pub fn create(&self, project: &Project) -> Result<Box<dyn Analyser>, AnalysisError> {
@@ -419,22 +624,27 @@ extension::collect!(AnalyserProvider);
 pub enum EngineError {
     #[error(transparent)]
     Analysis(#[from] AnalysisError),
+    #[error("duplicate registered analyser name: `{0}`")]
+    DuplicateAnalyserName(&'static str),
     #[error("analysis engine poisoned: {0}")]
     Poisoned(String),
-    #[error("project is retained by a live query reader or project handle")]
-    ProjectRetained,
     #[error(transparent)]
     Project(#[from] ProjectError),
+    #[error("project is retained by a live query reader or project handle")]
+    ProjectRetained,
     #[error("analysis engine stopped")]
     Stopped,
     #[error("subscription has no pending changes")]
     SubscriptionEmpty,
     #[error("subscription receive timed out")]
     SubscriptionTimeout,
+    #[error("analyser name is not registered: `{0}`")]
+    UnregisteredAnalyserName(String),
+    #[error("analyser type is not registered: `{0}`")]
+    UnregisteredAnalyserType(&'static str),
 }
 
 pub struct AnalysisEngine {
-    cancellation: CancellationToken,
     handle: Option<JoinHandle<()>>,
     metrics: EngineMetrics,
     poison: Arc<OnceLock<String>>,
@@ -452,10 +662,10 @@ impl AnalysisEngine {
         project: Project,
         config: AnalysisEngineConfig,
     ) -> Result<Self, EngineError> {
+        config.validate_analysers()?;
         let channel_capacity = config.channel_capacity();
         let (tx, rx) = flume::bounded(channel_capacity);
         let (worker_done_tx, worker_done) = flume::bounded(1);
-        let cancellation = CancellationToken::default();
         let poison = Arc::new(OnceLock::new());
         let project = Arc::new(RwLock::new(project));
         let registry = config.registry_handle();
@@ -465,7 +675,6 @@ impl AnalysisEngine {
             config.lifted_cache_bytes(),
         );
         let query_reader = queries.reader(tx.clone());
-        let worker_cancellation = cancellation.clone();
         let worker_poison = poison.clone();
         let worker_state_poison = poison.clone();
         let metrics = EngineMetrics::new();
@@ -478,7 +687,6 @@ impl AnalysisEngine {
                     project,
                     queries,
                     worker_state_poison,
-                    worker_cancellation,
                     worker_metrics,
                 );
                 match worker {
@@ -492,7 +700,6 @@ impl AnalysisEngine {
             .map_err(|error| EngineError::Poisoned(error.to_string()))?;
 
         Ok(Self {
-            cancellation,
             handle: Some(handle),
             metrics,
             poison,
@@ -506,8 +713,30 @@ impl AnalysisEngine {
         self.metrics.snapshot()
     }
 
-    pub fn cancellation_token(&self) -> CancellationToken {
-        self.cancellation.clone()
+    pub fn set_data<T>(&self, value: T) -> Result<(), EngineError>
+    where
+        T: AnalysisData,
+    {
+        self.poison_check()?;
+
+        let (reply_tx, reply_rx) = flume::bounded(1);
+        self.tx
+            .send(Intake::SetData {
+                data: Box::new(value),
+                root: TypeId::of::<T>(),
+                reply: reply_tx,
+            })
+            .map_err(|_| EngineError::Stopped)?;
+
+        self.receive_reply(reply_rx)
+    }
+
+    pub fn with_data<T>(self, value: T) -> Result<Self, EngineError>
+    where
+        T: AnalysisData,
+    {
+        self.set_data(value)?;
+        Ok(self)
     }
 
     pub fn schedule_ranges(
@@ -521,33 +750,25 @@ impl AnalysisEngine {
             .map_err(|_| EngineError::Stopped)
     }
 
-    pub fn apply_update(
+    fn apply_update(
         &self,
         source: impl Into<ChangeSource>,
         update: ProjectUpdate,
     ) -> Result<ChangeSet, EngineError> {
-        self.apply_update_batch(source.into(), SmallVec::from_buf([update]))
+        self.apply_updates(source, ProjectUpdates::from(update))
     }
 
     pub fn apply_updates(
         &self,
         source: impl Into<ChangeSource>,
-        updates: Vec<ProjectUpdate>,
-    ) -> Result<ChangeSet, EngineError> {
-        self.apply_update_batch(source.into(), SmallVec::from_vec(updates))
-    }
-
-    fn apply_update_batch(
-        &self,
-        source: ChangeSource,
-        updates: SmallVec<[ProjectUpdate; 1]>,
+        updates: ProjectUpdates,
     ) -> Result<ChangeSet, EngineError> {
         self.poison_check()?;
 
         let (reply_tx, reply_rx) = flume::bounded(1);
         self.tx
             .send(Intake::Updates {
-                source,
+                source: source.into(),
                 updates,
                 reply: reply_tx,
             })
@@ -796,14 +1017,6 @@ impl AnalysisEngine {
             .as_ref()
             .cloned()
             .ok_or(EngineError::Stopped)
-    }
-
-    pub fn cancel(&self) -> Result<(), EngineError> {
-        self.poison_check()?;
-        self.cancellation.cancel();
-        self.tx
-            .send(Intake::Cancel)
-            .map_err(|_| EngineError::Stopped)
     }
 
     pub fn subscribe(&self) -> SubscriptionBuilder<'_> {

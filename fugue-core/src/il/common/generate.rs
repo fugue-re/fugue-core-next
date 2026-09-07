@@ -2,7 +2,6 @@ use std::error::Error;
 
 use thiserror::Error as ThisError;
 
-use crate::analysis::control::CancellationToken;
 use crate::arch::Arch;
 use crate::il::common::{IlArtefact, IlError};
 use crate::ir::{CodeBlockTable, FunctionId, FunctionTable, IncompleteFunction};
@@ -125,7 +124,6 @@ pub trait IlProducer: Default + Send + 'static {
     fn produce(
         &mut self,
         context: &IlGenerationContext<'_>,
-        cancellation: &CancellationToken,
     ) -> Result<Self::Output, IlGenerationError>;
 }
 
@@ -137,6 +135,5 @@ pub trait IlTransformer: Default + Send + 'static {
         &mut self,
         source: &Self::Input,
         context: &IlGenerationContext<'_>,
-        cancellation: &CancellationToken,
     ) -> Result<Self::Output, IlGenerationError>;
 }

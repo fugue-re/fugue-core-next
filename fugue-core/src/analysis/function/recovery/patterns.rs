@@ -7,12 +7,11 @@ use anyhow::Error as AnyError;
 use fugue_specs::PatternsWithContext;
 use serde::{Deserialize, Serialize};
 use serde_yaml::Error as YamlError;
-use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::analysis::function::recovery::analysis::FunctionDiscoveryContext;
 use crate::analysis::{AnalysisError, AnalysisPass};
-use crate::engine::ProjectView;
+use crate::engine::{AnalysisContext, ProjectView};
 use crate::ir::{Address, AddressWithContext, RawAddress};
 use crate::lifter::ContextSet;
 use crate::storage::{AddressSpaceId, SegmentMappingCache, SegmentMappingView, SegmentStorage};
@@ -140,33 +139,28 @@ impl FunctionRecoveryPatternMatcher {
         space_id: AddressSpaceId,
     ) {
         let segments = project.segments();
-        let gaps = state.gaps(space_id);
-        let available = gaps
-            .ranges()
-            .map(|range| range.start()..=range.end())
-            .collect::<SmallVec<[_; 4]>>();
-
-        if available.is_empty() {
-            tracing::debug!("no gaps to analyse");
+        let mut ranges = state.unclaimed_ranges(space_id);
+        let Some(mut available) = ranges.next() else {
+            tracing::debug!("no unclaimed ranges to analyse");
             return;
-        }
+        };
 
         let arch = project.arch();
         let language = project.language();
 
         let mut mapping_cache = SegmentMappingCache::new();
 
-        for available in available {
+        loop {
             tracing::debug!(
                 "analysing available range {}-{}",
-                available.start(),
-                available.end()
+                available.start_address(),
+                available.end_address()
             );
             for_each_visible_byte_range(
                 segments,
                 &mut mapping_cache,
                 space_id,
-                available,
+                available.raw_range(),
                 |range_in_space, bytes| {
                     for (range, context, confidence) in self
                         .patterns
@@ -174,9 +168,7 @@ impl FunctionRecoveryPatternMatcher {
                         .flat_map(|patterns| patterns.matches(bytes))
                     {
                         let start = Address::new(space_id, *range_in_space.start() + range.start);
-                        if arch.canonicalise_address(start).is_none()
-                            || state.avoids().contains(start)
-                        {
+                        if arch.canonicalise_address(start).is_none() || ranges.is_avoided(start) {
                             continue;
                         }
 
@@ -192,12 +184,17 @@ impl FunctionRecoveryPatternMatcher {
                             "adding candidate at {start} with context {context:?} (confidence: {confidence})"
                         );
 
-                        state.add_candidate(AddressWithContext::new_with(
+                        ranges.add_candidate(AddressWithContext::new_with(
                             start, context, confidence,
                         ));
                     }
                 },
             );
+
+            let Some(next) = ranges.next() else {
+                break;
+            };
+            available = next;
         }
     }
 }
@@ -205,9 +202,10 @@ impl FunctionRecoveryPatternMatcher {
 impl AnalysisPass<FunctionDiscoveryContext> for FunctionRecoveryPatternMatcher {
     fn analyse_with(
         &mut self,
-        project: &ProjectView<'_>,
+        context: &mut AnalysisContext<'_, '_>,
         state: &mut FunctionDiscoveryContext,
     ) -> Result<(), AnalysisError> {
+        let project = &context.project;
         let segments = project.segments();
         let spaces = segments.spaces();
 

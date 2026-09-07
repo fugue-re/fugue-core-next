@@ -120,13 +120,21 @@ mod test {
     use fugue_bv::BitVec;
 
     use super::*;
-    use crate::analysis::control::CancellationToken;
     use crate::il::common::{
-        IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlGraph, IlIndexRange, IlMetadata,
+        IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlError, IlGraph, IlIndexRange,
+        IlMetadata, IlValueId,
     };
-    use crate::il::ecode::test::emit_value;
     use crate::il::ecode::{ECodeBuilder, ECodeOpSpec, ECodeOpcode};
     use crate::ir::FunctionId;
+
+    fn emit_value(
+        builder: &mut ECodeBuilder,
+        spec: ECodeOpSpec,
+        operands: impl IntoIterator<Item = IlValueId>,
+    ) -> Result<IlValueId, IlError> {
+        let (_, results) = builder.emitter().emit(spec, operands, 1)?;
+        IlValueId::try_from_index(results.start())
+    }
 
     fn builder() -> ECodeBuilder {
         let metadata = IlMetadata::new(FunctionId::default(), 0);
@@ -155,7 +163,7 @@ mod test {
         )
         .unwrap();
 
-        let ir = builder.build(&CancellationToken::default()).unwrap();
+        let ir = builder.build().unwrap();
         let intervals = ir.analyse::<ECodeStridedIntervals>();
 
         assert_eq!(
@@ -186,7 +194,7 @@ mod test {
         )
         .unwrap();
 
-        let ir = builder.build(&CancellationToken::default()).unwrap();
+        let ir = builder.build().unwrap();
         let intervals = ir.analyse::<ECodeStridedIntervals>();
 
         assert_eq!(
@@ -249,7 +257,7 @@ mod test {
         builder.emitter().emit_edge_args([next]).unwrap();
         builder.emitter().emit_edge_args([]).unwrap();
 
-        let ir = builder.build(&CancellationToken::default()).unwrap();
+        let ir = builder.build().unwrap();
         let intervals = ir.analyse::<ECodeStridedIntervals>();
 
         assert_eq!(

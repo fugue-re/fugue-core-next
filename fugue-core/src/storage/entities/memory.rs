@@ -337,7 +337,6 @@ mod test {
     use super::*;
     use crate::ir::Address;
     use crate::storage::entities::schema::EntityId;
-    use crate::storage::entities::schema::test::assert_domain_keys_round_trip;
     use crate::storage::entities::{Entity, EntityStorage};
 
     #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -415,7 +414,6 @@ mod test {
     #[test]
     fn iter_range_respects_inclusive_and_exclusive_bounds() -> Result<(), EntityStorageError> {
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
-        assert_domain_keys_round_trip(&storage)?;
 
         for value in 1..=4 {
             storage.insert(&Address::from(value), &TestEntity::new(value))?;

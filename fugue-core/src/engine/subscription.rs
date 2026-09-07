@@ -4,8 +4,8 @@ use std::time::Duration;
 use flume::{Receiver, Sender, TryRecvError, TrySendError};
 use smol_str::SmolStr;
 
-use super::{AnalysisEngine, DEFAULT_SUBSCRIPTION_CAPACITY, EngineError};
 use crate::engine::change::ChangeFilter;
+use crate::engine::{AnalysisEngine, DEFAULT_SUBSCRIPTION_CAPACITY, EngineError};
 use crate::ir::AddressRangeSet;
 use crate::project::{
     ChangeCategory, ChangeKinds, ChangeRecord, ChangeSet, ChangeSource, MAX_DETAILED_CHANGE_RECORDS,

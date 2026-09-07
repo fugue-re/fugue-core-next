@@ -1,6 +1,5 @@
 use fugue_bv::BitVec;
 
-use crate::analysis::control::CancellationToken;
 use crate::il::common::{
     IlArtefact, IlBlockArgId, IlBlockId, IlConstantInterner, IlError, IlGraph, IlIndexRange,
     IlMetadata, IlOpId, IlParentSpan, IlPool, IlSourceSpan, IlValueId,
@@ -132,8 +131,8 @@ impl ECodeBuilder {
         self.memory_domains.push(ECodeMemoryDomain::new(space));
     }
 
-    pub fn build(self, cancellation: &CancellationToken) -> Result<ECodeIr, IlError> {
-        let ir = self.build_unchecked(cancellation)?;
+    pub fn build(self) -> Result<ECodeIr, IlError> {
+        let ir = self.build_unchecked();
 
         if ir.verify().is_err() {
             return Err(IlError::invalid_artefact(ECodeIr::FORM));
@@ -142,12 +141,7 @@ impl ECodeBuilder {
         Ok(ir)
     }
 
-    pub(crate) fn build_unchecked(
-        mut self,
-        cancellation: &CancellationToken,
-    ) -> Result<ECodeIr, IlError> {
-        cancellation.check()?;
-
+    pub(crate) fn build_unchecked(mut self) -> ECodeIr {
         if self.edge_args.is_empty() && !self.graph.successors().is_empty() {
             self.edge_args = vec![IlIndexRange::EMPTY; self.graph.successors().len()];
         }
@@ -170,7 +164,7 @@ impl ECodeBuilder {
 
         ir.shrink_to_fit();
 
-        Ok(ir)
+        ir
     }
 }
 

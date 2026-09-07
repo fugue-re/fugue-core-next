@@ -378,7 +378,6 @@ mod test {
     use super::super::lifter::PCodeToECodeLifter;
     use super::super::ssa::{PCodeToECodeSsaLifter, PCodeToECodeSsaScratch};
     use super::*;
-    use crate::analysis::control::CancellationToken;
     use crate::arch::Arch;
     use crate::il::common::{IlExprId, IlMetadata, IlParentSpan};
     use crate::il::ecode::{ECodeBuilder, ECodeIr, ECodeOpcode};
@@ -436,7 +435,7 @@ mod test {
             self.buffer.op_operands_for(operation)
         }
 
-        fn build(self, cancellation: &CancellationToken) -> Result<ECodeIr, IlError> {
+        fn build(self) -> Result<ECodeIr, IlError> {
             let builder = ECodeBuilder::new(self.metadata, IlGraph::default());
             PCodeToECodeSsaLifter::new(
                 self.buffer,
@@ -446,7 +445,7 @@ mod test {
                 builder,
                 &mut PCodeToECodeSsaScratch::default(),
             )
-            .lift(cancellation)
+            .lift()
         }
     }
 
@@ -455,15 +454,13 @@ mod test {
         source: &PCodeIr,
         arch: &Arch,
         platform: &Platform,
-        cancellation: &CancellationToken,
     ) -> Result<PCodeToECodeBufferFixture, IlError> {
         let metadata = IlMetadata::new(
             source.metadata().function(),
             source.metadata().input_revision(),
         );
         let (buffer, operation_map) =
-            PCodeToECodeLifter::new(source, arch, &mut transform.lift_scratch)?
-                .lift(platform, cancellation)?;
+            PCodeToECodeLifter::new(source, arch, &mut transform.lift_scratch)?.lift(platform)?;
 
         Ok(PCodeToECodeBufferFixture {
             metadata,
@@ -478,13 +475,11 @@ mod test {
     fn empty_pcode_lifts_to_empty_ecode() {
         let pcode_metadata = IlMetadata::new(FunctionId::default(), 11);
         let source = PCodeBuilder::new(pcode_metadata, IlGraph::default())
-            .build(&CancellationToken::default())
+            .build()
             .unwrap();
-        let cancellation = CancellationToken::default();
         let mut transform = PCodeToECode::default();
 
-        let lifted =
-            lift_buffer(&mut transform, &source, &arch(), &platform(), &cancellation).unwrap();
+        let lifted = lift_buffer(&mut transform, &source, &arch(), &platform()).unwrap();
 
         assert_eq!(lifted.metadata().input_revision().value(), 11);
         assert!(lifted.ops().is_empty());
@@ -547,16 +542,10 @@ mod test {
                 1,
             ),
         ]);
-        let source = builder.build(&CancellationToken::default()).unwrap();
+        let source = builder.build().unwrap();
 
-        let lifted = lift_buffer(
-            &mut PCodeToECode::default(),
-            &source,
-            &arch(),
-            &platform(),
-            &CancellationToken::default(),
-        )
-        .unwrap();
+        let lifted =
+            lift_buffer(&mut PCodeToECode::default(), &source, &arch(), &platform()).unwrap();
         assert_eq!(
             lifted
                 .expressions()
@@ -571,11 +560,9 @@ mod test {
     #[test]
     fn copy_pcode_lifts_to_ecode_write() {
         let source = copy_source();
-        let cancellation = CancellationToken::default();
         let mut transform = PCodeToECode::default();
 
-        let lifted =
-            lift_buffer(&mut transform, &source, &arch(), &platform(), &cancellation).unwrap();
+        let lifted = lift_buffer(&mut transform, &source, &arch(), &platform()).unwrap();
 
         assert_eq!(lifted.expressions().len(), 2);
         assert_eq!(
@@ -632,16 +619,10 @@ mod test {
                 [input, offset],
             )
             .unwrap();
-        let source = builder.build(&CancellationToken::default()).unwrap();
+        let source = builder.build().unwrap();
 
-        let lifted = lift_buffer(
-            &mut PCodeToECode::default(),
-            &source,
-            &arch(),
-            &platform(),
-            &CancellationToken::default(),
-        )
-        .unwrap();
+        let lifted =
+            lift_buffer(&mut PCodeToECode::default(), &source, &arch(), &platform()).unwrap();
 
         assert_eq!(lifted.expressions().len(), 2);
         let extract = &lifted.expressions()[1];
@@ -706,17 +687,10 @@ mod test {
             .emitter()
             .emit(PCodeOpSpec::new(PCodeOpcode::Copy), Some(word), [ax])
             .unwrap();
-        let source = builder.build(&CancellationToken::default()).unwrap();
+        let source = builder.build().unwrap();
         let mut transform = PCodeToECode::default();
 
-        let lifted = lift_buffer(
-            &mut transform,
-            &source,
-            &arch(),
-            &platform(),
-            &CancellationToken::default(),
-        )
-        .unwrap();
+        let lifted = lift_buffer(&mut transform, &source, &arch(), &platform()).unwrap();
         let register_reads = lifted
             .expressions()
             .iter()
@@ -751,7 +725,7 @@ mod test {
         assert_eq!(lifted.ops()[0].opcode(), ECodeOpcode::WriteRegister);
         assert_eq!(lifted.ops()[0].immediate(), rax.offset());
 
-        let ir = lifted.build(&CancellationToken::default()).unwrap();
+        let ir = lifted.build().unwrap();
         ir.verify().unwrap();
     }
 
@@ -829,16 +803,10 @@ mod test {
                 [flag_constant],
             )
             .unwrap();
-        let source = builder.build(&CancellationToken::default()).unwrap();
+        let source = builder.build().unwrap();
 
-        let lifted = lift_buffer(
-            &mut PCodeToECode::default(),
-            &source,
-            &arch(),
-            &platform(),
-            &CancellationToken::default(),
-        )
-        .unwrap();
+        let lifted =
+            lift_buffer(&mut PCodeToECode::default(), &source, &arch(), &platform()).unwrap();
 
         assert_eq!(
             lifted
@@ -884,16 +852,10 @@ mod test {
             .emitter()
             .emit(PCodeOpSpec::new(PCodeOpcode::Copy), Some(output), [input])
             .unwrap();
-        let source = builder.build(&CancellationToken::default()).unwrap();
+        let source = builder.build().unwrap();
 
-        let lifted = lift_buffer(
-            &mut PCodeToECode::default(),
-            &source,
-            &arch(),
-            &platform(),
-            &CancellationToken::default(),
-        )
-        .unwrap();
+        let lifted =
+            lift_buffer(&mut PCodeToECode::default(), &source, &arch(), &platform()).unwrap();
 
         assert_eq!(
             lifted.expressions()[0].kind(),
@@ -916,16 +878,10 @@ mod test {
                 [],
             )
             .unwrap();
-        let source = builder.build(&CancellationToken::default()).unwrap();
+        let source = builder.build().unwrap();
 
-        let lifted = lift_buffer(
-            &mut PCodeToECode::default(),
-            &source,
-            &arch(),
-            &platform(),
-            &CancellationToken::default(),
-        )
-        .unwrap();
+        let lifted =
+            lift_buffer(&mut PCodeToECode::default(), &source, &arch(), &platform()).unwrap();
 
         assert!(lifted.expressions().is_empty());
         assert_eq!(lifted.ops().len(), 1);
@@ -936,11 +892,9 @@ mod test {
     #[test]
     fn unique_output_pcode_does_not_lift_to_register_write() {
         let source = unique_copy_source();
-        let cancellation = CancellationToken::default();
         let mut transform = PCodeToECode::default();
 
-        let lifted =
-            lift_buffer(&mut transform, &source, &arch(), &platform(), &cancellation).unwrap();
+        let lifted = lift_buffer(&mut transform, &source, &arch(), &platform()).unwrap();
 
         assert_eq!(lifted.expressions().len(), 2);
         assert!(lifted.ops().is_empty());
@@ -976,17 +930,10 @@ mod test {
                 [input],
             )
             .unwrap();
-        let source = builder.build(&CancellationToken::default()).unwrap();
+        let source = builder.build().unwrap();
         let mut transform = PCodeToECode::default();
 
-        let lifted = lift_buffer(
-            &mut transform,
-            &source,
-            &arch(),
-            &platform(),
-            &CancellationToken::default(),
-        )
-        .unwrap();
+        let lifted = lift_buffer(&mut transform, &source, &arch(), &platform()).unwrap();
 
         assert_eq!(lifted.expressions().len(), 2);
         assert_eq!(
@@ -999,11 +946,9 @@ mod test {
     #[test]
     fn store_pcode_lifts_to_ecode_store_with_fugue_space() {
         let source = store_source();
-        let cancellation = CancellationToken::default();
         let mut transform = PCodeToECode::default();
 
-        let lifted =
-            lift_buffer(&mut transform, &source, &arch(), &platform(), &cancellation).unwrap();
+        let lifted = lift_buffer(&mut transform, &source, &arch(), &platform()).unwrap();
 
         assert_eq!(lifted.ops().len(), 1);
         assert_eq!(lifted.ops()[0].opcode(), ECodeOpcode::Store);
@@ -1042,16 +987,10 @@ mod test {
                 [constant, constant],
             )
             .unwrap();
-        let source = builder.build(&CancellationToken::default()).unwrap();
+        let source = builder.build().unwrap();
 
-        let lifted = lift_buffer(
-            &mut PCodeToECode::default(),
-            &source,
-            &arch(),
-            &platform(),
-            &CancellationToken::default(),
-        )
-        .unwrap();
+        let lifted =
+            lift_buffer(&mut PCodeToECode::default(), &source, &arch(), &platform()).unwrap();
         let operands = lifted.op_operands_for(&lifted.ops()[0]);
 
         assert_ne!(operands[0], operands[1]);
@@ -1069,11 +1008,9 @@ mod test {
     fn branch_pcode_lifts_to_ecode_branch_with_target() {
         let target = Address::new(AddressSpaceId::new(3), 0x2000u64);
         let source = branch_source(target);
-        let cancellation = CancellationToken::default();
         let mut transform = PCodeToECode::default();
 
-        let lifted =
-            lift_buffer(&mut transform, &source, &arch(), &platform(), &cancellation).unwrap();
+        let lifted = lift_buffer(&mut transform, &source, &arch(), &platform()).unwrap();
 
         assert_eq!(lifted.ops().len(), 1);
         assert_eq!(lifted.ops()[0].opcode(), ECodeOpcode::Branch);
@@ -1116,17 +1053,10 @@ mod test {
             vec![IlBlockId::try_from_index(1).unwrap()],
             vec![IlEdgeKinds::UNCONDITIONAL; 1],
         ));
-        let source = builder.build(&CancellationToken::default()).unwrap();
+        let source = builder.build().unwrap();
         let mut transform = PCodeToECode::default();
 
-        let lifted = lift_buffer(
-            &mut transform,
-            &source,
-            &arch(),
-            &platform(),
-            &CancellationToken::default(),
-        )
-        .unwrap();
+        let lifted = lift_buffer(&mut transform, &source, &arch(), &platform()).unwrap();
         let entry = &lifted.graph().blocks()[0];
 
         assert_eq!(
@@ -1139,11 +1069,9 @@ mod test {
     #[test]
     fn return_pcode_lifts_to_ecode_return_with_fugue_space() {
         let source = return_source(AddressSpaceId::new(9));
-        let cancellation = CancellationToken::default();
         let mut transform = PCodeToECode::default();
 
-        let lifted =
-            lift_buffer(&mut transform, &source, &arch(), &platform(), &cancellation).unwrap();
+        let lifted = lift_buffer(&mut transform, &source, &arch(), &platform()).unwrap();
 
         assert_eq!(lifted.ops().len(), 1);
         assert_eq!(lifted.ops()[0].opcode(), ECodeOpcode::Return);
@@ -1172,14 +1100,8 @@ mod test {
         ];
         let mut seen = Vec::new();
         for source in &sources {
-            let lifted = lift_buffer(
-                &mut PCodeToECode::default(),
-                source,
-                &arch(),
-                &platform(),
-                &CancellationToken::default(),
-            )
-            .unwrap();
+            let lifted =
+                lift_buffer(&mut PCodeToECode::default(), source, &arch(), &platform()).unwrap();
             seen.extend(lifted.ops().iter().map(PCodeToECodeEffect::opcode));
         }
 
@@ -1224,7 +1146,7 @@ mod test {
             )
             .unwrap();
 
-        builder.build(&CancellationToken::default()).unwrap()
+        builder.build().unwrap()
     }
 
     fn trap_source() -> PCodeIr {
@@ -1242,7 +1164,7 @@ mod test {
             )
             .unwrap();
 
-        builder.build(&CancellationToken::default()).unwrap()
+        builder.build().unwrap()
     }
 
     fn intrinsic_source() -> PCodeIr {
@@ -1267,7 +1189,7 @@ mod test {
             )
             .unwrap();
 
-        builder.build(&CancellationToken::default()).unwrap()
+        builder.build().unwrap()
     }
 
     fn copy_source() -> PCodeIr {
@@ -1295,7 +1217,7 @@ mod test {
             .emit(PCodeOpSpec::new(PCodeOpcode::Copy), Some(output), [input])
             .unwrap();
 
-        builder.build(&CancellationToken::default()).unwrap()
+        builder.build().unwrap()
     }
 
     fn unique_copy_source() -> PCodeIr {
@@ -1323,7 +1245,7 @@ mod test {
             .emit(PCodeOpSpec::new(PCodeOpcode::Copy), Some(output), [input])
             .unwrap();
 
-        builder.build(&CancellationToken::default()).unwrap()
+        builder.build().unwrap()
     }
 
     fn store_source() -> PCodeIr {
@@ -1355,7 +1277,7 @@ mod test {
             )
             .unwrap();
 
-        builder.build(&CancellationToken::default()).unwrap()
+        builder.build().unwrap()
     }
 
     fn branch_source(target: Address) -> PCodeIr {
@@ -1379,7 +1301,7 @@ mod test {
             )
             .unwrap();
 
-        builder.build(&CancellationToken::default()).unwrap()
+        builder.build().unwrap()
     }
 
     fn return_source(space: AddressSpaceId) -> PCodeIr {
@@ -1402,6 +1324,6 @@ mod test {
             )
             .unwrap();
 
-        builder.build(&CancellationToken::default()).unwrap()
+        builder.build().unwrap()
     }
 }

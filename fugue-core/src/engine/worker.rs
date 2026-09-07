@@ -1,4 +1,4 @@
-use std::any::Any;
+use std::any::{Any, TypeId};
 use std::collections::{BTreeMap, VecDeque};
 use std::convert::Infallible;
 use std::sync::{Arc, OnceLock};
@@ -7,19 +7,19 @@ use flume::{Receiver, Sender, TryRecvError};
 use parking_lot::RwLock;
 use smallvec::SmallVec;
 
-use super::scheduler::{
+use crate::analysis::AnalysisError;
+use crate::engine::scheduler::{
     AnalyserId, AnalyserOrder, AnalysisWorkQueue, Degradation, DegradationReport, IlAnalysisInputs,
     ScheduledAnalyser, WORK_SLICE_BYTES, WorkBatch,
 };
-use super::subscription::Subscriber;
-use super::update::{MappingCreationResult, ProjectUpdate, SpaceCreationResult};
-use super::view::DependencyIndex;
-use super::{
-    AnalyserProvider, AnalysisContext, AnalysisEngineConfig, EngineError, EngineMetrics,
-    MAX_COMPLETION_ROUNDS, ProjectView, RETRACTED_BY_BYTE_CHANGE, WORK_BATCH_ITEMS, WorkCause,
+use crate::engine::subscription::Subscriber;
+use crate::engine::update::{MappingCreationResult, ProjectUpdates, SpaceCreationResult};
+use crate::engine::view::DependencyIndex;
+use crate::engine::{
+    AnalyserProvider, AnalysisContext, AnalysisData, AnalysisDataStore, AnalysisEngineConfig,
+    EngineError, EngineMetrics, MAX_COMPLETION_ROUNDS, ProjectView, RETRACTED_BY_BYTE_CHANGE,
+    WORK_BATCH_ITEMS, WorkCause,
 };
-use crate::analysis::AnalysisError;
-use crate::analysis::control::{CancellationToken, Cancelled};
 use crate::extension;
 use crate::il::common::{IlError, IlFormId, IlGenerationContext, IlSubject};
 use crate::il::registry::{GeneratedArtefact, IlGenerationSession, IlRegistry};
@@ -35,7 +35,6 @@ use crate::types::Revision;
 
 pub(crate) enum Intake {
     Analyse(Sender<Result<(), EngineError>>),
-    Cancel,
     CreateMapping {
         builder: SegmentMappingBuilder,
         reply: Sender<Result<MappingCreationResult, EngineError>>,
@@ -55,11 +54,16 @@ pub(crate) enum Intake {
         form: IlFormId,
         reply: Sender<Result<Option<Arc<dyn Any + Send + Sync>>, EngineError>>,
     },
+    SetData {
+        data: Box<dyn AnalysisData>,
+        root: TypeId,
+        reply: Sender<Result<(), EngineError>>,
+    },
     Shutdown,
     Subscribe(Subscriber),
     Updates {
         source: ChangeSource,
-        updates: SmallVec<[ProjectUpdate; 1]>,
+        updates: ProjectUpdates,
         reply: Sender<Result<ChangeSet, EngineError>>,
     },
 }
@@ -76,39 +80,35 @@ enum TransactionResult<T, E> {
 
 struct AnalysisProduction {
     base: Revision,
-    outcome: Result<(), Cancelled>,
     reads: ReadSet,
     reads_collapsed: bool,
-    updates: Vec<ProjectUpdate>,
+    regions: AddressRangeSet,
+    updates: ProjectUpdates,
 }
 
 impl AnalysisProduction {
-    fn from_analysis(
+    fn new(
         base: Revision,
-        analysis: Result<(), AnalysisError>,
-        reads: ReadSet,
-        reads_collapsed: bool,
-        updates: Vec<ProjectUpdate>,
-    ) -> Result<Self, AnalysisError> {
-        let outcome = match analysis {
-            Ok(()) => Ok(()),
-            Err(AnalysisError::Cancelled(cancelled)) => Err(cancelled),
-            Err(error) => return Err(error),
-        };
-        Ok(Self {
+        project: ProjectView<'_>,
+        regions: AddressRangeSet,
+        updates: ProjectUpdates,
+    ) -> Self {
+        let reads_collapsed = project.collapsed();
+        let reads = project.into_reads();
+        Self {
             base,
-            outcome,
             reads,
             reads_collapsed,
+            regions,
             updates,
-        })
+        }
     }
 }
 
 struct AnalysisAdmission {
-    outcome: Result<(), Cancelled>,
     reads: ReadSet,
     reads_collapsed: bool,
+    regions: AddressRangeSet,
 }
 
 enum AnalysisAdmissionResult {
@@ -120,8 +120,8 @@ enum AnalysisAdmissionResult {
 pub(crate) struct Worker {
     analysers: Vec<ScheduledAnalyser>,
     config: AnalysisEngineConfig,
+    analysis_data: AnalysisDataStore,
     pending_diagnostics: PendingDiagnostics,
-    cancellation: CancellationToken,
     poison: Arc<OnceLock<String>>,
     project: Arc<RwLock<Project>>,
     queries: QueryEngine,
@@ -255,13 +255,15 @@ impl Worker {
         project: Arc<RwLock<Project>>,
         queries: QueryEngine,
         poison: Arc<OnceLock<String>>,
-        cancellation: CancellationToken,
         metrics: EngineMetrics,
     ) -> Result<Self, EngineError> {
         let registry = config.registry_handle();
         let mut analysers = Vec::new();
         let project_read = project.read();
         for provider in extension::iter::<AnalyserProvider>() {
+            if !config.analyser_enabled(provider) {
+                continue;
+            }
             let analyser = provider.create(&project_read)?;
             if analyser.can_analyse(&project_read) {
                 let id = AnalyserId::new(analysers.len());
@@ -296,8 +298,8 @@ impl Worker {
         let mut worker = Self {
             analysers,
             config,
+            analysis_data: AnalysisDataStore::default(),
             pending_diagnostics: PendingDiagnostics::default(),
-            cancellation,
             poison,
             queries,
             generation,
@@ -350,14 +352,6 @@ impl Worker {
         }
     }
 
-    fn cancel_pending_work(&mut self) {
-        self.queue.clear();
-        for analyser in &mut self.analysers {
-            analyser.clear_claimed();
-        }
-        self.cancellation.clear();
-    }
-
     fn reject_pending(rx: &Receiver<Intake>, message: &str) {
         loop {
             match rx.try_recv() {
@@ -376,15 +370,13 @@ impl Worker {
                 Ok(Intake::GenerateLifted { reply, .. }) => {
                     let _ = reply.send(Err(EngineError::Poisoned(message.to_owned())));
                 }
+                Ok(Intake::SetData { reply, .. }) => {
+                    let _ = reply.send(Err(EngineError::Poisoned(message.to_owned())));
+                }
                 Ok(Intake::Analyse(reply)) => {
                     let _ = reply.send(Err(EngineError::Poisoned(message.to_owned())));
                 }
-                Ok(
-                    Intake::Cancel
-                    | Intake::Direct { .. }
-                    | Intake::Shutdown
-                    | Intake::Subscribe(_),
-                ) => {}
+                Ok(Intake::Direct { .. } | Intake::Shutdown | Intake::Subscribe(_)) => {}
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => return,
             }
         }
@@ -403,19 +395,12 @@ impl Worker {
             };
 
             match message {
-                Intake::Cancel => {
-                    self.cancel_pending_work();
-                }
                 Intake::CreateMapping { builder, reply } => {
-                    let result = self
-                        .drain_or_handle_cancelled()
-                        .and_then(|()| self.create_mapping(builder));
+                    let result = self.drain().and_then(|()| self.create_mapping(builder));
                     let _ = reply.send(result);
                 }
                 Intake::CreateSpace(reply) => {
-                    let result = self
-                        .drain_or_handle_cancelled()
-                        .and_then(|()| self.create_space());
+                    let result = self.drain().and_then(|()| self.create_space());
                     let _ = reply.send(result);
                 }
                 Intake::Direct { kind, regions } => {
@@ -444,7 +429,7 @@ impl Worker {
                     reply,
                 } => {
                     let result = self
-                        .drain_or_handle_cancelled()
+                        .drain()
                         .and_then(|()| self.ensure_lifted(function, &form));
                     let _ = reply.send(result);
                 }
@@ -454,9 +439,14 @@ impl Worker {
                     reply,
                 } => {
                     let result = self
-                        .drain_or_handle_cancelled()
+                        .drain()
                         .and_then(|()| self.generate_lifted(function, &form));
                     let _ = reply.send(result);
+                }
+                Intake::SetData { data, root, reply } => {
+                    self.analysis_data.set(root, data);
+                    let _ = reply.send(Ok(()));
+                    continue;
                 }
                 Intake::Updates {
                     source,
@@ -464,16 +454,16 @@ impl Worker {
                     reply,
                 } => {
                     let result = self
-                        .drain_or_handle_cancelled()
+                        .drain()
                         .and_then(|()| self.apply_updates(source, updates));
                     let _ = reply.send(result);
                 }
                 Intake::Analyse(reply) => {
-                    let result = self.drain_or_handle_cancelled();
+                    let result = self.drain();
                     let _ = reply.send(result);
                 }
                 Intake::Shutdown => {
-                    if let Err(error) = self.drain_or_handle_cancelled() {
+                    if let Err(error) = self.drain() {
                         let message = error.to_string();
                         let _ = self.poison.set(message);
                         self.queries.mark_dead();
@@ -485,7 +475,7 @@ impl Worker {
                 }
             }
 
-            if let Err(error) = self.drain_or_handle_cancelled() {
+            if let Err(error) = self.drain() {
                 let message = match &error {
                     EngineError::Poisoned(message) => message.clone(),
                     _ => error.to_string(),
@@ -495,26 +485,6 @@ impl Worker {
                 Self::reject_pending(&rx, &message);
                 break;
             }
-        }
-    }
-
-    fn drain_or_handle_cancelled(&mut self) -> Result<(), EngineError> {
-        match self.drain() {
-            Ok(()) => Ok(()),
-            Err(error) if self.handle_analysis_cancelled(&error) => {
-                self.cancel_pending_work();
-                Ok(())
-            }
-            Err(error) => Err(error),
-        }
-    }
-
-    fn handle_analysis_cancelled(&self, error: &EngineError) -> bool {
-        if matches!(error, EngineError::Analysis(AnalysisError::Cancelled(_))) {
-            self.cancellation.clear();
-            true
-        } else {
-            false
         }
     }
 
@@ -999,30 +969,30 @@ impl Worker {
         }
 
         let AnalysisProduction {
-            outcome,
             reads,
             reads_collapsed,
+            regions,
             updates,
             ..
         } = production;
         let result =
             self.with_transaction(ChangeSource::analysis(name), move |_, transaction| {
                 transaction.absorb_reads(&reads);
-                ProjectUpdate::apply_all(updates, transaction)
+                updates
+                    .apply(transaction)
                     .map_err(|error| AnalysisError::pass_failed(name, error))?;
-                Ok::<_, AnalysisError>(outcome)
+                Ok::<_, AnalysisError>(())
             })?;
 
         Ok(match result {
             TransactionResult::Committed {
-                value,
                 reads,
                 reads_collapsed: admission_reads_collapsed,
                 ..
             } => AnalysisAdmissionResult::Committed(AnalysisAdmission {
-                outcome: value,
                 reads,
                 reads_collapsed: reads_collapsed || admission_reads_collapsed,
+                regions,
             }),
             TransactionResult::Rejected(error) => AnalysisAdmissionResult::Rejected(error),
         })
@@ -1038,30 +1008,36 @@ impl Worker {
         batch: WorkBatch,
     ) -> Result<(), EngineError> {
         let name = self.analysers[id.index()].analyser().name();
-        let cx = AnalysisContext::new(self.cancellation.child())
-            .with_worker_limit(self.config.worker_limit())
-            .with_work(phase, causes, continuation);
+        let worker_limit = self.config.worker_limit();
 
         let production = {
             let project = self.project.read();
             let base = project.revision();
-            let view = match self.il_inputs.as_ref() {
+            let project = match self.il_inputs.as_ref() {
                 Some(inputs) => ProjectView::with_il_inputs(&project, &self.registry, inputs),
                 None => ProjectView::with_registry(&project, &self.registry),
             };
-            let mut updates = Vec::new();
-            let analysis = self.analysers[id.index()].analyser_mut().analyse(
-                &view,
-                &regions,
-                &cx,
-                &mut updates,
-            );
-            let reads_collapsed = view.collapsed();
-            let reads = view.into_reads();
-            AnalysisProduction::from_analysis(base, analysis, reads, reads_collapsed, updates)
+            let (result, project, updates) = {
+                let mut context = AnalysisContext {
+                    project,
+                    updates: ProjectUpdates::new(),
+                    analysis_data: &mut self.analysis_data,
+                    causes,
+                    continuation,
+                    phase,
+                    regions: &regions,
+                    worker_limit,
+                };
+                let result = self.analysers[id.index()]
+                    .analyser_mut()
+                    .analyse(&mut context);
+                (result, context.project, context.updates)
+            };
+            result.map(|_| AnalysisProduction::new(base, project, regions, updates))
         };
         let production = match production {
             Ok(production) => production,
+            Err(error @ AnalysisError::AnalysisData(_)) => return Err(error.into()),
             Err(error) => {
                 self.handle_dispatch_failure(id, batch, error);
                 return Ok(());
@@ -1069,9 +1045,9 @@ impl Worker {
         };
         match self.admit_analysis(name, production)? {
             AnalysisAdmissionResult::Committed(AnalysisAdmission {
-                outcome: Ok(()),
                 reads,
                 reads_collapsed,
+                regions,
             }) => {
                 self.dependencies.record(id, &regions, reads);
                 if reads_collapsed {
@@ -1086,10 +1062,6 @@ impl Worker {
                 }
                 Ok(())
             }
-            AnalysisAdmissionResult::Committed(AnalysisAdmission {
-                outcome: Err(cancelled),
-                ..
-            }) => Err(AnalysisError::Cancelled(cancelled).into()),
             AnalysisAdmissionResult::Conflict => {
                 self.handle_admission_conflict(batch);
                 Ok(())
@@ -1144,24 +1116,32 @@ impl Worker {
     fn run_completion_hook(&mut self, id: AnalyserId) -> Result<(), EngineError> {
         let name = self.analysers[id.index()].analyser().name();
         for _ in 0..MAX_COMPLETION_ROUNDS {
-            let cx = AnalysisContext::new(self.cancellation.child())
-                .with_worker_limit(self.config.worker_limit());
+            let worker_limit = self.config.worker_limit();
             let production = {
                 let project = self.project.read();
                 let base = project.revision();
-                let view = match self.il_inputs.as_ref() {
+                let project = match self.il_inputs.as_ref() {
                     Some(inputs) => ProjectView::with_il_inputs(&project, &self.registry, inputs),
                     None => ProjectView::with_registry(&project, &self.registry),
                 };
-                let mut updates = Vec::new();
-                let analysis = self.analysers[id.index()].analyser_mut().analysis_ended(
-                    &view,
-                    &cx,
-                    &mut updates,
-                );
-                let reads_collapsed = view.collapsed();
-                let reads = view.into_reads();
-                AnalysisProduction::from_analysis(base, analysis, reads, reads_collapsed, updates)
+                let regions = AddressRangeSet::new();
+                let (result, project, updates) = {
+                    let mut context = AnalysisContext {
+                        project,
+                        updates: ProjectUpdates::new(),
+                        analysis_data: &mut self.analysis_data,
+                        causes: SmallVec::new(),
+                        continuation: false,
+                        phase: AnalysisPhase::default(),
+                        regions: &regions,
+                        worker_limit,
+                    };
+                    let result = self.analysers[id.index()]
+                        .analyser_mut()
+                        .analysis_ended(&mut context);
+                    (result, context.project, context.updates)
+                };
+                result.map(|_| AnalysisProduction::new(base, project, regions, updates))
             };
             let production = match production {
                 Ok(production) => production,
@@ -1173,19 +1153,15 @@ impl Worker {
 
             return match self.admit_analysis(name, production)? {
                 AnalysisAdmissionResult::Committed(AnalysisAdmission {
-                    outcome: Ok(()),
                     reads_collapsed,
+                    regions,
                     ..
                 }) => {
                     if reads_collapsed {
-                        self.defer_read_set_collapse(&AddressRangeSet::new());
+                        self.defer_read_set_collapse(&regions);
                     }
                     Ok(())
                 }
-                AnalysisAdmissionResult::Committed(AnalysisAdmission {
-                    outcome: Err(cancelled),
-                    ..
-                }) => Err(AnalysisError::Cancelled(cancelled).into()),
                 AnalysisAdmissionResult::Conflict => continue,
                 AnalysisAdmissionResult::Rejected(error) => {
                     tracing::warn!("analyser {name} completion failed: {error}");
@@ -1202,10 +1178,10 @@ impl Worker {
     fn apply_updates(
         &mut self,
         source: ChangeSource,
-        updates: impl IntoIterator<Item = ProjectUpdate>,
+        updates: ProjectUpdates,
     ) -> Result<ChangeSet, EngineError> {
         match self.with_transaction(source, |_, transaction| {
-            ProjectUpdate::apply_all(updates, transaction)?;
+            updates.apply(transaction)?;
             Ok::<(), ProjectError>(())
         })? {
             TransactionResult::Committed { changes, .. } => Ok(changes),
@@ -1218,8 +1194,7 @@ impl Worker {
         function: FunctionId,
         form: &IlFormId,
     ) -> Result<ChangeSet, EngineError> {
-        let cancellation = self.cancellation.child();
-        let prepared = self.prepare_lifted(function, form, IlLookup::Persisted, &cancellation)?;
+        let prepared = self.prepare_lifted(function, form, IlLookup::Persisted)?;
         let result = self
             .with_transaction(ChangeSource::engine("ensure IR"), move |_, transaction| {
                 prepared.admit(transaction)
@@ -1278,8 +1253,7 @@ impl Worker {
         function: FunctionId,
         form: &IlFormId,
     ) -> Result<PreparedLiftedArtefacts, EngineError> {
-        let cancellation = self.cancellation.child();
-        self.prepare_lifted(function, form, IlLookup::Current, &cancellation)
+        self.prepare_lifted(function, form, IlLookup::Current)
     }
 
     fn prepare_lifted(
@@ -1287,9 +1261,7 @@ impl Worker {
         function: FunctionId,
         form: &IlFormId,
         lookup: IlLookup,
-        cancellation: &CancellationToken,
     ) -> Result<PreparedLiftedArtefacts, EngineError> {
-        cancellation.check().map_err(ProjectError::from)?;
         let registry = self.registry.clone();
         let path = registry.canonical_path(form);
         if function.is_invalid() {
@@ -1318,7 +1290,7 @@ impl Worker {
             .collect::<Result<Vec<_>, _>>()?;
         let generated = self
             .generation
-            .generate(&registry, form, existing, &context, cancellation)
+            .generate(&registry, form, existing, &context)
             .map_err(ProjectError::from)?;
 
         Ok(PreparedLiftedArtefacts::new(generated.into_artefacts()))

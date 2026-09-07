@@ -1,6 +1,6 @@
 use crate::analysis::function::recovery::StructuredFunctionContext;
 use crate::analysis::{AnalysisError, AnalysisPass};
-use crate::engine::ProjectView;
+use crate::engine::AnalysisContext;
 
 const MAX_INSN_BYTES: usize = 32;
 pub(crate) const NON_RETURNING_THUNK_ANALYSER: &str = "non-returning-thunk";
@@ -11,9 +11,10 @@ pub(crate) struct NonReturningThunk;
 impl AnalysisPass<StructuredFunctionContext> for NonReturningThunk {
     fn analyse_with(
         &mut self,
-        project: &ProjectView<'_>,
+        context: &mut AnalysisContext<'_, '_>,
         state: &mut StructuredFunctionContext,
     ) -> Result<(), AnalysisError> {
+        let project = &context.project;
         if state.function().is_non_returning() {
             return Ok(());
         }

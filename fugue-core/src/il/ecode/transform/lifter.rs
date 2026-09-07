@@ -1,7 +1,6 @@
 use rustc_hash::FxHashMap;
 
 use super::buffer::PCodeToECodeBuffer;
-use crate::analysis::control::CancellationToken;
 use crate::arch::Arch;
 use crate::il::common::{
     FlagId, IlArtefact, IlError, IlExprId, IlIndexMapper, RegisterBank, RegisterId, RegisterRange,
@@ -159,13 +158,11 @@ impl<'a, 'b> PCodeToECodeLifter<'a, 'b> {
     pub(crate) fn lift(
         mut self,
         platform: &Platform,
-        cancellation: &CancellationToken,
     ) -> Result<(PCodeToECodeBuffer, IlIndexMapper), IlError> {
         let mut operation_map = Vec::with_capacity(self.source.ops().len() + 1);
         let mut source_span = 0usize;
 
         for (index, operation) in self.source.ops().iter().enumerate() {
-            cancellation.check()?;
             while let Some(span) = self
                 .source
                 .source_spans()

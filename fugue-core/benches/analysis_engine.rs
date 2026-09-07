@@ -10,10 +10,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use fugue_core::analysis::control::CancellationToken;
+use fugue_core::analysis::non_returning::NonReturningExterns;
 #[cfg(feature = "sqlite")]
 use fugue_core::attributes;
-use fugue_core::engine::{AnalysisEngine, ProjectUpdate, ProjectView};
+use fugue_core::engine::{AnalysisEngine, AnalysisEngineConfig, ProjectUpdates, ProjectView};
 use fugue_core::il::common::{
     IlBlockId, IlBlockProperties, IlDominance, IlDominanceEvent, IlEdgeKinds, IlGraphBuilder,
     IlIndexRange,
@@ -43,6 +43,7 @@ use fugue_core::storage::{
 #[cfg(feature = "sqlite")]
 use fugue_core::types::ATTRIBUTE_PROJECT_PATH;
 use fugue_core::types::{AttributeMap, BytesOrSlice};
+
 const SYNTHETIC_SYMBOLS: usize = 1024;
 const SYNTHETIC_FUNCTIONS: usize = 256;
 const LARGE_FUNCTION_BLOCKS: usize = 4096;
@@ -574,8 +575,8 @@ fn add_empty_function(engine: &AnalysisEngine, entry: Address) -> Result<(), Box
     Ok(())
 }
 
-fn function_updates(base: Address, count: usize) -> Result<Vec<ProjectUpdate>, Box<dyn Error>> {
-    let mut updates = Vec::with_capacity(count);
+fn function_updates(base: Address, count: usize) -> Result<ProjectUpdates, Box<dyn Error>> {
+    let mut updates = ProjectUpdates::with_capacity(count);
     for index in 0..count {
         let entry = base
             .checked_add(index as u64)
@@ -587,7 +588,7 @@ fn function_updates(base: Address, count: usize) -> Result<Vec<ProjectUpdate>, B
             Vec::new(),
             Default::default(),
         ));
-        updates.push(ProjectUpdate::add_function(function));
+        updates.add_function(function);
     }
     Ok(updates)
 }
@@ -696,6 +697,33 @@ fn bench_representative_analysis(results: &mut Vec<BenchResult>) -> Result<(), B
         .ok_or_else(|| std::io::Error::other("representative fixture entry missing"))?;
     black_box(engine.query_reader()?.revision()?);
     results.push(result);
+
+    let loader = Loader::from_file(REPRESENTATIVE_FIXTURE)?;
+    let project_without_external_classification = Project::new_transient(&loader)?;
+    let mut config = AnalysisEngineConfig::default();
+    config.disable_analyser::<NonReturningExterns>();
+    let comparison_function_count = {
+        let (comparison, comparison_engine) = measure(
+            "representative_arm_analysis_without_non_returning_externs",
+            || {
+                let engine =
+                    AnalysisEngine::with_config(project_without_external_classification, config)?;
+                engine.analyse()?;
+                Ok((engine, 1))
+            },
+        )?;
+        let reader = comparison_engine.query_reader()?;
+        let project = reader.project()?;
+        black_box(project.revision());
+        results.push(comparison);
+        project.functions().len()
+    };
+    let default_function_count = {
+        let reader = engine.query_reader()?;
+        let project = reader.project()?;
+        project.functions().len()
+    };
+    assert_eq!(comparison_function_count, default_function_count);
 
     let batch_base = Address::new(entry.space(), 0xf000_0000u64);
     let (output, updates) = measure("representative_function_batch_output", || {
@@ -808,22 +836,10 @@ fn bench_call_heavy_mcode(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn 
         .filter(|(_, calls)| *calls != 0)
         .ok_or_else(|| std::io::Error::other("fixture contains no ECode calls"))?;
     let mut transformer = ECodeToMCode::default();
-    black_box(transformer.transform(
-        &source,
-        &arch,
-        &platform,
-        None,
-        &CancellationToken::default(),
-    )?);
+    black_box(transformer.transform(&source, &arch, &platform, None)?);
 
     let (result, mcode) = measure("mcode_call_heavy_transform", || {
-        let mcode = transformer.transform(
-            &source,
-            &arch,
-            &platform,
-            None,
-            &CancellationToken::default(),
-        )?;
+        let mcode = transformer.transform(&source, &arch, &platform, None)?;
         Ok((mcode, calls))
     })?;
     black_box(mcode);

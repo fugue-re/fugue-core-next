@@ -194,9 +194,9 @@ mod test {
 
     use super::abi::MCodeCallingConventionEntry;
     use super::*;
-    use crate::analysis::control::CancellationToken;
-    use crate::il::common::{IlBlock, IlBlockProperties, IlGraph, IlIndexRange, IlMetadata};
-    use crate::il::ecode::test::emit_value;
+    use crate::il::common::{
+        IlBlock, IlBlockProperties, IlError, IlGraph, IlIndexRange, IlMetadata, IlValueId,
+    };
     use crate::il::ecode::{ECodeBuilder, ECodeDomain, ECodeOpSpec, ECodeOpcode};
     use crate::ir::{Address, FunctionId};
     use crate::lifter::resolve_language;
@@ -205,6 +205,15 @@ mod test {
     const RDI: u64 = 0x38;
     const RSI: u64 = 0x30;
     const RSP: u64 = 0x20;
+
+    fn emit_value(
+        builder: &mut ECodeBuilder,
+        spec: ECodeOpSpec,
+        operands: impl IntoIterator<Item = IlValueId>,
+    ) -> Result<IlValueId, IlError> {
+        let (_, results) = builder.emitter().emit(spec, operands, 1)?;
+        IlValueId::try_from_index(results.start())
+    }
 
     fn x86_64_config() -> MCodeRecoveryConfig<'static> {
         let language = resolve_language("x86:LE:64").unwrap();
@@ -301,9 +310,7 @@ mod test {
             Vec::new(),
             Vec::new(),
         ));
-        let ir = builder
-            .build_unchecked(&CancellationToken::default())
-            .unwrap();
+        let ir = builder.build_unchecked();
 
         let registers = RegisterBank::new(resolve_language("x86:LE:64").unwrap()).unwrap();
         let recovery = MCodeRecovery::new(&ir, &x86_64_config(), &registers).unwrap();

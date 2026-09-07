@@ -2,7 +2,7 @@ use super::condition::AnalysisCondition;
 use super::error::AnalysisError;
 use super::group::AnalysisGroup;
 use super::pass::AnalysisPass;
-use crate::engine::ProjectView;
+use crate::engine::AnalysisContext;
 
 pub struct IteratedAnalysis<S = ()> {
     pass: Box<dyn AnalysisPass<S> + 'static>,
@@ -50,13 +50,17 @@ impl<S> AnalysisPass<S> for IteratedAnalysis<S>
 where
     S: 'static,
 {
+    fn can_analyse(&self, context: &AnalysisContext<'_, '_>) -> bool {
+        self.pass.can_analyse(context)
+    }
+
     fn analyse_with(
         &mut self,
-        project: &ProjectView<'_>,
+        context: &mut AnalysisContext<'_, '_>,
         state: &mut S,
     ) -> Result<(), AnalysisError> {
         while self.condition.evaluate(state) {
-            self.pass.analyse_with(project, state)?;
+            self.pass.analyse_with(context, state)?;
         }
         Ok(())
     }
@@ -116,13 +120,17 @@ impl<S> AnalysisPass<S> for ConditionalAnalysis<S>
 where
     S: 'static,
 {
+    fn can_analyse(&self, context: &AnalysisContext<'_, '_>) -> bool {
+        self.pass.can_analyse(context)
+    }
+
     fn analyse_with(
         &mut self,
-        project: &ProjectView<'_>,
+        context: &mut AnalysisContext<'_, '_>,
         state: &mut S,
     ) -> Result<(), AnalysisError> {
         if self.condition.evaluate(state) {
-            self.pass.analyse_with(project, state)?;
+            self.pass.analyse_with(context, state)?;
         }
         Ok(())
     }
@@ -181,12 +189,16 @@ impl<S> AnalysisPass for StatefulAnalysis<S>
 where
     S: Send + 'static,
 {
+    fn can_analyse(&self, context: &AnalysisContext<'_, '_>) -> bool {
+        self.pass.can_analyse(context)
+    }
+
     fn analyse_with(
         &mut self,
-        project: &ProjectView<'_>,
+        context: &mut AnalysisContext<'_, '_>,
         _state: &mut (),
     ) -> Result<(), AnalysisError> {
-        self.pass.analyse_with(project, &mut self.state)
+        self.pass.analyse_with(context, &mut self.state)
     }
 }
 
@@ -229,14 +241,18 @@ impl<S> AnalysisPass<S> for OneShotAnalysis<S>
 where
     S: 'static,
 {
+    fn can_analyse(&self, context: &AnalysisContext<'_, '_>) -> bool {
+        !self.executed && self.pass.can_analyse(context)
+    }
+
     fn analyse_with(
         &mut self,
-        project: &ProjectView<'_>,
+        context: &mut AnalysisContext<'_, '_>,
         state: &mut S,
     ) -> Result<(), AnalysisError> {
         if !self.executed {
             self.executed = true;
-            self.pass.analyse_with(project, state)?;
+            self.pass.analyse_with(context, state)?;
         }
         Ok(())
     }
@@ -255,7 +271,7 @@ mod test {
     use super::*;
     use crate::analysis::{AnalysisPassExt, IterationLimit};
 
-    fn no_op(_project: &ProjectView<'_>, _state: &mut ()) -> Result<(), AnalysisError> {
+    fn no_op(_context: &mut AnalysisContext<'_, '_>, _state: &mut ()) -> Result<(), AnalysisError> {
         Ok(())
     }
 

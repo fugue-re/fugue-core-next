@@ -4,37 +4,30 @@ use rayon::prelude::*;
 use rayon::{ThreadPool, ThreadPoolBuilder};
 
 use crate::analysis::AnalysisError;
-use crate::analysis::control::CancellationToken;
 use crate::analysis::function::recovery::FUNCTION_RECOVERY_ANALYSER;
 use crate::analysis::function::recovery::analysis::FunctionRecoveryContext;
 use crate::analysis::function::recovery::builder::{
     FunctionBuilder, FunctionCandidateOutcome, FunctionCandidateState,
 };
-use crate::engine::ProjectView;
+use crate::engine::AnalysisContext;
 use crate::ir::AddressWithContext;
 use crate::lifter::InsnResolver;
 
-pub(crate) struct FunctionCandidateBatch<'a, 'p> {
+pub(crate) struct FunctionCandidateBatch<'a> {
     candidates: Vec<AddressWithContext>,
     context: &'a FunctionRecoveryContext,
-    project: &'a ProjectView<'p>,
-    token: &'a CancellationToken,
     worker_limit: usize,
 }
 
-impl<'a, 'p> FunctionCandidateBatch<'a, 'p> {
+impl<'a> FunctionCandidateBatch<'a> {
     pub(crate) fn new(
-        project: &'a ProjectView<'p>,
         context: &'a FunctionRecoveryContext,
         candidates: Vec<AddressWithContext>,
-        token: &'a CancellationToken,
         worker_limit: usize,
     ) -> Self {
         Self {
             candidates,
             context,
-            project,
-            token,
             worker_limit,
         }
     }
@@ -52,25 +45,26 @@ impl FunctionRecoveryExecutor {
 
     pub(crate) fn analyse_candidates(
         &mut self,
+        analysis: &mut AnalysisContext<'_, '_>,
         builder: &mut FunctionBuilder,
         resolver: &mut Option<InsnResolver>,
-        batch: FunctionCandidateBatch<'_, '_>,
-        mut on_outcome: impl FnMut(FunctionCandidateOutcome) -> Result<bool, AnalysisError>,
+        batch: FunctionCandidateBatch<'_>,
+        mut on_outcome: impl FnMut(
+            &mut AnalysisContext<'_, '_>,
+            FunctionCandidateOutcome,
+        ) -> Result<bool, AnalysisError>,
     ) -> Result<Vec<AddressWithContext>, AnalysisError> {
         let FunctionCandidateBatch {
             candidates,
             context,
-            project,
-            token,
             worker_limit,
         } = batch;
-        let workers = Self::worker_count(builder, candidates.len(), worker_limit);
+        let workers = Self::worker_count(analysis, builder, candidates.len(), worker_limit);
         if workers <= 1 {
             let mut candidates = candidates.into_iter();
             while let Some(candidate) = candidates.next() {
-                let outcome =
-                    builder.analyse_candidate(project, context, resolver, candidate, token);
-                if on_outcome(outcome)? {
+                let outcome = builder.analyse_candidate(analysis, context, resolver, candidate);
+                if on_outcome(analysis, outcome)? {
                     return Ok(candidates.collect());
                 }
             }
@@ -82,7 +76,6 @@ impl FunctionRecoveryExecutor {
             .pool
             .as_ref()
             .expect("the parallel recovery pool must be configured");
-        let arch = project.arch();
         let config = *builder.config();
         let mut candidates = candidates.into_iter();
 
@@ -90,7 +83,9 @@ impl FunctionRecoveryExecutor {
             let mut tasks = candidates
                 .by_ref()
                 .take(workers)
-                .map(|candidate| FunctionCandidateState::new(project.fork(), candidate, &config))
+                .map(|candidate| {
+                    FunctionCandidateState::new(analysis.project.fork(), candidate, &config)
+                })
                 .collect::<Vec<_>>();
             if tasks.is_empty() {
                 return Ok(Vec::new());
@@ -98,11 +93,12 @@ impl FunctionRecoveryExecutor {
 
             loop {
                 let avoidance_baseline = builder.avoids();
+                let arch = analysis.project.arch();
                 pool.install(|| {
                     tasks.par_iter_mut().for_each_init(
                         || InsnResolver::new(arch),
                         |resolver, task| {
-                            task.resolve(&config, context, token, resolver, avoidance_baseline);
+                            task.resolve(&config, context, resolver, avoidance_baseline);
                         },
                     );
                 });
@@ -110,9 +106,9 @@ impl FunctionRecoveryExecutor {
                 let mut pending = false;
                 for task in &mut tasks {
                     task.apply_post_structuring_passes(
+                        analysis,
                         &config,
                         builder.post_structuring_passes_mut(),
-                        token,
                     );
                     pending |= !task.is_finished();
                 }
@@ -123,12 +119,12 @@ impl FunctionRecoveryExecutor {
 
             let mut tasks = tasks.into_iter();
             while let Some(task) = tasks.next() {
-                let (reads, outcome) = task.finish();
-                project.merge_reads(&reads);
+                analysis.project.merge(task.view());
+                let outcome = task.finish();
                 for range in outcome.avoids().ranges() {
                     builder.avoids_mut().insert_range(range);
                 }
-                if on_outcome(outcome)? {
+                if on_outcome(analysis, outcome)? {
                     let mut remaining = tasks
                         .map(FunctionCandidateState::into_candidate)
                         .collect::<Vec<_>>();
@@ -161,11 +157,12 @@ impl FunctionRecoveryExecutor {
     }
 
     fn worker_count(
+        analysis: &AnalysisContext<'_, '_>,
         builder: &FunctionBuilder,
         candidate_count: usize,
         worker_limit: usize,
     ) -> usize {
-        if !builder.pre_resolution_passes().is_empty() {
+        if builder.pre_resolution_passes().can_analyse(analysis) {
             return 1;
         }
 

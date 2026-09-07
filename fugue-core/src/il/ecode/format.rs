@@ -292,8 +292,7 @@ impl fmt::Display for ECodeOpDisplay<'_> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::analysis::control::CancellationToken;
-    use crate::il::common::{IlGraph, IlMetadata};
+    use crate::il::common::{IlGraph, IlMetadata, IlValueId};
     use crate::il::ecode::{ECodeBuilder, ECodeOpSpec};
     use crate::ir::FunctionId;
 
@@ -301,18 +300,21 @@ mod test {
     fn ecode_display_is_deterministic() {
         let metadata = IlMetadata::new(FunctionId::default(), 0);
         let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
-        let value = crate::il::ecode::test::emit_value(
-            &mut builder,
-            ECodeOpSpec::new(ECodeOpcode::Constant, 64).with_immediate(0x2a),
-            [],
-        )
-        .unwrap();
+        let (_, results) = builder
+            .emitter()
+            .emit(
+                ECodeOpSpec::new(ECodeOpcode::Constant, 64).with_immediate(0x2a),
+                [],
+                1,
+            )
+            .unwrap();
+        let value = IlValueId::try_from_index(results.start()).unwrap();
         builder
             .emitter()
             .emit(ECodeOpSpec::new(ECodeOpcode::Return, 0), [value], 0)
             .unwrap();
 
-        let ir = builder.build(&CancellationToken::default()).unwrap();
+        let ir = builder.build().unwrap();
 
         assert_eq!(
             ir.display().to_string(),

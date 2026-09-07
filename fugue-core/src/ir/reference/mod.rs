@@ -402,7 +402,6 @@ mod test {
     use fugue_lifter::runtime::pcode::Inputs;
 
     use super::*;
-    use crate::analysis::control::CancellationToken;
     use crate::il::common::{IlGraph, IlIndexRange, IlMetadata, IlSourceSpan};
     use crate::il::pcode::{PCodeBuilder, PCodeLocation, PCodeOpSpec, PCodeOpcode};
     use crate::ir::{
@@ -849,7 +848,7 @@ mod test {
             0,
             2,
         )]);
-        let ir = builder.build(&CancellationToken::default())?;
+        let ir = builder.build()?;
         let artefact_refs = ir.data_references().collect::<Vec<_>>();
 
         assert_eq!(artefact_refs.len(), 2);
@@ -893,7 +892,7 @@ mod test {
             0,
             1,
         )]);
-        let ir = builder.build(&CancellationToken::default())?;
+        let ir = builder.build()?;
         assert!(ir.data_references().next().is_none());
 
         Ok(())

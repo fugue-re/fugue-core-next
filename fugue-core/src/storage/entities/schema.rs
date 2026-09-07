@@ -309,10 +309,10 @@ pub trait Entity: EntityCodec {
 }
 
 #[cfg(test)]
-pub(crate) mod test {
+mod test {
     use super::*;
     use crate::ir::{Address, CodeBlockId, FunctionId, ProblemId, RawAddress, SwitchId, SymbolId};
-    use crate::storage::entities::{EntityStorage, EntityStorageError};
+    use crate::storage::entities::{EntityStorage, EntityStorageError, InMemoryEntityStorage};
     use crate::storage::segments::space::AddressSpaceId;
 
     #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -330,9 +330,9 @@ pub(crate) mod test {
         const ID: EntityId = EntityId::new(123);
     }
 
-    pub(crate) fn assert_domain_keys_round_trip(
-        storage: &EntityStorage,
-    ) -> Result<(), EntityStorageError> {
+    #[test]
+    fn domain_keys_round_trip() -> Result<(), EntityStorageError> {
+        let storage = EntityStorage::new(InMemoryEntityStorage::new());
         let raw_address = RawAddress::from(0x0123_4567_89ab_cdefu64);
         storage.insert(&raw_address, &DomainKeyValue::new(1))?;
         assert_eq!(storage.get(&raw_address)?, Some(DomainKeyValue::new(1)));

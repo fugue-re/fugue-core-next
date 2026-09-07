@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
-use crate::analysis::control::Cancelled;
 use crate::arch::Arch;
 use crate::il::common::{IlError, IlFormId, IlGenerationError, PersistableIl};
 use crate::il::ecode::ECodeIr;
@@ -147,12 +146,6 @@ pub enum ProjectError {
     StorageProvider(#[from] StorageProviderError),
     #[error(transparent)]
     Switch(#[from] SwitchTableError),
-}
-
-impl From<Cancelled> for ProjectError {
-    fn from(cancelled: Cancelled) -> Self {
-        Self::Il(IlError::from(cancelled))
-    }
 }
 
 impl From<IlStorageError> for ProjectError {
@@ -725,4 +718,42 @@ impl Project {
 }
 
 #[cfg(test)]
-mod test;
+mod test {
+    use super::*;
+    use crate::il::common::{IlArtefact, IlError, IlGraph, IlMetadata};
+    use crate::il::pcode::PCodeIr;
+    use crate::ir::FunctionId;
+
+    #[test]
+    fn project_pcode_rejects_stale_input_revision() -> Result<(), Box<dyn std::error::Error>> {
+        let mut project = Project::from_file_transient("tests/ls.elf")?;
+        let function = FunctionId::default();
+        let stale_revision = project.semantic_revision();
+        {
+            let mut transaction = project.transaction("test");
+            transaction.create_space()?;
+            transaction.commit()?;
+        }
+
+        let ir = PCodeIr::new(
+            IlMetadata::new(function, stale_revision),
+            IlGraph::default(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let mut staging = crate::il::storage::IlStaging::default();
+        staging.replace(&project.storage, ir)?;
+        let writes = staging.prepare()?;
+        project.storage.entities().apply_batch(&writes)?;
+
+        assert!(matches!(
+            project.pcode(function),
+            Err(ProjectError::Il(IlError::StaleArtefact { ref form, .. })) if *form == PCodeIr::FORM
+        ));
+
+        Ok(())
+    }
+}

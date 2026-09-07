@@ -2,8 +2,8 @@ use std::io;
 use std::path::PathBuf;
 
 use fugue_core::ir::{
-    Address, AddressRange, AddressRangeSet, FunctionProperties, IncompleteCodeBlock,
-    IncompleteFunction, SymbolEntry, SymbolIndex, SymbolProperties, SymbolTableSelector,
+    Address, AddressRangeSet, FunctionProperties, IncompleteCodeBlock, IncompleteFunction,
+    SymbolEntry, SymbolIndex, SymbolProperties, SymbolTableSelector,
 };
 use fugue_core::lifter::ContextSet;
 use fugue_core::project::{ChangeRecord, FunctionChangeKind, Project, ProjectError};
@@ -88,17 +88,18 @@ fn test_removing_mapping_records_unmapped_ranges() -> Result<(), Box<dyn std::er
     let range = project
         .segments()
         .mapping_placements(mapping)
-        .find_map(|(mapped_space, range)| (mapped_space == space).then_some(range))
+        .find(|range| range.space() == space)
         .expect("mapping should have a placement in its priority space");
 
     let mut transaction = project.transaction("test");
     transaction.remove_mapping(mapping)?;
     let changes = transaction.commit()?;
 
-    assert!(changes.records().contains(&ChangeRecord::SegmentUnmapped {
-        mapping,
-        range: AddressRange::new(space, range.0, range.1),
-    }));
+    assert!(
+        changes
+            .records()
+            .contains(&ChangeRecord::SegmentUnmapped { mapping, range })
+    );
 
     Ok(())
 }
@@ -157,7 +158,7 @@ fn mapping_transactions_distinguish_addition_from_priority()
         project
             .segments()
             .mapping_placements(mapping)
-            .any(|(candidate, _)| candidate == space)
+            .any(|range| range.space() == space)
     );
     Ok(())
 }
@@ -178,7 +179,7 @@ fn test_remapping_mapping_records_old_and_new_ranges() -> Result<(), Box<dyn std
     let old_range = project
         .segments()
         .mapping_placements(mapping)
-        .find_map(|(mapped_space, range)| (mapped_space == space).then_some(range))
+        .find(|range| range.space() == space)
         .expect("mapping should have a placement in its priority space");
     let new_start = project
         .segments()
@@ -194,16 +195,16 @@ fn test_remapping_mapping_records_old_and_new_ranges() -> Result<(), Box<dyn std
     let new_range = project
         .segments()
         .mapping_placements(mapping)
-        .find_map(|(mapped_space, range)| (mapped_space == space).then_some(range))
+        .find(|range| range.space() == space)
         .expect("mapping should keep its placement after remap");
 
     assert!(changes.records().contains(&ChangeRecord::SegmentUnmapped {
         mapping,
-        range: AddressRange::new(space, old_range.0, old_range.1),
+        range: old_range,
     }));
     assert!(changes.records().contains(&ChangeRecord::SegmentMapped {
         mapping,
-        range: AddressRange::new(space, new_range.0, new_range.1),
+        range: new_range,
     }));
 
     Ok(())
@@ -225,7 +226,7 @@ fn test_rejecting_mapping_removal_preserves_placement() -> Result<(), Box<dyn st
     let old_range = project
         .segments()
         .mapping_placements(mapping)
-        .find_map(|(mapped_space, range)| (mapped_space == space).then_some(range))
+        .find(|range| range.space() == space)
         .expect("mapping should have a placement in its priority space");
 
     let mut transaction = project.transaction("test");
@@ -236,7 +237,7 @@ fn test_rejecting_mapping_removal_preserves_placement() -> Result<(), Box<dyn st
         project
             .segments()
             .mapping_placements(mapping)
-            .find_map(|(mapped_space, range)| (mapped_space == space).then_some(range)),
+            .find(|range| range.space() == space),
         Some(old_range)
     );
 
@@ -259,7 +260,7 @@ fn test_rejecting_mapping_remap_preserves_old_range() -> Result<(), Box<dyn std:
     let old_range = project
         .segments()
         .mapping_placements(mapping)
-        .find_map(|(mapped_space, range)| (mapped_space == space).then_some(range))
+        .find(|range| range.space() == space)
         .expect("mapping should have a placement in its priority space");
     let new_start = project
         .segments()
@@ -276,7 +277,7 @@ fn test_rejecting_mapping_remap_preserves_old_range() -> Result<(), Box<dyn std:
         project
             .segments()
             .mapping_placements(mapping)
-            .find_map(|(mapped_space, range)| (mapped_space == space).then_some(range)),
+            .find(|range| range.space() == space),
         Some(old_range)
     );
 

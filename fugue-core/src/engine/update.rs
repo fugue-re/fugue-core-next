@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use smallvec::SmallVec;
+
 use crate::ir::{
     Address, AddressRangeSet, FunctionId, FunctionProperties, IncompleteFunction, ProblemKind,
     Reference, ReferenceKind, ReferenceOrigin, ReferenceTarget, Switch, SymbolEntry, SymbolId,
@@ -472,8 +474,195 @@ impl SpaceCreationResult {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct ProjectUpdates {
+    updates: SmallVec<[ProjectUpdate; 1]>,
+}
+
+impl ProjectUpdates {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            updates: SmallVec::with_capacity(capacity),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.updates.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.updates.is_empty()
+    }
+
+    pub(crate) fn apply(
+        self,
+        transaction: &mut ProjectTransaction<'_>,
+    ) -> Result<(), ProjectError> {
+        let mut functions = Vec::new();
+
+        for update in self.updates {
+            let update = match update.operation {
+                ProjectOperation::AddFunction(addition) => {
+                    functions.push(addition.function);
+                    continue;
+                }
+                operation => ProjectUpdate::new(operation),
+            };
+
+            if !functions.is_empty() {
+                transaction.add_functions(functions.drain(..))?;
+            }
+            update.apply(transaction)?;
+        }
+
+        if !functions.is_empty() {
+            transaction.add_functions(functions)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn reserve(&mut self, additional: usize) {
+        self.updates.reserve(additional);
+    }
+
+    pub fn add_function(&mut self, mut function: IncompleteFunction) {
+        let switches = function.take_pending_switches();
+        self.updates.push(ProjectUpdate::add_function(function));
+        self.updates
+            .extend(switches.into_iter().map(ProjectUpdate::add_derived_switch));
+    }
+
+    pub fn add_mapping_to_space(&mut self, space: AddressSpaceId, mapping: SegmentMappingId) {
+        self.updates
+            .push(ProjectUpdate::add_mapping_to_space(space, mapping));
+    }
+
+    pub fn add_mapping_to_space_bottom(
+        &mut self,
+        space: AddressSpaceId,
+        mapping: SegmentMappingId,
+    ) {
+        self.updates
+            .push(ProjectUpdate::add_mapping_to_space_bottom(space, mapping));
+    }
+
+    pub fn add_mapping_to_space_top(&mut self, space: AddressSpaceId, mapping: SegmentMappingId) {
+        self.updates
+            .push(ProjectUpdate::add_mapping_to_space_top(space, mapping));
+    }
+
+    pub fn add_problem(&mut self, address: impl Into<Address>, kind: ProblemKind) {
+        self.updates.push(ProjectUpdate::add_problem(address, kind));
+    }
+
+    pub fn add_reference(&mut self, reference: Reference) {
+        self.updates.push(ProjectUpdate::add_reference(reference));
+    }
+
+    pub fn add_switch(&mut self, switch: Switch) {
+        self.updates.push(ProjectUpdate::add_switch(switch));
+    }
+
+    pub fn add_symbol(&mut self, index: SymbolIndex, entry: SymbolEntry) {
+        self.updates.push(ProjectUpdate::add_symbol(index, entry));
+    }
+
+    pub fn deprioritise_mapping(&mut self, space: AddressSpaceId, mapping: SegmentMappingId) {
+        self.updates
+            .push(ProjectUpdate::deprioritise_mapping(space, mapping));
+    }
+
+    pub fn prioritise_mapping(&mut self, space: AddressSpaceId, mapping: SegmentMappingId) {
+        self.updates
+            .push(ProjectUpdate::prioritise_mapping(space, mapping));
+    }
+
+    pub fn remap_mapping(&mut self, mapping: SegmentMappingId, start: impl Into<Address>) {
+        self.updates
+            .push(ProjectUpdate::remap_mapping(mapping, start));
+    }
+
+    pub fn remove_function(&mut self, entry: impl Into<Address>) {
+        self.updates.push(ProjectUpdate::remove_function(entry));
+    }
+
+    pub fn remove_function_by_id(&mut self, id: FunctionId) {
+        self.updates.push(ProjectUpdate::remove_function_by_id(id));
+    }
+
+    pub fn remove_mapping(&mut self, mapping: SegmentMappingId) {
+        self.updates.push(ProjectUpdate::remove_mapping(mapping));
+    }
+
+    pub fn remove_reference(&mut self, from: Address, target: ReferenceTarget) {
+        self.updates
+            .push(ProjectUpdate::remove_reference(from, target));
+    }
+
+    pub fn remove_switch(&mut self, branch: impl Into<Address>) {
+        self.updates.push(ProjectUpdate::remove_switch(branch));
+    }
+
+    pub fn remove_symbol(&mut self, index: SymbolIndex) {
+        self.updates.push(ProjectUpdate::remove_symbol(index));
+    }
+
+    pub fn replace_derived_references(
+        &mut self,
+        coverage: AddressRangeSet,
+        kind: ReferenceKind,
+        references: Vec<Reference>,
+    ) {
+        self.updates.push(ProjectUpdate::replace_derived_references(
+            coverage, kind, references,
+        ));
+    }
+
+    pub fn resize_mapping(&mut self, mapping: SegmentMappingId, size: u64) {
+        self.updates
+            .push(ProjectUpdate::resize_mapping(mapping, size));
+    }
+
+    pub fn update_function_properties(
+        &mut self,
+        entry: impl Into<Address>,
+        properties: FunctionProperties,
+    ) {
+        self.updates
+            .push(ProjectUpdate::update_function_properties(entry, properties));
+    }
+
+    pub fn update_mapping_metadata(&mut self, update: MappingMetadataUpdate) {
+        self.updates
+            .push(ProjectUpdate::update_mapping_metadata(update));
+    }
+
+    pub fn update_symbol_properties(&mut self, id: SymbolId, properties: SymbolProperties) {
+        self.updates
+            .push(ProjectUpdate::update_symbol_properties(id, properties));
+    }
+
+    pub fn write_bytes(&mut self, address: impl Into<Address>, bytes: impl Into<Arc<[u8]>>) {
+        self.updates
+            .push(ProjectUpdate::write_bytes(address, bytes));
+    }
+}
+
+impl From<ProjectUpdate> for ProjectUpdates {
+    fn from(update: ProjectUpdate) -> Self {
+        Self {
+            updates: SmallVec::from_buf([update]),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProjectUpdate {
+pub(crate) struct ProjectUpdate {
     operation: ProjectOperation,
 }
 
@@ -502,13 +691,13 @@ enum ProjectOperation {
 }
 
 impl ProjectUpdate {
-    pub fn add_function(function: IncompleteFunction) -> Self {
+    pub(crate) fn add_function(function: IncompleteFunction) -> Self {
         Self::new(ProjectOperation::AddFunction(FunctionAddition::new(
             function,
         )))
     }
 
-    pub fn add_mapping_to_space(space: AddressSpaceId, mapping: SegmentMappingId) -> Self {
+    pub(crate) fn add_mapping_to_space(space: AddressSpaceId, mapping: SegmentMappingId) -> Self {
         Self::new(ProjectOperation::AddMappingToSpace(MappingPlacement::new(
             space,
             mapping,
@@ -516,7 +705,10 @@ impl ProjectUpdate {
         )))
     }
 
-    pub fn add_mapping_to_space_bottom(space: AddressSpaceId, mapping: SegmentMappingId) -> Self {
+    pub(crate) fn add_mapping_to_space_bottom(
+        space: AddressSpaceId,
+        mapping: SegmentMappingId,
+    ) -> Self {
         Self::new(ProjectOperation::AddMappingToSpace(MappingPlacement::new(
             space,
             mapping,
@@ -524,7 +716,10 @@ impl ProjectUpdate {
         )))
     }
 
-    pub fn add_mapping_to_space_top(space: AddressSpaceId, mapping: SegmentMappingId) -> Self {
+    pub(crate) fn add_mapping_to_space_top(
+        space: AddressSpaceId,
+        mapping: SegmentMappingId,
+    ) -> Self {
         Self::new(ProjectOperation::AddMappingToSpace(MappingPlacement::new(
             space,
             mapping,
@@ -532,37 +727,37 @@ impl ProjectUpdate {
         )))
     }
 
-    pub fn deprioritise_mapping(space: AddressSpaceId, mapping: SegmentMappingId) -> Self {
+    pub(crate) fn deprioritise_mapping(space: AddressSpaceId, mapping: SegmentMappingId) -> Self {
         Self::new(ProjectOperation::DeprioritiseMapping(
             MappingPriorityUpdate::new(space, mapping),
         ))
     }
 
-    pub fn add_symbol(index: SymbolIndex, entry: SymbolEntry) -> Self {
+    pub(crate) fn add_symbol(index: SymbolIndex, entry: SymbolEntry) -> Self {
         Self::new(ProjectOperation::AddSymbol(SymbolAddition::new(
             index, entry,
         )))
     }
 
-    pub fn prioritise_mapping(space: AddressSpaceId, mapping: SegmentMappingId) -> Self {
+    pub(crate) fn prioritise_mapping(space: AddressSpaceId, mapping: SegmentMappingId) -> Self {
         Self::new(ProjectOperation::PrioritiseMapping(
             MappingPriorityUpdate::new(space, mapping),
         ))
     }
 
-    pub fn remap_mapping(mapping: SegmentMappingId, start: impl Into<Address>) -> Self {
+    pub(crate) fn remap_mapping(mapping: SegmentMappingId, start: impl Into<Address>) -> Self {
         Self::new(ProjectOperation::RemapMapping(MappingRemap::new(
             mapping, start,
         )))
     }
 
-    pub fn remove_function(entry: impl Into<Address>) -> Self {
+    pub(crate) fn remove_function(entry: impl Into<Address>) -> Self {
         Self::new(ProjectOperation::RemoveFunction(FunctionRemoval::new(
             entry,
         )))
     }
 
-    pub fn remove_function_by_id(id: FunctionId) -> Self {
+    pub(crate) fn remove_function_by_id(id: FunctionId) -> Self {
         Self::new(ProjectOperation::RemoveFunction(FunctionRemoval::by_id(id)))
     }
 
@@ -578,23 +773,23 @@ impl ProjectUpdate {
         ))
     }
 
-    pub fn remove_mapping(mapping: SegmentMappingId) -> Self {
+    pub(crate) fn remove_mapping(mapping: SegmentMappingId) -> Self {
         Self::new(ProjectOperation::RemoveMapping(MappingRemoval::new(
             mapping,
         )))
     }
 
-    pub fn add_reference(reference: Reference) -> Self {
+    pub(crate) fn add_reference(reference: Reference) -> Self {
         Self::new(ProjectOperation::AddReference(reference))
     }
 
-    pub fn remove_reference(from: Address, target: ReferenceTarget) -> Self {
+    pub(crate) fn remove_reference(from: Address, target: ReferenceTarget) -> Self {
         Self::new(ProjectOperation::RemoveReference(ReferenceRemoval::new(
             from, target,
         )))
     }
 
-    pub fn replace_derived_references(
+    pub(crate) fn replace_derived_references(
         coverage: AddressRangeSet,
         kind: ReferenceKind,
         references: Vec<Reference>,
@@ -604,7 +799,7 @@ impl ProjectUpdate {
         ))
     }
 
-    pub fn add_switch(switch: Switch) -> Self {
+    pub(crate) fn add_switch(switch: Switch) -> Self {
         Self::new(ProjectOperation::AddSwitch(SwitchAddition::new(switch)))
     }
 
@@ -612,13 +807,13 @@ impl ProjectUpdate {
         Self::new(ProjectOperation::AddSwitch(SwitchAddition::derived(switch)))
     }
 
-    pub fn add_problem(address: impl Into<Address>, kind: ProblemKind) -> Self {
+    pub(crate) fn add_problem(address: impl Into<Address>, kind: ProblemKind) -> Self {
         Self::new(ProjectOperation::AddProblem(ProblemAddition::new(
             address, kind,
         )))
     }
 
-    pub fn update_function_properties(
+    pub(crate) fn update_function_properties(
         entry: impl Into<Address>,
         properties: FunctionProperties,
     ) -> Self {
@@ -627,64 +822,36 @@ impl ProjectUpdate {
         ))
     }
 
-    pub fn remove_switch(branch: impl Into<Address>) -> Self {
+    pub(crate) fn remove_switch(branch: impl Into<Address>) -> Self {
         Self::new(ProjectOperation::RemoveSwitch(branch.into()))
     }
 
-    pub fn remove_symbol(index: SymbolIndex) -> Self {
+    pub(crate) fn remove_symbol(index: SymbolIndex) -> Self {
         Self::new(ProjectOperation::RemoveSymbol(SymbolRemoval::new(index)))
     }
 
-    pub fn resize_mapping(mapping: SegmentMappingId, size: u64) -> Self {
+    pub(crate) fn resize_mapping(mapping: SegmentMappingId, size: u64) -> Self {
         Self::new(ProjectOperation::ResizeMapping(MappingResize::new(
             mapping, size,
         )))
     }
 
-    pub fn update_mapping_metadata(update: MappingMetadataUpdate) -> Self {
+    pub(crate) fn update_mapping_metadata(update: MappingMetadataUpdate) -> Self {
         Self::new(ProjectOperation::UpdateMappingMetadata(update))
     }
 
-    pub fn update_symbol_properties(id: SymbolId, properties: SymbolProperties) -> Self {
+    pub(crate) fn update_symbol_properties(id: SymbolId, properties: SymbolProperties) -> Self {
         Self::new(ProjectOperation::UpdateSymbolProperties(
             SymbolPropertiesUpdate::new(id, properties),
         ))
     }
 
-    pub fn write_bytes(address: impl Into<Address>, bytes: impl Into<Arc<[u8]>>) -> Self {
+    pub(crate) fn write_bytes(address: impl Into<Address>, bytes: impl Into<Arc<[u8]>>) -> Self {
         Self::new(ProjectOperation::WriteBytes(ByteWrite::new(address, bytes)))
     }
 
     fn new(operation: ProjectOperation) -> Self {
         Self { operation }
-    }
-
-    pub(crate) fn apply_all(
-        updates: impl IntoIterator<Item = Self>,
-        transaction: &mut ProjectTransaction<'_>,
-    ) -> Result<(), ProjectError> {
-        let mut functions = Vec::new();
-
-        for update in updates {
-            let update = match update.operation {
-                ProjectOperation::AddFunction(addition) => {
-                    functions.push(addition.function);
-                    continue;
-                }
-                operation => Self::new(operation),
-            };
-
-            if !functions.is_empty() {
-                transaction.add_functions(functions.drain(..))?;
-            }
-            update.apply(transaction)?;
-        }
-
-        if !functions.is_empty() {
-            transaction.add_functions(functions)?;
-        }
-
-        Ok(())
     }
 
     pub(crate) fn apply(

@@ -4,7 +4,7 @@ use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use fugue_core::engine::{AnalysisEngine, ProjectUpdate};
+use fugue_core::engine::{AnalysisEngine, ProjectUpdates};
 use fugue_core::ir::{
     Address, Symbol, SymbolEntry, SymbolIndex, SymbolProperties, SymbolTableSelector,
 };
@@ -81,13 +81,12 @@ fn test_labelled_agent_loop_recomputes_and_resynchronises() -> Result<(), Box<dy
         Ok(view.symbols().iter().count())
     })?;
 
-    let applied = engine.apply_update(
-        ChangeSource::agent(AGENT),
-        ProjectUpdate::add_symbol(
-            SymbolIndex::new(SymbolTableSelector::new(239), 0),
-            SymbolEntry::new(entry, "agent_loop_symbol", SymbolProperties::LOCAL),
-        ),
-    )?;
+    let mut updates = ProjectUpdates::new();
+    updates.add_symbol(
+        SymbolIndex::new(SymbolTableSelector::new(239), 0),
+        SymbolEntry::new(entry, "agent_loop_symbol", SymbolProperties::LOCAL),
+    );
+    let applied = engine.apply_updates(ChangeSource::agent(AGENT), updates)?;
     assert!(applied.provenance().contains(AGENT));
 
     let delivered = changes.recv_timeout(Duration::from_secs(1))?;
@@ -129,17 +128,16 @@ fn incremental_and_resynchronised_agents_converge() -> Result<(), Box<dyn Error>
 
     let addresses = [entry, entry + 0x10u64, entry + 0x20u64];
     for (index, address) in addresses.into_iter().enumerate() {
-        engine.apply_update(
-            ChangeSource::agent("symbol-agent"),
-            ProjectUpdate::add_symbol(
-                SymbolIndex::new(SymbolTableSelector::new(240), index),
-                SymbolEntry::new(
-                    address,
-                    format!("resynchronisation_symbol_{index}"),
-                    SymbolProperties::LOCAL,
-                ),
+        let mut updates = ProjectUpdates::new();
+        updates.add_symbol(
+            SymbolIndex::new(SymbolTableSelector::new(240), index),
+            SymbolEntry::new(
+                address,
+                format!("resynchronisation_symbol_{index}"),
+                SymbolProperties::LOCAL,
             ),
-        )?;
+        );
+        engine.apply_updates(ChangeSource::agent("symbol-agent"), updates)?;
     }
     engine.remove_symbol(SymbolIndex::new(SymbolTableSelector::new(240), 1))?;
     engine.analyse()?;

@@ -5,6 +5,7 @@ use digest::Digest as _;
 use fallible_iterator::FallibleIterator;
 use thiserror::Error;
 
+use crate::AnalysisData;
 use crate::arch::Arch;
 use crate::ir::Address;
 use crate::ir::symbol::TransientSymbolTable;
@@ -292,6 +293,8 @@ pub trait Loadable {
     ) -> impl FallibleIterator<Item = ImageSegmentContents<'a>, Error = LoaderError> + 'a;
 }
 
+#[derive(AnalysisData)]
+#[analysis_data(delegate)]
 pub enum Loader<'a> {
     Elf(elf::Elf<'a>),
     Pe(pe::Pe<'a>),

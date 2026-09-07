@@ -1,8 +1,6 @@
 use super::IlArtefact;
 use crate::analysis::AnalysisError;
-use crate::engine::{
-    AnalysisContext, DEFAULT_WORK_ITEM_MAX_ATTEMPTS, Priority, ProjectUpdate, ProjectView,
-};
+use crate::engine::{AnalysisContext, DEFAULT_WORK_ITEM_MAX_ATTEMPTS, Priority};
 use crate::ir::FunctionId;
 use crate::project::{AnalysisPhase, ChangeKinds, Project};
 
@@ -30,11 +28,9 @@ pub trait IlAnalyser: Send + Sized + 'static {
 
     fn analyse(
         &mut self,
-        project: &ProjectView<'_>,
+        context: &mut AnalysisContext<'_, '_>,
         function: FunctionId,
         input: &Self::Input,
-        cx: &AnalysisContext,
-        updates: &mut Vec<ProjectUpdate>,
     ) -> Result<(), AnalysisError>;
 
     fn produces(&self) -> ChangeKinds {

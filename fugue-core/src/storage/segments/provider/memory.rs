@@ -1,5 +1,7 @@
 use std::ops::RangeInclusive;
 
+use fugue_core_derive::SegmentStorageProvider;
+
 use crate::ir::{Address, AddressRangeExt};
 use crate::storage::segments::SegmentStorageError;
 use crate::storage::segments::overlay::OverlayTree;
@@ -9,7 +11,7 @@ use crate::storage::segments::provider::{
 };
 use crate::types::AttributeMap;
 
-#[derive(crate::SegmentStorageProvider)]
+#[derive(SegmentStorageProvider)]
 #[provider(tag = "in-memory", persistent = false)]
 pub struct InMemorySegmentStorage {
     base: usize,

@@ -1,45 +1,38 @@
 use std::collections::VecDeque;
 use std::mem;
-use std::ops::ControlFlow;
 
 use indexmap::{IndexMap, IndexSet};
 use itertools::Either;
 use rustc_hash::FxBuildHasher;
 use smallvec::SmallVec;
 
-use crate::analysis::control::{CancellationToken, Cancelled};
 use crate::analysis::function::recovery::analysis::FunctionRecoveryContext;
 use crate::analysis::function::recovery::structuring::FunctionStructurer;
 use crate::analysis::function::recovery::{FunctionRecoveryConfig, FunctionRecoveryError};
-use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
+use crate::analysis::{AnalysisGroup, AnalysisPass};
 use crate::arch::Arch;
-use crate::engine::ProjectView;
+use crate::engine::{AnalysisContext, ProjectView};
 use crate::ir::function::FunctionInsnIndex;
 use crate::ir::{
     Address, AddressRangeSet, AddressWithContext, FlowKind, FlowTarget, IncompleteCodeBlockId,
     IncompleteFunction, InsnEntry, ProblemKind,
 };
 use crate::lifter::{ContextSet, InsnResolver};
-use crate::project::ReadSet;
 use crate::storage::{SegmentMappingCache, SegmentStorage};
 use crate::types::Confidence;
 
-const INSN_CANCELLATION_CHECK_INTERVAL: usize = 64;
-
 pub struct StructuredFunctionContext {
-    cancellation: CancellationToken,
     config: FunctionRecoveryConfig,
     context: FunctionBuilderContext,
     function: IncompleteFunction,
     resolver: Option<InsnResolver>,
 }
 
-struct FunctionCandidateAnalysis<'a, 'p> {
+struct FunctionCandidateAnalysis<'a, 'b, 'p> {
+    analysis: &'a mut AnalysisContext<'b, 'p>,
     context: &'a FunctionRecoveryContext,
-    project: &'a ProjectView<'p>,
     resolver_slot: &'a mut Option<InsnResolver>,
     candidate: AddressWithContext,
-    token: &'a CancellationToken,
     config: &'a FunctionRecoveryConfig,
     pre_resolution_passes: &'a mut AnalysisGroup<FunctionBuilderContext>,
     post_structuring_passes: &'a mut AnalysisGroup<StructuredFunctionContext>,
@@ -50,7 +43,6 @@ struct InsnResolution<'a, 'p> {
     config: &'a FunctionRecoveryConfig,
     context: &'a FunctionRecoveryContext,
     project: &'a ProjectView<'p>,
-    token: &'a CancellationToken,
 }
 
 pub(crate) struct FunctionCandidateOutcome {
@@ -58,7 +50,7 @@ pub(crate) struct FunctionCandidateOutcome {
     avoids: AddressRangeSet,
     confidence: Confidence,
     problems: SmallVec<[(Address, ProblemKind); 4]>,
-    result: Option<Result<ControlFlow<Cancelled, IncompleteFunction>, FunctionRecoveryError>>,
+    result: Option<Result<IncompleteFunction, FunctionRecoveryError>>,
     targets: SmallVec<[AddressWithContext; 4]>,
 }
 
@@ -67,7 +59,7 @@ impl FunctionCandidateOutcome {
         address: Address,
         confidence: Confidence,
         problems: SmallVec<[(Address, ProblemKind); 4]>,
-        result: Result<ControlFlow<Cancelled, IncompleteFunction>, FunctionRecoveryError>,
+        result: Result<IncompleteFunction, FunctionRecoveryError>,
         targets: SmallVec<[AddressWithContext; 4]>,
     ) -> Self {
         Self {
@@ -100,9 +92,7 @@ impl FunctionCandidateOutcome {
         self.targets.drain(..)
     }
 
-    pub(crate) fn take_result(
-        &mut self,
-    ) -> Result<ControlFlow<Cancelled, IncompleteFunction>, FunctionRecoveryError> {
+    pub(crate) fn take_result(&mut self) -> Result<IncompleteFunction, FunctionRecoveryError> {
         self.result
             .take()
             .expect("candidate result must only be taken once")
@@ -124,7 +114,6 @@ enum FunctionCandidatePhase {
     Structured(usize),
     Finished,
     Failed(FunctionRecoveryError),
-    Cancelled(Cancelled),
 }
 
 enum BlockContexts {
@@ -299,18 +288,16 @@ impl FunctionBuilder {
 
     fn analyse(
         &mut self,
-        project: &ProjectView<'_>,
+        analysis: &mut AnalysisContext<'_, '_>,
         context: &FunctionRecoveryContext,
         resolver_slot: &mut Option<InsnResolver>,
         candidate: impl Into<AddressWithContext>,
-        token: &CancellationToken,
-    ) -> Result<ControlFlow<Cancelled, IncompleteFunction>, FunctionRecoveryError> {
+    ) -> Result<IncompleteFunction, FunctionRecoveryError> {
         self.context.analyse(FunctionCandidateAnalysis {
+            analysis,
             context,
-            project,
             resolver_slot,
             candidate: candidate.into(),
-            token,
             config: &self.config,
             pre_resolution_passes: &mut self.pre_resolution_passes,
             post_structuring_passes: &mut self.post_structuring_passes,
@@ -319,15 +306,14 @@ impl FunctionBuilder {
 
     pub(super) fn analyse_candidate(
         &mut self,
-        project: &ProjectView<'_>,
+        analysis: &mut AnalysisContext<'_, '_>,
         context: &FunctionRecoveryContext,
         resolver_slot: &mut Option<InsnResolver>,
         candidate: AddressWithContext,
-        token: &CancellationToken,
     ) -> FunctionCandidateOutcome {
         let address = candidate.address();
         let confidence = candidate.confidence();
-        let result = self.analyse(project, context, resolver_slot, candidate, token);
+        let result = self.analyse(analysis, context, resolver_slot, candidate);
         FunctionCandidateOutcome::from_result(
             address,
             confidence,
@@ -355,10 +341,6 @@ impl FunctionBuilder {
 }
 
 impl StructuredFunctionContext {
-    pub fn cancellation(&self) -> &CancellationToken {
-        &self.cancellation
-    }
-
     pub fn config(&self) -> &FunctionRecoveryConfig {
         &self.config
     }
@@ -542,13 +524,12 @@ impl FunctionBuilderContext {
         resolution: &InsnResolution<'_, '_>,
         resolver: &mut InsnResolver,
         f: &mut IncompleteFunction,
-    ) -> Result<ControlFlow<Cancelled>, FunctionRecoveryError> {
+    ) -> Result<(), FunctionRecoveryError> {
         let InsnResolution {
             avoidance_baseline,
             config,
             context,
             project,
-            token,
         } = resolution;
 
         let is_avoided = |additions: &AddressRangeSet, address| {
@@ -568,10 +549,6 @@ impl FunctionBuilderContext {
             .expect("function entry is valid");
 
         'outer: while let Some(candidate) = self.candidates.pop_front() {
-            if let Err(cancelled) = token.check() {
-                return Ok(ControlFlow::Break(cancelled));
-            }
-
             let (block, mut context) = candidate.into_parts();
 
             // This ensures correct alignment, to address is correctly wrapped with respect to
@@ -637,7 +614,6 @@ impl FunctionBuilderContext {
             .unwrap_or(usize::MAX);
             let bytes = &bytes[..bytes.len().min(remaining)];
             let mut offset = 0usize;
-            let mut cancellation_check = INSN_CANCELLATION_CHECK_INTERVAL;
             let mut mapping_hints = view.mapping_hints_from(block);
             let mut next_mapping_hint = mapping_hints.next();
             let next_function_entry = function_entries
@@ -646,14 +622,6 @@ impl FunctionBuilderContext {
                 .filter(|entry| entry.space() == block.space());
 
             while offset < bytes.len() {
-                if cancellation_check == 0 {
-                    if let Err(cancelled) = token.check() {
-                        return Ok(ControlFlow::Break(cancelled));
-                    }
-                    cancellation_check = INSN_CANCELLATION_CHECK_INTERVAL;
-                }
-                cancellation_check -= 1;
-
                 let address = block + offset;
 
                 if next_function_entry.is_some_and(|entry| address >= entry) {
@@ -849,7 +817,7 @@ impl FunctionBuilderContext {
             self.add_candidate(AddressWithContext::new(boundary, context));
         }
 
-        Ok(ControlFlow::Continue(()))
+        Ok(())
     }
 
     fn structure_blocks(
@@ -869,8 +837,8 @@ impl FunctionBuilderContext {
 
     fn analyse(
         &mut self,
-        analysis: FunctionCandidateAnalysis<'_, '_>,
-    ) -> Result<ControlFlow<Cancelled, IncompleteFunction>, FunctionRecoveryError> {
+        analysis: FunctionCandidateAnalysis<'_, '_, '_>,
+    ) -> Result<IncompleteFunction, FunctionRecoveryError> {
         // We have three main stages:
         //
         // 1. We first prepare the function builder with the entry point and the context
@@ -885,7 +853,6 @@ impl FunctionBuilderContext {
         // main loop and after each block discovery pass has completed within the main loop.
         //
         let mut candidate = analysis.candidate;
-
         tracing::debug!("exploring from {candidate}");
 
         self.clear();
@@ -895,6 +862,7 @@ impl FunctionBuilderContext {
             // NOTE: this expect is safe because the entry address must be valid to reach this
             // point under normal usage.
             let view = analysis
+                .analysis
                 .project
                 .segments()
                 .view_containing(self.entry)
@@ -917,15 +885,11 @@ impl FunctionBuilderContext {
         self.add_candidate(candidate);
 
         // Apply the pre-resolution passes
-        match analysis
+        if let Err(error) = analysis
             .pre_resolution_passes
-            .analyse_with(analysis.project, self)
+            .analyse_with(analysis.analysis, self)
         {
-            Ok(()) => {}
-            Err(AnalysisError::Cancelled(cancelled)) => {
-                return Ok(ControlFlow::Break(cancelled));
-            }
-            Err(e) => return Err(FunctionRecoveryError::PreResolutionPass(e)),
+            return Err(FunctionRecoveryError::PreResolutionPass(error));
         }
 
         let mut incomplete = IncompleteFunction::with_recycled_insn_index(
@@ -934,28 +898,23 @@ impl FunctionBuilderContext {
         );
 
         loop {
-            if let Err(cancelled) = analysis.token.check() {
-                return Ok(ControlFlow::Break(cancelled));
-            }
-
             let resolver = analysis
                 .resolver_slot
                 .as_mut()
                 .expect("function builder resolver must be available");
 
-            match self.resolve_insns(
-                &InsnResolution {
-                    avoidance_baseline: None,
-                    config: analysis.config,
-                    context: analysis.context,
-                    project: analysis.project,
-                    token: analysis.token,
-                },
-                resolver,
-                &mut incomplete,
-            )? {
-                ControlFlow::Continue(()) => {}
-                ControlFlow::Break(cancelled) => return Ok(ControlFlow::Break(cancelled)),
+            {
+                let project = &analysis.analysis.project;
+                self.resolve_insns(
+                    &InsnResolution {
+                        avoidance_baseline: None,
+                        config: analysis.config,
+                        context: analysis.context,
+                        project,
+                    },
+                    resolver,
+                    &mut incomplete,
+                )?;
             }
 
             if !incomplete.has_insns() {
@@ -968,7 +927,6 @@ impl FunctionBuilderContext {
             let num_local_targets = self.local_targets.len();
 
             let mut structured = StructuredFunctionContext {
-                cancellation: analysis.token.clone(),
                 config: *analysis.config,
                 context: mem::take(self),
                 function: mem::take(&mut incomplete),
@@ -978,22 +936,14 @@ impl FunctionBuilderContext {
             // Run post-structuring passes
             let result = analysis
                 .post_structuring_passes
-                .analyse_with(analysis.project, &mut structured);
+                .analyse_with(analysis.analysis, &mut structured);
 
             *self = structured.context;
             incomplete = structured.function;
             *analysis.resolver_slot = structured.resolver;
 
-            match result {
-                Ok(()) => {}
-                Err(AnalysisError::Cancelled(cancelled)) => {
-                    return Ok(ControlFlow::Break(cancelled));
-                }
-                Err(e) => return Err(FunctionRecoveryError::PostStructuringPass(e)),
-            }
-
-            if let Err(cancelled) = analysis.token.check() {
-                return Ok(ControlFlow::Break(cancelled));
+            if let Err(error) = result {
+                return Err(FunctionRecoveryError::PostStructuringPass(error));
             }
 
             if self.candidates.is_empty() && self.local_targets.len() == num_local_targets {
@@ -1010,7 +960,7 @@ impl FunctionBuilderContext {
         );
         self.insn_index = incomplete.recycle_insn_index();
 
-        Ok(ControlFlow::Continue(incomplete))
+        Ok(incomplete)
     }
 }
 
@@ -1054,12 +1004,14 @@ impl<'p> FunctionCandidateState<'p> {
         }
     }
 
+    pub(super) fn view(&self) -> &ProjectView<'p> {
+        &self.view
+    }
+
     pub(crate) fn is_finished(&self) -> bool {
         matches!(
             self.phase,
-            FunctionCandidatePhase::Finished
-                | FunctionCandidatePhase::Failed(_)
-                | FunctionCandidatePhase::Cancelled(_)
+            FunctionCandidatePhase::Finished | FunctionCandidatePhase::Failed(_)
         )
     }
 
@@ -1067,38 +1019,24 @@ impl<'p> FunctionCandidateState<'p> {
         &mut self,
         config: &FunctionRecoveryConfig,
         context: &FunctionRecoveryContext,
-        token: &CancellationToken,
         resolver: &mut InsnResolver,
         avoidance_baseline: &AddressRangeSet,
     ) {
         if !matches!(self.phase, FunctionCandidatePhase::Resolving) {
             return;
         }
-        if let Err(cancelled) = token.check() {
-            self.phase = FunctionCandidatePhase::Cancelled(cancelled);
-            return;
-        }
-
-        match self.context.resolve_insns(
+        if let Err(error) = self.context.resolve_insns(
             &InsnResolution {
                 avoidance_baseline: Some(avoidance_baseline),
                 config,
                 context,
                 project: &self.view,
-                token,
             },
             resolver,
             &mut self.function,
         ) {
-            Ok(ControlFlow::Continue(())) => {}
-            Ok(ControlFlow::Break(cancelled)) => {
-                self.phase = FunctionCandidatePhase::Cancelled(cancelled);
-                return;
-            }
-            Err(error) => {
-                self.phase = FunctionCandidatePhase::Failed(error);
-                return;
-            }
+            self.phase = FunctionCandidatePhase::Failed(error);
+            return;
         }
         if !self.function.has_insns() {
             self.phase = FunctionCandidatePhase::Failed(FunctionRecoveryError::InvalidFunction);
@@ -1114,40 +1052,29 @@ impl<'p> FunctionCandidateState<'p> {
 
     pub(crate) fn apply_post_structuring_passes(
         &mut self,
+        analysis: &mut AnalysisContext<'_, 'p>,
         config: &FunctionRecoveryConfig,
         passes: &mut AnalysisGroup<StructuredFunctionContext>,
-        token: &CancellationToken,
     ) {
         let FunctionCandidatePhase::Structured(previous_local_targets) = self.phase else {
             return;
         };
 
         let mut structured = StructuredFunctionContext {
-            cancellation: token.clone(),
             config: *config,
             context: mem::take(&mut self.context),
             function: mem::take(&mut self.function),
             resolver: None,
         };
-        let result = passes.analyse_with(&self.view, &mut structured);
+        let result = analysis.with_project(&mut self.view, |analysis| {
+            passes.analyse_with(analysis, &mut structured)
+        });
         self.context = structured.context;
         self.function = structured.function;
 
-        match result {
-            Ok(()) => {}
-            Err(AnalysisError::Cancelled(cancelled)) => {
-                self.phase = FunctionCandidatePhase::Cancelled(cancelled);
-                return;
-            }
-            Err(error) => {
-                self.phase = FunctionCandidatePhase::Failed(
-                    FunctionRecoveryError::PostStructuringPass(error),
-                );
-                return;
-            }
-        }
-        if let Err(cancelled) = token.check() {
-            self.phase = FunctionCandidatePhase::Cancelled(cancelled);
+        if let Err(error) = result {
+            self.phase =
+                FunctionCandidatePhase::Failed(FunctionRecoveryError::PostStructuringPass(error));
             return;
         }
         if self.context.candidates.is_empty()
@@ -1159,7 +1086,7 @@ impl<'p> FunctionCandidateState<'p> {
         }
     }
 
-    pub(crate) fn finish(mut self) -> (ReadSet, FunctionCandidateOutcome) {
+    pub(crate) fn finish(mut self) -> FunctionCandidateOutcome {
         if matches!(self.phase, FunctionCandidatePhase::Finished) {
             self.function.set_tail_call_sites(
                 self.context
@@ -1171,22 +1098,20 @@ impl<'p> FunctionCandidateState<'p> {
             self.context.insn_index = self.function.recycle_insn_index();
         }
         let result = match self.phase {
-            FunctionCandidatePhase::Finished => Ok(ControlFlow::Continue(self.function)),
+            FunctionCandidatePhase::Finished => Ok(self.function),
             FunctionCandidatePhase::Failed(error) => Err(error),
-            FunctionCandidatePhase::Cancelled(cancelled) => Ok(ControlFlow::Break(cancelled)),
             FunctionCandidatePhase::Resolving | FunctionCandidatePhase::Structured(_) => {
                 unreachable!("candidate must be finished before producing its outcome")
             }
         };
-        let outcome = FunctionCandidateOutcome {
+        FunctionCandidateOutcome {
             address: self.address,
             avoids: self.context.avoids,
             confidence: self.confidence,
             problems: self.context.problems,
             result: Some(result),
             targets: self.context.global_targets.into_iter().collect(),
-        };
-        (self.view.into_reads(), outcome)
+        }
     }
 
     pub(crate) fn into_candidate(self) -> AddressWithContext {

@@ -202,7 +202,6 @@ impl fmt::Display for PCodeOpDisplay<'_> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::analysis::control::CancellationToken;
     use crate::il::common::{IlGraph, IlIndexRange, IlMetadata, IlOpId, IlSourceSpan};
     use crate::il::pcode::{
         PCodeBuilder, PCodeLifterSpaceHandle, PCodeLocationProperties, PCodeOpSpec,
@@ -248,7 +247,7 @@ mod test {
             )
             .unwrap();
 
-        let ir = builder.build(&CancellationToken::default()).unwrap();
+        let ir = builder.build().unwrap();
 
         assert_eq!(
             ir.display().to_string(),
@@ -300,7 +299,7 @@ mod test {
             )
             .unwrap();
 
-        let ir = builder.build(&CancellationToken::default()).unwrap();
+        let ir = builder.build().unwrap();
         let operations = ir.ops_for_source(second).collect::<Vec<_>>();
 
         assert_eq!(operations.len(), 1);

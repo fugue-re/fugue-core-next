@@ -219,7 +219,7 @@ impl Platform {
         self.calling_convention
     }
 
-    pub(crate) fn compiler_spec_id(&self) -> &'static str {
+    pub fn compiler_spec_id(&self) -> &'static str {
         self.compiler_spec_id.as_str()
     }
 
@@ -243,7 +243,7 @@ impl Platform {
         self.calling_convention = calling_convention;
     }
 
-    pub(crate) fn set_compiler_spec_id(&mut self, compiler_spec_id: impl AsRef<str>) {
+    pub fn set_compiler_spec_id(&mut self, compiler_spec_id: impl AsRef<str>) {
         self.compiler_spec_id = Ustr::from(compiler_spec_id.as_ref());
     }
 
@@ -269,7 +269,7 @@ impl Platform {
         self
     }
 
-    pub(crate) fn with_compiler_spec_id(mut self, compiler_spec_id: impl AsRef<str>) -> Self {
+    pub fn with_compiler_spec_id(mut self, compiler_spec_id: impl AsRef<str>) -> Self {
         self.set_compiler_spec_id(compiler_spec_id);
         self
     }

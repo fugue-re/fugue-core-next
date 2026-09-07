@@ -16,8 +16,32 @@ names = [
 prefixes = ["get"]
 suffixes = ["at", "page"]
 
+[parameters]
+first = ["AnalysisContext"]
+
 [vocabulary]
 acronyms = ["ecode", "mcode", "pcode"]
+
+[[vocabulary.term]]
+reject = "tests"
+prefer = "test"
+roles = ["module"]
+modules = ["crate"]
+reason = "Rust test modules use the repository-wide singular `test` name"
+
+[[vocabulary.term]]
+reject = "data"
+prefer = "place engine-owned invocation resources in crate::engine"
+roles = ["module"]
+modules = ["crate::analysis"]
+reason = "analysis data is engine invocation infrastructure, not an analysis implementation"
+
+[[vocabulary.term]]
+reject = "parts"
+prefer = "use the public AnalysisContext resource fields directly"
+roles = ["type"]
+modules = ["crate::engine"]
+reason = "AnalysisContext must not gain a split-borrow wrapper"
 
 [[vocabulary.term]]
 reject = "argument"
@@ -62,6 +86,69 @@ modules = ["crate::arch"]
 reason = "architecture intrinsic hooks use P-code user-op identifiers"
 
 [[vocabulary.term]]
+reject = "finalise"
+prefer = "finish"
+roles = ["field", "function", "local", "method", "module", "type", "variant"]
+modules = ["crate"]
+reason = "project-owned completion identifiers use finish consistently"
+
+[[vocabulary.term]]
+reject = "finalize"
+prefer = "finish"
+roles = ["field", "function", "local", "method", "module", "type", "variant"]
+modules = ["crate"]
+reason = "project-owned completion identifiers use finish consistently"
+
+[[vocabulary.term]]
+reject = "wave"
+prefer = "describe the concrete recovery state"
+roles = ["field", "function", "local", "method", "module", "type", "variant"]
+modules = ["crate::analysis::function::recovery"]
+reason = "function recovery has no wave lifecycle"
+
+[[vocabulary.term]]
+reject = "chunk"
+prefer = "invocation, batch, or the concrete representation term"
+roles = ["field", "function", "local", "method", "module", "type", "variant"]
+modules = ["crate::analysis::function::recovery"]
+reason = "chunk is overloaded and does not identify function-recovery ownership"
+
+[[vocabulary.term]]
+reject = "queue"
+prefer = "add"
+roles = ["function", "method"]
+modules = ["crate::analysis::function::recovery"]
+reason = "candidate registration uses the established add_candidate vocabulary"
+
+[[vocabulary.term]]
+reject = "run"
+prefer = "apply"
+roles = ["function", "method"]
+modules = ["crate::analysis::function::recovery"]
+reason = "analysis hook execution uses apply vocabulary"
+
+[[vocabulary.term]]
+reject = "initialisation"
+prefer = "pre_resolution"
+roles = ["field", "function", "method", "type", "variant"]
+modules = ["crate::analysis::function::recovery"]
+reason = "the general function-builder hook runs before instruction resolution"
+
+[[vocabulary.term]]
+reject = "idle"
+prefer = "name the concrete recovery state or transition"
+roles = ["field", "function", "local", "method", "type", "variant"]
+modules = ["crate::analysis::function::recovery"]
+reason = "function recovery has no generic idle lifecycle state"
+
+[[vocabulary.term]]
+reject = "inputs"
+prefer = "context or the concrete fact collection"
+roles = ["field", "method", "type"]
+modules = ["crate::analysis::function::recovery"]
+reason = "retained function-recovery facts are context, not generic inputs"
+
+[[vocabulary.term]]
 reject = "ssa"
 prefer = "omit the redundant SSA marker"
 roles = ["module", "type"]
@@ -72,6 +159,7 @@ reason = "SSA is an invariant of the only MCode form, not a namespace or type di
 additional = [
     "canonicalise",
     "compact",
+    "configure",
     "convert",
     "evaluate",
     "fold",
@@ -127,6 +215,10 @@ modules = ["crate::il::ecode::optimise::required", "crate::il::mcode::optimise::
 [[family]]
 name = "ecode-mcode-values"
 modules = ["crate::il::ecode::value", "crate::il::mcode::value"]
+
+[[family]]
+name = "switch-recovery-strategies"
+modules = ["crate::analysis::switch::idiom", "crate::analysis::switch::interval"]
 
 [[family]]
 name = "ir-entity-tables"
@@ -332,12 +424,6 @@ reason = "the (table, index, index_before) triple is match-internal plumbing bet
 rule = "tuple_type"
 path = "fugue-core/src/ir/symbol/table"
 reason = "the symbol iteration triple is the same transient view across facade and worker layers; a named record would restate SymbolEntry"
-
-[[exception]]
-rule = "index_conversion_churn"
-path = "fugue-core/src/analysis/switch/idiom/recovery.rs"
-item = "recover_operations"
-reason = "the recovered-window arithmetic bridges raw pcode indices, byte offsets and id spaces; each conversion is the boundary"
 
 [[exception]]
 rule = "accessor_family"
@@ -610,12 +696,6 @@ item = "crate::storage::entities::EntityStorage::contains"
 reason = "contains follows the write operations to preserve the provider and backend API's established CRUD ordering"
 
 [[exception]]
-rule = "impl_method_order"
-path = "fugue-core/src/analysis/control.rs"
-item = "crate::analysis::control::CancellationToken::cancel"
-reason = "cancel is an action on the shared cancellation state, not an accessor"
-
-[[exception]]
 rule = "unnecessary_wraps"
 path = "fugue-core/src/analysis/combinator.rs"
 reason = "the test helper implements the fallible AnalysisPass callback contract"
@@ -628,24 +708,18 @@ reason = "the test helper implements the fallible AnalysisPass callback contract
 [[exception]]
 rule = "unnecessary_wraps"
 path = "fugue-core/src/analysis/non_returning/mod.rs"
-reason = "the extension apply function must match the fallible FunctionRecoveryExtension callback contract"
+reason = "the extension configure function must match the fallible FunctionRecoveryExtension callback contract"
 
 [[exception]]
 rule = "unnecessary_wraps"
-path = "fugue-core/src/analysis/switch/analysis.rs"
-reason = "the extension apply function must match the fallible FunctionRecoveryExtension callback contract"
+path = "fugue-core/src/analysis/switch/mod.rs"
+reason = "the extension configure function must match the fallible FunctionRecoveryExtension callback contract"
 
 [[exception]]
 rule = "split_inherent_impl"
 path = "fugue-core/src/project/transaction"
 item = "crate::project::transaction::ProjectTransaction"
 reason = "ProjectTransaction is the intentional flat public facade over domain-owned transaction operations; co-locating the methods would collapse the project transaction API into one module"
-
-[[exception]]
-rule = "split_inherent_impl"
-path = "fugue-core/src/loader/elf/extensions.rs"
-item = "crate::loader::elf::extensions::FunctionRecoveryExtension"
-reason = "#[fugue_core::extension] consumes this apparent impl and emits free functions plus registration, so no split inherent impl exists after expansion"
 
 [[exception]]
 rule = "split_inherent_impl"
@@ -658,12 +732,6 @@ rule = "split_inherent_impl"
 path = "fugue-core/src/loader/pe/relocations"
 item = "crate::loader::pe::relocations::PeSegmentRelocator"
 reason = "architecture-owned relocation methods deliberately share the relocator's private state; replacing the split impl with free functions would change syntax only and widen the state interface"
-
-[[exception]]
-rule = "split_inherent_impl"
-path = "fugue-core/src/analysis/switch/interval"
-item = "crate::analysis::switch::interval::SwitchIntervalRecovery"
-reason = "guard and table-layout recovery are focused parts of the same analysis over shared private state; extracting collaborators would add forwarding and state plumbing without creating separate ownership"
 
 [[exception]]
 rule = "duplicate_helper"
@@ -920,19 +988,13 @@ reason = "AnalyserProvider requires this callback to return Result; macro regist
 [[exception]]
 rule = "unnecessary_wraps"
 path = "fugue-core/tests/engine.rs"
-item = "crate::build_cancelling_analyser"
-reason = "AnalyserProvider requires this callback to return Result; macro registration hides the required coercion from Clippy"
+item = "crate::FunctionRecoveryExtension::configure"
+reason = "FunctionRecoveryExtension requires this callback to return Result; macro registration hides the required coercion from Clippy"
 
 [[exception]]
 rule = "unnecessary_wraps"
-path = "fugue-core/tests/engine.rs"
-item = "crate::build_cancellation_follow_up_analyser"
-reason = "AnalyserProvider requires this callback to return Result; macro registration hides the required coercion from Clippy"
-
-[[exception]]
-rule = "unnecessary_wraps"
-path = "fugue-core/tests/engine.rs"
-item = "crate::configure_test_recovery"
+path = "fugue-core-idalib/src/lib.rs"
+item = "crate::FunctionRecoveryExtension::configure"
 reason = "FunctionRecoveryExtension requires this callback to return Result; macro registration hides the required coercion from Clippy"
 
 [[exception]]
@@ -940,3 +1002,136 @@ rule = "unnecessary_wraps"
 path = "fugue-core/tests/engine_diagnostics.rs"
 item = "crate::build_rejecting_collapse_analyser"
 reason = "AnalyserProvider requires this callback to return Result; macro registration hides the required coercion from Clippy"
+
+[[exception]]
+rule = "companion_location"
+path = "fugue-core/src/analysis/function/recovery/builder.rs"
+item = "crate::analysis::function::recovery::builder::FunctionBuilder"
+reason = "FunctionBuilder is the private recovery algorithm which produces IncompleteFunction candidates; it is not a construction companion for the persisted Function IR type"
+
+[[exception]]
+rule = "semantic_newtype_bypass"
+path = "fugue-core/src/analysis/function/recovery/mod.rs"
+reason = "candidate, function and output-byte ceilings are distinct recovery resources; IterationLimit models analysis-combinator iteration counts and is not their domain type"
+
+[[exception]]
+rule = "macro_skipped"
+path = "fugue-core/src/analysis/non_returning/externs.rs"
+reason = "the skipped invocation registers the analyser provider; the analyser implementation itself is declared directly and remains auditable"
+
+[[exception]]
+rule = "tuple_type"
+path = "fugue-core/src/analysis/switch/interval/layout.rs"
+item = "crate::analysis::switch::interval::layout::SwitchLayoutAnalysis::table_layout"
+reason = "the loaded-table triple is immediately destructured into SwitchTableLayout; another layout record would duplicate that enum"
+
+[[exception]]
+rule = "tuple_type"
+path = "fugue-core/src/analysis/switch/interval/layout.rs"
+item = "crate::analysis::switch::interval::layout::SwitchLayoutAnalysis::inline_table_layout"
+reason = "the inline-table triple is immediately destructured into SwitchTableLayout; another layout record would duplicate that enum"
+
+[[exception]]
+rule = "index_conversion_churn"
+path = "fugue-core/src/analysis/switch/interval/mod.rs"
+item = "crate::analysis::switch::interval::SwitchIntervalRecovery::resolve_layout"
+reason = "switch recovery converts at the distinct BitVec value, table-entry u32, byte-size usize and IR element-count boundaries"
+
+[[exception]]
+rule = "tuple_type"
+path = "fugue-core/src/analysis/switch/interval/mod.rs"
+item = "crate::analysis::switch::interval::SwitchIntervalRecovery::case_enumeration"
+reason = "the interval, optional guard and label offset are transient return plumbing consumed immediately by resolve_layout; a second case-analysis record was reviewed and rejected"
+
+[[exception]]
+rule = "role_mismatch"
+path = "fugue-core/src/analysis/switch/interval/mod.rs"
+item = "crate::analysis::switch::interval::SwitchIntervalRecovery::case_enumeration::index"
+reason = "index is the switch-table index expression; IlValueId is its SSA representation rather than its domain role"
+
+[[exception]]
+rule = "unresolved_impl_owner"
+path = "fugue-core/src/analysis/switch/mod.rs"
+reason = "#[fugue_core::extension] consumes the apparent impl and emits a FunctionRecoveryExtension registration before Rust resolves an inherent impl owner"
+
+[[exception]]
+rule = "macro_skipped"
+path = "fugue-core/src/analysis/value/strided.rs"
+reason = "the macros generate the reviewed owned and borrowed standard-operator implementation matrix without duplicating each forwarding body"
+
+[[exception]]
+rule = "rejected_term"
+path = "fugue-core-derive/src/lib.rs"
+item = "crate::analysis::AnalysisDataDelegation"
+reason = "the compound name identifies the derive macro's analysis-data delegation model; bare Delegation loses its domain"
+
+[[exception]]
+rule = "rejected_term"
+path = "fugue-core/src/engine/mod.rs"
+item = "crate::engine::AnalysisData"
+reason = "AnalysisData is the agreed domain term for values supplied to analysis through the engine"
+
+[[exception]]
+rule = "rejected_term"
+path = "fugue-core/src/engine/mod.rs"
+item = "crate::engine::AnalysisDataError"
+reason = "AnalysisDataError names failures from the agreed AnalysisData lookup contract"
+
+[[exception]]
+rule = "rejected_term"
+path = "fugue-core/src/engine/mod.rs"
+item = "crate::engine::AnalysisDataStore"
+reason = "AnalysisDataStore is the agreed name for the engine-owned collection of AnalysisData values"
+
+[[exception]]
+rule = "method_family_name"
+path = "fugue-core/src/engine/mod.rs"
+item = "crate::engine::AnalysisEngine::set_data"
+reason = "set_data synchronously replaces worker-owned AnalysisData through the engine's interior command transport"
+
+[[exception]]
+rule = "unresolved_impl_owner"
+path = "fugue-core/src/loader/elf/function_recovery/mod.rs"
+reason = "#[fugue_core::extension] consumes the apparent impl and emits a FunctionRecoveryExtension registration before Rust resolves an inherent impl owner"
+
+[[exception]]
+rule = "associated_namespace_helper"
+path = "fugue-core/src/storage/segments/mod.rs"
+item = "crate::storage::segments::SegmentStorage::read_metadata"
+reason = "SegmentStorage owns reconstruction from its persisted representation; the metadata record remains a serialisation carrier without filesystem responsibility"
+
+[[exception]]
+rule = "constructor_role"
+path = "fugue-core/src/storage/segments/mod.rs"
+item = "crate::storage::segments::SegmentStorage::read_metadata"
+reason = "read_metadata performs the storage aggregate's file I/O and decoding; SegmentStorageMetadata is deliberately only the decoded carrier"
+
+[[exception]]
+rule = "synonym_cluster"
+path = "fugue-core/src/storage/segments/staging.rs"
+item = "crate::storage::segments::staging::PreparedSegmentWriteRecord::new"
+reason = "new constructs private staging records while create_mapping stages a domain mutation; the verbs describe different operations"
+
+[[exception]]
+rule = "repeated_mechanics"
+path = "fugue-core/src/storage/segments/staging.rs"
+item = "crate::storage::segments::staging::SegmentStorageStaging::remap_mapping"
+reason = "remap and resize intentionally mirror validation while applying different SegmentMappingBuilder invariants; a setter callback would obscure the mutation"
+
+[[exception]]
+rule = "repeated_mechanics"
+path = "fugue-core/src/storage/segments/staging.rs"
+item = "crate::storage::segments::staging::SegmentStorageStaging::resize_mapping"
+reason = "remap and resize intentionally mirror validation while applying different SegmentMappingBuilder invariants; a setter callback would obscure the mutation"
+
+[[exception]]
+rule = "repeated_mechanics"
+path = "fugue-core/src/storage/segments/staging.rs"
+item = "crate::storage::segments::staging::SegmentStorageStaging::add_mapping_with_placement"
+reason = "add and reprioritise deliberately express opposing membership preconditions before publishing the same placement operation"
+
+[[exception]]
+rule = "repeated_mechanics"
+path = "fugue-core/src/storage/segments/staging.rs"
+item = "crate::storage::segments::staging::SegmentStorageStaging::reprioritise_mapping"
+reason = "add and reprioritise deliberately express opposing membership preconditions before publishing the same placement operation"

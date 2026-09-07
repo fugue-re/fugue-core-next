@@ -17,9 +17,9 @@ pub mod patcher;
 pub mod types;
 mod util;
 
-pub use self::core::LifterGenerator;
-pub use self::error::LifterGeneratorError;
-pub use self::patcher::{PatchSet, PatcherError};
+pub use core::LifterGenerator;
+pub use error::LifterGeneratorError;
+pub use patcher::{PatchSet, PatcherError};
 
 #[derive(Debug, Error)]
 pub enum CodegenError {

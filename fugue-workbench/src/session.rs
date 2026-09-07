@@ -179,6 +179,5 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
-        let _ = self.engine.cancel();
     }
 }

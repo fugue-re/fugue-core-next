@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt::Debug;
 use std::ops::Bound;
@@ -11,37 +11,30 @@ use std::{io, iter, thread};
 use bytes::Bytes;
 use fallible_iterator::{FallibleIterator, convert};
 use fugue_core::analysis::AnalysisError;
-use fugue_core::analysis::control::Cancelled;
-use fugue_core::analysis::function::{
-    FunctionRecovery, FunctionRecoveryCommitContext, FunctionRecoveryCommitHook,
-    FunctionRecoveryError, FunctionRecoveryExtension,
-};
+use fugue_core::analysis::function::{FunctionRecovery, FunctionRecoveryExtension};
 use fugue_core::analysis::switch::SwitchRecovery;
 use fugue_core::arch::Arch;
 use fugue_core::engine::{
     Analyser, AnalyserProvider, AnalysisContext, AnalysisEngine, EngineError,
-    MappingMetadataUpdate, Priority, ProjectUpdate, ProjectView, Subscription,
+    MappingMetadataUpdate, Priority, ProjectUpdates, ProjectView, Subscription,
 };
-use fugue_core::extension::{self, Registration};
-use fugue_core::il::common::{IlArtefact, IlError, RegisterId};
+use fugue_core::extension;
+use fugue_core::il::common::{IlArtefact, RegisterId};
 use fugue_core::il::ecode::ECodeIr;
 use fugue_core::il::mcode::{MCodeIr, MCodeOpcode, MCodeVarKind};
 use fugue_core::il::pcode::PCodeIr;
 use fugue_core::ir::{
-    Address, AddressRange, AddressRangeSet, AddressTable, AddressWithContext, Endian, FlowKind,
-    ProblemKind, ProblemScope, RawAddress, Reference, ReferenceOrigin, ReferenceProperties,
-    ReferenceTarget, Switch, SwitchCase, SwitchId, SwitchModel, SymbolEntry, SymbolIndex,
-    SymbolProperties, SymbolTableSelector,
+    Address, AddressRange, AddressRangeSet, AddressTable, AddressWithContext, Endian, ProblemKind,
+    ProblemScope, RawAddress, Reference, ReferenceProperties, ReferenceTarget, Switch, SwitchCase,
+    SwitchId, SwitchModel, SymbolEntry, SymbolIndex, SymbolProperties, SymbolTableSelector,
 };
 use fugue_core::lifter::{ContextSet, resolve_language};
 use fugue_core::loader::{
-    ImageAddress, ImageBacking, ImageBank, ImageBankHandle, ImageLayout, ImageSegment,
+    Elf, ImageAddress, ImageBacking, ImageBank, ImageBankHandle, ImageLayout, ImageSegment,
     ImageSegmentContents, ImageSegmentContentsIterator, ImageSegmentIterator, ImageSpace,
-    ImageSpaceHandle, Loadable, LoadableAnalysers, LoadableMetadata, Loader, LoaderError,
+    ImageSpaceHandle, Loadable, LoadableMetadata, Loader, LoaderError,
 };
-use fugue_core::project::{
-    ChangeCategory, ChangeKinds, ChangeRecord, ChangeSource, Project, ProjectError,
-};
+use fugue_core::project::{ChangeCategory, ChangeKinds, ChangeRecord, ChangeSource, Project};
 use fugue_core::queries::{CallEdge, MappingEntity, QueryError, QueryPage, SymbolEntity};
 use fugue_core::storage::{
     BufferedEntityWriter, DEFAULT_SPACE_ID, ENTITY_PROJECT_REVISION_ID, EntityBytesReadTransaction,
@@ -66,7 +59,11 @@ use common::{one_block_function, writable_address};
 
 const EXPECTED_DEFAULT_WORK_ITEM_MAX_ATTEMPTS: usize = 3;
 const TEST_ANALYSER_ATTR: &str = "fugue.test.engine-analyser";
-const TEST_CHUNKED_RECOVERY_ATTR: &str = "fugue.test.chunked-recovery";
+const TEST_FUNCTION_RECOVERY_CANDIDATES_ATTR: &str = "fugue.test.function-recovery-candidates";
+const TEST_FUNCTION_RECOVERY_MAX_INSNS_ATTR: &str = "fugue.test.function-recovery-max-insns";
+const TEST_FUNCTION_RECOVERY_OUTPUT_LIMIT_ATTR: &str = "fugue.test.function-recovery-output-limit";
+const TEST_INVOCATION_LIMITED_RECOVERY_ATTR: &str = "fugue.test.invocation-limited-recovery";
+const TEST_NON_RETURNING_RECOVERY_ATTR: &str = "fugue.test.non-returning-recovery";
 const TEST_SWITCH_RECOVERY_ATTR: &str = "fugue.test.switch-recovery";
 const TEST_WORK_SLICE_BYTES: u64 = 1 << 20;
 
@@ -92,21 +89,6 @@ static STORM_ANALYSER_RUNS: AtomicUsize = AtomicUsize::new(0);
 #[derive(Default)]
 struct FailingEntityStorage {
     inner: InMemoryEntityStorage,
-}
-
-struct DeferredFunctionCommit {
-    entry: Address,
-}
-
-impl FunctionRecoveryCommitHook for DeferredFunctionCommit {
-    fn should_commit(
-        &self,
-        project: &ProjectView<'_>,
-        context: &FunctionRecoveryCommitContext,
-    ) -> Result<bool, FunctionRecoveryError> {
-        let _ = project;
-        Ok(context.function().entry() != self.entry)
-    }
 }
 
 struct FailingEntityWriter<'a> {
@@ -302,28 +284,24 @@ impl Analyser for FailingTestAnalyser {
             == Some(self.mode)
     }
 
-    fn analyse(
-        &mut self,
-        project: &ProjectView<'_>,
-        regions: &AddressRangeSet,
-        cx: &AnalysisContext,
-        updates: &mut Vec<ProjectUpdate>,
-    ) -> Result<(), AnalysisError> {
-        let _ = project;
-        let _ = cx;
+    fn analyse(&mut self, context: &mut AnalysisContext<'_, '_>) -> Result<(), AnalysisError> {
         FAILING_ANALYSER_RUNS.fetch_add(1, Ordering::SeqCst);
 
         if self.mode == "mutating-error"
-            && let Some(address) = regions.ranges().next().map(|range| range.start_address())
+            && let Some(address) = context
+                .regions()
+                .ranges()
+                .next()
+                .map(|range| range.start_address())
         {
-            updates.push(ProjectUpdate::add_symbol(
+            context.updates.add_symbol(
                 SymbolIndex::new(SymbolTableSelector::new(251), 0),
                 SymbolEntry::new(
                     address,
                     "rolled_back_symbol",
                     SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
                 ),
-            ));
+            );
         }
 
         Err(AnalysisError::pass_failed(
@@ -352,32 +330,29 @@ impl Analyser for PanickingTestAnalyser {
             == Some(self.name())
     }
 
-    fn analyse(
-        &mut self,
-        project: &ProjectView<'_>,
-        regions: &AddressRangeSet,
-        cx: &AnalysisContext,
-        updates: &mut Vec<ProjectUpdate>,
-    ) -> Result<(), AnalysisError> {
-        let _ = project;
-        let _ = cx;
-        if let Some(address) = regions.ranges().next().map(|range| range.start_address()) {
-            updates.push(ProjectUpdate::add_symbol(
+    fn analyse(&mut self, context: &mut AnalysisContext<'_, '_>) -> Result<(), AnalysisError> {
+        if let Some(address) = context
+            .regions()
+            .ranges()
+            .next()
+            .map(|range| range.start_address())
+        {
+            context.updates.add_symbol(
                 SymbolIndex::new(SymbolTableSelector::new(252), 0),
                 SymbolEntry::new(
                     address,
                     "panicked_torn_symbol",
                     SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
                 ),
-            ));
+            );
             let target = address
                 .checked_add(0x100u64)
                 .expect("torn reference target");
-            updates.push(ProjectUpdate::add_reference(Reference::data(
+            context.updates.add_reference(Reference::data(
                 address,
                 target,
                 ReferenceProperties::READ,
-            )));
+            ));
         }
         panic!("test analyser panic");
     }
@@ -414,29 +389,20 @@ impl Analyser for CompletionTestAnalyser {
             == Some(self.name())
     }
 
-    fn analyse(
-        &mut self,
-        project: &ProjectView<'_>,
-        regions: &AddressRangeSet,
-        cx: &AnalysisContext,
-        updates: &mut Vec<ProjectUpdate>,
-    ) -> Result<(), AnalysisError> {
-        let _ = project;
-        let _ = updates;
-        let _ = cx;
+    fn analyse(&mut self, context: &mut AnalysisContext<'_, '_>) -> Result<(), AnalysisError> {
         COMPLETION_ANALYSE_COUNT.fetch_add(1, Ordering::SeqCst);
-        self.address = regions.ranges().next().map(|range| range.start_address());
+        self.address = context
+            .regions()
+            .ranges()
+            .next()
+            .map(|range| range.start_address());
         Ok(())
     }
 
     fn analysis_ended(
         &mut self,
-        project: &ProjectView<'_>,
-        cx: &AnalysisContext,
-        updates: &mut Vec<ProjectUpdate>,
+        context: &mut AnalysisContext<'_, '_>,
     ) -> Result<(), AnalysisError> {
-        let _ = project;
-        let _ = cx;
         let Some(address) = self.address.take() else {
             return Ok(());
         };
@@ -447,14 +413,14 @@ impl Analyser for CompletionTestAnalyser {
         }
 
         self.completed = true;
-        updates.push(ProjectUpdate::add_symbol(
+        context.updates.add_symbol(
             SymbolIndex::new(SymbolTableSelector::new(252), 1),
             SymbolEntry::new(
                 address,
                 "completion_symbol",
                 SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
             ),
-        ));
+        );
         Ok(())
     }
 }
@@ -478,29 +444,14 @@ impl Analyser for PanickingCompletionTestAnalyser {
             == Some(self.name())
     }
 
-    fn analyse(
-        &mut self,
-        project: &ProjectView<'_>,
-        regions: &AddressRangeSet,
-        cx: &AnalysisContext,
-        updates: &mut Vec<ProjectUpdate>,
-    ) -> Result<(), AnalysisError> {
-        let _ = project;
-        let _ = updates;
-        let _ = regions;
-        let _ = cx;
+    fn analyse(&mut self, _context: &mut AnalysisContext<'_, '_>) -> Result<(), AnalysisError> {
         Ok(())
     }
 
     fn analysis_ended(
         &mut self,
-        project: &ProjectView<'_>,
-        cx: &AnalysisContext,
-        updates: &mut Vec<ProjectUpdate>,
+        _context: &mut AnalysisContext<'_, '_>,
     ) -> Result<(), AnalysisError> {
-        let _ = project;
-        let _ = updates;
-        let _ = cx;
         panic!("test completion panic");
     }
 }
@@ -536,26 +487,17 @@ impl Analyser for DerivedSymbolAnalyser {
             == Some(self.name())
     }
 
-    fn analyse(
-        &mut self,
-        project: &ProjectView<'_>,
-        regions: &AddressRangeSet,
-        cx: &AnalysisContext,
-        updates: &mut Vec<ProjectUpdate>,
-    ) -> Result<(), AnalysisError> {
-        let _ = project;
-        let _ = cx;
-
-        for range in regions.ranges() {
+    fn analyse(&mut self, context: &mut AnalysisContext<'_, '_>) -> Result<(), AnalysisError> {
+        for range in context.regions().ranges() {
             let address = range.start_address();
-            updates.push(ProjectUpdate::add_symbol(
+            context.updates.add_symbol(
                 SymbolIndex::new(SymbolTableSelector::new(253), self.next_index),
                 SymbolEntry::new(
                     address,
                     "derived_function",
                     SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
                 ),
-            ));
+            );
             self.next_index += 1;
         }
 
@@ -582,38 +524,44 @@ impl Analyser for StormTestAnalyser {
             == Some(self.name())
     }
 
-    fn analyse(
-        &mut self,
-        project: &ProjectView<'_>,
-        regions: &AddressRangeSet,
-        cx: &AnalysisContext,
-        updates: &mut Vec<ProjectUpdate>,
-    ) -> Result<(), AnalysisError> {
-        let _ = project;
-        let _ = cx;
+    fn analyse(&mut self, context: &mut AnalysisContext<'_, '_>) -> Result<(), AnalysisError> {
         STORM_ANALYSER_RUNS.fetch_add(1, Ordering::SeqCst);
 
-        let Some(address) = regions.ranges().next().map(|range| range.start_address()) else {
+        let Some(address) = context
+            .regions()
+            .ranges()
+            .next()
+            .map(|range| range.start_address())
+        else {
             return Ok(());
         };
 
-        updates.push(ProjectUpdate::add_symbol(
+        context.updates.add_symbol(
             SymbolIndex::new(SymbolTableSelector::new(250), 0),
             SymbolEntry::new(
                 address,
                 "storm_symbol",
                 SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
             ),
-        ));
+        );
         Ok(())
     }
 }
 
-struct CancellingTestAnalyser;
+#[derive(fugue_core::AnalysisData)]
+#[analysis_data(delegate)]
+struct WrappedLoader(Loader<'static>);
 
-impl Analyser for CancellingTestAnalyser {
+#[derive(fugue_core::AnalysisData)]
+struct InvocationCounter {
+    value: usize,
+}
+
+struct LoaderProjectionAnalyser;
+
+impl Analyser for LoaderProjectionAnalyser {
     fn name(&self) -> &'static str {
-        "cancelling-test"
+        "loader-projection"
     }
 
     fn triggers(&self) -> ChangeKinds {
@@ -628,76 +576,38 @@ impl Analyser for CancellingTestAnalyser {
             == Some(self.name())
     }
 
-    fn analyse(
-        &mut self,
-        project: &ProjectView<'_>,
-        regions: &AddressRangeSet,
-        cx: &AnalysisContext,
-        updates: &mut Vec<ProjectUpdate>,
-    ) -> Result<(), AnalysisError> {
-        let _ = project;
-        let _ = cx;
-        let Some(address) = regions.ranges().next().map(|range| range.start_address()) else {
-            return Err(Cancelled.into());
+    fn analyse(&mut self, context: &mut AnalysisContext<'_, '_>) -> Result<(), AnalysisError> {
+        if context.analysis_data.get::<Loader<'static>>()?.is_none() {
+            return Ok(());
+        }
+        if context.analysis_data.get::<Elf<'static>>()?.is_none() {
+            return Err(AnalysisError::pass_failed(
+                self.name(),
+                io::Error::other("active ELF projection missing"),
+            ));
+        }
+
+        let value = {
+            let counter = context.analysis_data.require_mut::<InvocationCounter>()?;
+            counter.value += 1;
+            counter.value
         };
-
-        updates.push(ProjectUpdate::add_symbol(
-            SymbolIndex::new(SymbolTableSelector::new(248), 0),
-            SymbolEntry::new(
-                address,
-                "cancel_committed_symbol",
-                SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
-            ),
-        ));
-
-        Err(Cancelled.into())
-    }
-}
-
-struct CancellationFollowUpAnalyser;
-
-impl Analyser for CancellationFollowUpAnalyser {
-    fn name(&self) -> &'static str {
-        "cancellation-follow-up"
-    }
-
-    fn triggers(&self) -> ChangeKinds {
-        ChangeKinds::SYMBOL_ADDED
-    }
-
-    fn priority(&self) -> Priority {
-        Priority::ENRICHMENT
-    }
-
-    fn can_analyse(&self, project: &Project) -> bool {
-        project
-            .attributes()
-            .get_attr::<String>(TEST_ANALYSER_ATTR)
-            .as_deref()
-            == Some("cancelling-test")
-    }
-
-    fn analyse(
-        &mut self,
-        project: &ProjectView<'_>,
-        regions: &AddressRangeSet,
-        cx: &AnalysisContext,
-        updates: &mut Vec<ProjectUpdate>,
-    ) -> Result<(), AnalysisError> {
-        let _ = project;
-        let _ = cx;
-        let Some(address) = regions.ranges().next().map(|range| range.start_address()) else {
+        let Some(address) = context
+            .regions()
+            .ranges()
+            .next()
+            .map(|range| range.start_address())
+        else {
             return Ok(());
         };
-
-        updates.push(ProjectUpdate::add_symbol(
-            SymbolIndex::new(SymbolTableSelector::new(248), 1),
+        context.updates.add_symbol(
+            SymbolIndex::new(SymbolTableSelector::new(244), 0),
             SymbolEntry::new(
                 address,
-                "cancel_followup_symbol",
-                SymbolProperties::LOCAL | SymbolProperties::FUNCTION,
+                format!("loader_projection_{value}"),
+                SymbolProperties::LOCAL,
             ),
-        ));
+        );
 
         Ok(())
     }
@@ -731,77 +641,99 @@ fn build_storm_analyser(_project: &Project) -> Result<Box<dyn Analyser>, Analysi
     Ok(Box::new(StormTestAnalyser))
 }
 
-fn build_cancelling_analyser(_project: &Project) -> Result<Box<dyn Analyser>, AnalysisError> {
-    Ok(Box::new(CancellingTestAnalyser))
-}
+#[fugue_core::extension]
+impl FunctionRecoveryExtension {
+    const NAME: &str = "function-recovery-test-configuration";
 
-fn build_cancellation_follow_up_analyser(
-    _project: &Project,
-) -> Result<Box<dyn Analyser>, AnalysisError> {
-    Ok(Box::new(CancellationFollowUpAnalyser))
-}
+    fn configure(project: &Project, recovery: &mut FunctionRecovery) -> Result<(), AnalysisError> {
+        if let Some(candidates) = project
+            .attributes()
+            .get_attr::<Vec<Address>>(TEST_FUNCTION_RECOVERY_CANDIDATES_ATTR)
+        {
+            recovery.add_candidates(candidates);
+        }
+        if let Some(limit) = project
+            .attributes()
+            .get_attr::<usize>(TEST_FUNCTION_RECOVERY_MAX_INSNS_ATTR)
+        {
+            let config = recovery.config_mut();
+            config.set_max_function_insns(limit);
+            config.set_segment_function_hints(false);
+            config.set_symbol_table_function_hints(false);
+        }
+        if let Some(limit) = project
+            .attributes()
+            .get_attr::<usize>(TEST_FUNCTION_RECOVERY_OUTPUT_LIMIT_ATTR)
+        {
+            recovery
+                .config_mut()
+                .set_max_output_bytes_per_invocation(limit);
+        }
+        if project
+            .attributes()
+            .get_attr::<bool>(TEST_INVOCATION_LIMITED_RECOVERY_ATTR)
+            .unwrap_or(false)
+        {
+            recovery.config_mut().set_max_functions_per_invocation(1);
+            recovery.config_mut().set_max_candidates_per_invocation(1);
+        }
+        if project
+            .attributes()
+            .get_attr::<bool>(TEST_NON_RETURNING_RECOVERY_ATTR)
+            .unwrap_or(false)
+        {
+            recovery.config_mut().set_non_returning_analysis(true);
+        }
+        if project
+            .attributes()
+            .get_attr::<bool>(TEST_SWITCH_RECOVERY_ATTR)
+            .unwrap_or(false)
+        {
+            recovery.add_post_structuring_pass("switch-recovery", SwitchRecovery::new());
+        }
 
-fn configure_test_recovery(
-    project: &Project,
-    recovery: &mut FunctionRecovery,
-) -> Result<(), AnalysisError> {
-    if project
-        .attributes()
-        .get_attr::<bool>(TEST_CHUNKED_RECOVERY_ATTR)
-        .unwrap_or(false)
-    {
-        recovery.set_chunk_function_limit(Some(1));
-        recovery.set_chunk_candidate_limit(Some(1));
+        Ok(())
     }
-    if project
-        .attributes()
-        .get_attr::<bool>(TEST_SWITCH_RECOVERY_ATTR)
-        .unwrap_or(false)
-    {
-        recovery.add_builder_post_structuring_pass("switch-recovery", SwitchRecovery::new());
-    }
-
-    Ok(())
 }
 
 extension::submit! {
-    AnalyserProvider::new("error-test", build_error_analyser)
+    AnalyserProvider::new::<FailingTestAnalyser>("error-test", build_error_analyser)
 }
 
 extension::submit! {
-    AnalyserProvider::new("mutating-error", build_mutating_error_analyser)
+    AnalyserProvider::new::<FailingTestAnalyser>("mutating-error", build_mutating_error_analyser)
 }
 
 extension::submit! {
-    AnalyserProvider::new("panicking-test", build_panicking_analyser)
+    AnalyserProvider::new::<PanickingTestAnalyser>("panicking-test", build_panicking_analyser)
 }
 
 extension::submit! {
-    AnalyserProvider::new("completion-test", build_completion_analyser)
+    AnalyserProvider::new::<CompletionTestAnalyser>("completion-test", build_completion_analyser)
 }
 
 extension::submit! {
-    AnalyserProvider::new("completion-panic-test", build_completion_panic_analyser)
+    AnalyserProvider::new::<PanickingCompletionTestAnalyser>(
+        "completion-panic-test",
+        build_completion_panic_analyser,
+    )
 }
 
 extension::submit! {
-    AnalyserProvider::new("derived-symbol", build_derived_symbol_analyser)
+    AnalyserProvider::new::<DerivedSymbolAnalyser>(
+        "derived-symbol",
+        build_derived_symbol_analyser,
+    )
 }
 
 extension::submit! {
-    AnalyserProvider::new("storm-test", build_storm_analyser)
+    AnalyserProvider::new::<StormTestAnalyser>("storm-test", build_storm_analyser)
 }
 
 extension::submit! {
-    AnalyserProvider::new("cancelling-test", build_cancelling_analyser)
-}
-
-extension::submit! {
-    AnalyserProvider::new("cancellation-follow-up", build_cancellation_follow_up_analyser)
-}
-
-extension::submit! {
-    FunctionRecoveryExtension::new("test-recovery", configure_test_recovery)
+    AnalyserProvider::new::<LoaderProjectionAnalyser>("loader-projection", |_| {
+        Ok(Box::new(LoaderProjectionAnalyser))
+    })
 }
 
 fn project_with_test_analyser(mode: &'static str) -> Result<Project, Box<dyn Error>> {
@@ -811,6 +743,12 @@ fn project_with_test_analyser(mode: &'static str) -> Result<Project, Box<dyn Err
     Ok(Project::new_with_provider::<TransientStorageProvider>(
         &loader, attributes,
     )?)
+}
+
+fn analyse_project(project: Project) -> Result<Project, Box<dyn Error>> {
+    let engine = AnalysisEngine::new(project)?;
+    engine.analyse()?;
+    Ok(engine.into_project()?)
 }
 
 fn project_with_writable_address() -> Result<(Project, Address), Box<dyn Error>> {
@@ -874,41 +812,65 @@ where
 }
 
 #[test]
-fn test_engine_startup_reaches_imperative_entry() -> Result<(), Box<dyn Error>> {
+fn engine_values_install_without_scheduling_and_delegate_transitively() -> Result<(), Box<dyn Error>>
+{
     let loader = Loader::from_file("tests/ls.elf")?;
+    let mut attributes = AttributeMap::new();
+    attributes.set_attr(TEST_ANALYSER_ATTR, "loader-projection");
+    let project = Project::new_with_provider::<TransientStorageProvider>(&loader, attributes)?;
+    let address = writable_address(&project, 1)?;
+    let engine = AnalysisEngine::new(project)?;
 
-    let mut imperative = Project::new_transient(&loader)?;
-    let Some(entry) = imperative.entry_point() else {
+    engine.analyse()?;
+    engine.set_data(WrappedLoader(loader))?;
+    engine.set_data(InvocationCounter { value: 3 })?;
+    engine.set_data(InvocationCounter { value: 7 })?;
+    engine.analyse()?;
+
+    let reader = engine.query_reader()?;
+    assert!(
+        !reader
+            .symbol_page_at(address, None, 16)?
+            .entries()
+            .iter()
+            .any(|symbol| symbol.symbol().starts_with("loader_projection_"))
+    );
+
+    trigger_test_analyser(&engine, address)?;
+
+    assert!(
+        reader
+            .symbol_page_at(address, None, 16)?
+            .entries()
+            .iter()
+            .any(|symbol| symbol.symbol() == "loader_projection_8")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_engine_startup_reaches_entry() -> Result<(), Box<dyn Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let project = Project::new_transient(&loader)?;
+    let Some(entry) = project.entry_point() else {
         return Err(io::Error::other("fixture entry missing").into());
     };
-    let mut recovery = loader.analysers().function_recovery()?;
-    recovery.add_candidate(entry);
-    recovery.analyse(&mut imperative)?;
 
-    let imperative_functions = imperative.functions().addresses().collect::<BTreeSet<_>>();
-    assert!(imperative_functions.contains(&entry));
-
-    let project = Project::new_transient(&loader)?;
     let engine = AnalysisEngine::new(project)?;
     let changes = engine.subscribe().with_capacity(4096).build()?;
     engine.analyse()?;
     let reader = engine.query_reader()?;
     let mut engine_functions = BTreeSet::new();
-    let function_spaces = imperative_functions
-        .iter()
-        .map(|address| address.space())
-        .collect::<BTreeSet<_>>();
-    for space in function_spaces {
-        let mut cursor = None::<Address>;
-        loop {
-            let page = reader.function_page(space, cursor, 128)?;
-            engine_functions.extend(page.entries().iter().copied());
+    let mut cursor = None::<Address>;
+    loop {
+        let page = reader.function_page(entry.space(), cursor, 128)?;
+        engine_functions.extend(page.entries().iter().copied());
 
-            let Some(next_cursor) = page.next_cursor().copied() else {
-                break;
-            };
-            cursor = Some(next_cursor);
-        }
+        let Some(next_cursor) = page.next_cursor().copied() else {
+            break;
+        };
+        cursor = Some(next_cursor);
     }
     let mut journal_functions = BTreeSet::new();
 
@@ -954,7 +916,7 @@ fn test_engine_startup_reaches_imperative_entry() -> Result<(), Box<dyn Error>> 
 
     assert_eq!(callees, expected_callees);
     assert_eq!(call_edges, expected_callees);
-    assert_eq!(engine_functions, imperative_functions);
+    assert!(engine_functions.contains(&entry));
     assert_eq!(journal_functions, engine_functions);
 
     Ok(())
@@ -1099,98 +1061,6 @@ fn test_mapping_pages_handle_overlaid_start_boundaries() -> Result<(), Box<dyn E
 }
 
 #[test]
-fn test_byte_chunked_function_recovery_converges() -> Result<(), Box<dyn Error>> {
-    let loader = Loader::from_file("tests/ls.elf")?;
-    let mut unchunked_project = Project::new_transient(&loader)?;
-    let mut chunked_project = Project::new_transient(&loader)?;
-    let mut unchunked = FunctionRecovery::new();
-    let mut chunked = FunctionRecovery::new();
-    let mut extensions = extension::iter::<FunctionRecoveryExtension>().collect::<Vec<_>>();
-    extensions.sort_unstable_by_key(|extension| (extension.priority(), extension.name()));
-    for extension in extensions {
-        extension.apply(&unchunked_project, &mut unchunked)?;
-        extension.apply(&chunked_project, &mut chunked)?;
-    }
-
-    chunked.set_chunk_output_byte_limit(Some(1));
-
-    unchunked.analyse(&mut unchunked_project)?;
-
-    let mut chunks = 0usize;
-    loop {
-        chunks += 1;
-        assert!(
-            chunks <= 4096,
-            "chunked recovery did not consume its queued candidates"
-        );
-        chunked.analyse(&mut chunked_project)?;
-
-        if !Analyser::has_pending_work(&chunked) {
-            break;
-        }
-    }
-    assert!(chunks > 1, "the chunk limit did not yield partial work");
-
-    let unchunked_functions = unchunked_project
-        .functions()
-        .addresses()
-        .collect::<BTreeSet<_>>();
-    let chunked_functions = chunked_project
-        .functions()
-        .addresses()
-        .collect::<BTreeSet<_>>();
-    let function_blocks = |project: &Project| {
-        project
-            .functions()
-            .iter()
-            .map(|function| {
-                (
-                    function.entry(),
-                    function
-                        .blocks()
-                        .map(|(address, _)| address)
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .collect::<BTreeMap<_, _>>()
-    };
-
-    assert_eq!(chunked_functions, unchunked_functions);
-
-    let chunked_blocks = function_blocks(&chunked_project);
-    let unchunked_blocks = function_blocks(&unchunked_project);
-    let difference = chunked_blocks.iter().find_map(|(&entry, blocks)| {
-        let unchunked = unchunked_blocks.get(&entry)?;
-        if blocks == unchunked {
-            return None;
-        }
-        let chunked_only = blocks
-            .iter()
-            .find(|address| unchunked.binary_search(address).is_err())
-            .copied();
-        let unchunked_only = unchunked
-            .iter()
-            .find(|address| blocks.binary_search(address).is_err())
-            .copied();
-        Some((
-            entry,
-            blocks.len(),
-            unchunked.len(),
-            chunked_only,
-            chunked_only.is_some_and(|address| chunked_functions.contains(&address)),
-            unchunked_only,
-            unchunked_only.is_some_and(|address| unchunked_functions.contains(&address)),
-        ))
-    });
-    assert!(
-        difference.is_none(),
-        "chunked recovery differs at {difference:?}"
-    );
-
-    Ok(())
-}
-
-#[test]
 fn test_recovery_requires_executable_cause_start() -> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let mut project = Project::new_transient(&loader)?;
@@ -1259,234 +1129,11 @@ fn test_recovery_requires_executable_cause_start() -> Result<(), Box<dyn Error>>
 }
 
 #[test]
-fn test_function_boundary_retraction_reconciles_callers() -> Result<(), Box<dyn Error>> {
-    let loader = Loader::from_file("tests/ls.elf")?;
-    let mut project = Project::new_transient(&loader)?;
-    let mut recovery = FunctionRecovery::new();
-    recovery.analyse(&mut project)?;
-
-    let (caller, source, target) = project
-        .functions()
-        .iter()
-        .find_map(|function| {
-            function
-                .flow_targets(project.blocks())
-                .find(|target| {
-                    target.kind() == FlowKind::TailCallBranch
-                        && project
-                            .segments()
-                            .view_containing(target.from())
-                            .is_ok_and(|view| view.contains(target.to()))
-                })
-                .map(|target| (function.entry(), target.from(), target.to()))
-        })
-        .ok_or_else(|| io::Error::other("no recovered tail-call boundary"))?;
-    let function = project
-        .functions()
-        .get_by_address(caller)
-        .ok_or_else(|| io::Error::other("tail-call owner missing"))?;
-    assert_eq!(
-        function
-            .flow_targets(project.blocks())
-            .filter(|flow| flow.from() == source && flow.to() == target)
-            .map(|flow| flow.kind())
-            .collect::<Vec<_>>(),
-        vec![FlowKind::TailCallBranch],
-    );
-    drop(function);
-
-    {
-        let mut transaction = project.transaction("test");
-        assert!(transaction.remove_function(target, ReferenceOrigin::Derived)?);
-        transaction.commit()?;
-    }
-    assert!(project.functions().get_by_address(target).is_none());
-    recovery.set_commit_hook(DeferredFunctionCommit { entry: target });
-    recovery.config_mut().set_commit_pending_functions(false);
-    recovery.add_candidate(target);
-    recovery.analyse(&mut project)?;
-
-    assert!(project.functions().get_by_address(target).is_none());
-    let function = project
-        .functions()
-        .get_by_address(caller)
-        .ok_or_else(|| io::Error::other("caller removed during boundary reconciliation"))?;
-    assert!(function.blocks_at(target).next().is_some());
-    assert!(
-        !function
-            .flow_targets(project.blocks())
-            .any(|flow| flow.kind() == FlowKind::TailCallBranch && flow.to() == target)
-    );
-    drop(function);
-
-    recovery.config_mut().set_commit_pending_functions(true);
-    recovery.analyse(&mut project)?;
-
-    assert!(project.functions().get_by_address(target).is_some());
-    let function = project
-        .functions()
-        .get_by_address(caller)
-        .ok_or_else(|| io::Error::other("caller missing after boundary restoration"))?;
-    assert_eq!(
-        function
-            .flow_targets(project.blocks())
-            .filter(|flow| flow.from() == source && flow.to() == target)
-            .map(|flow| flow.kind())
-            .collect::<Vec<_>>(),
-        vec![FlowKind::TailCallBranch],
-    );
-
-    Ok(())
-}
-
-#[test]
-fn test_function_boundary_addition_splits_containing_block() -> Result<(), Box<dyn Error>> {
-    let loader = Loader::from_file("tests/ls.elf")?;
-    let mut project = Project::new_transient(&loader)?;
-    let mut recovery = FunctionRecovery::new();
-    recovery.analyse(&mut project)?;
-    let mut disassembler = project.arch().disassembler();
-    let mut lifter = project.lifter();
-
-    let (owner, boundary) = project
-        .functions()
-        .iter()
-        .find_map(|function| {
-            function.blocks().find_map(|(_, id)| {
-                let block = project.blocks().get_by_id(id)?;
-                block.context().apply(block.address(), lifter.context_mut());
-                let view = project.segments().view_containing(block.address()).ok()?;
-                let bytes = view.bytes_from(block.address())?;
-                let bytes = bytes.as_contiguous()?;
-                let first = disassembler
-                    .disassemble(block.address(), bytes, lifter.context_mut())
-                    .ok()?;
-                let boundary = first.next_address();
-                if boundary >= block.next_address() {
-                    return None;
-                }
-                (project.functions().get_by_address(boundary).is_none())
-                    .then_some((function.entry(), boundary))
-            })
-        })
-        .ok_or_else(|| io::Error::other("no block contains a usable interior boundary"))?;
-
-    recovery.add_candidate(boundary);
-    recovery.analyse(&mut project)?;
-
-    assert!(project.functions().get_by_address(boundary).is_some());
-    let owner = project
-        .functions()
-        .get_by_address(owner)
-        .ok_or_else(|| io::Error::other("containing function removed during reconciliation"))?;
-    assert!(!owner.blocks().any(|(_, id)| {
-        project
-            .blocks()
-            .get_by_id(id)
-            .is_some_and(|block| block.range().contains(&boundary))
-    }));
-
-    Ok(())
-}
-
-#[test]
-fn test_function_recovery_bounds_candidate_instructions() -> Result<(), Box<dyn Error>> {
-    let loader = Loader::from_file("tests/ls.elf")?;
-    let mut project = Project::new_transient(&loader)?;
-    let entry = project
-        .entry_point()
-        .ok_or_else(|| io::Error::other("fixture entry missing"))?;
-    let mut recovery = FunctionRecovery::new();
-    let config = recovery.config_mut();
-    config.set_segment_function_hints(false);
-    config.set_symbol_table_function_hints(false);
-    config.set_max_function_insns(1);
-
-    recovery.analyse(&mut project)?;
-
-    assert!(project.functions().is_empty());
-    assert!(
-        project
-            .problems()
-            .get(entry, ProblemKind::FunctionTooLarge)
-            .is_some()
-    );
-
-    Ok(())
-}
-
-#[cfg(feature = "sqlite")]
-#[test]
-fn test_chunked_function_recovery_converges_after_reopen() -> Result<(), Box<dyn Error>> {
-    let directory = tempfile::tempdir()?;
-    let project_path = directory.path().join("chunked-recovery.fdbz");
-    let fixture = "tests/ls.elf";
-    let mut attributes = AttributeMap::new();
-    attributes.set_attr(ATTRIBUTE_PROJECT_PATH, project_path);
-    let mut project = Project::from_file_with_provider_and_attributes::<SqliteProjectProvider>(
-        fixture,
-        attributes.clone(),
-    )?;
-    let mut recovery = FunctionRecovery::new();
-    let config = recovery.config_mut();
-    config.set_segment_function_hints(false);
-    config.set_symbol_table_function_hints(false);
-    recovery.set_chunk_function_limit(Some(1));
-
-    recovery.analyse(&mut project)?;
-    assert!(Analyser::has_pending_work(&recovery));
-    let partial_function_count = project.functions().len();
-    assert!(partial_function_count > 0);
-    drop(project);
-
-    let mut reopened = Project::from_file_with_provider_and_attributes::<SqliteProjectProvider>(
-        fixture, attributes,
-    )?;
-    let mut resumed = FunctionRecovery::new();
-    let config = resumed.config_mut();
-    config.set_segment_function_hints(false);
-    config.set_symbol_table_function_hints(false);
-    resumed.analyse(&mut reopened)?;
-    assert!(!Analyser::has_pending_work(&resumed));
-
-    let loader = Loader::from_file(fixture)?;
-    let mut clean = Project::new_transient(&loader)?;
-    let mut clean_recovery = FunctionRecovery::new();
-    let config = clean_recovery.config_mut();
-    config.set_segment_function_hints(false);
-    config.set_symbol_table_function_hints(false);
-    clean_recovery.analyse(&mut clean)?;
-
-    assert!(clean.functions().len() > 1);
-    assert!(partial_function_count < clean.functions().len());
-    let reopened_functions = reopened.functions().addresses().collect::<BTreeSet<_>>();
-    let clean_functions = clean.functions().addresses().collect::<BTreeSet<_>>();
-    let missing = clean_functions
-        .difference(&reopened_functions)
-        .take(8)
-        .copied()
-        .collect::<Vec<_>>();
-    let unexpected = reopened_functions
-        .difference(&clean_functions)
-        .take(8)
-        .copied()
-        .collect::<Vec<_>>();
-    assert!(
-        missing.is_empty() && unexpected.is_empty(),
-        "resumed recovery diverged: {} reopened functions, {} clean functions, \
-         first missing {missing:?}, first unexpected {unexpected:?}",
-        reopened_functions.len(),
-        clean_functions.len(),
-    );
-
-    Ok(())
-}
-
-#[test]
-fn test_reader_observes_progress_during_chunked_function_recovery() -> Result<(), Box<dyn Error>> {
+fn test_reader_observes_progress_during_invocation_limited_function_recovery()
+-> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let mut attributes = AttributeMap::new();
-    attributes.set_attr(TEST_CHUNKED_RECOVERY_ATTR, true);
+    attributes.set_attr(TEST_INVOCATION_LIMITED_RECOVERY_ATTR, true);
     let project = Project::new_with_provider::<TransientStorageProvider>(&loader, attributes)?;
     let engine = AnalysisEngine::new(project)?;
     let reader = engine.query_reader()?;
@@ -1528,8 +1175,252 @@ fn test_reader_observes_progress_during_chunked_function_recovery() -> Result<()
     let observed = observed.lock().expect("observed revisions lock poisoned");
     assert!(
         observed.len() >= 2,
-        "reader did not observe multiple committed revisions during chunked recovery: {observed:?}"
+        "reader did not observe multiple committed revisions during invocation-limited recovery: \
+         {observed:?}"
     );
+
+    Ok(())
+}
+
+#[test]
+fn test_function_recovery_output_limit_preserves_results() -> Result<(), Box<dyn Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let baseline = analyse_project(Project::new_transient(&loader)?)?;
+    let mut limited = Project::new_transient(&loader)?;
+    limited
+        .attributes_mut()
+        .set_attr(TEST_FUNCTION_RECOVERY_OUTPUT_LIMIT_ATTR, 1usize);
+    let limited = analyse_project(limited)?;
+    let function_blocks = |project: &Project| {
+        project
+            .functions()
+            .iter()
+            .map(|function| {
+                (
+                    function.entry(),
+                    function.blocks().map(|(address, _)| address).collect(),
+                )
+            })
+            .collect::<Vec<(Address, Vec<Address>)>>()
+    };
+
+    assert_eq!(
+        limited.functions().addresses().collect::<BTreeSet<_>>(),
+        baseline.functions().addresses().collect::<BTreeSet<_>>()
+    );
+    assert_eq!(function_blocks(&limited), function_blocks(&baseline));
+
+    Ok(())
+}
+
+#[test]
+fn test_function_recovery_reconciles_new_boundary() -> Result<(), Box<dyn Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let mut project = analyse_project(Project::new_transient(&loader)?)?;
+    let mut disassembler = project.arch().disassembler();
+    let mut lifter = project.lifter();
+
+    let (owner, boundary) = project
+        .functions()
+        .iter()
+        .find_map(|function| {
+            function.blocks().find_map(|(_, id)| {
+                let block = project.blocks().get_by_id(id)?;
+                block.context().apply(block.address(), lifter.context_mut());
+                let view = project.segments().view_containing(block.address()).ok()?;
+                let bytes = view.bytes_from(block.address())?;
+                let bytes = bytes.as_contiguous()?;
+                let first = disassembler
+                    .disassemble(block.address(), bytes, lifter.context_mut())
+                    .ok()?;
+                let boundary = first.next_address();
+                (boundary < block.next_address()
+                    && project.functions().get_by_address(boundary).is_none())
+                .then_some((function.entry(), boundary))
+            })
+        })
+        .ok_or_else(|| io::Error::other("no block contains a usable interior boundary"))?;
+
+    project
+        .attributes_mut()
+        .set_attr(TEST_FUNCTION_RECOVERY_CANDIDATES_ATTR, vec![boundary]);
+    let engine = AnalysisEngine::new(project)?;
+    let mut regions = AddressRangeSet::new();
+    regions.insert(boundary);
+    engine.schedule_ranges(ChangeKinds::BYTES_WRITTEN, regions)?;
+    engine.analyse()?;
+    let project = engine.into_project()?;
+
+    assert!(project.functions().get_by_address(boundary).is_some());
+    let owner = project
+        .functions()
+        .get_by_address(owner)
+        .ok_or_else(|| io::Error::other("containing function was removed"))?;
+    assert!(!owner.blocks().any(|(_, id)| {
+        project
+            .blocks()
+            .get_by_id(id)
+            .is_some_and(|block| block.range().contains(&boundary))
+    }));
+
+    Ok(())
+}
+
+#[test]
+fn test_function_recovery_records_instruction_limit() -> Result<(), Box<dyn Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let mut project = Project::new_transient(&loader)?;
+    let entry = project
+        .entry_point()
+        .ok_or_else(|| io::Error::other("fixture entry missing"))?;
+    project
+        .attributes_mut()
+        .set_attr(TEST_FUNCTION_RECOVERY_CANDIDATES_ATTR, vec![entry]);
+    project
+        .attributes_mut()
+        .set_attr(TEST_FUNCTION_RECOVERY_MAX_INSNS_ATTR, 1usize);
+    let project = analyse_project(project)?;
+
+    assert!(project.functions().is_empty());
+    assert!(
+        project
+            .problems()
+            .get(entry, ProblemKind::FunctionTooLarge)
+            .is_some()
+    );
+
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires binary test fixtures"]
+fn test_non_returning_externs_are_marked() -> Result<(), Box<dyn Error>> {
+    for (path, expected) in [
+        ("tests/ls.elf", ["abort", "__stack_chk_fail"].as_slice()),
+        ("tests/hello-pe.exe", ["ExitProcess"].as_slice()),
+    ] {
+        let loader = Loader::from_file(path)?;
+        let project = analyse_project(Project::new_transient(&loader)?)?;
+
+        for name in expected {
+            let marked = project.symbols().iter().any(|(_, entry)| {
+                let symbol = entry.symbol();
+                symbol
+                    .rsplit_once('!')
+                    .map_or(symbol.as_str(), |(_, name)| name)
+                    == *name
+                    && entry.is_non_returning()
+            });
+            assert!(marked, "{name} is not marked non-returning in {path}");
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires binary test fixtures"]
+fn test_non_returning_recovery_marks_functions_and_thunks() -> Result<(), Box<dyn Error>> {
+    for path in ["tests/ls.elf", "tests/hello-pe.exe"] {
+        let loader = Loader::from_file(path)?;
+        let mut project = Project::new_transient(&loader)?;
+        project
+            .attributes_mut()
+            .set_attr(TEST_NON_RETURNING_RECOVERY_ATTR, true);
+        let project = analyse_project(project)?;
+        let propagated = project
+            .functions()
+            .iter()
+            .filter(|function| function.is_non_returning() && !function.is_thunk())
+            .count();
+        let thunks = project
+            .functions()
+            .iter()
+            .filter(|function| function.is_thunk() && function.is_non_returning())
+            .count();
+
+        assert!(propagated > 0, "no non-returning functions found in {path}");
+        assert!(thunks > 0, "no non-returning thunks recovered in {path}");
+    }
+
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires binary test fixtures"]
+fn test_non_returning_recovery_preserves_switches() -> Result<(), Box<dyn Error>> {
+    for path in ["tests/ls.elf", "tests/hello-pe.exe"] {
+        let loader = Loader::from_file(path)?;
+        let mut baseline = Project::new_transient(&loader)?;
+        baseline
+            .attributes_mut()
+            .set_attr(TEST_SWITCH_RECOVERY_ATTR, true);
+        let baseline = analyse_project(baseline)?;
+        let mut project = Project::new_transient(&loader)?;
+        project
+            .attributes_mut()
+            .set_attr(TEST_NON_RETURNING_RECOVERY_ATTR, true);
+        project
+            .attributes_mut()
+            .set_attr(TEST_SWITCH_RECOVERY_ATTR, true);
+        let recovered = analyse_project(project)?;
+        let baseline = baseline
+            .switches()
+            .iter()
+            .map(|switch| switch.branch())
+            .collect::<BTreeSet<_>>();
+        let recovered = recovered
+            .switches()
+            .iter()
+            .map(|switch| switch.branch())
+            .collect::<BTreeSet<_>>();
+
+        assert!(!baseline.is_empty(), "no switches recovered in {path}");
+        assert!(
+            baseline.is_subset(&recovered),
+            "non-returning recovery lost switches in {path}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires binary test fixtures"]
+fn test_non_returning_calls_have_no_fall_through() -> Result<(), Box<dyn Error>> {
+    for path in ["tests/ls.elf", "tests/hello-pe.exe"] {
+        let loader = Loader::from_file(path)?;
+        let mut project = Project::new_transient(&loader)?;
+        project
+            .attributes_mut()
+            .set_attr(TEST_NON_RETURNING_RECOVERY_ATTR, true);
+        let project = analyse_project(project)?;
+        let view = ProjectView::new(&project);
+        let mut suppressed = 0usize;
+
+        for function in project.functions().iter() {
+            for (_, id) in function.blocks() {
+                let Some(block) = project.blocks().get_by_id(id) else {
+                    continue;
+                };
+                let Some(target) = block.call_target() else {
+                    continue;
+                };
+                if !block.is_call() || block.is_branch() || !view.is_non_returning_at(target) {
+                    continue;
+                }
+
+                assert!(
+                    !function.has_successors(id),
+                    "call to a non-returning function at {} in {path} kept its fall-through",
+                    block.last_address()
+                );
+                suppressed += 1;
+            }
+        }
+
+        assert!(suppressed > 0, "no non-returning calls found in {path}");
+    }
 
     Ok(())
 }
@@ -1701,29 +1592,6 @@ fn test_engine_startup_uses_segment_function_hints() -> Result<(), Box<dyn Error
 }
 
 #[test]
-fn test_function_recovery_cancel_before_project_candidates_are_added_leaves_project_unchanged()
--> Result<(), Box<dyn Error>> {
-    let loader = Loader::from_file("tests/ls.elf")?;
-    let mut project = Project::new_transient(&loader)?;
-    let revision = project.revision();
-    let mut recovery = loader.analysers().function_recovery()?;
-    let cancellation = recovery.cancellation_token();
-
-    cancellation.cancel();
-    recovery.set_cancellation_token(cancellation);
-
-    let error = recovery
-        .analyse(&mut project)
-        .expect_err("cancelled recovery should fail");
-
-    assert!(matches!(error, AnalysisError::Cancelled(_)));
-    assert_eq!(project.revision(), revision);
-    assert!(project.functions().is_empty());
-
-    Ok(())
-}
-
-#[test]
 fn test_engine_write_bytes_materialises_change() -> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
@@ -1765,13 +1633,10 @@ fn test_engine_applies_update_batch_in_one_revision() -> Result<(), Box<dyn Erro
     engine.analyse()?;
     let revision = engine.query_reader()?.revision()?;
 
-    let changes = engine.apply_updates(
-        ChangeSource::agent("test"),
-        vec![
-            ProjectUpdate::add_function(one_block_function(entry, 1)),
-            ProjectUpdate::add_function(one_block_function(entry + 0x10u64, 1)),
-        ],
-    )?;
+    let mut updates = ProjectUpdates::new();
+    updates.add_function(one_block_function(entry, 1));
+    updates.add_function(one_block_function(entry + 0x10u64, 1));
+    let changes = engine.apply_updates(ChangeSource::agent("test"), updates)?;
 
     assert_eq!(
         changes
@@ -1794,14 +1659,13 @@ fn test_oversized_update_batch_resynchronises_and_records_degradation() -> Resul
     let engine = AnalysisEngine::new(project)?;
     engine.analyse()?;
 
-    let updates = (0..8193)
-        .map(|index| {
-            ProjectUpdate::add_problem(
-                Address::in_default_space(0x1000_0000u64 + index as u64),
-                ProblemKind::DecodeFailed,
-            )
-        })
-        .collect::<Vec<_>>();
+    let mut updates = ProjectUpdates::with_capacity(8193);
+    for index in 0..8193 {
+        updates.add_problem(
+            Address::in_default_space(0x1000_0000u64 + index as u64),
+            ProblemKind::DecodeFailed,
+        );
+    }
     let changes = engine.apply_updates(ChangeSource::agent("test"), updates)?;
     assert_eq!(
         changes.records(),
@@ -1892,52 +1756,6 @@ fn test_engine_ensure_lifted_materialises_requested_chain() -> Result<(), Box<dy
 
     let ensured = engine.ensure_lifted(function, ECodeIr::FORM)?;
     assert!(ensured.records().is_empty());
-
-    Ok(())
-}
-
-#[test]
-fn test_engine_ensure_lifted_cancelled_is_rejected_without_materialising()
--> Result<(), Box<dyn Error>> {
-    let loader = Loader::from_file("tests/ls.elf")?;
-    let project = Project::new_transient(&loader)?;
-    let entry = project
-        .entry_point()
-        .ok_or_else(|| io::Error::other("fixture entry missing"))?;
-    let engine = AnalysisEngine::new(project)?;
-    engine.analyse()?;
-
-    let reader = engine.query_reader()?;
-    let function = reader
-        .function_at(entry)?
-        .ok_or_else(|| io::Error::other("function ID missing after add"))?;
-    let revision = reader.revision()?;
-
-    let cancellation = engine.cancellation_token();
-    cancellation.cancel();
-
-    assert!(matches!(
-        engine.ensure_lifted(function, ECodeIr::FORM),
-        Err(EngineError::Project(ProjectError::Il(IlError::Cancelled)))
-    ));
-
-    let reader = engine.query_reader()?;
-    assert_eq!(reader.revision()?, revision);
-    let snapshot = reader.project()?;
-    assert!(snapshot.pcode(function)?.is_none());
-    assert!(snapshot.ecode(function)?.is_none());
-    drop(snapshot);
-
-    cancellation.clear();
-    let ensured = engine.ensure_lifted(function, ECodeIr::FORM)?;
-    for form in [PCodeIr::FORM, ECodeIr::FORM] {
-        assert!(
-            ensured
-                .records()
-                .contains(&ChangeRecord::LiftedMaterialised { function, form })
-        );
-    }
-    assert!(engine.query_reader()?.ecode(function)?.is_some());
 
     Ok(())
 }
@@ -2539,52 +2357,6 @@ fn test_engine_mapping_edits_materialise_changes() -> Result<(), Box<dyn Error>>
             .iter()
             .any(|record| record.mapping() == mapping_id)
     );
-
-    Ok(())
-}
-
-#[test]
-fn test_cancel_between_analyses_does_not_poison_future_work() -> Result<(), Box<dyn Error>> {
-    let loader = Loader::from_file("tests/ls.elf")?;
-    let project = Project::new_transient(&loader)?;
-    let engine = AnalysisEngine::new(project)?;
-
-    engine.analyse()?;
-    engine.cancel()?;
-    engine.analyse()?;
-
-    assert!(!engine.cancellation_token().is_cancelled());
-
-    Ok(())
-}
-
-#[test]
-fn test_cancelling_analyser_commits_partial_progress_and_clears_followup()
--> Result<(), Box<dyn Error>> {
-    let project = project_with_test_analyser("cancelling-test")?;
-    let address = project
-        .entry_point()
-        .ok_or_else(|| io::Error::other("fixture entry missing"))?;
-    let engine = AnalysisEngine::new(project)?;
-
-    engine.analyse()?;
-    trigger_test_analyser(&engine, address)?;
-
-    let reader = engine.query_reader()?;
-    let symbols = reader.symbol_page_at(address, None, 4096)?;
-    assert!(
-        symbols
-            .entries()
-            .iter()
-            .any(|record| record.symbol().as_str() == "cancel_committed_symbol")
-    );
-    assert!(
-        symbols
-            .entries()
-            .iter()
-            .all(|record| record.symbol().as_str() != "cancel_followup_symbol")
-    );
-    assert!(!engine.cancellation_token().is_cancelled());
 
     Ok(())
 }

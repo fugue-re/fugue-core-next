@@ -5,7 +5,7 @@ use indexmap::IndexMap;
 
 use super::error::AnalysisError;
 use super::pass::AnalysisPass;
-use crate::engine::ProjectView;
+use crate::engine::AnalysisContext;
 
 pub struct AnalysisGroup<S = ()> {
     passes: IndexMap<String, Box<dyn AnalysisPass<S> + 'static>>,
@@ -72,13 +72,19 @@ where
         self.passes.is_empty()
     }
 
+    pub fn can_analyse(&self, context: &AnalysisContext<'_, '_>) -> bool {
+        self.passes.values().any(|pass| pass.can_analyse(context))
+    }
+
     pub fn analyse_with(
         &mut self,
-        project: &ProjectView<'_>,
+        context: &mut AnalysisContext<'_, '_>,
         state: &mut S,
     ) -> Result<(), AnalysisError> {
         for pass in self.passes.values_mut() {
-            pass.analyse_with(project, state)?;
+            if pass.can_analyse(context) {
+                pass.analyse_with(context, state)?;
+            }
         }
         Ok(())
     }
@@ -124,12 +130,16 @@ impl<S> AnalysisPass<S> for AnalysisGroup<S>
 where
     S: 'static,
 {
+    fn can_analyse(&self, context: &AnalysisContext<'_, '_>) -> bool {
+        AnalysisGroup::can_analyse(self, context)
+    }
+
     fn analyse_with(
         &mut self,
-        project: &ProjectView<'_>,
+        context: &mut AnalysisContext<'_, '_>,
         state: &mut S,
     ) -> Result<(), AnalysisError> {
-        AnalysisGroup::analyse_with(self, project, state)
+        AnalysisGroup::analyse_with(self, context, state)
     }
 
     fn as_group(&self) -> Option<&AnalysisGroup<S>> {
@@ -145,7 +155,7 @@ where
 mod test {
     use super::*;
 
-    fn no_op(_project: &ProjectView<'_>, _state: &mut ()) -> Result<(), AnalysisError> {
+    fn no_op(_context: &mut AnalysisContext<'_, '_>, _state: &mut ()) -> Result<(), AnalysisError> {
         Ok(())
     }
 

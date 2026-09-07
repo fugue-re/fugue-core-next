@@ -4,8 +4,8 @@ use std::mem;
 
 use smallvec::{IntoIter, SmallVec};
 
-use super::super::{Priority, WorkCause};
-use super::{AnalyserId, AnalyserOrder};
+use crate::engine::scheduler::{AnalyserId, AnalyserOrder};
+use crate::engine::{Priority, WorkCause};
 use crate::ir::{Address, AddressRange, AddressRangeSet, ProblemScope, RawAddress};
 use crate::project::AnalysisPhase;
 use crate::storage::segments::space::AddressSpaceId;
@@ -529,14 +529,6 @@ impl AnalysisWorkQueue {
 
     pub(crate) fn take_degradations(&mut self) -> DegradationReport {
         mem::take(&mut self.degradations)
-    }
-
-    pub(crate) fn clear(&mut self) {
-        self.items.clear();
-        for keys in &mut self.keys_by_analyser_and_range {
-            keys.clear();
-        }
-        self.degradations = DegradationReport::default();
     }
 }
 

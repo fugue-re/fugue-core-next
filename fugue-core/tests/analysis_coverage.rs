@@ -9,9 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(feature = "sqlite")]
 use fugue_core::analysis::AnalysisError;
 #[cfg(feature = "sqlite")]
-use fugue_core::engine::{
-    Analyser, AnalyserProvider, AnalysisContext, AnalysisEngine, ProjectUpdate, ProjectView,
-};
+use fugue_core::engine::{Analyser, AnalyserProvider, AnalysisContext, AnalysisEngine};
 #[cfg(feature = "sqlite")]
 use fugue_core::extension;
 #[cfg(feature = "sqlite")]
@@ -79,17 +77,7 @@ impl Analyser for CoverageAnalyser {
             == Some(self.name)
     }
 
-    fn analyse(
-        &mut self,
-        project: &ProjectView<'_>,
-        regions: &AddressRangeSet,
-        context: &AnalysisContext,
-        updates: &mut Vec<ProjectUpdate>,
-    ) -> Result<(), AnalysisError> {
-        let _ = project;
-        let _ = context;
-        let _ = updates;
-
+    fn analyse(&mut self, context: &mut AnalysisContext<'_, '_>) -> Result<(), AnalysisError> {
         if self.name == OLD_ANALYSER_NAME {
             OLD_ANALYSER_RUNS.fetch_add(1, Ordering::SeqCst);
             return Ok(());
@@ -101,11 +89,11 @@ impl Analyser for CoverageAnalyser {
             .expect("coverage analyser region lock must not be poisoned");
         match observed.as_mut() {
             Some(observed) => {
-                for range in regions.ranges() {
+                for range in context.regions().ranges() {
                     observed.insert_range(range);
                 }
             }
-            None => *observed = Some(regions.clone()),
+            None => *observed = Some(context.regions().clone()),
         }
         Ok(())
     }
@@ -123,12 +111,12 @@ fn build_old_coverage_analyser(_project: &Project) -> Result<Box<dyn Analyser>, 
 
 #[cfg(feature = "sqlite")]
 extension::submit! {
-    AnalyserProvider::new(NEW_ANALYSER_NAME, build_new_coverage_analyser)
+    AnalyserProvider::new::<CoverageAnalyser>(NEW_ANALYSER_NAME, build_new_coverage_analyser)
 }
 
 #[cfg(feature = "sqlite")]
 extension::submit! {
-    AnalyserProvider::new(OLD_ANALYSER_NAME, build_old_coverage_analyser)
+    AnalyserProvider::new::<CoverageAnalyser>(OLD_ANALYSER_NAME, build_old_coverage_analyser)
 }
 
 #[test]
@@ -228,19 +216,6 @@ fn renamed_analyser_reprocesses_persisted_coverage() -> Result<(), Box<dyn Error
     let mut new_attributes = AttributeMap::new();
     new_attributes.set_attr(ATTRIBUTE_PROJECT_PATH, project_path.clone());
     new_attributes.set_attr(ANALYSER_ATTRIBUTE, NEW_ANALYSER_NAME);
-    let project = Project::from_file_with_provider_and_attributes::<SqliteProjectProvider>(
-        "tests/ls.elf",
-        new_attributes.clone(),
-    )?;
-    let engine = AnalysisEngine::new(project)?;
-    engine.cancel()?;
-    drop(engine);
-    assert_eq!(
-        NEW_ANALYSER_RUNS.load(Ordering::SeqCst),
-        0,
-        "cancelling before dispatch must leave replacement coverage pending"
-    );
-
     let project = Project::from_file_with_provider_and_attributes::<SqliteProjectProvider>(
         "tests/ls.elf",
         new_attributes.clone(),

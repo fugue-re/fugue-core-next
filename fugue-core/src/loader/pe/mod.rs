@@ -20,6 +20,7 @@ use object::read::pe::{
 use object::{FileKind, Object, ObjectSection, ReadRef, SectionFlags};
 use smallvec::{SmallVec, smallvec};
 
+use crate::AnalysisData;
 use crate::arch::Arch;
 use crate::ir::{
     Endian, RawAddress, RawAddressRangeSet, Symbol, SymbolIndex, SymbolProperties,
@@ -163,6 +164,7 @@ impl<'a> PeInner<'a> {
 
 type PeRecoverError<'a> = Box<(BytesOrMapping<'a>, LoaderError)>;
 
+#[derive(AnalysisData)]
 pub struct Pe<'a> {
     object: PeInner<'a>,
     metadata: OnceLock<LoadableMetadata>,

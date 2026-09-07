@@ -1,7 +1,6 @@
 use std::error::Error;
 use std::io;
 
-use fugue_core::analysis::control::CancellationToken;
 use fugue_core::engine::{AnalysisEngine, AnalysisEngineConfig};
 use fugue_core::il::common::{IlOpId, IlValueId, RegisterBank};
 use fugue_core::il::ecode::{ECodeDomain, ECodeIr, ECodeOpcode};
@@ -139,13 +138,7 @@ fn an_external_consumer_can_supply_function_scoped_facts() -> Result<(), Box<dyn
     let mut facts = MCodeFunctionFacts::new(source.metadata().function());
     facts.insert_call(call);
 
-    let mcode = ECodeToMCode::default().transform(
-        &source,
-        &arch,
-        &platform,
-        Some(&facts),
-        &CancellationToken::default(),
-    )?;
+    let mcode = ECodeToMCode::default().transform(&source, &arch, &platform, Some(&facts))?;
 
     assert_eq!(mcode.metadata().function(), facts.function());
     Ok(())

@@ -7,7 +7,6 @@ use super::ECodeToMCodeScratch;
 use super::variables::{
     MCodeCallOutputSite, MCodeCallOutputVariables, MCodeStackDefs, MCodeVariableWidths,
 };
-use crate::analysis::control::CancellationToken;
 use crate::il::common::{
     IlArtefact, IlBlock, IlBlockId, IlDominance, IlDominanceEvent, IlError, IlIndexRange,
     IlIndexRangeMap, IlOpId, IlValueId, RegisterId,
@@ -386,7 +385,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "variable binding"))
     }
 
-    pub(crate) fn lift(mut self, cancellation: &CancellationToken) -> Result<MCodeIr, IlError> {
+    pub(crate) fn lift(mut self) -> Result<MCodeIr, IlError> {
         for domain in self.source.memory_domains() {
             self.builder.emitter().intern_memory_domain(domain.space());
         }
@@ -399,8 +398,8 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         );
 
         match self.source.graph().entry_block() {
-            Some(entry) => self.lift_blocks(entry, cancellation)?,
-            None => self.lift_linear(cancellation)?,
+            Some(entry) => self.lift_blocks(entry)?,
+            None => self.lift_linear()?,
         }
 
         let mut versions = FxHashMap::default();
@@ -414,40 +413,30 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                 .bind_value(value, variable, *version)?;
         }
 
-        self.builder.build(cancellation)
+        self.builder.build()
     }
 
-    fn lift_linear(&mut self, cancellation: &CancellationToken) -> Result<(), IlError> {
+    fn lift_linear(&mut self) -> Result<(), IlError> {
         let mut current = ECodeToMCodeRenameState::default();
         for index in 0..self.source.ops().len() {
-            cancellation.check()?;
             self.lift_op_at(index, &mut current)?;
         }
 
         self.finish_graph(self.source.graph().blocks().iter().map(|block| block.ops()))
     }
 
-    fn lift_blocks(
-        &mut self,
-        entry: IlBlockId,
-        cancellation: &CancellationToken,
-    ) -> Result<(), IlError> {
+    fn lift_blocks(&mut self, entry: IlBlockId) -> Result<(), IlError> {
         let graph = self.source.graph();
         let dominance = IlDominance::from_blocks(graph.blocks(), graph.successors(), entry);
         self.place_block_args(&dominance)?;
-        self.lift_block_tree(
-            entry,
-            &dominance,
-            ECodeToMCodeRenameState::default(),
-            cancellation,
-        )?;
+        self.lift_block_tree(entry, &dominance, ECodeToMCodeRenameState::default())?;
 
         for index in 0..graph.blocks().len() {
             if self.blocks[index].is_some() {
                 continue;
             }
             let block = IlBlockId::try_from_index(index)?;
-            self.lift_block(block, &mut ECodeToMCodeRenameState::default(), cancellation)?;
+            self.lift_block(block, &mut ECodeToMCodeRenameState::default())?;
         }
 
         for args in mem::take(&mut self.edge_args) {
@@ -465,14 +454,13 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         entry: IlBlockId,
         dominance: &IlDominance,
         mut current: ECodeToMCodeRenameState,
-        cancellation: &CancellationToken,
     ) -> Result<(), IlError> {
         let mut checkpoints = Vec::new();
         for event in dominance.events_from(entry) {
             match event {
                 IlDominanceEvent::Enter(block) => {
                     checkpoints.push(current.checkpoint());
-                    self.lift_block(block, &mut current, cancellation)?;
+                    self.lift_block(block, &mut current)?;
                 }
                 IlDominanceEvent::Exit(_) => {
                     current.rollback(
@@ -491,10 +479,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         &mut self,
         block: IlBlockId,
         current: &mut ECodeToMCodeRenameState,
-        cancellation: &CancellationToken,
     ) -> Result<(), IlError> {
-        cancellation.check()?;
-
         for index in 0..self.block_args[block.index()].len() {
             let arg = self.block_args[block.index()][index];
             match arg.domain {
@@ -538,11 +523,9 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             if Some(index) == terminator {
                 continue;
             }
-            cancellation.check()?;
             self.lift_op_at(index, current)?;
         }
         if let Some(index) = terminator {
-            cancellation.check()?;
             self.lift_op_at(index, current)?;
         }
 
@@ -1725,4 +1708,49 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
 }
 
 #[cfg(test)]
-mod test;
+mod test {
+    use super::*;
+
+    #[test]
+    fn branch_heavy_rename_state_restores_each_domain_between_siblings() {
+        const BRANCH_COUNT: usize = 64;
+
+        let variable = MCodeVarId::try_from_index(0).unwrap();
+        let memory_space = AddressSpaceId::new(1);
+        let other_space = AddressSpaceId::new(2);
+        let output_register = RegisterId::new(3);
+        let other_register = RegisterId::new(4);
+        let stack_value = IlValueId::try_from_index(0).unwrap();
+        let memory_value = IlValueId::try_from_index(1).unwrap();
+        let output_value = IlValueId::try_from_index(2).unwrap();
+        let mut state = ECodeToMCodeRenameState::default();
+        state.insert_stack(variable, stack_value);
+        state.insert_memory(memory_space, memory_value);
+        state.insert_unmatched_call_memory(memory_space);
+        state.insert_unmatched_call_output(output_register, output_value);
+
+        for branch in 0..BRANCH_COUNT {
+            let checkpoint = state.checkpoint();
+            let branch_value = IlValueId::try_from_index(branch + 3).unwrap();
+            state.insert_stack(variable, branch_value);
+            state.clear_memory();
+            state.insert_memory(other_space, branch_value);
+            state.clear_unmatched_call_memory();
+            state.insert_unmatched_call_memory(other_space);
+            state.clear_unmatched_call_outputs();
+            state.insert_unmatched_call_output(other_register, branch_value);
+            state.rollback(checkpoint);
+
+            assert_eq!(state.stack_value(variable), Some(stack_value));
+            assert_eq!(state.memory_value(memory_space), Some(memory_value));
+            assert_eq!(state.memory_value(other_space), None);
+            assert!(state.unmatched_call_memory.contains(&memory_space));
+            assert!(!state.unmatched_call_memory.contains(&other_space));
+            assert_eq!(
+                state.unmatched_call_outputs.get(&output_register),
+                Some(&output_value)
+            );
+            assert!(!state.unmatched_call_outputs.contains_key(&other_register));
+        }
+    }
+}

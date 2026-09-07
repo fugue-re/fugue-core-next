@@ -83,11 +83,19 @@ impl IlAnalysis<MCodeIr> for MCodeBlockArgInputs {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::analysis::control::CancellationToken;
-    use crate::il::common::{IlArtefact, IlGraph, IlMetadata};
-    use crate::il::mcode::test::emit_value;
+    use crate::il::common::{IlArtefact, IlError, IlGraph, IlMetadata, IlValueId};
     use crate::il::mcode::{MCodeBuilder, MCodeOpSpec, MCodeOpcode};
     use crate::ir::FunctionId;
+
+    fn emit_value(
+        builder: &mut MCodeBuilder,
+        spec: MCodeOpSpec,
+        operands: impl IntoIterator<Item = IlValueId>,
+        width: u32,
+    ) -> Result<IlValueId, IlError> {
+        let (_, results) = builder.emitter().emit(spec, operands, [width])?;
+        IlValueId::try_from_index(results.start())
+    }
 
     #[test]
     fn uses_preserve_operand_positions() {
@@ -115,7 +123,7 @@ mod test {
                 [],
             )
             .unwrap();
-        let ir = builder.build(&CancellationToken::default()).unwrap();
+        let ir = builder.build().unwrap();
         let uses = ir.analyse::<MCodeUses>();
 
         assert_eq!(

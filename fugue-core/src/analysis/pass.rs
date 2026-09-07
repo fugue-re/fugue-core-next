@@ -4,12 +4,16 @@ use super::combinator::{ConditionalAnalysis, IteratedAnalysis, OneShotAnalysis, 
 use super::condition::AnalysisCondition;
 use super::error::AnalysisError;
 use super::group::AnalysisGroup;
-use crate::engine::ProjectView;
+use crate::engine::AnalysisContext;
 
 pub trait AnalysisPass<S = ()>: Downcast + Send {
+    fn can_analyse(&self, _context: &AnalysisContext<'_, '_>) -> bool {
+        true
+    }
+
     fn analyse_with(
         &mut self,
-        project: &ProjectView<'_>,
+        context: &mut AnalysisContext<'_, '_>,
         state: &mut S,
     ) -> Result<(), AnalysisError>;
 
@@ -26,15 +30,17 @@ impl_downcast!(AnalysisPass<S>);
 
 impl<S, F> AnalysisPass<S> for F
 where
-    F: FnMut(&ProjectView<'_>, &mut S) -> Result<(), AnalysisError> + Send + 'static,
+    F: for<'a, 'p> FnMut(&mut AnalysisContext<'a, 'p>, &mut S) -> Result<(), AnalysisError>
+        + Send
+        + 'static,
     S: 'static,
 {
     fn analyse_with(
         &mut self,
-        project: &ProjectView<'_>,
+        context: &mut AnalysisContext<'_, '_>,
         state: &mut S,
     ) -> Result<(), AnalysisError> {
-        self(project, state)
+        self(context, state)
     }
 }
 

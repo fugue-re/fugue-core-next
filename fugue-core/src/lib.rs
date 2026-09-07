@@ -14,5 +14,5 @@ pub mod queries;
 pub mod storage;
 pub mod types;
 
-// Re-export derive macro for provider registration
-pub use fugue_core_derive::{SegmentStorageProvider, extension};
+pub use engine::AnalysisData;
+pub use fugue_core_derive::{AnalysisData, SegmentStorageProvider, extension};

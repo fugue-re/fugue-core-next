@@ -3,7 +3,7 @@ use std::fmt::{Debug, Display, LowerHex, UpperHex};
 use std::num::ParseIntError;
 use std::ops::{Add, AddAssign, Bound, Range, RangeBounds, RangeInclusive, Sub, SubAssign};
 use std::str::FromStr;
-use std::{fmt, mem};
+use std::{fmt, iter, mem};
 
 use rangemap::{RangeInclusiveMap, RangeInclusiveSet};
 use serde::{Deserialize, Serialize};
@@ -652,6 +652,22 @@ impl RawAddressRangeSet {
             .map(|r| RawAddress::from(*r.start())..=RawAddress::from(*r.end()))
     }
 
+    pub fn overlapping_ranges(
+        &self,
+        range: RangeInclusive<RawAddress>,
+    ) -> impl Iterator<Item = RangeInclusive<RawAddress>> + use<'_> {
+        let start = range.start().offset();
+        let end = range.end().offset();
+        (start <= end)
+            .then_some(start..=end)
+            .into_iter()
+            .flat_map(move |range| {
+                self.0
+                    .overlapping(range)
+                    .map(|range| RawAddress::from(*range.start())..=RawAddress::from(*range.end()))
+            })
+    }
+
     pub fn range_count(&self) -> usize {
         self.0.len()
     }
@@ -686,40 +702,12 @@ impl RawAddressRangeSet {
 
     pub fn difference(&self, other: &Self) -> Self {
         let mut difference = RangeInclusiveSet::new();
-        let mut exclusions = other.0.iter().peekable();
-
-        for range in self.0.iter() {
-            let mut start = *range.start();
-            let end = *range.end();
-
-            while exclusions
-                .peek()
-                .is_some_and(|exclusion| *exclusion.end() < start)
-            {
-                exclusions.next();
-            }
-
-            let mut exhausted = false;
-            while let Some(exclusion) = exclusions.peek() {
-                if *exclusion.start() > end {
-                    break;
-                }
-                if *exclusion.start() > start {
-                    difference.insert(start..=*exclusion.start() - 1);
-                }
-                if *exclusion.end() >= end {
-                    exhausted = true;
-                    break;
-                }
-                start = *exclusion.end() + 1;
-                exclusions.next();
-            }
-
-            if !exhausted {
-                difference.insert(start..=end);
+        for range in self.ranges() {
+            let excluded = other.overlapping_ranges(range.clone());
+            for range in range.difference(excluded) {
+                difference.insert(range.start().offset()..=range.end().offset());
             }
         }
-
         Self(difference)
     }
 
@@ -1547,6 +1535,12 @@ impl Address {
 }
 
 pub trait AddressRangeExt<T> {
+    fn difference<E>(self, excluded: E) -> impl Iterator<Item = RangeInclusive<T>>
+    where
+        Self: Sized,
+        E: IntoIterator,
+        E::Item: AddressRangeExt<T>;
+
     fn first(&self) -> T;
 
     fn last(&self) -> T;
@@ -1560,23 +1554,66 @@ pub trait AddressRangeExt<T> {
     fn inclusive(&self) -> RangeInclusive<T>;
 }
 
-trait RangeAddress: Copy + Ord + Sub<usize, Output = Self> {
+trait AddressDifference: Add<usize, Output = Self> + Copy + Ord + Sub<usize, Output = Self> {
     fn checked_offset_from(self, base: Self) -> Option<u64>;
 }
 
-impl RangeAddress for RawAddress {
+impl AddressDifference for RawAddress {
     fn checked_offset_from(self, base: Self) -> Option<u64> {
         RawAddress::checked_offset_from(&self, base)
     }
 }
 
-impl RangeAddress for Address {
+impl AddressDifference for Address {
     fn checked_offset_from(self, base: Self) -> Option<u64> {
         Address::checked_offset_from(&self, base)
     }
 }
 
-impl<T: RangeAddress> AddressRangeExt<T> for RangeInclusive<T> {
+impl<T: AddressDifference> AddressRangeExt<T> for RangeInclusive<T> {
+    fn difference<E>(self, excluded: E) -> impl Iterator<Item = RangeInclusive<T>>
+    where
+        E: IntoIterator,
+        E::Item: AddressRangeExt<T>,
+    {
+        // NOTE: assumes exclusions are ordered
+        let mut excluded = excluded.into_iter().peekable();
+        let mut remainder = (!self.is_empty()).then(|| (*self.start(), *self.end()));
+
+        iter::from_fn(move || {
+            loop {
+                let (start, end) = remainder.take()?;
+
+                while excluded
+                    .peek()
+                    .is_some_and(|range| range.is_empty() || range.last() < start)
+                {
+                    excluded.next();
+                }
+
+                let Some(exclusion) = excluded.peek() else {
+                    return Some(start..=end);
+                };
+                let exclusion_start = exclusion.first();
+                if exclusion_start > end {
+                    return Some(start..=end);
+                }
+                let exclusion_end = exclusion.last();
+                if exclusion_start > start {
+                    remainder = (exclusion_end < end).then_some((exclusion_end + 1usize, end));
+                    if remainder.is_some() {
+                        excluded.next();
+                    }
+                    return Some(start..=(exclusion_start - 1usize));
+                }
+                if exclusion_end < end {
+                    remainder = Some((exclusion_end + 1usize, end));
+                    excluded.next();
+                }
+            }
+        })
+    }
+
     fn first(&self) -> T {
         *self.start()
     }
@@ -1607,7 +1644,18 @@ impl<T: RangeAddress> AddressRangeExt<T> for RangeInclusive<T> {
     }
 }
 
-impl<T: RangeAddress> AddressRangeExt<T> for Range<T> {
+impl<T: AddressDifference> AddressRangeExt<T> for Range<T> {
+    fn difference<E>(self, excluded: E) -> impl Iterator<Item = RangeInclusive<T>>
+    where
+        E: IntoIterator,
+        E::Item: AddressRangeExt<T>,
+    {
+        (!self.is_empty())
+            .then(|| (self.inclusive(), excluded))
+            .into_iter()
+            .flat_map(|(range, excluded)| range.difference(excluded))
+    }
+
     fn first(&self) -> T {
         self.start
     }
@@ -1787,6 +1835,12 @@ mod test {
         assert_eq!(
             range.inclusive(),
             RawAddress::from(4u64)..=RawAddress::from(8u64)
+        );
+        assert!(
+            (RawAddress::zero()..RawAddress::zero())
+                .difference(iter::empty::<RangeInclusive<RawAddress>>())
+                .next()
+                .is_none()
         );
     }
 

@@ -1,5 +1,3 @@
-use smallvec::SmallVec;
-
 use crate::ir::{Address, Location, ToRawAddress};
 use crate::lifter::{Language, Op, RawPCodeOp};
 
@@ -11,92 +9,113 @@ pub enum RawPCodeFlow {
     Return(Option<Address>),
 }
 
-pub struct RawPCodeFlows {
-    targets: SmallVec<[(u16, RawPCodeFlow); 2]>,
+pub struct RawPCodeFlows<'a> {
+    address: Address,
+    language: &'static Language,
+    operations: &'a [RawPCodeOp],
+    size: usize,
 }
 
-impl RawPCodeFlows {
+impl<'a> RawPCodeFlows<'a> {
     pub fn new(
         language: &'static Language,
         address: Address,
         size: usize,
-        operations: &[RawPCodeOp],
+        operations: &'a [RawPCodeOp],
     ) -> Self {
-        let operation_count = operations.len() as u16;
-        let next_address = address + size;
-
-        let next_location = |index: u16| -> Location {
-            if index >= operation_count {
-                Location::new(next_address, index - operation_count)
-            } else {
-                Location::new(address, index)
-            }
-        };
-
-        let mut targets = SmallVec::new();
-
-        if operation_count == 0 {
-            targets.push((0, RawPCodeFlow::FallThrough(next_location(1))));
-            return Self { targets };
+        Self {
+            address,
+            language,
+            operations,
+            size,
         }
+    }
 
-        for (index, operation) in operations.iter().enumerate() {
-            let index = index as u16;
-            let next = next_location(index + 1);
+    pub fn iter(&self) -> impl Iterator<Item = (u16, RawPCodeFlow)> + '_ {
+        let empty = self
+            .operations
+            .is_empty()
+            .then(|| (0, RawPCodeFlow::FallThrough(self.next_location(1))));
+        empty
+            .into_iter()
+            .chain(self.operations.iter().enumerate().flat_map(|(index, _)| {
+                let index = index as u16;
+                self.flows_for(index).map(move |flow| (index, flow))
+            }))
+    }
+
+    pub fn flows_for(&self, index: u16) -> impl Iterator<Item = RawPCodeFlow> + '_ {
+        let flows = if self.operations.is_empty() {
+            [
+                (index == 0).then(|| RawPCodeFlow::FallThrough(self.next_location(1))),
+                None,
+            ]
+        } else if let Some(operation) = self.operations.get(usize::from(index)) {
+            let next = self.next_location(index + 1);
             let inputs = operation.inputs();
 
             match operation.op() {
-                Op::Branch => {
-                    let location = Location::absolute_from(language, address, inputs[0], index);
-                    targets.push((index, RawPCodeFlow::Branch(location)));
-                }
-                Op::CBranch => {
-                    let location = Location::absolute_from(language, address, inputs[0], index);
-                    targets.push((index, RawPCodeFlow::Branch(location)));
-                    targets.push((index, RawPCodeFlow::FallThrough(next)));
-                }
-                Op::IBranch => {
-                    targets.push((index, RawPCodeFlow::Branch(None)));
-                }
-                Op::Call => {
-                    let location = Location::absolute_from(language, address, inputs[0], index);
-                    targets.push((index, RawPCodeFlow::Call(location)));
-                    targets.push((index, RawPCodeFlow::FallThrough(next)));
-                }
-                Op::ICall => {
-                    targets.push((index, RawPCodeFlow::Call(None)));
-                    targets.push((index, RawPCodeFlow::FallThrough(next)));
-                }
+                Op::Branch => [
+                    Some(RawPCodeFlow::Branch(Location::absolute_from(
+                        self.language,
+                        self.address,
+                        inputs[0],
+                        index,
+                    ))),
+                    None,
+                ],
+                Op::CBranch => [
+                    Some(RawPCodeFlow::Branch(Location::absolute_from(
+                        self.language,
+                        self.address,
+                        inputs[0],
+                        index,
+                    ))),
+                    Some(RawPCodeFlow::FallThrough(next)),
+                ],
+                Op::IBranch => [Some(RawPCodeFlow::Branch(None)), None],
+                Op::Call => [
+                    Some(RawPCodeFlow::Call(Location::absolute_from(
+                        self.language,
+                        self.address,
+                        inputs[0],
+                        index,
+                    ))),
+                    Some(RawPCodeFlow::FallThrough(next)),
+                ],
+                Op::ICall => [
+                    Some(RawPCodeFlow::Call(None)),
+                    Some(RawPCodeFlow::FallThrough(next)),
+                ],
                 Op::Return => {
                     let return_address = inputs[0]
-                        .to_address(language)
-                        .map(|address_offset| Address::new(address.space(), address_offset));
-                    targets.push((index, RawPCodeFlow::Return(return_address)));
+                        .to_address(self.language)
+                        .map(|address| Address::new(self.address.space(), address));
+                    [Some(RawPCodeFlow::Return(return_address)), None]
                 }
-                Op::UserOp(_, _) => {
-                    targets.push((index, RawPCodeFlow::Intrinsic));
-                    targets.push((index, RawPCodeFlow::FallThrough(next)));
+                Op::UserOp(_, _) => [
+                    Some(RawPCodeFlow::Intrinsic),
+                    Some(RawPCodeFlow::FallThrough(next)),
+                ],
+                _ if index + 1 == self.operations.len() as u16 => {
+                    [Some(RawPCodeFlow::FallThrough(next)), None]
                 }
-                _ => {
-                    if index + 1 == operation_count {
-                        targets.push((index, RawPCodeFlow::FallThrough(next)));
-                    }
-                }
+                _ => [None, None],
             }
+        } else {
+            [None, None]
+        };
+
+        flows.into_iter().flatten()
+    }
+
+    fn next_location(&self, index: u16) -> Location {
+        let operation_count = self.operations.len() as u16;
+        if index >= operation_count {
+            Location::new(self.address + self.size, index - operation_count)
+        } else {
+            Location::new(self.address, index)
         }
-
-        Self { targets }
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (u16, &RawPCodeFlow)> + '_ {
-        self.targets.iter().map(|(index, flow)| (*index, flow))
-    }
-
-    pub fn flow_for(&self, index: u16) -> Option<&RawPCodeFlow> {
-        self.targets
-            .iter()
-            .find(|(target_index, _)| *target_index == index)
-            .map(|(_, flow)| flow)
     }
 }
 

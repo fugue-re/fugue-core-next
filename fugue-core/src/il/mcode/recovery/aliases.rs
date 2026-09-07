@@ -72,15 +72,22 @@ impl MCodeAliasSet {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::analysis::control::CancellationToken;
-    use crate::il::common::{IlGraph, IlMetadata, RegisterId};
-    use crate::il::ecode::test::emit_value;
+    use crate::il::common::{IlError, IlGraph, IlMetadata, IlValueId, RegisterId};
     use crate::il::ecode::{ECodeBuilder, ECodeDomain, ECodeIr, ECodeOpSpec, ECodeOpcode};
     use crate::il::mcode::MCodeVarKind;
     use crate::il::mcode::recovery::MCodeStackModel;
     use crate::ir::FunctionId;
 
     const STACK_POINTER: u64 = 0x20;
+
+    fn emit_value(
+        builder: &mut ECodeBuilder,
+        spec: ECodeOpSpec,
+        operands: impl IntoIterator<Item = IlValueId>,
+    ) -> Result<IlValueId, IlError> {
+        let (_, results) = builder.emitter().emit(spec, operands, 1)?;
+        IlValueId::try_from_index(results.start())
+    }
 
     fn escaping_frame() -> (ECodeIr, MCodeStackModel, MCodeVariableModel) {
         let mut builder = ECodeBuilder::new(
@@ -127,9 +134,7 @@ mod test {
         )
         .unwrap();
 
-        let ir = builder
-            .build_unchecked(&CancellationToken::default())
-            .unwrap();
+        let ir = builder.build_unchecked();
         let stack = MCodeStackModel::new(&ir, RegisterId::new(STACK_POINTER), []);
         let variables = MCodeVariableModel::new(&ir, &stack);
         (ir, stack, variables)

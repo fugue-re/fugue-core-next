@@ -1,6 +1,5 @@
 use rustc_hash::FxHashMap;
 
-use crate::analysis::control::CancellationToken;
 use crate::il::common::{
     IlArtefact, IlError, IlGraph, IlIndexRange, IlMetadata, IlOpId, IlPool, IlSourceSpan,
 };
@@ -89,9 +88,7 @@ impl PCodeBuilder {
         PCodeTargetId::try_from_index(index)
     }
 
-    pub fn build(self, cancellation: &CancellationToken) -> Result<PCodeIr, IlError> {
-        cancellation.check()?;
-
+    pub fn build(self) -> Result<PCodeIr, IlError> {
         let mut ir = PCodeIr::new(
             self.metadata,
             self.graph,
@@ -177,7 +174,7 @@ mod test {
             )
             .unwrap();
 
-        let ir = builder.build(&CancellationToken::default()).unwrap();
+        let ir = builder.build().unwrap();
 
         assert!(ir.verify().is_ok());
         assert_eq!(ir.ops().len(), 1);
@@ -206,7 +203,7 @@ mod test {
             .unwrap();
 
         assert!(matches!(
-            builder.build(&CancellationToken::default()),
+            builder.build(),
             Err(IlError::InvalidArtefact { .. })
         ));
     }
@@ -233,7 +230,7 @@ mod test {
             .unwrap();
 
         assert!(matches!(
-            builder.build(&CancellationToken::default()),
+            builder.build(),
             Err(IlError::InvalidArtefact { .. })
         ));
     }
@@ -241,7 +238,7 @@ mod test {
     #[test]
     fn pcode_builder_finish_shrinks_spare_capacity() {
         let baseline = PCodeBuilder::new(metadata(), IlGraph::default())
-            .build(&CancellationToken::default())
+            .build()
             .unwrap();
         let mut builder = PCodeBuilder::new(metadata(), IlGraph::default());
 
@@ -249,7 +246,7 @@ mod test {
         builder.operations.reserve(16);
         builder.targets.reserve(16);
 
-        let ir = builder.build(&CancellationToken::default()).unwrap();
+        let ir = builder.build().unwrap();
 
         assert_eq!(ir.estimate_size(), baseline.estimate_size());
     }
@@ -275,7 +272,7 @@ mod test {
             )
             .unwrap();
 
-        let ir = builder.build(&CancellationToken::default()).unwrap();
+        let ir = builder.build().unwrap();
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&ir).unwrap();
         let decoded = rkyv::from_bytes::<PCodeIr, rkyv::rancor::Error>(&bytes).unwrap();
 
@@ -330,7 +327,7 @@ mod test {
             )
             .unwrap();
 
-        let ir = builder.build(&CancellationToken::default()).unwrap();
+        let ir = builder.build().unwrap();
         let references = ir.data_references().collect::<Vec<_>>();
 
         assert_eq!(references.len(), 2);
@@ -387,7 +384,7 @@ mod test {
             )
             .unwrap();
 
-        let ir = builder.build(&CancellationToken::default()).unwrap();
+        let ir = builder.build().unwrap();
 
         assert!(ir.data_references().next().is_none());
     }
@@ -470,7 +467,7 @@ mod test {
             .unwrap();
 
         assert!(matches!(
-            builder.build(&CancellationToken::default()),
+            builder.build(),
             Err(IlError::InvalidArtefact { .. })
         ));
     }
@@ -505,7 +502,7 @@ mod test {
             )
             .unwrap();
 
-        let ir = builder.build(&CancellationToken::default()).unwrap();
+        let ir = builder.build().unwrap();
 
         assert!(ir.verify().is_ok());
     }
@@ -528,7 +525,7 @@ mod test {
             .unwrap();
 
         assert!(matches!(
-            builder.build(&CancellationToken::default()),
+            builder.build(),
             Err(IlError::InvalidArtefact { .. })
         ));
     }
@@ -560,7 +557,7 @@ mod test {
             .unwrap();
 
         assert!(matches!(
-            builder.build(&CancellationToken::default()),
+            builder.build(),
             Err(IlError::InvalidArtefact { .. })
         ));
     }

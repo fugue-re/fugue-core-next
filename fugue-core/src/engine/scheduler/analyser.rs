@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use smallvec::SmallVec;
 
-use super::super::{Analyser, AnalysisContext, Priority, ProjectUpdate, ProjectView};
-use super::{AnalyserId, AnalyserOrder};
 use crate::analysis::AnalysisError;
+use crate::engine::scheduler::{AnalyserId, AnalyserOrder};
+use crate::engine::{Analyser, AnalysisContext, Priority};
 use crate::il::common::{IlAnalyser, IlArtefact, IlError, IlFormId};
 use crate::il::registry::GeneratedArtefact;
 use crate::ir::{AddressRange, AddressRangeSet, FunctionId};
@@ -132,29 +132,23 @@ where
         self.analyser.can_analyse(project)
     }
 
-    fn analyse(
-        &mut self,
-        project: &ProjectView<'_>,
-        regions: &AddressRangeSet,
-        cx: &AnalysisContext,
-        updates: &mut Vec<ProjectUpdate>,
-    ) -> Result<(), AnalysisError> {
+    fn analyse(&mut self, context: &mut AnalysisContext<'_, '_>) -> Result<(), AnalysisError> {
         let mut functions = SmallVec::<[FunctionId; 4]>::new();
-        if let Some(function) = project.il_analysis_function() {
+        if let Some(function) = context.project.il_analysis_function() {
             functions.push(function);
         } else {
-            functions.extend(project.function_ids_overlapping(regions));
+            functions.extend(context.project.function_ids_overlapping(context.regions()));
         }
 
         for function in functions {
-            let Some(input) = project
+            let Some(input) = context
+                .project
                 .lifted::<A::Input>(function)
                 .map_err(|error| AnalysisError::pass_failed(A::NAME, error))?
             else {
                 continue;
             };
-            self.analyser
-                .analyse(project, function, &input, cx, updates)?;
+            self.analyser.analyse(context, function, &input)?;
         }
 
         Ok(())
@@ -247,10 +241,6 @@ impl ScheduledAnalyser {
 
     pub(crate) fn claim(&mut self, range: AddressRange) {
         self.claimed.insert_range(range);
-    }
-
-    pub(crate) fn clear_claimed(&mut self) {
-        self.claimed = AddressRangeSet::new();
     }
 
     pub(crate) fn retract_claimed(&mut self, range: AddressRange) {

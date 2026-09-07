@@ -89,11 +89,18 @@ impl IlAnalysis<ECodeIr> for ECodeBlockArgInputs {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::analysis::control::CancellationToken;
-    use crate::il::common::{IlArtefact, IlGraph, IlMetadata};
-    use crate::il::ecode::test::emit_value;
+    use crate::il::common::{IlArtefact, IlError, IlGraph, IlMetadata, IlValueId};
     use crate::il::ecode::{ECodeBuilder, ECodeOpSpec, ECodeOpcode};
     use crate::ir::FunctionId;
+
+    fn emit_value(
+        builder: &mut ECodeBuilder,
+        spec: ECodeOpSpec,
+        operands: impl IntoIterator<Item = IlValueId>,
+    ) -> Result<IlValueId, IlError> {
+        let (_, results) = builder.emitter().emit(spec, operands, 1)?;
+        IlValueId::try_from_index(results.start())
+    }
 
     #[test]
     fn uses_builds_from_ecode_body() {
@@ -119,7 +126,7 @@ mod test {
                 0,
             )
             .unwrap();
-        let ir = builder.build(&CancellationToken::default()).unwrap();
+        let ir = builder.build().unwrap();
         let index = ir.analyse::<ECodeUses>();
 
         assert_eq!(
