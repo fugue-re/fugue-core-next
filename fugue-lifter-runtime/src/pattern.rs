@@ -1,9 +1,10 @@
 use std::fmt;
 use std::ops::Range;
 
+use crate::format::{InstructionOutput, InstructionSection};
 use crate::input::{BREADCRUMBS, INVALID_HANDLE};
-use crate::language::LanguageData;
-use crate::operand::Operands;
+use crate::language::{Language, LanguageData};
+use crate::operand::OperandPiece;
 use crate::pcode::LiftingContextState;
 use crate::{byte_swap, sign_extend, zero_extend};
 
@@ -97,7 +98,7 @@ impl PatternExpression {
         }
     }
 
-    fn has_signed_terms(&self, data: &'static LanguageData) -> bool {
+    pub(crate) fn has_signed_terms(&self, data: &'static LanguageData) -> bool {
         self.operations(data).iter().any(|op| match op {
             PatternOp::TokenField { sign_bit, .. } | PatternOp::ContextField { sign_bit, .. } => {
                 *sign_bit
@@ -109,20 +110,24 @@ impl PatternExpression {
         })
     }
 
-    /// # Safety
-    ///
-    /// Called from generated code which ensures validity of arguments and state.
-    pub unsafe fn operands(
+    pub(crate) unsafe fn operand_pieces<O: InstructionOutput + ?Sized>(
         &self,
-        data: &'static LanguageData,
+        language: &'static Language,
         state: &mut LiftingContextState<'_>,
-        operands: &mut Operands,
-    ) {
+        output: &mut O,
+        section: InstructionSection,
+    ) -> fmt::Result {
         unsafe {
-            let (value, range) = self
+            let data = language.data();
+            let (value, resolved) = self
                 .resolve_with_range(data, state)
                 .expect("value previously resolved");
-            operands.push_with(value, range);
+            let signed = self.has_signed_terms(data);
+            section.write(
+                output,
+                OperandPiece::scalar(value, resolved.as_ref(), signed),
+                resolved,
+            )
         }
     }
 

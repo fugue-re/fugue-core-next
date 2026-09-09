@@ -1,8 +1,9 @@
 use std::fmt;
 
 use crate::LiftingContextState;
+use crate::format::InstructionFormatter;
 use crate::language::LanguageData;
-use crate::operand::Operands;
+use crate::operand::{Operands, OperandsContext};
 use crate::pcode::{LiftingContext, PCodeOp};
 
 #[inline]
@@ -45,10 +46,15 @@ pub fn operands(
     address: u64,
     bytes: &[u8],
     context: &mut LiftingContext,
+    operand_context: &mut OperandsContext,
     operands: &mut Operands,
 ) -> Option<usize> {
-    let data = context.language().data();
-    unsafe {
+    let language = context.language();
+    let data = language.data();
+
+    operands.clear();
+
+    let length = unsafe {
         let mut nop_issued = Vec::with_capacity(0);
         let mut state = context.state_for(address, bytes, &mut nop_issued)?;
 
@@ -67,10 +73,16 @@ pub fn operands(
 
         state.apply_commits(data);
 
-        state.operands(data, operands)?;
+        state.operands(language, operands)?;
 
-        Some(length)
+        length
+    };
+
+    if lift(address, bytes, context, operand_context.operations_mut()).is_some() {
+        operands.correlate(language, operand_context);
     }
+
+    Some(length)
 }
 
 #[inline]
@@ -81,6 +93,19 @@ pub fn disassemble(
     output: &mut String,
 ) -> Option<usize> {
     disassemble_to(address, bytes, context, output).unwrap()
+}
+
+#[inline]
+pub fn disassemble_and_format<F: InstructionFormatter + ?Sized>(
+    address: u64,
+    bytes: &[u8],
+    context: &mut LiftingContext,
+    formatter: &mut F,
+) -> Result<Option<usize>, fmt::Error> {
+    let language = context.language();
+    disassemble_aux(address, bytes, context, |_data, state| unsafe {
+        state.format_instruction(language, formatter)
+    })
 }
 
 #[inline]
@@ -101,8 +126,9 @@ pub fn disassemble_to(
     context: &mut LiftingContext,
     writer: impl fmt::Write,
 ) -> Result<Option<usize>, fmt::Error> {
-    disassemble_aux(address, bytes, context, |data, state| unsafe {
-        state.format(data, writer)
+    let language = context.language();
+    disassemble_aux(address, bytes, context, |_data, state| unsafe {
+        state.format(language, writer)
     })
 }
 
@@ -114,8 +140,9 @@ pub fn disassemble_parts_to(
     mnemonic: impl fmt::Write,
     operands: impl fmt::Write,
 ) -> Result<Option<usize>, fmt::Error> {
-    disassemble_aux(address, bytes, context, |data, state| unsafe {
-        state.format_parts(data, mnemonic, operands)
+    let language = context.language();
+    disassemble_aux(address, bytes, context, |_data, state| unsafe {
+        state.format_parts(language, mnemonic, operands)
     })
 }
 

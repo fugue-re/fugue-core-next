@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
+use std::fmt::{self, Debug, Display, Formatter, Result as FmtResult};
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::str::FromStr;
@@ -10,7 +10,8 @@ use crate::constructor::Constructor;
 use crate::context::{ContextBitRange, ContextDatabase};
 use crate::convention::Convention;
 use crate::dynamic::{Language as DynamicLanguage, LanguageLoadError, registry};
-use crate::operand::{OperandFilter, Operands};
+use crate::format::InstructionFormatter;
+use crate::operand::{OperandFilter, Operands, OperandsContext};
 use crate::pattern::PatternOp;
 use crate::pcode::{LiftingContext, PCodeBuilderContext, PCodeOp, Varnode};
 use crate::resolve::DecisionNode;
@@ -580,9 +581,10 @@ impl Language {
         address: u64,
         bytes: impl AsRef<[u8]>,
         context: &mut LiftingContext,
+        operand_context: &mut OperandsContext,
         operands: &mut Operands,
     ) -> Option<usize> {
-        entry::operands(address, bytes.as_ref(), context, operands)
+        entry::operands(address, bytes.as_ref(), context, operand_context, operands)
     }
 
     pub fn disassemble(
@@ -593,6 +595,16 @@ impl Language {
         disassembly: &mut String,
     ) -> Option<usize> {
         entry::disassemble(address, bytes.as_ref(), context, disassembly)
+    }
+
+    pub fn disassemble_and_format<F: InstructionFormatter + ?Sized>(
+        &self,
+        address: u64,
+        bytes: impl AsRef<[u8]>,
+        context: &mut LiftingContext,
+        formatter: &mut F,
+    ) -> Result<Option<usize>, fmt::Error> {
+        entry::disassemble_and_format(address, bytes.as_ref(), context, formatter)
     }
 
     pub fn disassemble_parts(

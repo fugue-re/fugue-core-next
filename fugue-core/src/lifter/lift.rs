@@ -146,9 +146,8 @@ impl Lifter {
     }
 
     pub fn operands(&mut self, address: impl Into<Address>, bytes: &[u8]) -> Option<Operands> {
-        let address = address.into();
         let mut operands = Operands::new();
-        self.0.operands(address.offset(), bytes, &mut operands)?;
+        self.operands_into(address, bytes, &mut operands)?;
         Some(operands)
     }
 
@@ -244,15 +243,17 @@ mod test {
         let operands = lifter.operands(0x1000, &bytes).unwrap();
         assert_eq!(operands.len(), 2);
 
-        let op0 = operands.get(0).unwrap();
+        let op0 = operands.operand(0).unwrap();
         assert_eq!(op0.range().cloned(), Some(21..24));
 
-        let op1 = operands.get(1).unwrap();
+        let op1 = operands.operand(1).unwrap();
         assert_eq!(op1.range().cloned(), Some(18..21));
     }
 
     #[test]
-    fn test_grouped_operands() {
+    fn test_compound_operands() {
+        use fugue_lifter::runtime::operand::{OperandKind, OperandPiece};
+
         let mut lifter = x86_64_lifter();
 
         // mov rax, [0x1000]
@@ -261,10 +262,10 @@ mod test {
         let operands = lifter.operands(0x1000, &bytes).unwrap();
         assert_eq!(operands.len(), 2);
 
-        let op0 = operands.get(0).unwrap();
+        let op0 = operands.operand(0).unwrap();
         assert_eq!(op0.range().cloned(), Some(18..21));
 
-        let op1 = operands.get(1).unwrap();
+        let op1 = operands.operand(1).unwrap();
         assert_eq!(op1.range().cloned(), Some(32..64));
 
         // mov rax, [ecx*4 + 0x10]
@@ -273,20 +274,24 @@ mod test {
         let operands = lifter.operands(0x1000, &bytes).unwrap();
         assert_eq!(operands.len(), 2);
 
-        let op0 = operands.get(0).unwrap();
-        assert_eq!(op0.symbol(), Some("RAX"));
+        let op0 = operands.operand(0).unwrap();
+        assert_eq!(op0.register().map(|register| register.name()), Some("RAX"));
 
-        let op1 = operands.get(1).unwrap();
-        assert!(op1.group().is_some());
-
-        let op1_0 = op1.group().unwrap().get(0).unwrap();
-        assert_eq!(op1_0.symbol(), Some("ECX"));
-
-        let op1_1 = op1.group().unwrap().get(1).unwrap();
-        assert_eq!(op1_1.value(), Some(4));
-
-        let op1_2 = op1.group().unwrap().get(2).unwrap();
-        assert_eq!(op1_2.value(), Some(0x10));
+        let op1 = operands.operand(1).unwrap();
+        assert_eq!(op1.kind(), OperandKind::Dynamic);
+        assert!(op1.pieces().iter().any(
+            |piece| matches!(piece, OperandPiece::Register(register) if register.name() == "ECX")
+        ));
+        assert!(
+            op1.pieces()
+                .iter()
+                .any(|piece| matches!(piece, OperandPiece::Scalar(scalar) if scalar.value() == 4))
+        );
+        assert!(
+            op1.pieces().iter().any(
+                |piece| matches!(piece, OperandPiece::Scalar(scalar) if scalar.value() == 0x10)
+            )
+        );
     }
 
     #[test]

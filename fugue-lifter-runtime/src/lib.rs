@@ -3,6 +3,7 @@ pub mod context;
 pub mod convention;
 pub mod dynamic;
 pub mod entry;
+mod format;
 pub mod input;
 pub mod language;
 pub mod lifter;
@@ -18,10 +19,14 @@ pub mod template;
 pub use constructor::Constructor;
 pub use context::ContextDatabase;
 pub use convention::{Convention, Prototype, PrototypeEntry, PrototypeOperand, ReturnAddress};
+pub use format::InstructionFormatter;
 pub use input::{ContextCommit, FixedHandle, ParserInput, ParserInputs};
 pub use language::{Language, LanguageId};
 pub use lifter::Lifter;
-pub use operand::{Operand, OperandData, OperandHandleResolver, OperandResolver, Operands};
+pub use operand::{
+    Operand, OperandAccess, OperandHandleResolver, OperandKind, OperandPiece, OperandRef,
+    OperandResolver, Operands, OperandsContext, Register, Scalar,
+};
 pub use pcode::{
     LiftingContext, LiftingContextState, Op, PCodeBuilder, PCodeBuilderContext, PCodeOp, Varnode,
 };

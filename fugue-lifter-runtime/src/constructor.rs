@@ -1,11 +1,11 @@
 use std::fmt::{self, Debug};
 
 use crate::context::{ContextPostAction, ContextPreAction};
+use crate::format::{InstructionOutput, InstructionParts, InstructionSection, InstructionText};
 use crate::input::{ContextCommit, FixedHandle, INVALID_HANDLE};
-use crate::language::LanguageData;
-use crate::operand::{Operand, OperandHandleResolver, OperandResolver, Operands};
+use crate::language::{Language, LanguageData};
+use crate::operand::{Operand, OperandHandleResolver, OperandPiece, OperandResolver, Operands};
 use crate::pcode::LiftingContextState;
-use crate::symbol::Symbol;
 use crate::template::handle_tpl;
 
 pub struct Constructor {
@@ -217,24 +217,101 @@ impl Constructor {
     /// Called from generated code which ensures validity of arguments and state.
     pub unsafe fn format_mnemonic<W: fmt::Write>(
         &self,
-        data: &'static LanguageData,
+        language: &'static Language,
         state: &mut LiftingContextState<'_>,
         writer: &mut W,
     ) -> fmt::Result {
         unsafe {
-            if let Some(index) = self.flow_through_index {
-                if matches!(
+            let mut output = InstructionText::new(writer);
+            self.write_mnemonic(language, state, &mut output)
+        }
+    }
+
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
+    pub unsafe fn format_body<W: fmt::Write>(
+        &self,
+        language: &'static Language,
+        state: &mut LiftingContextState<'_>,
+        writer: &mut W,
+    ) -> Result<(), fmt::Error> {
+        unsafe {
+            let mut output = InstructionText::new(writer);
+            self.write_body(language, state, &mut output)
+        }
+    }
+
+    /// # Safety
+    ///
+    /// Called from generated code which ensures validity of arguments and state.
+    pub unsafe fn format<W: fmt::Write>(
+        &self,
+        language: &'static Language,
+        state: &mut LiftingContextState<'_>,
+        writer: &mut W,
+    ) -> Result<(), fmt::Error> {
+        unsafe {
+            let mut output = InstructionText::new(writer);
+            self.format_instruction(language, state, &mut output)
+        }
+    }
+
+    pub(crate) unsafe fn format_parts<M: fmt::Write, O: fmt::Write>(
+        &self,
+        language: &'static Language,
+        state: &mut LiftingContextState<'_>,
+        mnemonic: &mut M,
+        operands: &mut O,
+    ) -> fmt::Result {
+        unsafe {
+            let mut output = InstructionParts::new(mnemonic, operands);
+            self.format_instruction(language, state, &mut output)
+        }
+    }
+
+    pub(crate) unsafe fn operands(
+        &self,
+        language: &'static Language,
+        state: &mut LiftingContextState<'_>,
+        operands: &mut Operands,
+    ) -> Option<()> {
+        unsafe { self.format_instruction(language, state, operands).ok() }
+    }
+
+    pub(crate) unsafe fn format_instruction<O: InstructionOutput + ?Sized>(
+        &self,
+        language: &'static Language,
+        state: &mut LiftingContextState<'_>,
+        output: &mut O,
+    ) -> fmt::Result {
+        unsafe {
+            self.write_mnemonic(language, state, output)?;
+            self.write_body(language, state, output)?;
+            output.finish_instruction()
+        }
+    }
+
+    unsafe fn write_mnemonic<O: InstructionOutput + ?Sized>(
+        &self,
+        language: &'static Language,
+        state: &mut LiftingContextState<'_>,
+        output: &mut O,
+    ) -> fmt::Result {
+        unsafe {
+            if let Some(index) = self.flow_through_index
+                && matches!(
                     &self.operands[index].handle_resolver,
                     OperandHandleResolver::None
-                ) {
-                    state.input().push_operand(index);
-                    state
-                        .input()
-                        .constructor()
-                        .format_mnemonic(data, state, writer)?;
-                    state.input().pop_operand();
-                    return Ok(());
-                }
+                )
+            {
+                state.input().push_operand(index);
+                let result = state
+                    .input()
+                    .constructor()
+                    .write_mnemonic(language, state, output);
+                state.input().pop_operand();
+                return result;
             }
 
             let Some(pieces) = self
@@ -244,61 +321,36 @@ impl Constructor {
                 return Ok(());
             };
 
-            for p in pieces {
-                match p {
-                    PrintPiece::Operand(index) => {
-                        state.input().push_operand(*index as usize);
-                        match &self.operands[*index as usize].handle_resolver {
-                            OperandHandleResolver::None => {
-                                state.input().constructor().format(data, state, writer)?;
-                            }
-                            OperandHandleResolver::Symbol(symbol) => {
-                                Symbol::format(
-                                    &data.symbols[*symbol as usize],
-                                    data,
-                                    state,
-                                    writer,
-                                )?;
-                            }
-                            OperandHandleResolver::Expression(expr) => {
-                                expr.format(data, state, writer)?;
-                            }
-                        }
-                        state.input().pop_operand();
-                    }
-                    PrintPiece::Token(token) => {
-                        writer.write_str(token)?;
-                    }
-                }
-            }
-
-            Ok(())
+            self.write_pieces(
+                language,
+                state,
+                output,
+                pieces,
+                InstructionSection::Mnemonic,
+            )
         }
     }
 
-    /// # Safety
-    ///
-    /// Called from generated code which ensures validity of arguments and state.
-    pub unsafe fn format_body<W: fmt::Write>(
+    unsafe fn write_body<O: InstructionOutput + ?Sized>(
         &self,
-        data: &'static LanguageData,
+        language: &'static Language,
         state: &mut LiftingContextState<'_>,
-        writer: &mut W,
-    ) -> Result<(), fmt::Error> {
+        output: &mut O,
+    ) -> fmt::Result {
         unsafe {
-            if let Some(index) = self.flow_through_index {
-                if matches!(
+            if let Some(index) = self.flow_through_index
+                && matches!(
                     &self.operands[index].handle_resolver,
                     OperandHandleResolver::None
-                ) {
-                    state.input().push_operand(index);
-                    state
-                        .input()
-                        .constructor()
-                        .format_body(data, state, writer)?;
-                    state.input().pop_operand();
-                    return Ok(());
-                }
+                )
+            {
+                state.input().push_operand(index);
+                let result = state
+                    .input()
+                    .constructor()
+                    .write_body(language, state, output);
+                state.input().pop_operand();
+                return result;
             }
 
             let Some(pieces) = self
@@ -309,33 +361,22 @@ impl Constructor {
             };
 
             if !pieces.is_empty() {
-                writer.write_char(' ')?;
+                output.write_separator(" ")?;
             }
 
-            for p in pieces {
-                match p {
+            for piece in pieces {
+                match piece {
                     PrintPiece::Operand(index) => {
-                        state.input().push_operand(*index as usize);
-                        match &self.operands[*index as usize].handle_resolver {
-                            OperandHandleResolver::None => {
-                                state.input().constructor().format(data, state, writer)?;
-                            }
-                            OperandHandleResolver::Symbol(symbol) => {
-                                Symbol::format(
-                                    &data.symbols[*symbol as usize],
-                                    data,
-                                    state,
-                                    writer,
-                                )?;
-                            }
-                            OperandHandleResolver::Expression(expr) => {
-                                expr.format(data, state, writer)?;
-                            }
-                        }
-                        state.input().pop_operand();
+                        self.write_operand(
+                            language,
+                            state,
+                            output,
+                            *index as usize,
+                            InstructionSection::Operand,
+                        )?;
                     }
                     PrintPiece::Token(token) => {
-                        writer.write_str(token)?;
+                        output.write_separator(token)?;
                     }
                 }
             }
@@ -344,133 +385,71 @@ impl Constructor {
         }
     }
 
-    /// # Safety
-    ///
-    /// Called from generated code which ensures validity of arguments and state.
-    pub unsafe fn format<W: fmt::Write>(
+    unsafe fn write_pieces<O: InstructionOutput + ?Sized>(
         &self,
-        data: &'static LanguageData,
+        language: &'static Language,
         state: &mut LiftingContextState<'_>,
-        writer: &mut W,
-    ) -> Result<(), fmt::Error> {
+        output: &mut O,
+        pieces: &[PrintPiece],
+        section: InstructionSection,
+    ) -> fmt::Result {
         unsafe {
-            for p in self.print_pieces {
-                match p {
+            for piece in pieces {
+                match piece {
                     PrintPiece::Operand(index) => {
-                        state.input().push_operand(*index as usize);
-                        match &self.operands[*index as usize].handle_resolver {
-                            OperandHandleResolver::None => {
-                                state.input().constructor().format(data, state, writer)?;
-                            }
-                            OperandHandleResolver::Symbol(symbol) => {
-                                Symbol::format(
-                                    &data.symbols[*symbol as usize],
-                                    data,
-                                    state,
-                                    writer,
-                                )?;
-                            }
-                            OperandHandleResolver::Expression(expr) => {
-                                expr.format(data, state, writer)?;
-                            }
-                        }
-                        state.input().pop_operand();
+                        self.write_operand(language, state, output, *index as usize, section)?;
                     }
                     PrintPiece::Token(token) => {
-                        writer.write_str(token)?;
+                        section.write(output, OperandPiece::Text(token), None)?;
                     }
                 }
             }
+
             Ok(())
         }
     }
 
-    pub(crate) unsafe fn operands(
+    unsafe fn write_operand<O: InstructionOutput + ?Sized>(
         &self,
-        data: &'static LanguageData,
+        language: &'static Language,
         state: &mut LiftingContextState<'_>,
-        operands: &mut Operands,
-    ) -> Option<()> {
+        output: &mut O,
+        index: usize,
+        section: InstructionSection,
+    ) -> fmt::Result {
         unsafe {
-            if let Some(index) = self.flow_through_index {
-                if matches!(
-                    &self.operands[index].handle_resolver,
-                    OperandHandleResolver::None
-                ) {
-                    state.input().push_operand(index);
-                    state
-                        .input()
-                        .constructor()
-                        .operands(data, state, operands)?;
-                    state.input().pop_operand();
-                    return Some(());
-                }
+            if matches!(section, InstructionSection::Operand) {
+                output.begin_operand()?;
             }
 
-            let Some(pieces) = self
-                .first_whitespace
-                .and_then(|start| self.print_pieces.get(start + 1..))
-            else {
-                return Some(());
+            state.input().push_operand(index);
+            let data = language.data();
+            let result = match &self.operands[index].handle_resolver {
+                OperandHandleResolver::None => {
+                    let constructor = state.input().constructor();
+                    constructor.write_pieces(
+                        language,
+                        state,
+                        output,
+                        constructor.print_pieces,
+                        section,
+                    )
+                }
+                OperandHandleResolver::Symbol(symbol) => {
+                    data.symbols[*symbol as usize].operand_pieces(language, state, output, section)
+                }
+                OperandHandleResolver::Expression(expression) => {
+                    expression.operand_pieces(language, state, output, section)
+                }
             };
+            state.input().pop_operand();
+            result?;
 
-            for p in pieces {
-                if let PrintPiece::Operand(index) = p {
-                    state.input().push_operand(*index as usize);
-                    match &self.operands[*index as usize].handle_resolver {
-                        OperandHandleResolver::None => {
-                            let mut inner = Operands::new();
-                            state
-                                .input()
-                                .constructor()
-                                .operands_inner(data, state, &mut inner)?;
-                            operands.append(inner);
-                        }
-                        OperandHandleResolver::Symbol(symbol) => {
-                            data.symbols[*symbol as usize].operands(data, state, operands);
-                        }
-                        OperandHandleResolver::Expression(expr) => {
-                            expr.operands(data, state, operands);
-                        }
-                    }
-                    state.input().pop_operand();
-                }
+            if matches!(section, InstructionSection::Operand) {
+                output.end_operand()?;
             }
 
-            Some(())
-        }
-    }
-
-    pub(crate) unsafe fn operands_inner(
-        &self,
-        data: &'static LanguageData,
-        state: &mut LiftingContextState<'_>,
-        operands: &mut Operands,
-    ) -> Option<()> {
-        unsafe {
-            for p in self.print_pieces {
-                if let PrintPiece::Operand(index) = p {
-                    state.input().push_operand(*index as usize);
-                    match &self.operands[*index as usize].handle_resolver {
-                        OperandHandleResolver::None => {
-                            let mut inner = Operands::new();
-                            state
-                                .input()
-                                .constructor()
-                                .operands_inner(data, state, &mut inner)?;
-                            operands.append(inner);
-                        }
-                        OperandHandleResolver::Symbol(symbol) => {
-                            data.symbols[*symbol as usize].operands(data, state, operands);
-                        }
-                        OperandHandleResolver::Expression(expr) => {
-                            expr.operands(data, state, operands);
-                        }
-                    }
-                    state.input().pop_operand();
-                }
-            }
-            Some(())
+            Ok(())
         }
     }
 }
