@@ -6,7 +6,7 @@ use rkyv::rancor::Fallible;
 use rkyv::{Archive, Place, Serialize};
 
 use crate::il::pcode::Varnode;
-use crate::ir::{Address, Endian, ExternFunctionTemplate, Symbol};
+use crate::ir::{Endian, ExternFunctionTemplate, RawAddress, Symbol};
 use crate::lifter::{
     ContextHint, ContextSet, Disassembler, Language, Lifter, LiftingContext, resolve_language,
 };
@@ -16,7 +16,12 @@ use crate::storage::entities::{Entity, EntityId};
 pub mod aarch64;
 pub mod arm;
 pub mod mips;
+pub mod mips64;
+pub mod ppc;
+pub mod ppc64;
 pub mod registry;
+pub mod riscv;
+pub mod riscv64;
 pub mod x86;
 pub mod x86_64;
 
@@ -153,16 +158,19 @@ impl Arch {
         self.0.endian()
     }
 
-    pub fn canonicalise_address(&self, addr: Address) -> Option<(Address, ContextSet)> {
-        self.0.canonicalise_address(addr)
+    pub fn canonicalise_address(
+        &self,
+        addr: impl Into<RawAddress>,
+    ) -> Option<(RawAddress, ContextSet)> {
+        self.0.canonicalise_address(addr.into())
     }
 
     pub fn canonicalise_address_with(
         &self,
-        addr: Address,
+        addr: impl Into<RawAddress>,
         context: &LiftingContext,
-    ) -> Option<(Address, ContextSet)> {
-        self.0.canonicalise_address_with(addr, context)
+    ) -> Option<(RawAddress, ContextSet)> {
+        self.0.canonicalise_address_with(addr.into(), context)
     }
 
     pub fn external_thunk_template(&self) -> ExternFunctionTemplate {

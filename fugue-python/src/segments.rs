@@ -1,10 +1,11 @@
-use std::collections::BTreeMap;
-
 use fallible_iterator::FallibleIterator;
-use fugue_core::ir::{Address as CoreAddress, SegmentProperties as CoreSegmentProperties};
+use fugue_core::ir::Address as CoreAddress;
+use fugue_core::ir::SegmentProperties as CoreSegmentProperties;
 use fugue_core::lifter::{ContextHint as CoreContextHint, ContextHintKind};
-use fugue_core::loader::{Loadable, LoadableSegment as CoreLoadableSegment, Loader as CoreLoader};
+use fugue_core::loader::{Loadable, Loader as CoreLoader};
+use fugue_core::storage::segments::mapping::SegmentMappingBuilder;
 use fugue_core::storage::segments::{InMemorySegmentStorage, SegmentStorage as CoreSegmentStorage};
+use fugue_core::types::AttributeMap;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyModule};
 
@@ -36,80 +37,67 @@ fn convert_context_hint(hint: &CoreContextHint) -> ContextHint {
     }
 }
 
-fn mapping_hints_from_core<'a>(
-    items: impl IntoIterator<Item = (&'a CoreAddress, &'a CoreContextHint)>,
-) -> Vec<MappingHint> {
-    items
-        .into_iter()
-        .map(|(address, hint)| MappingHint {
-            address: Address::from_core(*address),
-            hint: convert_context_hint(hint),
-        })
-        .collect()
-}
-
-fn function_hints_from_core<'a>(items: impl IntoIterator<Item = &'a CoreAddress>) -> Vec<Address> {
-    items
-        .into_iter()
-        .map(|address| Address::from_core(*address))
-        .collect()
-}
-
 pub(crate) fn segment_storage_from_loader(
     loader: &CoreLoader<'static>,
+    attributes: &mut AttributeMap,
 ) -> PyResult<CoreSegmentStorage> {
-    let mut segments = Vec::new();
-    let mut iter = loader.segments();
-
-    while let Some(segment) = iter.next().map_err(loader_error)? {
-        segments.push(segment.into_owned());
-    }
-
-    let mut storage = CoreSegmentStorage::empty();
-    let max_space = segments
-        .iter()
-        .map(|segment| segment.space().index())
-        .max()
-        .unwrap_or(0);
-
-    for _ in 1..=max_space {
-        storage.create_space().map_err(storage_error)?;
-    }
-
-    for segment in segments {
-        let provider = InMemorySegmentStorage::from_bytes(segment.bytes().to_vec());
-        let provider_id = storage.open_provider(provider, CoreSegmentProperties::PERM_ALL);
-        let mapping_id = storage
-            .create_mapping_with_metadata(
-                provider_id,
-                segment.address(),
-                segment.len(),
-                0,
-                segment.properties(),
-                segment.name(),
-                segment.mapping_hints().clone(),
-                segment.function_hints().clone(),
-            )
-            .map_err(storage_error)?;
-
-        storage
-            .add_mapping_to_space_top(segment.space(), mapping_id)
-            .map_err(storage_error)?;
-    }
-
-    Ok(storage)
+    Ok(
+        CoreSegmentStorage::from_loadable::<InMemorySegmentStorage>(loader, attributes)
+            .map_err(storage_error)?
+            .into_parts()
+            .0,
+    )
 }
 
-pub(crate) fn loadable_segment_from_core(segment: &CoreLoadableSegment<'_>) -> LoadableSegment {
-    LoadableSegment {
-        name: segment.name().to_owned(),
-        address: Address::from_core(segment.address()),
-        size: segment.len(),
-        properties: SegmentProperties::from_core(segment.properties()),
-        bytes: segment.bytes().to_vec(),
-        mapping_hints: mapping_hints_from_core(segment.mapping_hints().iter()),
-        function_hints: function_hints_from_core(segment.function_hints().iter()),
+pub(crate) fn loadable_segments_from_loader(
+    loader: &CoreLoader<'static>,
+) -> PyResult<Vec<LoadableSegment>> {
+    let mut attributes = AttributeMap::default();
+    let (storage, resolution) =
+        CoreSegmentStorage::from_loadable::<InMemorySegmentStorage>(loader, &mut attributes)
+            .map_err(storage_error)?
+            .into_parts();
+
+    let mut segments = Vec::new();
+    let mut image_segments = loader.image_segments();
+
+    while let Some(segment) = image_segments.next().map_err(loader_error)? {
+        let Some(address) = resolution.resolve_address(segment.address()) else {
+            continue;
+        };
+
+        let mut bytes = vec![0u8; segment.size() as usize];
+        storage
+            .read_bytes(address, &mut bytes)
+            .map_err(storage_error)?;
+
+        let mapping_hints = segment
+            .mapping_hints()
+            .iter()
+            .map(|(hint_offset, hint)| MappingHint {
+                address: Address::from_core(CoreAddress::new(address.space(), *hint_offset)),
+                hint: convert_context_hint(hint),
+            })
+            .collect();
+
+        let function_hints = segment
+            .function_hints()
+            .iter()
+            .map(|hint_offset| Address::from_core(CoreAddress::new(address.space(), *hint_offset)))
+            .collect();
+
+        segments.push(LoadableSegment {
+            name: segment.name().to_owned(),
+            address: Address::from_core(address),
+            size: segment.size() as usize,
+            properties: SegmentProperties::from_core(segment.properties()),
+            bytes,
+            mapping_hints,
+            function_hints,
+        });
     }
+
+    Ok(segments)
 }
 
 #[pyclass(frozen, skip_from_py_object)]
@@ -328,8 +316,8 @@ impl SegmentStorage {
     #[staticmethod]
     #[pyo3(signature = (binary, attributes = None))]
     fn from_binary(binary: &Binary, attributes: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
-        let _ = attribute_map_from_py(attributes)?;
-        let inner = segment_storage_from_loader(&binary.loader)?;
+        let mut attributes = attribute_map_from_py(attributes)?;
+        let inner = segment_storage_from_loader(&binary.loader, &mut attributes)?;
 
         Ok(Self { inner })
     }
@@ -359,15 +347,10 @@ impl SegmentStorage {
             .open_provider(provider, CoreSegmentProperties::PERM_ALL);
         let mapping_id = self
             .inner
-            .create_mapping_with_metadata(
-                provider_id,
-                start,
-                bytes.len(),
-                0,
-                properties,
-                name,
-                BTreeMap::new(),
-                Default::default(),
+            .create_mapping_from_builder(
+                SegmentMappingBuilder::new(start, bytes.len() as u64, 0, provider_id)
+                    .with_properties(properties)
+                    .with_name(name),
             )
             .map_err(storage_error)?;
 

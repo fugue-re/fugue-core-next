@@ -3,7 +3,7 @@ use object::read::elf::FileHeader;
 use object::{ReadRef, Relocation, RelocationKind};
 
 use super::ElfSegmentRelocator;
-use crate::loader::LoadableSegment;
+use crate::loader::ImageSegmentContents;
 
 impl<'data, 'file, Elf, R> ElfSegmentRelocator<'data, 'file, Elf, R>
 where
@@ -13,13 +13,13 @@ where
 {
     pub(crate) fn apply_x86_relocation(
         &self,
-        lsegm: &mut LoadableSegment<'data>,
+        bytes: &mut ImageSegmentContents<'data>,
         offset: u64,
         reloc: &Relocation,
         is_dynamic: bool,
     ) {
         if reloc.kind() != RelocationKind::Unknown {
-            self.apply_generic_relocation(lsegm, offset, reloc, reloc.kind(), is_dynamic);
+            self.apply_generic_relocation(bytes, offset, reloc, reloc.kind(), is_dynamic);
             return;
         }
 
@@ -29,7 +29,6 @@ where
 
         match reloc_type {
             R_386_RELATIVE => {
-                let offset = offset as usize;
                 let value = self.base.offset().wrapping_add_signed(reloc.addend());
 
                 if value > u32::MAX as u64 {
@@ -39,11 +38,9 @@ where
 
                 tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");
 
-                lsegm.write_value(offset, value as u32);
+                bytes.write_value(offset, value as u32);
             }
             R_386_GLOB_DAT | R_386_JMP_SLOT => {
-                let offset = offset as usize;
-
                 let Some(value) = self.resolve_relocation_symbol(reloc, is_dynamic) else {
                     tracing::warn!("failed to resolve relocation {reloc_type:#x} at {offset:#x}");
                     return;
@@ -55,16 +52,16 @@ where
                 }
 
                 if reloc_type == R_386_JMP_SLOT {
-                    self.mark_function_symbol(value, lsegm);
+                    self.mark_function_symbol(value, bytes);
+                } else {
+                    self.mark_data_symbol(reloc, is_dynamic, bytes);
                 }
 
                 tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");
 
-                lsegm.write_value(offset, value as u32);
+                bytes.write_value(offset, value as u32);
             }
             R_386_32 | R_386_32PLT => {
-                let offset = offset as usize;
-
                 let Some(value) = self.resolve_relocation_symbol(reloc, is_dynamic) else {
                     tracing::warn!("failed to resolve relocation {reloc_type:#x} at {offset:#x}");
                     return;
@@ -79,7 +76,7 @@ where
 
                 tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");
 
-                lsegm.write_value(offset, value as u32);
+                bytes.write_value(offset, value as u32);
             }
             _ => {
                 tracing::warn!("unsupported relocation type {reloc:?}");

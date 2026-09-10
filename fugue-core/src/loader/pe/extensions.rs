@@ -5,30 +5,31 @@ use object::{ReadRef, pe};
 use crate::analysis::AnalysisError;
 use crate::analysis::function::FunctionRecovery;
 use crate::arch::Arch;
-use crate::ir::{Address, Endian};
+use crate::ir::{Endian, RawAddress};
 use crate::lifter::LanguageId;
 use crate::lifter::dynamic::LanguageSource;
 use crate::loader::pe::PeFileRepr;
-use crate::loader::{LoadableSegment, LoaderError, Pe};
+use crate::loader::{ImageSegmentContents, LanguageVariantOverride, LoaderError, Pe};
 use crate::registry::{self, Registration};
 use crate::types::AttributeMap;
+use crate::types::attributes::ATTRIBUTE_LANGUAGE_VARIANT;
 
 pub struct ImageContext<'a> {
     machine: u16,
     endian: Endian,
     is_64: bool,
-    base: Address,
-    preferred_base: Address,
-    entry: Option<Address>,
+    base: RawAddress,
+    preferred_base: RawAddress,
+    entry: Option<RawAddress>,
     attributes: &'a AttributeMap,
 }
 
 impl<'a> ImageContext<'a> {
     pub(crate) fn new(
         view: &PeFileRepr<'_, '_>,
-        base: Address,
-        preferred_base: Address,
-        entry: Option<Address>,
+        base: RawAddress,
+        preferred_base: RawAddress,
+        entry: Option<RawAddress>,
         attributes: &'a AttributeMap,
     ) -> Self {
         Self {
@@ -54,15 +55,15 @@ impl<'a> ImageContext<'a> {
         self.is_64
     }
 
-    pub fn base(&self) -> Address {
+    pub fn base(&self) -> RawAddress {
         self.base
     }
 
-    pub fn preferred_base(&self) -> Address {
+    pub fn preferred_base(&self) -> RawAddress {
         self.preferred_base
     }
 
-    pub fn entry(&self) -> Option<Address> {
+    pub fn entry(&self) -> Option<RawAddress> {
         self.entry
     }
 
@@ -86,13 +87,37 @@ impl<'a> ImageContext<'a> {
             }
         }
 
-        match matches.len() {
-            0 => Err(LoaderError::UnsupportedArch),
-            1 => Ok(matches.remove(0)),
-            _ => Err(LoaderError::extension_with(
-                "ambiguous PE architecture resolver",
-            )),
-        }
+        let arch = match matches.len() {
+            0 => return Err(LoaderError::UnsupportedArch),
+            1 => matches.remove(0),
+            _ => {
+                return Err(LoaderError::extension_with(
+                    "ambiguous PE architecture resolver",
+                ));
+            }
+        };
+
+        let Some(overrides) = self
+            .attributes
+            .get_attr::<LanguageVariantOverride>(ATTRIBUTE_LANGUAGE_VARIANT)
+        else {
+            return Ok(arch);
+        };
+
+        let language = arch.language();
+
+        let Some(variant) = overrides.variant_for(language) else {
+            return Ok(arch);
+        };
+
+        let id = LanguageId::new_with(
+            language.processor(),
+            language.is_big_endian(),
+            language.bits(),
+            Some(variant),
+        );
+
+        Arch::try_new(source.load(&id)?).map_err(LoaderError::extension)
     }
 
     pub fn resolve_architecture_using(
@@ -229,23 +254,23 @@ registry::collect!(FunctionRecoveryHandler);
 
 pub struct RelocationContext<'a, 'data> {
     machine: u16,
-    base: Address,
-    preferred_base: Address,
-    patch_address: Address,
-    offset: usize,
+    base: RawAddress,
+    preferred_base: RawAddress,
+    patch_address: RawAddress,
+    offset: u64,
     relocation_type: u16,
-    segment: &'a mut LoadableSegment<'data>,
+    segment: &'a mut ImageSegmentContents<'data>,
 }
 
 impl<'a, 'data> RelocationContext<'a, 'data> {
     pub(crate) fn new<Headers, R>(
         pe: &PeFile<'data, Headers, R>,
-        base: Address,
-        preferred_base: Address,
-        patch_address: Address,
-        offset: usize,
+        base: RawAddress,
+        preferred_base: RawAddress,
+        patch_address: RawAddress,
+        offset: u64,
         relocation_type: u16,
-        segment: &'a mut LoadableSegment<'data>,
+        segment: &'a mut ImageSegmentContents<'data>,
     ) -> Self
     where
         Headers: ImageNtHeaders,
@@ -266,19 +291,19 @@ impl<'a, 'data> RelocationContext<'a, 'data> {
         self.machine
     }
 
-    pub fn base(&self) -> Address {
+    pub fn base(&self) -> RawAddress {
         self.base
     }
 
-    pub fn preferred_base(&self) -> Address {
+    pub fn preferred_base(&self) -> RawAddress {
         self.preferred_base
     }
 
-    pub fn patch_address(&self) -> Address {
+    pub fn patch_address(&self) -> RawAddress {
         self.patch_address
     }
 
-    pub fn offset(&self) -> usize {
+    pub fn offset(&self) -> u64 {
         self.offset
     }
 
@@ -286,11 +311,11 @@ impl<'a, 'data> RelocationContext<'a, 'data> {
         self.relocation_type
     }
 
-    pub fn segment(&self) -> &LoadableSegment<'data> {
+    pub fn segment(&self) -> &ImageSegmentContents<'data> {
         self.segment
     }
 
-    pub fn segment_mut(&mut self) -> &mut LoadableSegment<'data> {
+    pub fn segment_mut(&mut self) -> &mut ImageSegmentContents<'data> {
         self.segment
     }
 

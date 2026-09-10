@@ -27,13 +27,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         )?;
 
-        let mut segments = binary.segments();
-        while let Some(segm) = segments.next()? {
+        let mut claims = binary.image_segments();
+        while let Some(claim) = claims.next()? {
             tracing::info!(
                 "{}-{} ({:?})",
-                segm.address(),
-                segm.address() + segm.len(),
-                segm.name()
+                claim.address(),
+                claim.address() + claim.size() as usize,
+                claim.name()
             );
         }
         tracing::info!("architecture: {}", binary.architecture());

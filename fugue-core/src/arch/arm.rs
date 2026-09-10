@@ -8,7 +8,9 @@ use crate::arch::Arch;
 use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
 use crate::il::pcode::Varnode;
-use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties, LazySymbol, Symbol};
+use crate::ir::{
+    Address, ExternFunctionTemplate, Insn, InsnProperties, LazySymbol, RawAddress, Symbol,
+};
 use crate::lazy_symbol;
 use crate::lifter::dynamic::LanguageSource;
 use crate::lifter::traits::Disassembler as DisassemblerT;
@@ -23,7 +25,7 @@ static MAPPING_SYMBOL_DATA: LazySymbol = lazy_symbol!("$d");
 
 #[derive(Clone)]
 struct ArchData {
-    gprs: Vec<Varnode>,
+    gprs: [Varnode; 16],
     t_mode: ContextBitRange,
 }
 
@@ -35,9 +37,9 @@ impl ArchData {
             "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "r12", "sp",
             "lr", "pc",
         ]
-        .into_iter()
-        .filter_map(reg)
-        .collect();
+        .map(|name| {
+            reg(name).unwrap_or_else(|| panic!("ARM language must define register `{name}`"))
+        });
 
         let t_mode = language
             .context_variable_by_name("TMode")
@@ -63,23 +65,26 @@ impl ArchT for Arm {
         Lifter::new(self.language)
     }
 
-    fn canonicalise_address(&self, addr: Address) -> Option<(Address, ContextSet)> {
+    fn canonicalise_address(&self, addr: RawAddress) -> Option<(RawAddress, ContextSet)> {
         let t_mode = (addr.offset() & 1) as u32;
         let alignment = if t_mode != 0 { 2 } else { 4 };
-        let naddr = addr.wrap(self.language()).align(alignment);
-        (naddr == addr).then_some((naddr, ContextSet::single(self.data.t_mode, t_mode)))
+        let cleared = RawAddress::from(addr.offset() & !1);
+        let naddr = cleared.wrap(self.language()).align(alignment);
+        (naddr == cleared).then_some((naddr, ContextSet::single(self.data.t_mode, t_mode)))
     }
 
     fn canonicalise_address_with(
         &self,
-        addr: Address,
+        addr: RawAddress,
         context: &LiftingContext,
-    ) -> Option<(Address, ContextSet)> {
-        let t_mode = addr.offset() & 1 == 1
-            || context.get_variable_by_bits(self.data.t_mode, addr.offset()) == 1;
-        let alignment = if t_mode { 2 } else { 4 };
-        let naddr = addr.wrap(self.language()).align(alignment);
-        (naddr == addr).then_some((naddr, ContextSet::single(self.data.t_mode, t_mode as u32)))
+    ) -> Option<(RawAddress, ContextSet)> {
+        let t_mode = (addr.offset() & 1 == 1
+            || context.get_variable_by_bits(self.data.t_mode, addr.offset()) == 1)
+            as u32;
+        let alignment = if t_mode != 0 { 2 } else { 4 };
+        let cleared = RawAddress::from(addr.offset() & !1);
+        let naddr = cleared.wrap(self.language()).align(alignment);
+        (naddr == cleared).then_some((naddr, ContextSet::single(self.data.t_mode, t_mode)))
     }
 
     fn external_function_template(&self) -> ExternFunctionTemplate {
@@ -306,5 +311,44 @@ impl DisassemblerT for ArmDisassembler {
             }
         };
         Ok(insn)
+    }
+}
+
+#[cfg(all(test, feature = "static-lifters"))]
+mod test {
+    use super::Arm;
+    use crate::ir::RawAddress;
+
+    #[test]
+    fn canonicalise_address_decodes_thumb_mode() {
+        let language = Arm::resolve_default_variant(false).expect("arm language");
+        let arch = Arm::new(language);
+
+        let (thumb_entry, thumb_ctx) = arch
+            .canonicalise_address(RawAddress::from(0x1001u64))
+            .expect("odd thumb pointer canonicalises to its even entry");
+        assert_eq!(thumb_entry, RawAddress::from(0x1000u64));
+
+        let (arm_entry, arm_ctx) = arch
+            .canonicalise_address(RawAddress::from(0x1000u64))
+            .expect("4-aligned arm pointer canonicalises");
+        assert_eq!(arm_entry, RawAddress::from(0x1000u64));
+
+        assert_ne!(
+            thumb_ctx, arm_ctx,
+            "thumb and arm modes carry distinct context"
+        );
+
+        assert!(
+            arch.canonicalise_address(RawAddress::from(0x1002u64))
+                .is_none(),
+            "an even but not 4-aligned pointer is not a viable arm entry",
+        );
+
+        assert!(
+            arch.canonicalise_address(RawAddress::from(0x1_0000_0001u64))
+                .is_none(),
+            "an out-of-space thumb pointer must be rejected, not silently wrapped",
+        );
     }
 }

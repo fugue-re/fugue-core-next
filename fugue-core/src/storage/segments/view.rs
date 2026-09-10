@@ -1,18 +1,20 @@
-use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
-
 use crate::ir::{Address, SegmentProperties};
 use crate::lifter::ContextHint;
 use crate::storage::segments::SegmentStorageError;
-use crate::storage::segments::mapping::{SegmentMapping, SegmentMappingRef, SegmentSubMapping};
-use crate::storage::segments::provider::SegmentStorageDescriptor;
+use crate::storage::segments::mapping::{
+    SegmentMapping, SegmentMappingKind, SegmentMappingProvenance, SegmentMappingRef,
+    SegmentSubMapping,
+};
+use crate::storage::segments::provider::{SegmentStorageDescriptor, SegmentView};
 use crate::storage::segments::space::AddressSpaceId;
 
 #[derive(Clone)]
 pub struct SegmentMappingView<'a> {
     mapping: &'a SegmentMapping,
     provider: &'a SegmentStorageDescriptor,
-    submap: &'a SegmentSubMapping,
+    mapping_ref: SegmentMappingRef,
+    start: Address,
+    size: u64,
     mapping_version: u64,
 }
 
@@ -25,37 +27,65 @@ impl<'a> SegmentMappingView<'a> {
         Self {
             mapping,
             provider,
-            submap,
+            mapping_ref: submap.mapping_ref(),
+            start: submap.start(),
+            size: submap.size(),
+            mapping_version: mapping.version(),
+        }
+    }
+
+    pub(super) fn from_parts(
+        mapping: &'a SegmentMapping,
+        provider: &'a SegmentStorageDescriptor,
+        mapping_ref: SegmentMappingRef,
+        start: Address,
+        size: u64,
+    ) -> Self {
+        Self {
+            mapping,
+            provider,
+            mapping_ref,
+            start,
+            size,
             mapping_version: mapping.version(),
         }
     }
 
     pub fn start(&self) -> Address {
-        self.submap.start()
+        self.start
     }
 
     pub fn last(&self) -> Address {
-        self.submap.last()
+        self.end() - 1usize
     }
 
     pub fn end(&self) -> Address {
-        self.submap.end()
+        self.start + self.size
     }
 
     pub fn space(&self) -> AddressSpaceId {
         self.mapping.space()
     }
 
-    pub fn size(&self) -> usize {
-        self.submap.size()
+    pub fn size(&self) -> u64 {
+        self.size
     }
 
     pub fn contains(&self, addr: impl Into<Address>) -> bool {
-        self.submap.contains(addr)
+        let addr = addr.into();
+        self.space() == addr.space() && addr >= self.start && addr < self.end()
     }
 
     pub fn properties(&self) -> SegmentProperties {
         self.mapping.properties()
+    }
+
+    pub fn kind(&self) -> SegmentMappingKind {
+        self.mapping.kind()
+    }
+
+    pub fn provenance(&self) -> SegmentMappingProvenance {
+        self.mapping.provenance()
     }
 
     pub fn is_valid(&self) -> bool {
@@ -66,26 +96,30 @@ impl<'a> SegmentMappingView<'a> {
         self.mapping.name()
     }
 
-    pub fn mapping_hints(&self) -> &BTreeMap<Address, ContextHint> {
+    pub fn mapping_hints(&self) -> impl Iterator<Item = (Address, &ContextHint)> + '_ {
         self.mapping.mapping_hints()
     }
 
-    pub fn function_hints(&self) -> &BTreeSet<Address> {
+    pub fn mapping_hint_at(&self, addr: impl Into<Address>) -> Option<&ContextHint> {
+        self.mapping.mapping_hint_at(addr)
+    }
+
+    pub fn function_hints(&self) -> impl Iterator<Item = Address> + '_ {
         self.mapping.function_hints()
     }
 
-    pub fn bytes_from(&self, addr: impl Into<Address>) -> Option<Cow<'a, [u8]>> {
+    pub fn bytes_from(&self, addr: impl Into<Address>) -> Option<SegmentView<'a>> {
         let addr = addr.into();
-        if !self.submap.contains(addr) {
+        if !self.contains(addr) {
             return None;
         }
         let phys_offset = self.mapping.to_offset(addr);
         self.provider.provider().view_bytes_from(phys_offset).ok()
     }
 
-    pub fn bytes_at(&self, addr: impl Into<Address>, size: usize) -> Option<Cow<'a, [u8]>> {
+    pub fn bytes_at(&self, addr: impl Into<Address>, size: usize) -> Option<SegmentView<'a>> {
         let addr = addr.into();
-        if !self.submap.contains(addr) {
+        if !self.contains(addr) {
             return None;
         }
         let phys_offset = self.mapping.to_offset(addr);
@@ -102,11 +136,11 @@ impl<'a> SegmentMappingView<'a> {
             return Ok(0);
         }
 
-        if !self.submap.contains(addr) {
+        if !self.contains(addr) {
             return Err(SegmentStorageError::InvalidAddress);
         }
 
-        let view_remaining = usize::from(self.submap.end() - addr);
+        let view_remaining = usize::from(self.end() - addr);
         let read_size = buf.len().min(view_remaining);
         let buf_slice = &mut buf[..read_size];
 
@@ -119,6 +153,6 @@ impl<'a> SegmentMappingView<'a> {
     }
 
     pub fn mapping_ref(&self) -> SegmentMappingRef {
-        self.submap.mapping_ref()
+        self.mapping_ref
     }
 }

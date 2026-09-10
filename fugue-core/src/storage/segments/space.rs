@@ -31,7 +31,7 @@ pub enum AddressSpaceError {
 )]
 #[rkyv(derive(PartialEq, Eq, PartialOrd, Ord, Hash))]
 #[repr(transparent)]
-pub struct AddressSpaceId(u8);
+pub struct AddressSpaceId(u16);
 
 impl fmt::Display for AddressSpaceId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -41,17 +41,17 @@ impl fmt::Display for AddressSpaceId {
 
 impl AddressSpaceId {
     pub fn try_new(index: usize) -> Result<Self, AddressSpaceError> {
-        u8::try_from(index)
+        u16::try_from(index)
             .map(Self)
             .map_err(|_| AddressSpaceError::IndexOutOfRange(index))
     }
 
     pub const fn new(index: usize) -> Self {
         assert!(
-            index <= u8::MAX as usize,
+            index <= u16::MAX as usize,
             "address space index out of range"
         );
-        Self(index as u8)
+        Self(index as u16)
     }
 
     pub const fn index(&self) -> usize {
@@ -69,6 +69,12 @@ impl TryFrom<usize> for AddressSpaceId {
 
 impl From<u8> for AddressSpaceId {
     fn from(id: u8) -> Self {
+        Self(id as u16)
+    }
+}
+
+impl From<u16> for AddressSpaceId {
+    fn from(id: u16) -> Self {
         Self(id)
     }
 }
@@ -79,17 +85,30 @@ impl From<AddressSpaceId> for usize {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[rkyv(derive(PartialEq, Eq))]
+pub enum AddressSpaceKind {
+    Base,
+    Overlay { base: AddressSpaceId },
+}
+
 #[derive(Debug)]
 pub struct AddressSpace {
     id: AddressSpaceId,
+    kind: AddressSpaceKind,
     submaps: IntervalMap<Address, SegmentSubMapping>,
     priority_list: Vec<SegmentMappingRef>,
 }
 
 impl AddressSpace {
     pub fn new(id: AddressSpaceId) -> Self {
+        Self::new_with(id, AddressSpaceKind::Base)
+    }
+
+    pub fn new_with(id: AddressSpaceId, kind: AddressSpaceKind) -> Self {
         Self {
             id,
+            kind,
             submaps: IntervalMap::new(),
             priority_list: Vec::new(),
         }
@@ -99,11 +118,26 @@ impl AddressSpace {
         self.id
     }
 
+    pub fn base(&self) -> Option<AddressSpaceId> {
+        match self.kind {
+            AddressSpaceKind::Base => None,
+            AddressSpaceKind::Overlay { base } => Some(base),
+        }
+    }
+
+    pub fn is_overlay(&self) -> bool {
+        matches!(self.kind, AddressSpaceKind::Overlay { .. })
+    }
+
+    pub fn kind(&self) -> AddressSpaceKind {
+        self.kind
+    }
+
     pub(crate) fn add_mapping_top(
         &mut self,
         mapping_ref: SegmentMappingRef,
         addr: impl Into<Address>,
-        size: usize,
+        size: u64,
         properties: SegmentProperties,
     ) {
         let start = addr.into();
@@ -118,7 +152,7 @@ impl AddressSpace {
         &mut self,
         mapping_ref: SegmentMappingRef,
         addr: impl Into<Address>,
-        size: usize,
+        size: u64,
         properties: SegmentProperties,
     ) {
         let start = Address::new(self.id, addr.into());
@@ -154,7 +188,7 @@ impl AddressSpace {
         &mut self,
         mapping_ref: SegmentMappingRef,
         addr: impl Into<Address>,
-        size: usize,
+        size: u64,
         properties: SegmentProperties,
     ) {
         let start = Address::new(self.id, addr.into());
@@ -184,7 +218,7 @@ impl AddressSpace {
         }
 
         for gap in gaps {
-            let gap_size = usize::from(gap.end - gap.start);
+            let gap_size = u64::from(gap.end - gap.start);
             let view = SegmentSubMapping::new(mapping_ref, gap.start, gap_size, properties);
             self.submaps.insert(gap, view);
         }
@@ -199,23 +233,22 @@ impl AddressSpace {
         self.submaps.values(addr..(addr + 1usize)).next()
     }
 
+    pub fn gap_len_at(&self, addr: impl Into<Address>, max: usize) -> usize {
+        let addr = Address::new(self.id, addr.into());
+        let end = Address::new(self.id, RawAddress::MAX);
+        self.submaps
+            .values(addr..=end)
+            .map(SegmentSubMapping::start)
+            .find(|start| *start > addr)
+            .map_or(max, |next| usize::from(next - addr).min(max))
+    }
+
     pub fn find_containing_mut(
         &mut self,
         addr: impl Into<Address>,
     ) -> Option<&mut SegmentSubMapping> {
         let addr = Address::new(self.id, addr.into());
         self.submaps.values_mut(addr..(addr + 1usize)).next()
-    }
-
-    pub(crate) fn prioritise(&mut self, mapping_id: SegmentMappingId) {
-        if let Some(pos) = self
-            .priority_list
-            .iter()
-            .position(|r| r.mapping_id() == mapping_id)
-        {
-            let mapping_ref = self.priority_list.remove(pos);
-            self.priority_list.push(mapping_ref);
-        }
     }
 
     pub(crate) fn deprioritise(&mut self, mapping_id: SegmentMappingId) {
@@ -233,7 +266,7 @@ impl AddressSpace {
         &mut self,
         range_start: RawAddress,
         range_end: RawAddress,
-        mappings: impl IntoIterator<Item = (SegmentMappingRef, RawAddress, usize, SegmentProperties)>,
+        mappings: impl IntoIterator<Item = (SegmentMappingRef, RawAddress, u64, SegmentProperties)>,
     ) {
         let range_start = Address::new(self.id, range_start);
         let range_end = Address::new(self.id, range_end);
@@ -265,8 +298,8 @@ impl AddressSpace {
         for (mapping_ref, start, size, properties) in mappings {
             let end = start + size;
 
-            let range_start = range_start.address();
-            let range_end = range_end.address();
+            let range_start = range_start.raw_address();
+            let range_end = range_end.raw_address();
 
             if end <= range_start || start >= range_end {
                 continue;
@@ -274,7 +307,7 @@ impl AddressSpace {
 
             let clamped_start = start.max(range_start);
             let clamped_end = end.min(range_end);
-            let clamped_size = usize::from(clamped_end - clamped_start);
+            let clamped_size = u64::from(clamped_end - clamped_start);
 
             self.insert_submap_top(mapping_ref, clamped_start, clamped_size, properties);
         }
@@ -393,8 +426,8 @@ mod test {
         // Rebuild the range where mapping 2 exists (0x1500-0x2500)
         // Mappings in priority order (lowest first): mapping 2, then mapping 1
         let mappings = vec![
-            (make_ref(2), RawAddress::from(0x1500u64), 0x1000usize, props),
-            (make_ref(1), RawAddress::from(0x1000u64), 0x1000usize, props),
+            (make_ref(2), RawAddress::from(0x1500u64), 0x1000u64, props),
+            (make_ref(1), RawAddress::from(0x1000u64), 0x1000u64, props),
         ];
         space.rebuild_range(
             RawAddress::from(0x1500u64),
@@ -442,7 +475,7 @@ mod test {
         space.add_mapping_top(make_ref(1), 0x1000u64, 0x2000, props);
 
         // Rebuild only 0x1500-0x2000 with a new mapping
-        let mappings = vec![(make_ref(2), RawAddress::from(0x1000u64), 0x2000usize, props)];
+        let mappings = vec![(make_ref(2), RawAddress::from(0x1000u64), 0x2000u64, props)];
         space.rebuild_range(
             RawAddress::from(0x1500u64),
             RawAddress::from(0x2000u64),

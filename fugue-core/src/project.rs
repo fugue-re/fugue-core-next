@@ -16,7 +16,7 @@ use crate::storage::{
 };
 use crate::types::AttributeMap;
 use crate::types::attributes::{
-    ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_FILE_PATH, ATTRIBUTE_PROJECT_PATH,
+    ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_INPUT_PATH, ATTRIBUTE_PROJECT_PATH,
 };
 
 pub struct Project {
@@ -138,6 +138,14 @@ impl Project {
             attributes.merge_vacant(&nattributes);
         }
 
+        if let (Some(loadable), Some(resolution)) = (loadable, storage.image_resolution.as_ref())
+            && let Some(entry) = loadable
+                .entry_point()
+                .and_then(|entry| resolution.resolve_address(entry))
+        {
+            attributes.set_attr(ATTRIBUTE_ENTRY_POINT, entry);
+        }
+
         tracing::trace!("loading project symbols");
 
         let symbols_builder = || match SymbolTable::from_entity_storage(&storage.entities)? {
@@ -150,14 +158,18 @@ impl Project {
 
                 let mut symbols = SymbolTable::default_from_entity_storage(&storage.entities)?;
 
-                if let Some(loadable_symbols) = loadable.symbols() {
+                if let (Some(loadable_symbols), Some(resolution)) =
+                    (loadable.image_symbols(), storage.image_resolution.as_ref())
+                {
                     tracing::trace!(
                         "transfering {} symbols from loadable",
                         loadable_symbols.len()
                     );
 
                     for (index, _, entry) in loadable_symbols.iter_by_index() {
-                        symbols.insert(index, entry.address(), entry.symbol(), entry.properties());
+                        if let Some(address) = resolution.resolve_address(entry.address()) {
+                            symbols.insert(index, address, entry.symbol(), entry.properties());
+                        }
                     }
                 }
                 Ok(symbols)
@@ -365,8 +377,8 @@ impl Project {
         let path = path.as_ref();
         let mut attributes = attributes.into();
 
-        if !attributes.contains(ATTRIBUTE_FILE_PATH) {
-            attributes.set_attr(ATTRIBUTE_FILE_PATH, path);
+        if !attributes.contains(ATTRIBUTE_INPUT_PATH) {
+            attributes.set_attr(ATTRIBUTE_INPUT_PATH, path);
         }
 
         if !attributes.contains(ATTRIBUTE_PROJECT_PATH) {

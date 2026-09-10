@@ -4,31 +4,32 @@ use object::{ReadRef, elf};
 use crate::analysis::AnalysisError;
 use crate::analysis::function::FunctionRecovery;
 use crate::arch::Arch;
-use crate::ir::Address;
+use crate::ir::RawAddress;
 use crate::lifter::LanguageId;
 use crate::lifter::dynamic::LanguageSource;
 use crate::loader::elf::ElfFileRepr;
-use crate::loader::{Elf, LoadableSegment, LoaderError};
+use crate::loader::{Elf, ImageSegmentContents, LanguageVariantOverride, LoaderError};
 use crate::registry::{self, Registration};
 use crate::types::AttributeMap;
+use crate::types::attributes::ATTRIBUTE_LANGUAGE_VARIANT;
 
 pub struct ImageContext<'a> {
     is_64: bool,
     is_be: bool,
     machine: u16,
     flags: u32,
-    base: Address,
-    preferred_base: Address,
-    entry: Option<Address>,
+    base: RawAddress,
+    preferred_base: RawAddress,
+    entry: Option<RawAddress>,
     attributes: &'a AttributeMap,
 }
 
 impl<'a> ImageContext<'a> {
     pub(crate) fn new(
         view: &ElfFileRepr<'_, '_>,
-        base: Address,
-        preferred_base: Address,
-        entry: Option<Address>,
+        base: RawAddress,
+        preferred_base: RawAddress,
+        entry: Option<RawAddress>,
         attributes: &'a AttributeMap,
     ) -> Self {
         Self {
@@ -59,15 +60,15 @@ impl<'a> ImageContext<'a> {
         self.flags
     }
 
-    pub fn base(&self) -> Address {
+    pub fn base(&self) -> RawAddress {
         self.base
     }
 
-    pub fn preferred_base(&self) -> Address {
+    pub fn preferred_base(&self) -> RawAddress {
         self.preferred_base
     }
 
-    pub fn entry(&self) -> Option<Address> {
+    pub fn entry(&self) -> Option<RawAddress> {
         self.entry
     }
 
@@ -91,13 +92,36 @@ impl<'a> ImageContext<'a> {
             }
         }
 
-        match matches.len() {
-            0 => Err(LoaderError::UnsupportedArch),
-            1 => Ok(matches.remove(0)),
-            _ => Err(LoaderError::extension_with(
-                "ambiguous ELF architecture resolver",
-            )),
-        }
+        let arch = match matches.len() {
+            0 => return Err(LoaderError::UnsupportedArch),
+            1 => matches.remove(0),
+            _ => {
+                return Err(LoaderError::extension_with(
+                    "ambiguous ELF architecture resolver",
+                ));
+            }
+        };
+
+        let Some(overrides) = self
+            .attributes
+            .get_attr::<LanguageVariantOverride>(ATTRIBUTE_LANGUAGE_VARIANT)
+        else {
+            return Ok(arch);
+        };
+
+        let language = arch.language();
+
+        let Some(variant) = overrides.variant_for(language) else {
+            return Ok(arch);
+        };
+        let id = LanguageId::new_with(
+            language.processor(),
+            language.is_big_endian(),
+            language.bits(),
+            Some(variant),
+        );
+
+        Arch::try_new(source.load(&id)?).map_err(LoaderError::extension)
     }
 
     pub fn resolve_architecture_using(
@@ -140,7 +164,10 @@ impl ArchResolver {
                 .entry()
                 .and_then(|entry| (entry.offset() & 1 == 1).then_some("v8T")),
             elf::EM_386 => None,
-            elf::EM_MIPS if !context.is_64() => None,
+            elf::EM_MIPS => None,
+            elf::EM_PPC if !context.is_64() => None,
+            elf::EM_PPC64 => (!context.is_64()).then_some("64-32addr"),
+            elf::EM_RISCV => None,
             elf::EM_X86_64 => None,
             _ => return Ok(None),
         };
@@ -149,7 +176,12 @@ impl ArchResolver {
             elf::EM_AARCH64 => LanguageId::new_with("AARCH64", is_be, 64, variant),
             elf::EM_ARM => LanguageId::new_with("ARM", is_be, 32, variant),
             elf::EM_386 => LanguageId::new_with("x86", false, 32, variant),
+            elf::EM_MIPS if context.is_64() => LanguageId::new_with("MIPS", is_be, 64, variant),
             elf::EM_MIPS => LanguageId::new_with("MIPS", is_be, 32, variant),
+            elf::EM_PPC => LanguageId::new_with("PowerPC", is_be, 32, variant),
+            elf::EM_PPC64 => LanguageId::new_with("PowerPC", is_be, 64, variant),
+            elf::EM_RISCV if context.is_64() => LanguageId::new_with("RISCV", false, 64, variant),
+            elf::EM_RISCV => LanguageId::new_with("RISCV", false, 32, variant),
             elf::EM_X86_64 => LanguageId::new_with("x86", false, 64, variant),
             _ => return Ok(None),
         };
@@ -225,23 +257,23 @@ registry::collect!(FunctionRecoveryHandler);
 
 pub struct RelocationContext<'a, 'data> {
     machine: u16,
-    base: Address,
-    patch_address: Address,
+    base: RawAddress,
+    patch_address: RawAddress,
     offset: u64,
     relocation_type: Option<u32>,
     is_dynamic: bool,
-    segment: &'a mut LoadableSegment<'data>,
+    segment: &'a mut ImageSegmentContents<'data>,
 }
 
 impl<'a, 'data> RelocationContext<'a, 'data> {
     pub(crate) fn new<Header, R>(
         elf: &ElfFile<'data, Header, R>,
-        base: Address,
-        patch_address: Address,
+        base: RawAddress,
+        patch_address: RawAddress,
         offset: u64,
         relocation_type: Option<u32>,
         is_dynamic: bool,
-        segment: &'a mut LoadableSegment<'data>,
+        segment: &'a mut ImageSegmentContents<'data>,
     ) -> Self
     where
         Header: FileHeader,
@@ -262,11 +294,11 @@ impl<'a, 'data> RelocationContext<'a, 'data> {
         self.machine
     }
 
-    pub fn base(&self) -> Address {
+    pub fn base(&self) -> RawAddress {
         self.base
     }
 
-    pub fn patch_address(&self) -> Address {
+    pub fn patch_address(&self) -> RawAddress {
         self.patch_address
     }
 
@@ -282,11 +314,11 @@ impl<'a, 'data> RelocationContext<'a, 'data> {
         self.is_dynamic
     }
 
-    pub fn segment(&self) -> &LoadableSegment<'data> {
+    pub fn segment(&self) -> &ImageSegmentContents<'data> {
         self.segment
     }
 
-    pub fn segment_mut(&mut self) -> &mut LoadableSegment<'data> {
+    pub fn segment_mut(&mut self) -> &mut ImageSegmentContents<'data> {
         self.segment
     }
 

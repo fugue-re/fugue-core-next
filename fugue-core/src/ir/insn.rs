@@ -84,7 +84,7 @@ impl Insn {
         self.operations.clear();
         self.targets.clear();
 
-        let length = lifter.lift_into(self.address.address(), bytes, &mut self.operations)?;
+        let length = lifter.lift_into(self.address.raw_address(), bytes, &mut self.operations)?;
 
         self.length = length
             .try_into()

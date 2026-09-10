@@ -154,6 +154,60 @@ impl LifterBuilder {
             ("MIPS", false, None | Some(32), None | Some("default")) => {
                 Ok(crate::mips::le::LifterFactory::new_default())
             }
+            #[cfg(feature = "mips64-be")]
+            ("MIPS", true, Some(64), variant) => match variant {
+                None | Some("default") => Ok(crate::mips64::be::LifterFactory::new_default()),
+                Some("64-32addr") => Ok(crate::mips64::be::LifterFactory::new_64_32addr()),
+                _ => Err(LifterBuilderError::Unsupported),
+            },
+            #[cfg(feature = "mips64-le")]
+            ("MIPS", false, Some(64), variant) => match variant {
+                None | Some("default") => Ok(crate::mips64::le::LifterFactory::new_default()),
+                Some("64-32addr") => Ok(crate::mips64::le::LifterFactory::new_64_32addr()),
+                _ => Err(LifterBuilderError::Unsupported),
+            },
+            #[cfg(feature = "ppc-be")]
+            ("PowerPC", true, Some(32), None | Some("default")) => {
+                Ok(crate::ppc::be::LifterFactory::new_default())
+            }
+            #[cfg(feature = "ppc-le")]
+            ("PowerPC", false, Some(32), None | Some("default")) => {
+                Ok(crate::ppc::le::LifterFactory::new_default())
+            }
+            ("PowerPC", true, Some(64), variant) => match variant {
+                #[cfg(feature = "ppc64-be")]
+                None | Some("default") => Ok(crate::ppc64::be::LifterFactory::new_default()),
+                #[cfg(feature = "ppc64-be")]
+                Some("64-32addr") => Ok(crate::ppc64::be::LifterFactory::new_64_32addr()),
+                #[cfg(feature = "ppc64-a2alt-be")]
+                Some("A2ALT") => Ok(crate::ppc64::a2alt_be::LifterFactory::new_a2alt()),
+                #[cfg(feature = "ppc64-a2alt-be")]
+                Some("A2ALT-32addr") => {
+                    Ok(crate::ppc64::a2alt_be::LifterFactory::new_a2alt_32addr())
+                }
+                _ => Err(LifterBuilderError::Unsupported),
+            },
+            ("PowerPC", false, Some(64), variant) => match variant {
+                #[cfg(feature = "ppc64-le")]
+                None | Some("default") => Ok(crate::ppc64::le::LifterFactory::new_default()),
+                #[cfg(feature = "ppc64-le")]
+                Some("64-32addr") => Ok(crate::ppc64::le::LifterFactory::new_64_32addr()),
+                #[cfg(feature = "ppc64-a2alt-le")]
+                Some("A2ALT") => Ok(crate::ppc64::a2alt_le::LifterFactory::new_a2alt()),
+                #[cfg(feature = "ppc64-a2alt-le")]
+                Some("A2ALT-32addr") => {
+                    Ok(crate::ppc64::a2alt_le::LifterFactory::new_a2alt_32addr())
+                }
+                _ => Err(LifterBuilderError::Unsupported),
+            },
+            #[cfg(feature = "riscv")]
+            ("RISCV", false, Some(32), None | Some("default")) => {
+                Ok(crate::riscv::LifterFactory::new_default())
+            }
+            #[cfg(feature = "riscv64")]
+            ("RISCV", false, Some(64), None | Some("default")) => {
+                Ok(crate::riscv64::LifterFactory::new_default())
+            }
             _ => Err(LifterBuilderError::Unsupported),
         }
     }
@@ -213,6 +267,23 @@ mod test {
 
         let _ = "AARCH64:LE:64".parse::<LifterBuilder>()?.build()?;
         let _ = "AARCH64:LE:64:v8A".parse::<LifterBuilder>()?.build()?;
+
+        let _ = "MIPS:BE:64:default".parse::<LifterBuilder>()?.build()?;
+        let _ = "MIPS:LE:64:64-32addr".parse::<LifterBuilder>()?.build()?;
+
+        let _ = "PowerPC:BE:32:default".parse::<LifterBuilder>()?.build()?;
+        let _ = "PowerPC:LE:32:default".parse::<LifterBuilder>()?.build()?;
+        let _ = "PowerPC:BE:64:default".parse::<LifterBuilder>()?.build()?;
+        let _ = "PowerPC:LE:64:64-32addr"
+            .parse::<LifterBuilder>()?
+            .build()?;
+        let _ = "PowerPC:BE:64:A2ALT".parse::<LifterBuilder>()?.build()?;
+        let _ = "PowerPC:LE:64:A2ALT-32addr"
+            .parse::<LifterBuilder>()?
+            .build()?;
+
+        let _ = "RISCV:LE:32:default".parse::<LifterBuilder>()?.build()?;
+        let _ = "RISCV:LE:64:default".parse::<LifterBuilder>()?.build()?;
 
         Ok(())
     }

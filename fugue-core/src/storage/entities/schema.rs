@@ -142,20 +142,21 @@ impl EntityKey for Address {
     const ID: EntityKeyId = ENTITY_KEY_META_ADDRESS_ENTITY_ID;
 
     fn decode(buf: &[u8]) -> Option<Self> {
-        const PACKED_SIZE: usize = mem::size_of::<RawAddress>() + mem::size_of::<AddressSpaceId>();
+        const SPACE_SIZE: usize = mem::size_of::<AddressSpaceId>();
+        const PACKED_SIZE: usize = mem::size_of::<RawAddress>() + SPACE_SIZE;
 
         if buf.len() < PACKED_SIZE {
             return None;
         }
 
-        let space = AddressSpaceId::from(buf[0]);
-        let address = u64::from_be_bytes(buf[1..PACKED_SIZE].try_into().ok()?);
+        let space = AddressSpaceId::from(u16::from_be_bytes(buf[..SPACE_SIZE].try_into().ok()?));
+        let address = u64::from_be_bytes(buf[SPACE_SIZE..PACKED_SIZE].try_into().ok()?);
 
         Some(Address::new(space, address))
     }
 
     fn encode(&self, buf: &mut BytesMut) {
-        buf.put_u8(self.space().index() as u8);
+        buf.put_u16(self.space().index() as u16);
         buf.put_u64(self.offset());
     }
 }
@@ -243,4 +244,21 @@ pub(crate) fn extract_key<K: EntityKey, V: Entity>(buf: BytesOrSlice<'_>) -> Opt
         return None;
     }
     K::decode(&buf[2..])
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_address_key_roundtrips_wide_space() {
+        let address = Address::new(AddressSpaceId::new(300), 0xdead_beefu64);
+
+        let mut buf = BytesMut::new();
+        address.encode(&mut buf);
+
+        let decoded = Address::decode(&buf).expect("decodes");
+        assert_eq!(decoded, address);
+        assert_eq!(decoded.space().index(), 300);
+    }
 }

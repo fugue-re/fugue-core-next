@@ -59,6 +59,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     build_lifter("MIPS:BE:32:default", &[], "mips_be.rs")?;
     #[cfg(feature = "mips-le")]
     build_lifter("MIPS:LE:32:default", &[], "mips_le.rs")?;
+    #[cfg(feature = "mips64-be")]
+    build_lifter("MIPS:BE:64:default", &["64-32addr"], "mips64_be.rs")?;
+    #[cfg(feature = "mips64-le")]
+    build_lifter("MIPS:LE:64:default", &["64-32addr"], "mips64_le.rs")?;
 
     Ok(())
 }

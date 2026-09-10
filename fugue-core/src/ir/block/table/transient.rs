@@ -53,7 +53,7 @@ impl CodeBlockTable {
             return Err(CodeBlockTableError::AddressMismatch);
         }
 
-        let range = block.start().address()..block.next_address().address();
+        let range = block.start().raw_address()..block.next_address().raw_address();
         self.index
             .bounds
             .entry(addr.space())
@@ -98,7 +98,7 @@ impl CodeBlockTable {
         };
 
         let space = block.space();
-        let range = block.start().address()..block.next_address().address();
+        let range = block.start().raw_address()..block.next_address().raw_address();
 
         if let Some(Entry::Occupied(mut entry)) =
             self.index.bounds.get_mut(&space).map(|m| m.entry(range))
@@ -120,7 +120,7 @@ impl CodeBlockTable {
 
     pub fn remove_by_address(&mut self, addr: Address) -> usize {
         let space = addr.space();
-        let raw = addr.address();
+        let raw = addr.raw_address();
 
         let Some(bounds) = self.index.bounds.get_mut(&space) else {
             return 0;
@@ -151,7 +151,7 @@ impl CodeBlockTable {
 
     pub fn remove_by_address_and_context(&mut self, addr: Address, context: &ContextSet) -> usize {
         let space = addr.space();
-        let raw = addr.address();
+        let raw = addr.raw_address();
 
         let Some(bounds) = self.index.bounds.get_mut(&space) else {
             return 0;
@@ -203,7 +203,7 @@ impl CodeBlockTable {
 
     pub fn get_by_address(&self, maddr: Address) -> impl Iterator<Item = &CodeBlock> + '_ {
         let space = maddr.space();
-        let raw = maddr.address();
+        let raw = maddr.raw_address();
 
         self.index
             .bounds
@@ -224,7 +224,7 @@ impl CodeBlockTable {
         context: &'a ContextSet,
     ) -> impl Iterator<Item = &'a CodeBlock> + 'a {
         let space = maddr.space();
-        let raw = maddr.address();
+        let raw = maddr.raw_address();
 
         self.index
             .bounds
@@ -241,7 +241,7 @@ impl CodeBlockTable {
 
     pub fn contains(&self, addr: Address) -> bool {
         let space = addr.space();
-        let raw = addr.address();
+        let raw = addr.raw_address();
 
         self.index
             .bounds
@@ -251,7 +251,7 @@ impl CodeBlockTable {
 
     pub fn overlaps(&self, addr: Address) -> impl Iterator<Item = &CodeBlock> + '_ {
         let space = addr.space();
-        let raw = addr.address();
+        let raw = addr.raw_address();
 
         self.index
             .bounds
@@ -266,7 +266,7 @@ impl CodeBlockTable {
         maddr: Address,
     ) -> impl Iterator<Item = &mut CodeBlock> + '_ {
         let space = maddr.space();
-        let raw = maddr.address();
+        let raw = maddr.raw_address();
 
         let blocks_ptr = self.entries.as_mut_ptr();
         self.index
@@ -298,7 +298,7 @@ impl CodeBlockTable {
         context: &'a ContextSet,
     ) -> impl Iterator<Item = &'a mut CodeBlock> + 'a {
         let space = maddr.space();
-        let raw = maddr.address();
+        let raw = maddr.raw_address();
 
         let blocks_ptr = self.entries.as_mut_ptr();
         self.index
@@ -317,7 +317,7 @@ impl CodeBlockTable {
 
     pub fn overlaps_mut(&mut self, addr: Address) -> impl Iterator<Item = &mut CodeBlock> + '_ {
         let space = addr.space();
-        let raw = addr.address();
+        let raw = addr.raw_address();
 
         let blocks_ptr = self.entries.as_mut_ptr();
         self.index

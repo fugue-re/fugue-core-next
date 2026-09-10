@@ -1,18 +1,17 @@
 use std::collections::BTreeMap;
 use std::ops::Bound;
 
-use bytes::Bytes;
 use smallvec::SmallVec;
 
-use crate::ir::Address;
+use crate::ir::RawAddress;
 
 #[derive(Debug, Clone)]
 pub struct OverlayChunk {
-    data: Bytes,
+    data: Vec<u8>,
 }
 
 impl OverlayChunk {
-    pub fn new(data: impl Into<Bytes>) -> Self {
+    pub fn new(data: impl Into<Vec<u8>>) -> Self {
         Self { data: data.into() }
     }
 
@@ -31,7 +30,7 @@ impl OverlayChunk {
 
 #[derive(Debug, Clone, Default)]
 pub struct OverlayTree {
-    chunks: BTreeMap<Address, OverlayChunk>,
+    chunks: BTreeMap<RawAddress, OverlayChunk>,
 }
 
 impl OverlayTree {
@@ -43,7 +42,7 @@ impl OverlayTree {
         self.chunks.is_empty()
     }
 
-    pub fn write(&mut self, addr: impl Into<Address>, data: impl Into<Bytes>) {
+    pub fn write(&mut self, addr: impl Into<RawAddress>, data: impl Into<Vec<u8>>) {
         let data = data.into();
         if data.is_empty() {
             return;
@@ -57,28 +56,21 @@ impl OverlayTree {
             .range(..write_end)
             .filter_map(|(&start, chunk)| {
                 let chunk_end = start + chunk.len();
-                if chunk_end > addr && start < write_end {
-                    Some(start)
-                } else {
-                    None
-                }
+                (chunk_end > addr && start < write_end).then_some(start)
             })
             .collect::<SmallVec<[_; 4]>>();
 
         for start in overlapping {
-            let chunk = self.chunks.remove(&start).unwrap();
+            let mut chunk = self.chunks.remove(&start).unwrap();
             let chunk_end = start + chunk.len();
 
-            if start < addr {
-                let left_len = usize::from(addr - start);
-                let left_data = chunk.data.slice(..left_len);
-                self.chunks.insert(start, OverlayChunk::new(left_data));
-            }
-
             if chunk_end > write_end {
-                let right_start = usize::from(write_end - start);
-                let right_data = chunk.data.slice(right_start..);
-                self.chunks.insert(write_end, OverlayChunk::new(right_data));
+                let right = chunk.data.split_off(usize::from(write_end - start));
+                self.chunks.insert(write_end, OverlayChunk::new(right));
+            }
+            if start < addr {
+                chunk.data.truncate(usize::from(addr - start));
+                self.chunks.insert(start, chunk);
             }
         }
 
@@ -86,10 +78,9 @@ impl OverlayTree {
         self.merge_adjacent(addr);
     }
 
-    fn merge_adjacent(&mut self, addr: Address) {
-        let chunk = match self.chunks.get(&addr) {
-            Some(c) => c,
-            None => return,
+    fn merge_adjacent(&mut self, addr: RawAddress) {
+        let Some(chunk) = self.chunks.get(&addr) else {
+            return;
         };
         let chunk_end = addr + chunk.len();
 
@@ -99,37 +90,25 @@ impl OverlayTree {
             .next()
             && next_start == chunk_end
         {
-            let next_chunk = self.chunks.remove(&next_start).unwrap();
+            let next = self.chunks.remove(&next_start).unwrap();
             let current = self.chunks.get_mut(&addr).unwrap();
-            let mut merged = Vec::with_capacity(current.data.len() + next_chunk.data.len());
-            merged.extend_from_slice(&current.data);
-            merged.extend_from_slice(&next_chunk.data);
-            current.data = Bytes::from(merged);
+            current.data.extend_from_slice(&next.data);
         }
 
-        let prev_entry = self
+        let prev_start = self
             .chunks
             .range(..addr)
             .next_back()
-            .and_then(|(&start, chunk)| {
-                if start + chunk.len() == addr {
-                    Some(start)
-                } else {
-                    None
-                }
-            });
+            .and_then(|(&start, chunk)| (start + chunk.len() == addr).then_some(start));
 
-        if let Some(prev_start) = prev_entry {
+        if let Some(prev_start) = prev_start {
             let current = self.chunks.remove(&addr).unwrap();
             let prev = self.chunks.get_mut(&prev_start).unwrap();
-            let mut merged = Vec::with_capacity(prev.data.len() + current.data.len());
-            merged.extend_from_slice(&prev.data);
-            merged.extend_from_slice(&current.data);
-            prev.data = Bytes::from(merged);
+            prev.data.extend_from_slice(&current.data);
         }
     }
 
-    pub fn read(&self, addr: impl Into<Address>, buf: &mut [u8]) -> usize {
+    pub fn read(&self, addr: impl Into<RawAddress>, buf: &mut [u8]) -> usize {
         if buf.is_empty() {
             return 0;
         }
@@ -165,8 +144,21 @@ impl OverlayTree {
         self.chunks.clear();
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (Address, &OverlayChunk)> {
+    pub fn iter(&self) -> impl Iterator<Item = (RawAddress, &OverlayChunk)> {
         self.chunks.iter().map(|(&k, v)| (k, v))
+    }
+
+    pub fn chunk_covering(
+        &self,
+        addr: impl Into<RawAddress>,
+    ) -> Option<(RawAddress, &OverlayChunk)> {
+        let addr = addr.into();
+        self.chunks
+            .range(..=addr)
+            .next_back()
+            .and_then(|(&start, chunk)| {
+                (addr.checked_offset_from(start)? < chunk.len() as u64).then_some((start, chunk))
+            })
     }
 
     pub fn total_size(&self) -> usize {
@@ -175,7 +167,7 @@ impl OverlayTree {
 }
 
 #[cfg(test)]
-mod tests {
+mod test {
     use super::*;
 
     #[test]
@@ -229,5 +221,18 @@ mod tests {
         assert!(!tree.is_empty());
         tree.clear();
         assert!(tree.is_empty());
+    }
+
+    #[test]
+    fn test_sequential_writes_coalesce() {
+        let mut tree = OverlayTree::new();
+        tree.write(0x100u64, vec![1u8, 2, 3, 4]);
+        tree.write(0x104u64, vec![5u8, 6, 7, 8]);
+        tree.write(0x108u64, vec![9u8, 10]);
+
+        assert_eq!(tree.iter().count(), 1, "adjacent chunks coalesce");
+        let (start, chunk) = tree.chunk_covering(0x100u64).unwrap();
+        assert_eq!(start, RawAddress::from(0x100u64));
+        assert_eq!(chunk.data(), &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     }
 }

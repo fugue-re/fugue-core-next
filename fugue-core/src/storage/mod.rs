@@ -12,7 +12,7 @@ use walkdir::WalkDir;
 use zip::write::SimpleFileOptions;
 use zip::{ZipArchive, ZipWriter};
 
-use crate::loader::Loadable;
+use crate::loader::{ImageResolution, Loadable};
 use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
 use crate::types::{AttributeMap, BytesOrMapping};
 
@@ -134,6 +134,7 @@ impl StorageProviderError {
 
 pub struct StorageContainer {
     pub entities: EntityStorage,
+    pub image_resolution: Option<ImageResolution>,
     pub segments: SegmentStorage,
     write_back: Option<Arc<WriteBackWorker>>,
     cleanup_handler: StorageCleanupHandlerOneShot,
@@ -212,10 +213,20 @@ impl StorageContainer {
 
         Ok(Self {
             entities,
+            image_resolution: None,
             segments,
             write_back,
             cleanup_handler: StorageCleanupHandlerOneShot::default(),
         })
+    }
+
+    pub fn set_image_resolution(&mut self, image_resolution: ImageResolution) {
+        self.image_resolution = Some(image_resolution);
+    }
+
+    pub fn with_image_resolution(mut self, image_resolution: ImageResolution) -> Self {
+        self.set_image_resolution(image_resolution);
+        self
     }
 
     pub fn set_cleanup_handler(&mut self, handler: impl StorageCleanupHandler) {
@@ -277,10 +288,12 @@ impl StorageProvider for TransientStorageProvider {
     ) -> Result<StorageContainer, StorageProviderError> {
         let entities =
             EntityStorage::new(InMemoryEntityStorage::from_loadable(loadable, attributes)?);
-        let segments =
-            SegmentStorage::from_loadable::<InMemorySegmentStorage>(loadable, attributes)?;
+        let (segments, image_resolution) =
+            SegmentStorage::from_loadable::<InMemorySegmentStorage>(loadable, attributes)?
+                .into_parts();
 
-        StorageContainer::from_parts(entities, segments)
+        Ok(StorageContainer::from_parts(entities, segments)?
+            .with_image_resolution(image_resolution))
     }
 }
 
@@ -305,10 +318,13 @@ impl StorageProvider for PersistentEntityStorageProvider {
         let entities = EntityStorage::new(DefaultPersistentEntityStorage::from_loadable(
             loadable, attributes,
         )?);
-        let segments =
-            SegmentStorage::from_loadable::<InMemorySegmentStorage>(loadable, attributes)?;
+        let (segments, image_resolution) =
+            SegmentStorage::from_loadable::<InMemorySegmentStorage>(loadable, attributes)?
+                .into_parts();
 
-        Ok(StorageContainer::from_parts(entities, segments)?.with_cleanup_handler(compressed))
+        Ok(StorageContainer::from_parts(entities, segments)?
+            .with_image_resolution(image_resolution)
+            .with_cleanup_handler(compressed))
     }
 }
 
@@ -345,9 +361,12 @@ where
             .with_header(FugueStorageHeader::STANDALONE);
 
         let entities = EntityStorage::new(T::from_loadable(loadable, attributes)?);
-        let segments = SegmentStorage::from_loadable::<U>(loadable, attributes)?;
+        let (segments, image_resolution) =
+            SegmentStorage::from_loadable::<U>(loadable, attributes)?.into_parts();
 
-        Ok(StorageContainer::from_parts(entities, segments)?.with_cleanup_handler(compressed))
+        Ok(StorageContainer::from_parts(entities, segments)?
+            .with_image_resolution(image_resolution)
+            .with_cleanup_handler(compressed))
     }
 }
 

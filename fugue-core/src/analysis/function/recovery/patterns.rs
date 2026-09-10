@@ -90,7 +90,7 @@ impl FunctionRecoveryPatternMatcher {
         let mut current_start = *gap.start();
 
         let calculate_end = |segm: &SegmentMappingView| -> RawAddress {
-            let segm_end = segm.last().address();
+            let segm_end = segm.last().raw_address();
             if segm_end <= gap_end {
                 segm_end
             } else {
@@ -125,11 +125,14 @@ impl FunctionRecoveryPatternMatcher {
             };
 
             let size = 1usize + range.end().absolute_difference(range.start()) as usize;
-            let Some(bytes) = segm.bytes_at(Address::new(space_id, *range.start()), size) else {
+            let Some(window) = segm.bytes_at(Address::new(space_id, *range.start()), size) else {
                 break;
             };
+            let Some(bytes) = window.as_contiguous() else {
+                continue;
+            };
 
-            f(range, &bytes);
+            f(range, bytes);
         }
     }
 

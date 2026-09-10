@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
 
-use object::read::pe::{ImageNtHeaders, PeFile};
+use object::read::pe::{ImageNtHeaders, PeFile, Relocation};
 use object::{Architecture, Object, ReadRef};
 
-use crate::ir::Address;
+use crate::ir::RawAddress;
 use crate::loader::pe::extensions::RelocationContext;
-use crate::loader::{LoadableSegment, LoaderError};
+use crate::loader::{ImageSegmentContents, LoaderError};
 
 pub mod generic;
 
@@ -21,9 +21,10 @@ where
     'file: 'data,
 {
     pe: &'file PeFile<'data, Pe, R>,
-    preferred_base: u64,
-    current_base: Address,
-    import_slots: &'file BTreeMap<Address, Address>,
+    preferred_base: RawAddress,
+    current_base: RawAddress,
+    import_slots: &'file BTreeMap<RawAddress, RawAddress>,
+    base_relocations: &'file [Relocation],
 }
 
 impl<'data, 'file, Pe, R> PeSegmentRelocator<'data, 'file, Pe, R>
@@ -34,26 +35,28 @@ where
 {
     pub fn new(
         pe: &'file PeFile<'data, Pe, R>,
-        preferred_base: u64,
-        current_base: Address,
-        import_slots: &'file BTreeMap<Address, Address>,
+        current_base: RawAddress,
+        preferred_base: RawAddress,
+        import_slots: &'file BTreeMap<RawAddress, RawAddress>,
+        base_relocations: &'file [Relocation],
     ) -> Self {
         Self {
             pe,
             preferred_base,
             current_base,
             import_slots,
+            base_relocations,
         }
     }
 
-    pub fn apply(&self, lsegm: &mut LoadableSegment<'data>) -> Result<(), LoaderError> {
-        self.apply_base_relocations(lsegm)?;
-        self.apply_import_slots(lsegm)?;
+    pub fn apply(&self, bytes: &mut ImageSegmentContents<'data>) -> Result<(), LoaderError> {
+        self.apply_base_relocations(bytes)?;
+        self.apply_import_slots(bytes)?;
         Ok(())
     }
 
     pub(crate) fn base_delta_u64(&self) -> u64 {
-        self.current_base.offset().wrapping_sub(self.preferred_base)
+        (self.current_base - self.preferred_base).offset()
     }
 
     pub(crate) fn base_delta_u32(&self) -> u32 {
@@ -70,63 +73,55 @@ where
 
     fn apply_base_relocations(
         &self,
-        lsegm: &mut LoadableSegment<'data>,
+        bytes: &mut ImageSegmentContents<'data>,
     ) -> Result<(), LoaderError> {
-        if self.current_base.offset() == self.preferred_base {
+        if self.current_base == self.preferred_base {
             return Ok(());
         }
 
-        let Some(mut blocks) = self
-            .pe
-            .data_directories()
-            .relocation_blocks(self.pe.data(), &self.pe.section_table())
-            .map_err(LoaderError::format)?
-        else {
-            return Ok(());
-        };
-
-        let start = lsegm.address().offset();
+        let start = bytes.address().offset();
         let end = start
-            .checked_add(lsegm.len() as u64)
-            .ok_or_else(|| LoaderError::address_overflow(lsegm.address()))?;
+            .checked_add(bytes.len())
+            .ok_or_else(|| LoaderError::address_overflow(bytes.address()))?;
 
-        while let Some(block) = blocks.next().map_err(LoaderError::format)? {
-            for reloc in block {
-                let address = self
-                    .current_base
-                    .offset()
-                    .wrapping_add(reloc.virtual_address as u64);
-                if address < start || address >= end {
-                    continue;
-                }
-
-                let Some(offset) = address.checked_sub(start) else {
-                    continue;
-                };
-                self.apply_relocation(lsegm, offset as usize, reloc.typ)?;
+        for reloc in self.base_relocations {
+            let address = self
+                .current_base
+                .offset()
+                .wrapping_add(reloc.virtual_address as u64);
+            if address < start || address >= end {
+                continue;
             }
+
+            let Some(offset) = address.checked_sub(start) else {
+                continue;
+            };
+            self.apply_relocation(bytes, offset, reloc.typ)?;
         }
 
         Ok(())
     }
 
-    fn apply_import_slots(&self, lsegm: &mut LoadableSegment<'data>) -> Result<(), LoaderError> {
-        let start = lsegm.address();
+    fn apply_import_slots(
+        &self,
+        bytes: &mut ImageSegmentContents<'data>,
+    ) -> Result<(), LoaderError> {
+        let start = bytes.address();
         let end = start
-            .checked_add(lsegm.len() as u64)
+            .checked_add(bytes.len())
             .ok_or_else(|| LoaderError::address_overflow(start))?;
 
         for (slot, target) in self.import_slots.range(start..end) {
-            let Some(offset) = lsegm.offset_of(*slot) else {
+            let Some(offset) = bytes.offset_of(*slot) else {
                 continue;
             };
 
             tracing::trace!("patching PE import slot {slot} -> {target}");
 
             if self.pe.is_64() {
-                lsegm.write_value(offset, target.offset());
+                bytes.write_value(offset, target.offset());
             } else {
-                lsegm.write_value(offset, target.offset() as u32);
+                bytes.write_value(offset, target.offset() as u32);
             }
         }
 
@@ -135,19 +130,19 @@ where
 
     fn apply_relocation(
         &self,
-        lsegm: &mut LoadableSegment<'data>,
-        offset: usize,
+        bytes: &mut ImageSegmentContents<'data>,
+        offset: u64,
         reloc_type: u16,
     ) -> Result<(), LoaderError> {
-        let patch_address = lsegm.address() + offset;
+        let patch_address = bytes.address() + offset;
         let mut context = RelocationContext::new(
             self.pe,
             self.current_base,
-            Address::new(self.current_base.space(), self.preferred_base),
+            self.preferred_base,
             patch_address,
             offset,
             reloc_type,
-            lsegm,
+            bytes,
         );
 
         if context.apply_relocation()? {
