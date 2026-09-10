@@ -7,7 +7,7 @@ use itertools::{Itertools, Position};
 use crate::calculate_mask;
 use crate::constructor::Constructor;
 use crate::context::{ContextBitRange, ContextDatabase, TrackedSet};
-use crate::format::InstructionOutput;
+use crate::format::{InstructionFormatError, InstructionWriter};
 use crate::input::{FixedHandle, INVALID_HANDLE, ParserInput, ParserInputs};
 use crate::language::{Language, LanguageData, LanguageFormatter};
 use crate::operand::Operands;
@@ -331,11 +331,11 @@ impl<'a> LiftingContextState<'a> {
     /// Called from generated code which ensures validity of arguments and state.
     #[doc(hidden)]
     #[inline]
-    pub unsafe fn format<W: fmt::Write>(
+    pub(crate) unsafe fn format<W: fmt::Write>(
         &mut self,
         language: &'static Language,
         mut writer: W,
-    ) -> fmt::Result {
+    ) -> Result<(), InstructionFormatError> {
         unsafe {
             self.inputs.input.base_state();
 
@@ -349,12 +349,12 @@ impl<'a> LiftingContextState<'a> {
     /// Called from generated code which ensures validity of arguments and state.
     #[doc(hidden)]
     #[inline]
-    pub unsafe fn format_parts<W1: fmt::Write, W2: fmt::Write>(
+    pub(crate) unsafe fn format_parts<W1: fmt::Write, W2: fmt::Write>(
         &mut self,
         language: &'static Language,
         mut mnemonic: W1,
         mut operands: W2,
-    ) -> fmt::Result {
+    ) -> Result<(), InstructionFormatError> {
         unsafe {
             self.inputs.input.base_state();
 
@@ -363,11 +363,11 @@ impl<'a> LiftingContextState<'a> {
         }
     }
 
-    pub(crate) unsafe fn format_instruction<O: InstructionOutput + ?Sized>(
+    pub(crate) unsafe fn format_instruction<O: InstructionWriter + ?Sized>(
         &mut self,
         language: &'static Language,
         output: &mut O,
-    ) -> fmt::Result {
+    ) -> Result<(), InstructionFormatError> {
         unsafe {
             self.inputs.input.base_state();
 

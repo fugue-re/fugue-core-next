@@ -8,8 +8,8 @@ use crate::il::ecode::{ECodeOp, ECodeOpcode};
 use crate::ir::{Address, RawAddress};
 use crate::storage::AddressSpaceId;
 
-pub(crate) struct SwitchTargetEvaluator<'context, 'analysis> {
-    context: &'context SwitchIntervalRecovery<'analysis>,
+pub(crate) struct SwitchTargetEvaluator<'a, 'b> {
+    context: &'a SwitchIntervalRecovery<'b>,
     space: AddressSpaceId,
     memo: FxHashMap<IlValueId, BitVec>,
     dependent: FxHashSet<IlValueId>,
@@ -23,9 +23,9 @@ enum EvaluationStep {
     Forward { value: IlValueId, input: IlValueId },
 }
 
-impl<'context, 'analysis> SwitchTargetEvaluator<'context, 'analysis> {
+impl<'a, 'b> SwitchTargetEvaluator<'a, 'b> {
     pub(crate) fn new(
-        context: &'context SwitchIntervalRecovery<'analysis>,
+        context: &'a SwitchIntervalRecovery<'b>,
         space: AddressSpaceId,
     ) -> Self {
         Self {

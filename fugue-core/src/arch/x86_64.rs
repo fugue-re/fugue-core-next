@@ -1,5 +1,6 @@
 #[cfg(feature = "static-lifters")]
 pub use fugue_lifter::x86_64::*;
+use memchr::arch::all::is_prefix;
 use yaxpeax_arch::*;
 use yaxpeax_x86::amd64::{DecodeError, InstDecoder, Instruction, Opcode, Operand};
 
@@ -13,68 +14,22 @@ use crate::lifter::{
     LanguageSource, Lifter, LiftingContext, Varnode,
 };
 
-fn classify_bytes(bytes: &[u8]) -> BytesProperties {
-    const NONSENSE: &[&[u8]] = &[&[0x00u8, 0x00u8], &[0x00u8], &[0xf0u8]];
-    const ENTRY_MARKERS: &[&[u8]] = &[
-        &[0xf3u8, 0x0fu8, 0x1eu8, 0xfau8],
-        &[0xf3u8, 0x0fu8, 0x1eu8, 0xfbu8],
-    ];
-
-    let mut properties = BytesProperties::empty();
-
-    if bytes.is_empty() {
-        return properties;
-    }
-
-    if ENTRY_MARKERS.contains(&bytes) {
-        properties |= BytesProperties::ENTRY_MARKER;
-    }
-
-    if NONSENSE.contains(&bytes) {
-        properties |= BytesProperties::NONSENSE;
-    }
-
-    let padded = bytes.iter().all(|&byte| byte == 0xcc)
-        || bytes
-            .iter()
-            .position(|byte| !matches!(byte, 0x66 | 0x2e))
-            .is_some_and(|opcode| matches!(&bytes[opcode..], [0x90] | [0x0f, 0x1f, ..]));
-
-    if padded {
-        properties |= BytesProperties::PADDING;
-    }
-
-    properties
-}
-
-fn classify_contiguous_bytes(bytes: &[u8]) -> (usize, BytesProperties) {
-    let decoder = InstDecoder::default();
-    let mut size = 0usize;
-    let mut properties = BytesProperties::empty();
-
-    while let Some(remaining) = bytes.get(size..) {
-        let mut reader = U8Reader::new(remaining);
-        let Ok(insn) = decoder.decode(&mut reader) else {
-            break;
-        };
-        let insn_size = insn.len().to_const() as usize;
-        if insn_size == 0 {
-            break;
-        }
-        let Some(insn_bytes) = remaining.get(..insn_size) else {
-            break;
-        };
-        let insn_properties = classify_bytes(insn_bytes);
-        if insn_properties.is_empty() || (!properties.is_empty() && insn_properties != properties) {
-            break;
-        }
-
-        properties = insn_properties;
-        size += insn_size;
-    }
-
-    (size, properties)
-}
+const ENTRY_INSNS: &[&[u8]] = &[&[0xf3, 0x0f, 0x1e, 0xfa], &[0xf3, 0x0f, 0x1e, 0xfb]];
+const NONSENSE: &[&[u8]] = &[&[0x00, 0x00], &[0x00], &[0xf0]];
+const NOP_INSNS: &[&[u8]] = &[
+    &[0x66, 0x2e, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
+    &[0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
+    &[0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
+    &[0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00],
+    &[0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00],
+    &[0x0f, 0x1f, 0x44, 0x00, 0x00],
+    &[0x0f, 0x1f, 0x40, 0x00],
+    &[0x66, 0x66, 0x90],
+    &[0x0f, 0x1f, 0x00],
+    &[0x66, 0x90],
+    &[0x90],
+];
+const PADDING: &[&[u8]] = &[&[0xcc]];
 
 #[derive(Clone)]
 struct ArchData {
@@ -153,7 +108,55 @@ impl ArchT for X86_64 {
     }
 
     fn classify_bytes(&self, bytes: &[u8]) -> BytesProperties {
-        classify_bytes(bytes)
+        let mut size = 0usize;
+        let mut properties = BytesProperties::empty();
+
+        while let Some(remaining) = bytes.get(size..) {
+            let matched = ENTRY_INSNS
+                .iter()
+                .copied()
+                .find(|pattern| is_prefix(remaining, pattern))
+                .map(|pattern| (pattern, BytesProperties::ENTRY_INSN))
+                .or_else(|| {
+                    NONSENSE
+                        .iter()
+                        .copied()
+                        .find(|pattern| is_prefix(remaining, pattern))
+                        .map(|pattern| (pattern, BytesProperties::NONSENSE))
+                })
+                .or_else(|| {
+                    NOP_INSNS
+                        .iter()
+                        .copied()
+                        .find(|pattern| is_prefix(remaining, pattern))
+                        .map(|pattern| (pattern, BytesProperties::NOP_INSN))
+                })
+                .or_else(|| {
+                    PADDING
+                        .iter()
+                        .copied()
+                        .find(|pattern| is_prefix(remaining, pattern))
+                        .map(|pattern| (pattern, BytesProperties::PADDING))
+                });
+            let Some((pattern, next_properties)) = matched else {
+                break;
+            };
+            if !properties.is_empty()
+                && properties != next_properties
+                && !(properties.is_alignment() && next_properties.is_alignment())
+            {
+                break;
+            }
+
+            properties |= next_properties;
+            size += pattern.len();
+        }
+
+        if size != 0 && size == bytes.len() {
+            properties
+        } else {
+            BytesProperties::empty()
+        }
     }
 
     fn classify_contiguous_bytes(
@@ -162,7 +165,51 @@ impl ArchT for X86_64 {
         _context: &LiftingContext,
         bytes: &[u8],
     ) -> (usize, BytesProperties) {
-        classify_contiguous_bytes(bytes)
+        let mut size = 0usize;
+        let mut properties = BytesProperties::empty();
+
+        while let Some(remaining) = bytes.get(size..) {
+            let matched = ENTRY_INSNS
+                .iter()
+                .copied()
+                .find(|pattern| is_prefix(remaining, pattern))
+                .map(|pattern| (pattern, BytesProperties::ENTRY_INSN))
+                .or_else(|| {
+                    NONSENSE
+                        .iter()
+                        .copied()
+                        .find(|pattern| is_prefix(remaining, pattern))
+                        .map(|pattern| (pattern, BytesProperties::NONSENSE))
+                })
+                .or_else(|| {
+                    NOP_INSNS
+                        .iter()
+                        .copied()
+                        .find(|pattern| is_prefix(remaining, pattern))
+                        .map(|pattern| (pattern, BytesProperties::NOP_INSN))
+                })
+                .or_else(|| {
+                    PADDING
+                        .iter()
+                        .copied()
+                        .find(|pattern| is_prefix(remaining, pattern))
+                        .map(|pattern| (pattern, BytesProperties::PADDING))
+                });
+            let Some((pattern, next_properties)) = matched else {
+                break;
+            };
+            if !properties.is_empty()
+                && properties != next_properties
+                && !(properties.is_alignment() && next_properties.is_alignment())
+            {
+                break;
+            }
+
+            properties |= next_properties;
+            size += pattern.len();
+        }
+
+        (size, properties)
     }
 
     fn is_skip_intrinsic(&self, user_op: u16, args: &[Varnode]) -> bool {
@@ -391,8 +438,9 @@ impl DisassemblerT for X86_64Disassembler {
 mod test {
     use std::error::Error;
 
-    use super::{X86_64, classify_bytes};
-    use crate::ir::{Address, Insn};
+    use super::X86_64;
+    use crate::arch::BytesProperties;
+    use crate::ir::{Address, Insn, RawAddress};
 
     fn assert_direct_flow_matches_lifter(bytes: &[u8]) -> Result<(), Box<dyn Error>> {
         let language = X86_64::resolve_default_variant()?;
@@ -422,34 +470,66 @@ mod test {
 
     #[test]
     fn test_byte_patterns_are_classified() {
-        for padding in [
+        let language = X86_64::resolve_default_variant().expect("x86-64 language");
+        let arch = X86_64::new(language);
+        let lifter = arch.lifter();
+
+        for entry in [
+            [0xf3u8, 0x0f, 0x1e, 0xfa].as_slice(),
+            &[0xf3, 0x0f, 0x1e, 0xfb],
+        ] {
+            let properties = arch.classify_bytes(entry);
+            assert!(properties.is_entry_insn());
+            assert!(!properties.is_alignment());
+        }
+
+        for nop in [
             [0x90u8].as_slice(),
             &[0x66, 0x90],
             &[0x0f, 0x1f, 0x00],
             &[0x66, 0x2e, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
-            &[0xcc],
         ] {
-            assert!(
-                classify_bytes(padding).is_padding(),
-                "{padding:02x?} should be padding"
-            );
+            let properties = arch.classify_bytes(nop);
+            assert!(properties.is_nop_insn(), "{nop:02x?} should be a NOP");
+            assert!(properties.is_alignment());
+            assert!(!properties.is_padding());
         }
 
-        for marker in [
-            [0xf3u8, 0x0f, 0x1e, 0xfa].as_slice(),
-            &[0xf3, 0x0f, 0x1e, 0xfb],
-        ] {
-            let properties = classify_bytes(marker);
-            assert!(properties.is_entry_marker(), "{marker:02x?} marks an entry");
-            assert!(!properties.is_padding(), "{marker:02x?} is not padding");
-        }
+        let padding = arch.classify_bytes(&[0xcc]);
+        assert!(padding.is_padding());
+        assert!(padding.is_alignment());
+        assert!(!padding.is_nop_insn());
 
         for nonsense in [[0x00u8].as_slice(), &[0x00, 0x00], &[0xf0]] {
-            assert!(classify_bytes(nonsense).is_nonsense());
+            assert!(arch.classify_bytes(nonsense).is_nonsense());
         }
 
-        assert!(classify_bytes(&[0x55, 0x48, 0x89, 0xe5]).is_empty());
-        assert!(classify_bytes(&[]).is_empty());
+        assert_eq!(
+            arch.classify_contiguous_bytes(
+                RawAddress::from(0u64),
+                lifter.context(),
+                &[0x90, 0x66, 0x90, 0x55],
+            ),
+            (3, BytesProperties::NOP_INSN)
+        );
+        assert_eq!(
+            arch.classify_contiguous_bytes(
+                RawAddress::from(0u64),
+                lifter.context(),
+                &[0x90, 0xcc, 0x55],
+            ),
+            (2, BytesProperties::ALIGNMENT)
+        );
+        assert_eq!(
+            arch.classify_contiguous_bytes(
+                RawAddress::from(0u64),
+                lifter.context(),
+                &[0x00, 0x00, 0xf0, 0x90],
+            ),
+            (3, BytesProperties::NONSENSE)
+        );
+        assert!(arch.classify_bytes(&[0x55, 0x48, 0x89, 0xe5]).is_empty());
+        assert!(arch.classify_bytes(&[]).is_empty());
     }
 
     #[test]

@@ -27,7 +27,12 @@ pub(crate) enum InstructionSection {
     Operand,
 }
 
-pub(crate) trait InstructionOutput {
+pub(crate) enum InstructionFormatError {
+    Formatting(fmt::Error),
+    Unresolved,
+}
+
+pub(crate) trait InstructionWriter {
     fn write_mnemonic_piece(&mut self, piece: OperandPiece) -> fmt::Result;
 
     fn write_separator(&mut self, separator: &str) -> fmt::Result;
@@ -42,21 +47,27 @@ pub(crate) trait InstructionOutput {
     fn finish_instruction(&mut self) -> fmt::Result;
 }
 
+impl From<fmt::Error> for InstructionFormatError {
+    fn from(error: fmt::Error) -> Self {
+        Self::Formatting(error)
+    }
+}
+
 impl InstructionSection {
-    pub(crate) fn write<O: InstructionOutput + ?Sized>(
+    pub(crate) fn write<W: InstructionWriter + ?Sized>(
         self,
-        output: &mut O,
+        writer: &mut W,
         piece: OperandPiece,
         bits: Option<Range<u32>>,
     ) -> fmt::Result {
         match self {
-            Self::Mnemonic => output.write_mnemonic_piece(piece),
-            Self::Operand => output.write_operand_piece(piece, bits),
+            Self::Mnemonic => writer.write_mnemonic_piece(piece),
+            Self::Operand => writer.write_operand_piece(piece, bits),
         }
     }
 }
 
-impl<F: InstructionFormatter + ?Sized> InstructionOutput for F {
+impl<F: InstructionFormatter + ?Sized> InstructionWriter for F {
     fn write_mnemonic_piece(&mut self, piece: OperandPiece) -> fmt::Result {
         match piece {
             OperandPiece::Text(text) => self.write_mnemonic(text),
@@ -122,7 +133,7 @@ impl<W> InstructionText<W> {
     }
 }
 
-impl<W: fmt::Write> InstructionOutput for InstructionText<W> {
+impl<W: fmt::Write> InstructionWriter for InstructionText<W> {
     fn write_mnemonic_piece(&mut self, piece: OperandPiece) -> fmt::Result {
         write!(self.writer, "{piece}")
     }
@@ -163,7 +174,7 @@ impl<M, O> InstructionParts<M, O> {
     }
 }
 
-impl<M: fmt::Write, O: fmt::Write> InstructionOutput for InstructionParts<M, O> {
+impl<M: fmt::Write, O: fmt::Write> InstructionWriter for InstructionParts<M, O> {
     fn write_mnemonic_piece(&mut self, piece: OperandPiece) -> fmt::Result {
         write!(self.mnemonic, "{piece}")
     }

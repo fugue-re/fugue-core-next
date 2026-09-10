@@ -1,7 +1,10 @@
 use std::fmt::{self, Debug};
 
 use crate::context::{ContextPostAction, ContextPreAction};
-use crate::format::{InstructionOutput, InstructionParts, InstructionSection, InstructionText};
+use crate::format::{
+    InstructionFormatError, InstructionParts, InstructionSection, InstructionText,
+    InstructionWriter,
+};
 use crate::input::{ContextCommit, FixedHandle, INVALID_HANDLE};
 use crate::language::{Language, LanguageData};
 use crate::operand::{Operand, OperandHandleResolver, OperandPiece, OperandResolver, Operands};
@@ -215,45 +218,45 @@ impl Constructor {
     /// # Safety
     ///
     /// Called from generated code which ensures validity of arguments and state.
-    pub unsafe fn format_mnemonic<W: fmt::Write>(
+    pub(crate) unsafe fn format_mnemonic<W: fmt::Write>(
         &self,
         language: &'static Language,
         state: &mut LiftingContextState<'_>,
         writer: &mut W,
-    ) -> fmt::Result {
+    ) -> Result<(), InstructionFormatError> {
         unsafe {
-            let mut output = InstructionText::new(writer);
-            self.write_mnemonic(language, state, &mut output)
+            let mut writer = InstructionText::new(writer);
+            self.write_mnemonic(language, state, &mut writer)
         }
     }
 
     /// # Safety
     ///
     /// Called from generated code which ensures validity of arguments and state.
-    pub unsafe fn format_body<W: fmt::Write>(
+    pub(crate) unsafe fn format_body<W: fmt::Write>(
         &self,
         language: &'static Language,
         state: &mut LiftingContextState<'_>,
         writer: &mut W,
-    ) -> Result<(), fmt::Error> {
+    ) -> Result<(), InstructionFormatError> {
         unsafe {
-            let mut output = InstructionText::new(writer);
-            self.write_body(language, state, &mut output)
+            let mut writer = InstructionText::new(writer);
+            self.write_body(language, state, &mut writer)
         }
     }
 
     /// # Safety
     ///
     /// Called from generated code which ensures validity of arguments and state.
-    pub unsafe fn format<W: fmt::Write>(
+    pub(crate) unsafe fn format<W: fmt::Write>(
         &self,
         language: &'static Language,
         state: &mut LiftingContextState<'_>,
         writer: &mut W,
-    ) -> Result<(), fmt::Error> {
+    ) -> Result<(), InstructionFormatError> {
         unsafe {
-            let mut output = InstructionText::new(writer);
-            self.format_instruction(language, state, &mut output)
+            let mut writer = InstructionText::new(writer);
+            self.format_instruction(language, state, &mut writer)
         }
     }
 
@@ -263,10 +266,24 @@ impl Constructor {
         state: &mut LiftingContextState<'_>,
         mnemonic: &mut M,
         operands: &mut O,
-    ) -> fmt::Result {
+    ) -> Result<(), InstructionFormatError> {
         unsafe {
-            let mut output = InstructionParts::new(mnemonic, operands);
-            self.format_instruction(language, state, &mut output)
+            let mut writer = InstructionParts::new(mnemonic, operands);
+            self.format_instruction(language, state, &mut writer)
+        }
+    }
+
+    pub(crate) unsafe fn format_instruction<O: InstructionWriter + ?Sized>(
+        &self,
+        language: &'static Language,
+        state: &mut LiftingContextState<'_>,
+        output: &mut O,
+    ) -> Result<(), InstructionFormatError> {
+        unsafe {
+            self.write_mnemonic(language, state, output)?;
+            self.write_body(language, state, output)?;
+            output.finish_instruction()?;
+            Ok(())
         }
     }
 
@@ -279,25 +296,12 @@ impl Constructor {
         unsafe { self.format_instruction(language, state, operands).ok() }
     }
 
-    pub(crate) unsafe fn format_instruction<O: InstructionOutput + ?Sized>(
+    unsafe fn write_mnemonic<O: InstructionWriter + ?Sized>(
         &self,
         language: &'static Language,
         state: &mut LiftingContextState<'_>,
         output: &mut O,
-    ) -> fmt::Result {
-        unsafe {
-            self.write_mnemonic(language, state, output)?;
-            self.write_body(language, state, output)?;
-            output.finish_instruction()
-        }
-    }
-
-    unsafe fn write_mnemonic<O: InstructionOutput + ?Sized>(
-        &self,
-        language: &'static Language,
-        state: &mut LiftingContextState<'_>,
-        output: &mut O,
-    ) -> fmt::Result {
+    ) -> Result<(), InstructionFormatError> {
         unsafe {
             if let Some(index) = self.flow_through_index
                 && matches!(
@@ -331,12 +335,12 @@ impl Constructor {
         }
     }
 
-    unsafe fn write_body<O: InstructionOutput + ?Sized>(
+    unsafe fn write_body<O: InstructionWriter + ?Sized>(
         &self,
         language: &'static Language,
         state: &mut LiftingContextState<'_>,
         output: &mut O,
-    ) -> fmt::Result {
+    ) -> Result<(), InstructionFormatError> {
         unsafe {
             if let Some(index) = self.flow_through_index
                 && matches!(
@@ -385,14 +389,14 @@ impl Constructor {
         }
     }
 
-    unsafe fn write_pieces<O: InstructionOutput + ?Sized>(
+    unsafe fn write_pieces<O: InstructionWriter + ?Sized>(
         &self,
         language: &'static Language,
         state: &mut LiftingContextState<'_>,
         output: &mut O,
         pieces: &[PrintPiece],
         section: InstructionSection,
-    ) -> fmt::Result {
+    ) -> Result<(), InstructionFormatError> {
         unsafe {
             for piece in pieces {
                 match piece {
@@ -409,14 +413,14 @@ impl Constructor {
         }
     }
 
-    unsafe fn write_operand<O: InstructionOutput + ?Sized>(
+    unsafe fn write_operand<O: InstructionWriter + ?Sized>(
         &self,
         language: &'static Language,
         state: &mut LiftingContextState<'_>,
         output: &mut O,
         index: usize,
         section: InstructionSection,
-    ) -> fmt::Result {
+    ) -> Result<(), InstructionFormatError> {
         unsafe {
             if matches!(section, InstructionSection::Operand) {
                 output.begin_operand()?;

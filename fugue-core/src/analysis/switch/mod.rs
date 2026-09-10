@@ -12,7 +12,6 @@ use crate::il::common::{IlArtefact, IlError};
 use crate::il::ecode::ECodeIr;
 use crate::ir::{FlowKind, FunctionId, SwitchId, SwitchProperties};
 use crate::project::Project;
-use crate::types::Revision;
 
 mod idiom;
 mod interval;
@@ -188,7 +187,7 @@ impl AnalysisPass<StructuredFunctionContext> for SwitchRecovery {
 
             if !unresolved.is_empty() || !retry.is_empty() {
                 let ssa = project
-                    .speculative_il::<ECodeIr>(function, Revision::default())
+                    .lifted_for_incomplete::<ECodeIr>(function)
                     .map_err(|e| AnalysisError::pass_failed(SWITCH_RECOVERY_ANALYSER, e))?
                     .ok_or_else(|| {
                         AnalysisError::pass_failed(

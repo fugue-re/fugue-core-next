@@ -1,7 +1,7 @@
 use std::fmt;
 use std::ops::Range;
 
-use crate::format::{InstructionOutput, InstructionSection};
+use crate::format::{InstructionFormatError, InstructionSection, InstructionWriter};
 use crate::input::{BREADCRUMBS, INVALID_HANDLE};
 use crate::language::{Language, LanguageData};
 use crate::operand::OperandPiece;
@@ -110,24 +110,25 @@ impl PatternExpression {
         })
     }
 
-    pub(crate) unsafe fn operand_pieces<O: InstructionOutput + ?Sized>(
+    pub(crate) unsafe fn operand_pieces<O: InstructionWriter + ?Sized>(
         &self,
         language: &'static Language,
         state: &mut LiftingContextState<'_>,
         output: &mut O,
         section: InstructionSection,
-    ) -> fmt::Result {
+    ) -> Result<(), InstructionFormatError> {
         unsafe {
             let data = language.data();
             let (value, resolved) = self
                 .resolve_with_range(data, state)
-                .expect("value previously resolved");
+                .ok_or(InstructionFormatError::Unresolved)?;
             let signed = self.has_signed_terms(data);
             section.write(
                 output,
                 OperandPiece::scalar(value, resolved.as_ref(), signed),
                 resolved,
-            )
+            )?;
+            Ok(())
         }
     }
 

@@ -3,7 +3,7 @@ use thiserror::Error;
 use crate::arch::Arch;
 use crate::ir::{Address, Insn, InsnError};
 use crate::lifter::{
-    Disassembler, DisassemblerError, Language, Lifter, LifterError, LiftingContext, Op, RawPCodeOp,
+    Disassembler, DisassemblerError, Lifter, LifterError, LiftingContext, RawPCodeOp,
 };
 
 #[derive(Debug, Error)]
@@ -41,6 +41,7 @@ impl ResolvedInsn {
         let target = self.indirect_target.as_ref()?;
         let mut buffer = [0u8; size_of::<u64>()];
         let bytes = buffer.get_mut(..target.size)?;
+
         if !read(target.pointer, bytes) {
             return None;
         }
@@ -104,13 +105,12 @@ impl InsnResolver {
         }
 
         let language = self.lifter.language();
-        let indirect_target =
-            Self::indirect_target_pointer(language, &insn, &self.operations).map(|pointer| {
-                IndirectTarget {
-                    pointer,
-                    size: language.address_size(),
-                    big_endian: language.is_big_endian(),
-                }
+        let indirect_target = insn
+            .indirect_target_pointer(language, &self.operations)
+            .map(|pointer| IndirectTarget {
+                pointer,
+                size: language.address_size(),
+                big_endian: language.is_big_endian(),
             });
 
         Ok(ResolvedInsn {
@@ -131,39 +131,5 @@ impl InsnResolver {
             .lift(address, bytes.as_ref(), &mut self.operations)?;
         output.append(&mut self.operations);
         Ok(size)
-    }
-
-    fn indirect_target_pointer(
-        language: &Language,
-        insn: &Insn,
-        operations: &[RawPCodeOp],
-    ) -> Option<Address> {
-        let (position, target) = operations
-            .iter()
-            .enumerate()
-            .find_map(|(index, operation)| {
-                if !matches!(operation.op(), Op::IBranch | Op::ICall) {
-                    return None;
-                }
-                operation.inputs().first().map(|target| (index, *target))
-            })?;
-
-        if language.in_default_space(&target) {
-            return Some(Address::new(insn.address().space(), target.offset()));
-        }
-
-        let definition = operations[..position]
-            .iter()
-            .rev()
-            .find(|operation| operation.output() == Some(&target))?;
-        if !matches!(definition.op(), Op::Copy) {
-            return None;
-        }
-
-        definition
-            .inputs()
-            .first()
-            .filter(|source| language.in_default_space(source))
-            .map(|source| Address::new(insn.address().space(), source.offset()))
     }
 }

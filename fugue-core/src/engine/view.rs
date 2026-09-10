@@ -357,12 +357,12 @@ impl<'a> ProjectView<'a> {
         self.project.references()
     }
 
-    pub fn speculative_il<T: IlArtefact>(
+    pub fn lifted_for_incomplete<T: IlArtefact>(
         &self,
         function: &IncompleteFunction,
-        input_revision: Revision,
     ) -> Result<Option<T>, IlGenerationError> {
         let mut generation = IlGenerationSession::new(self.registry);
+        let input_revision = function.input_revision();
         self.generate_il(
             IlSubject::Speculative {
                 function,

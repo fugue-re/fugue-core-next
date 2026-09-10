@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::format::{InstructionOutput, InstructionSection};
+use crate::format::{InstructionFormatError, InstructionSection, InstructionWriter};
 use crate::input::FixedHandle;
 use crate::language::{Language, LanguageData};
 use crate::operand::OperandPiece;
@@ -137,13 +137,13 @@ impl Symbol {
         }
     }
 
-    pub(crate) unsafe fn operand_pieces<O: InstructionOutput + ?Sized>(
+    pub(crate) unsafe fn operand_pieces<O: InstructionWriter + ?Sized>(
         &self,
         language: &'static Language,
         state: &mut LiftingContextState<'_>,
         output: &mut O,
         section: InstructionSection,
-    ) -> fmt::Result {
+    ) -> Result<(), InstructionFormatError> {
         unsafe {
             let data = language.data();
             match self {
@@ -165,7 +165,7 @@ impl Symbol {
                 } => {
                     let (index, resolved) = pattern_value
                         .resolve_with_range(data, state)
-                        .expect("resolved");
+                        .ok_or(InstructionFormatError::Unresolved)?;
                     if let Some(name) = symbol_table.get(index as usize).copied().flatten() {
                         section.write(output, OperandPiece::Text(name), resolved)?;
                     }
@@ -177,7 +177,7 @@ impl Symbol {
                 } => {
                     let (index, resolved) = pattern_value
                         .resolve_with_range(data, state)
-                        .expect("resolved");
+                        .ok_or(InstructionFormatError::Unresolved)?;
                     if let Some(name) = symbol_table.get(index as usize).copied().flatten() {
                         section.write(output, OperandPiece::register(language, name), resolved)?;
                     }
@@ -189,7 +189,7 @@ impl Symbol {
                 } => {
                     let (index, resolved) = pattern_value
                         .resolve_with_range(data, state)
-                        .expect("resolved");
+                        .ok_or(InstructionFormatError::Unresolved)?;
                     if let Some(name) = symbol_table.get(index as usize).copied() {
                         section.write(output, OperandPiece::register(language, name), resolved)?;
                     }
@@ -200,7 +200,7 @@ impl Symbol {
                 } => {
                     let (index, resolved) = pattern_value
                         .resolve_with_range(data, state)
-                        .expect("resolved");
+                        .ok_or(InstructionFormatError::Unresolved)?;
                     if let Some(value) = value_table.get(index as usize).copied().flatten() {
                         let signed = pattern_value.has_signed_terms(data);
                         section.write(
@@ -216,8 +216,11 @@ impl Symbol {
                 } => {
                     let (index, resolved) = pattern_value
                         .resolve_with_range(data, state)
-                        .expect("resolved");
-                    let value = value_table.get(index as usize).copied().expect("resolved");
+                        .ok_or(InstructionFormatError::Unresolved)?;
+                    let value = value_table
+                        .get(index as usize)
+                        .copied()
+                        .ok_or(InstructionFormatError::Unresolved)?;
                     let signed = pattern_value.has_signed_terms(data);
                     section.write(
                         output,
@@ -234,7 +237,11 @@ impl Symbol {
                 Self::Next2 { .. } => {
                     section.write(
                         output,
-                        OperandPiece::Address(state.next2_address().expect("resolved")),
+                        OperandPiece::Address(
+                            state
+                                .next2_address()
+                                .ok_or(InstructionFormatError::Unresolved)?,
+                        ),
                         None,
                     )?;
                 }

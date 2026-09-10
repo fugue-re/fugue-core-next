@@ -18,7 +18,7 @@ use crate::ir::{
     IncompleteFunction, InsnEntry, ProblemKind,
 };
 use crate::lifter::{ContextSet, InsnResolver};
-use crate::storage::{SegmentMappingCache, SegmentStorage};
+use crate::storage::SegmentMappingCache;
 use crate::types::Confidence;
 
 pub struct StructuredFunctionContext {
@@ -490,33 +490,42 @@ impl FunctionBuilderContext {
         self.structurer.clear();
     }
 
-    pub(crate) fn function_entry_after_padding(
+    pub(crate) fn resolve_insn_after_alignment(
         &mut self,
-        segments: &SegmentStorage,
-        arch: &Arch,
-        resolver: &InsnResolver,
+        project: &ProjectView<'_>,
+        resolver: &mut InsnResolver,
         address: Address,
     ) -> Option<Address> {
-        let mut address = address;
+        let arch = project.arch();
+        let segments = project.segments();
 
-        loop {
-            let view = self.mapping_cache.view_containing(segments, address)?;
-            if !view.properties().is_executable() {
-                return None;
-            }
-            let bytes_view = view.bytes_from(address)?;
-            let bytes = bytes_view.as_contiguous()?;
-            if bytes.is_empty() {
-                return None;
-            }
-            let (size, properties) =
-                arch.classify_contiguous_bytes(address.raw_address(), resolver.context(), bytes);
-            if size == 0 || !properties.is_padding() {
-                return Some(address);
-            }
-
-            address += size;
+        let view = self.mapping_cache.view_containing(segments, address)?;
+        if !view.properties().is_executable() {
+            return None;
         }
+
+        let bytes_view = view.bytes_from(address)?;
+        let bytes = bytes_view.as_contiguous()?;
+
+        if bytes.is_empty() {
+            return None;
+        }
+
+        let (size, properties) =
+            arch.classify_contiguous_bytes(address.raw_address(), resolver.context(), bytes);
+
+        let size = if properties.is_alignment() { size } else { 0 };
+
+        let address = address + size;
+        let bytes = bytes.get(size..)?;
+
+        if bytes.is_empty() {
+            return None;
+        }
+
+        resolver.resolve(address, bytes).ok()?;
+
+        Some(address)
     }
 
     fn resolve_insns(

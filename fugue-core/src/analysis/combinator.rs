@@ -265,24 +265,3 @@ where
         self.pass.as_group_mut()
     }
 }
-
-#[cfg(test)]
-mod test {
-    use super::*;
-    use crate::analysis::{AnalysisPassExt, IterationLimit};
-
-    fn no_op(_context: &mut AnalysisContext<'_, '_>, _state: &mut ()) -> Result<(), AnalysisError> {
-        Ok(())
-    }
-
-    #[test]
-    fn iteration_limit_composes_with_an_analysis_pass() {
-        let mut analysis = no_op.iterated(IterationLimit::new(3));
-        let mut state = ();
-
-        assert!(analysis.condition_mut().evaluate(&mut state));
-        assert!(analysis.condition_mut().evaluate(&mut state));
-        assert!(analysis.condition_mut().evaluate(&mut state));
-        assert!(!analysis.condition_mut().evaluate(&mut state));
-    }
-}

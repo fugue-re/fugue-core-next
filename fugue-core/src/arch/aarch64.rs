@@ -1,18 +1,21 @@
 #[cfg(feature = "static-lifters")]
 pub use fugue_lifter::aarch64::*;
+use memchr::arch::all::is_prefix;
 use yaxpeax_arch::*;
 use yaxpeax_arm::armv8::a64::{DecodeError, InstDecoder, Instruction, Opcode};
 
 use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
 use crate::arch::{Arch, BytesProperties, ExternalThunkTemplate};
-use crate::ir::{Address, Insn, InsnProperties, LazySymbol, Symbol};
+use crate::ir::{Address, Insn, InsnProperties, LazySymbol, RawAddress, Symbol};
 use crate::lazy_symbol;
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
     ContextHint, Disassembler, DisassemblerError, Language, LanguageError, LanguageId,
     LanguageLoader, LanguageSource, Lifter, LiftingContext, Varnode,
 };
+
+const NONSENSE: &[&[u8]] = &[&[0x00, 0x00, 0x00, 0x00]];
 
 static MAPPING_SYMBOL_CODE: LazySymbol = lazy_symbol!("$x");
 static MAPPING_SYMBOL_DATA: LazySymbol = lazy_symbol!("$d");
@@ -59,11 +62,45 @@ impl ArchT for AArch64 {
     }
 
     fn classify_bytes(&self, bytes: &[u8]) -> BytesProperties {
-        if bytes == [0x00u8, 0x00u8, 0x00u8, 0x00u8] {
+        let mut size = 0usize;
+        while let Some(remaining) = bytes.get(size..)
+            && let Some(pattern) = NONSENSE
+                .iter()
+                .copied()
+                .find(|pattern| is_prefix(remaining, pattern))
+        {
+            size += pattern.len();
+        }
+        if size != 0 && size == bytes.len() {
             BytesProperties::NONSENSE
         } else {
             BytesProperties::empty()
         }
+    }
+
+    fn classify_contiguous_bytes(
+        &self,
+        _address: RawAddress,
+        _context: &LiftingContext,
+        bytes: &[u8],
+    ) -> (usize, BytesProperties) {
+        let mut size = 0usize;
+        while let Some(remaining) = bytes.get(size..)
+            && let Some(pattern) = NONSENSE
+                .iter()
+                .copied()
+                .find(|pattern| is_prefix(remaining, pattern))
+        {
+            size += pattern.len();
+        }
+        (
+            size,
+            if size == 0 {
+                BytesProperties::empty()
+            } else {
+                BytesProperties::NONSENSE
+            },
+        )
     }
 
     fn gprs(&self) -> &[Varnode] {

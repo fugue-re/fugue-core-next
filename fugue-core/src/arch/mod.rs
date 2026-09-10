@@ -34,23 +34,33 @@ pub use traits::{Flag, FlagKind};
 bitflags::bitflags! {
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct BytesProperties: u8 {
-        const ENTRY_MARKER = 0b0000_0100;
-        const NONSENSE     = 0b0000_0001;
-        const PADDING      = 0b0000_0010;
+        const ENTRY_INSN = 0b0000_0100;
+        const NONSENSE   = 0b0000_0001;
+        const NOP_INSN   = 0b0000_1000;
+        const PADDING    = 0b0000_0010;
+        const ALIGNMENT  = Self::NOP_INSN.bits() | Self::PADDING.bits();
     }
 }
 
 impl BytesProperties {
+    pub fn is_alignment(&self) -> bool {
+        self.intersects(Self::ALIGNMENT)
+    }
+
+    pub fn is_entry_insn(&self) -> bool {
+        self.contains(Self::ENTRY_INSN)
+    }
+
     pub fn is_nonsense(&self) -> bool {
         self.contains(Self::NONSENSE)
     }
 
-    pub fn is_padding(&self) -> bool {
-        self.contains(Self::PADDING)
+    pub fn is_nop_insn(&self) -> bool {
+        self.contains(Self::NOP_INSN)
     }
 
-    pub fn is_entry_marker(&self) -> bool {
-        self.contains(Self::ENTRY_MARKER)
+    pub fn is_padding(&self) -> bool {
+        self.contains(Self::PADDING)
     }
 }
 
@@ -162,12 +172,12 @@ impl Entity for Arch {
 }
 
 impl Arch {
-    pub fn try_new(language: &'static Language) -> Result<Self, ArchError> {
-        registry::provide_arch(language)
-    }
-
     pub fn new(language: &'static Language) -> Self {
         Self::try_new(language).unwrap_or_else(|_| panic!("unsupported language: {language}"))
+    }
+
+    pub fn try_new(language: &'static Language) -> Result<Self, ArchError> {
+        registry::provide_arch(language)
     }
 
     pub fn disassembler(&self) -> Disassembler {
@@ -213,10 +223,6 @@ impl Arch {
         self.0.gprs()
     }
 
-    pub fn is_halt_intrinsic(&self, user_op: u16, args: &[Varnode]) -> bool {
-        self.0.is_halt_intrinsic(user_op, args)
-    }
-
     pub fn classify_bytes(&self, bytes: &[u8]) -> BytesProperties {
         self.0.classify_bytes(bytes)
     }
@@ -238,8 +244,8 @@ impl Arch {
         self.classify_bytes(bytes).is_padding()
     }
 
-    pub fn is_entry_marker_pattern(&self, bytes: &[u8]) -> bool {
-        self.classify_bytes(bytes).is_entry_marker()
+    pub fn is_halt_intrinsic(&self, user_op: u16, args: &[Varnode]) -> bool {
+        self.0.is_halt_intrinsic(user_op, args)
     }
 
     pub fn is_service_call(&self, user_op: u16, args: &[Varnode]) -> bool {

@@ -2,6 +2,7 @@ use fugue_bytes::{BE, ByteCast, Endian, LE};
 #[cfg(feature = "static-lifters")]
 pub use fugue_lifter::arm::*;
 use fugue_lifter::runtime::context::ContextBitRange;
+use memchr::arch::all::is_prefix;
 use yaxpeax_arch::{Decoder as _, LengthedInstruction as _, U8Reader};
 use yaxpeax_arm::armv7::{
     ConditionCode, DecodeError, InstDecoder, Instruction, Opcode, Operand, Reg,
@@ -22,10 +23,10 @@ static MAPPING_SYMBOL_ARM: LazySymbol = lazy_symbol!("$a");
 static MAPPING_SYMBOL_THUMB: LazySymbol = lazy_symbol!("$t");
 static MAPPING_SYMBOL_DATA: LazySymbol = lazy_symbol!("$d");
 
-const ARM_PADDING_BE: &[&[u8]] = &[&[0xe3, 0x20, 0xf0, 0x00], &[0xe1, 0xa0, 0x00, 0x00]];
-const ARM_PADDING_LE: &[&[u8]] = &[&[0x00, 0xf0, 0x20, 0xe3], &[0x00, 0x00, 0xa0, 0xe1]];
-const THUMB_PADDING_BE: &[&[u8]] = &[&[0xf3, 0xaf, 0x80, 0x00], &[0xbf, 0x00], &[0x46, 0xc0]];
-const THUMB_PADDING_LE: &[&[u8]] = &[&[0xaf, 0xf3, 0x00, 0x80], &[0x00, 0xbf], &[0xc0, 0x46]];
+const ARM_NOP_INSNS_BE: &[&[u8]] = &[&[0xe3, 0x20, 0xf0, 0x00], &[0xe1, 0xa0, 0x00, 0x00]];
+const ARM_NOP_INSNS_LE: &[&[u8]] = &[&[0x00, 0xf0, 0x20, 0xe3], &[0x00, 0x00, 0xa0, 0xe1]];
+const THUMB_NOP_INSNS_BE: &[&[u8]] = &[&[0xf3, 0xaf, 0x80, 0x00], &[0xbf, 0x00], &[0x46, 0xc0]];
+const THUMB_NOP_INSNS_LE: &[&[u8]] = &[&[0xaf, 0xf3, 0x00, 0x80], &[0x00, 0xbf], &[0xc0, 0x46]];
 
 #[derive(Clone)]
 struct ArchData {
@@ -86,10 +87,10 @@ impl ArchT for Arm {
     }
 
     fn classify_bytes(&self, bytes: &[u8]) -> BytesProperties {
-        let arm = Self::padding_size(bytes, self.language().is_big_endian(), false);
-        let thumb = Self::padding_size(bytes, self.language().is_big_endian(), true);
+        let arm = Self::nop_insn_size(bytes, self.language().is_big_endian(), false);
+        let thumb = Self::nop_insn_size(bytes, self.language().is_big_endian(), true);
         if (arm != 0 && arm == bytes.len()) || (thumb != 0 && thumb == bytes.len()) {
-            BytesProperties::PADDING
+            BytesProperties::NOP_INSN
         } else {
             BytesProperties::empty()
         }
@@ -102,13 +103,13 @@ impl ArchT for Arm {
         bytes: &[u8],
     ) -> (usize, BytesProperties) {
         let thumb = context.get_variable_by_bits(self.data.t_mode, address.offset()) == 1;
-        let size = Self::padding_size(bytes, self.language().is_big_endian(), thumb);
+        let size = Self::nop_insn_size(bytes, self.language().is_big_endian(), thumb);
         (
             size,
             if size == 0 {
                 BytesProperties::empty()
             } else {
-                BytesProperties::PADDING
+                BytesProperties::NOP_INSN
             },
         )
     }
@@ -155,40 +156,6 @@ impl ArchT for Arm {
 }
 
 impl Arm {
-    fn padding_size(bytes: &[u8], big_endian: bool, thumb: bool) -> usize {
-        let patterns = match (big_endian, thumb) {
-            (false, false) => ARM_PADDING_LE,
-            (false, true) => THUMB_PADDING_LE,
-            (true, false) => ARM_PADDING_BE,
-            (true, true) => THUMB_PADDING_BE,
-        };
-        let mut size = 0usize;
-
-        while let Some(remaining) = bytes.get(size..) {
-            let Some(pattern) = patterns
-                .iter()
-                .copied()
-                .find(|pattern| remaining.starts_with(pattern))
-            else {
-                break;
-            };
-            size += pattern.len();
-        }
-
-        size
-    }
-
-    fn canonicalise_with_mode(
-        &self,
-        address: RawAddress,
-        t_mode: u32,
-    ) -> Option<(RawAddress, ContextSet)> {
-        let alignment = if t_mode != 0 { 2 } else { 4 };
-        let cleared = address.align_down(2);
-        let canonical = cleared.wrap_and_align_with(self.language(), alignment);
-        (canonical == cleared).then_some((canonical, ContextSet::single(self.data.t_mode, t_mode)))
-    }
-
     #[allow(clippy::new_ret_no_self)]
     pub(crate) fn new(language: &'static Language) -> Arch {
         let is_thumb = language.variant().ends_with("T");
@@ -258,6 +225,40 @@ impl Arm {
         let variant = variant.or(Some("v8"));
         let lid = LanguageId::new_with("ARM", is_be, 32, variant);
         loader.load(&lid)
+    }
+
+    fn canonicalise_with_mode(
+        &self,
+        address: RawAddress,
+        t_mode: u32,
+    ) -> Option<(RawAddress, ContextSet)> {
+        let alignment = if t_mode != 0 { 2 } else { 4 };
+        let cleared = address.align_down(2);
+        let canonical = cleared.wrap_and_align_with(self.language(), alignment);
+        (canonical == cleared).then_some((canonical, ContextSet::single(self.data.t_mode, t_mode)))
+    }
+
+    fn nop_insn_size(bytes: &[u8], big_endian: bool, thumb: bool) -> usize {
+        let patterns = match (big_endian, thumb) {
+            (false, false) => ARM_NOP_INSNS_LE,
+            (false, true) => THUMB_NOP_INSNS_LE,
+            (true, false) => ARM_NOP_INSNS_BE,
+            (true, true) => THUMB_NOP_INSNS_BE,
+        };
+        let mut size = 0usize;
+
+        while let Some(remaining) = bytes.get(size..) {
+            let Some(pattern) = patterns
+                .iter()
+                .copied()
+                .find(|pattern| is_prefix(remaining, pattern))
+            else {
+                break;
+            };
+            size += pattern.len();
+        }
+
+        size
     }
 }
 
@@ -584,7 +585,7 @@ mod test {
     }
 
     #[test]
-    fn contiguous_padding_respects_arm_mode() {
+    fn contiguous_nop_insns_respect_arm_mode() {
         let language = Arm::resolve_default_variant(false).expect("arm language");
         let arch = Arm::new(language);
         let address = Address::in_default_space(0x1000u64);
@@ -596,7 +597,7 @@ mod test {
             &[0x00, 0xf0, 0x20, 0xe3, 0x00, 0x00, 0xa0, 0xe1, 0x01],
         );
         assert_eq!(size, 8);
-        assert_eq!(properties, BytesProperties::PADDING);
+        assert_eq!(properties, BytesProperties::NOP_INSN);
 
         let (_, thumb) = arch
             .canonicalise_address(RawAddress::from(0x1001u64))
@@ -608,7 +609,7 @@ mod test {
             &[0x00, 0xbf, 0xc0, 0x46, 0x01],
         );
         assert_eq!(size, 4);
-        assert_eq!(properties, BytesProperties::PADDING);
+        assert_eq!(properties, BytesProperties::NOP_INSN);
     }
 
     #[test]

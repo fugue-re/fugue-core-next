@@ -10,7 +10,7 @@ use crate::il::common::{IlError, IlFormId};
 use crate::il::registry::IlRegistry;
 use crate::ir::FunctionId;
 use crate::project::{ChangeRecord, ChangeSet, Project, ProjectError};
-use crate::queries::cache::{CacheLookup, QueryCache, QueryableIl};
+use crate::queries::cache::{CacheLookup, QueryCache};
 use crate::queries::index::ChangeIndex;
 use crate::queries::reader::QueryReader;
 
@@ -46,41 +46,6 @@ impl QueryEngine {
             changes: Arc::new(RwLock::new(ChangeIndex::new(revision))),
             registry,
         }
-    }
-
-    pub(crate) fn lookup_lifted<T>(
-        cache: &QueryCache,
-        registry: &IlRegistry,
-        project: &Project,
-        function: FunctionId,
-        lookup: IlLookup,
-    ) -> Result<Option<Arc<T>>, ProjectError>
-    where
-        T: QueryableIl,
-    {
-        if lookup == IlLookup::Current {
-            match cache.lifted::<T>(function)? {
-                CacheLookup::Hit(cached) => return Ok(Some(cached)),
-                CacheLookup::Absent => return Ok(None),
-                CacheLookup::Miss => {}
-            }
-        }
-
-        let ir = match project.lifted_erased(registry, function, &T::FORM) {
-            Ok(ir) => ir
-                .map(|ir| {
-                    ir.downcast::<T>()
-                        .map(Arc::from)
-                        .map_err(|_| IlError::mismatched_artefact(T::FORM))
-                })
-                .transpose()?,
-            Err(ProjectError::Il(IlError::StaleArtefact { .. })) => None,
-            Err(error) => return Err(error),
-        };
-        if lookup == IlLookup::Current {
-            cache.insert_lifted(function, ir.clone());
-        }
-        Ok(ir)
     }
 
     pub(crate) fn lookup_lifted_erased(

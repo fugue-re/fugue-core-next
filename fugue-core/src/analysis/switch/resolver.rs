@@ -9,19 +9,19 @@ use crate::ir::{
 use crate::lifter::{ContextSet, InsnResolver, RawPCodeOp};
 use crate::storage::{SegmentMappingCache, SegmentStorage};
 
-pub(crate) struct SwitchResolver<'project, 'resolver> {
-    arch: &'project Arch,
-    resolver: &'resolver mut InsnResolver,
+pub(crate) struct SwitchResolver<'a, 'b> {
+    arch: &'a Arch,
+    resolver: &'b mut InsnResolver,
     mapping_cache: SegmentMappingCache,
     read_buffer: Vec<u8>,
-    segments: &'project SegmentStorage,
+    segments: &'a SegmentStorage,
 }
 
-impl<'project, 'resolver> SwitchResolver<'project, 'resolver> {
+impl<'a, 'b> SwitchResolver<'a, 'b> {
     pub(crate) fn new(
-        arch: &'project Arch,
-        segments: &'project SegmentStorage,
-        resolver: &'resolver mut InsnResolver,
+        arch: &'a Arch,
+        segments: &'a SegmentStorage,
+        resolver: &'b mut InsnResolver,
     ) -> Self {
         Self {
             arch,

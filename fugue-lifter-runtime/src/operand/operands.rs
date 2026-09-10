@@ -3,7 +3,7 @@ use std::ops::Range;
 
 use bitflags::bitflags;
 
-use crate::format::InstructionOutput;
+use crate::format::InstructionWriter;
 use crate::language::Language;
 use crate::pcode::Varnode;
 
@@ -264,7 +264,7 @@ impl Operands {
     }
 }
 
-impl InstructionOutput for Operands {
+impl InstructionWriter for Operands {
     fn write_mnemonic_piece(&mut self, piece: OperandPiece) -> fmt::Result {
         write!(self.mnemonic, "{piece}")
     }

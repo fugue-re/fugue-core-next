@@ -30,10 +30,10 @@ impl SwitchTableLayout {
     }
 }
 
-pub(crate) struct SwitchLayoutAnalysis<'analysis> {
-    block_arg_inputs: &'analysis ECodeBlockArgInputs,
+pub(crate) struct SwitchLayoutAnalysis<'a> {
+    block_arg_inputs: &'a ECodeBlockArgInputs,
     config: SwitchRecoveryConfig,
-    ssa: &'analysis ECodeIr,
+    ssa: &'a ECodeIr,
 }
 
 struct BaseScaleIndex {
@@ -52,10 +52,10 @@ impl BaseScaleIndex {
     }
 }
 
-impl<'analysis> SwitchLayoutAnalysis<'analysis> {
+impl<'a> SwitchLayoutAnalysis<'a> {
     pub(crate) fn new(
-        ssa: &'analysis ECodeIr,
-        block_arg_inputs: &'analysis ECodeBlockArgInputs,
+        ssa: &'a ECodeIr,
+        block_arg_inputs: &'a ECodeBlockArgInputs,
         config: SwitchRecoveryConfig,
     ) -> Self {
         Self {

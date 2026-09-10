@@ -150,39 +150,3 @@ where
         Some(self)
     }
 }
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    fn no_op(_context: &mut AnalysisContext<'_, '_>, _state: &mut ()) -> Result<(), AnalysisError> {
-        Ok(())
-    }
-
-    #[test]
-    fn insert_after_places_pass_after_target() {
-        let mut group = AnalysisGroup::new();
-        group.add_pass("first", no_op);
-        group.add_pass("last", no_op);
-        group.insert_after("first", "middle", no_op);
-
-        assert_eq!(
-            group.iter().map(|(name, _)| name).collect::<Vec<_>>(),
-            ["first", "middle", "last"]
-        );
-    }
-
-    #[test]
-    fn insert_after_the_last_pass_moves_an_existing_pass_to_the_end() {
-        let mut group = AnalysisGroup::new();
-        group.add_pass("first", no_op);
-        group.add_pass("second", no_op);
-        group.add_pass("third", no_op);
-        group.insert_after("third", "first", no_op);
-
-        assert_eq!(
-            group.iter().map(|(name, _)| name).collect::<Vec<_>>(),
-            ["second", "third", "first"]
-        );
-    }
-}

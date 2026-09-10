@@ -19,7 +19,6 @@ use crate::ir::{
 };
 use crate::project::{ChangeKinds, Project, ProjectError};
 use crate::queries::cache::{CacheLookup, QueryCache, QueryableIl};
-use crate::queries::engine::{IlLookup, QueryEngine};
 use crate::queries::entities::{
     CallEdge, MappingEntity, ProblemEntity, QueryPage, SwitchEntity, SymbolEntity,
 };
@@ -413,15 +412,35 @@ impl QueryReader {
     {
         let _query_guard = self.enter_query()?;
 
-        let project = self.project.read();
-        QueryEngine::lookup_lifted(
-            &self.cache,
-            &self.registry,
-            &project,
-            function,
-            IlLookup::Current,
-        )
-        .map_err(QueryError::from)
+        match self
+            .cache
+            .lifted::<T>(function)
+            .map_err(ProjectError::from)?
+        {
+            CacheLookup::Hit(cached) => return Ok(Some(cached)),
+            CacheLookup::Absent => return Ok(None),
+            CacheLookup::Miss => {}
+        }
+
+        let ir = {
+            let project = self.project.read();
+            match project.lifted_erased(&self.registry, function, &T::FORM) {
+                Ok(ir) => ir
+                    .map(|ir| {
+                        ir.downcast::<T>()
+                            .map(Arc::from)
+                            .map_err(|_| IlError::mismatched_artefact(T::FORM))
+                    })
+                    .transpose()
+                    .map_err(ProjectError::from)?,
+                Err(ProjectError::Il(IlError::StaleArtefact { .. })) => None,
+                Err(error) => return Err(error.into()),
+            }
+        };
+
+        self.cache.insert_lifted(function, ir.clone());
+
+        Ok(ir)
     }
 
     fn request_generated<T>(&self, function: FunctionId) -> Result<Option<Arc<T>>, QueryError>

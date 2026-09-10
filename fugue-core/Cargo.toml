@@ -44,6 +44,7 @@ iset = { git = "https://github.com/fugue-re/fugue-iset", branch = "feature/inclu
 itertools = "0.14"
 libmdbx = { version = "0.6", optional = true }
 md-5 = "0.10"
+memchr = "2"
 memmap2 = "0.9"
 object = "0.39"
 ouroboros = "0.18"

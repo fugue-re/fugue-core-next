@@ -16,19 +16,16 @@ use crate::lifter::InsnResolver;
 pub(crate) struct FunctionCandidateBatch<'a> {
     candidates: Vec<AddressWithContext>,
     context: &'a FunctionRecoveryContext,
-    worker_limit: usize,
 }
 
 impl<'a> FunctionCandidateBatch<'a> {
     pub(crate) fn new(
         context: &'a FunctionRecoveryContext,
         candidates: Vec<AddressWithContext>,
-        worker_limit: usize,
     ) -> Self {
         Self {
             candidates,
             context,
-            worker_limit,
         }
     }
 }
@@ -36,6 +33,22 @@ impl<'a> FunctionCandidateBatch<'a> {
 #[derive(Default)]
 pub(crate) struct FunctionRecoveryExecutor {
     pool: Option<ThreadPool>,
+}
+
+fn worker_count(
+    analysis: &AnalysisContext<'_, '_>,
+    builder: &FunctionBuilder,
+    candidate_count: usize,
+    worker_limit: usize,
+) -> usize {
+    if builder.pre_resolution_passes().can_analyse(analysis) {
+        return 1;
+    }
+
+    thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(worker_limit)
+        .min(candidate_count)
 }
 
 impl FunctionRecoveryExecutor {
@@ -54,12 +67,13 @@ impl FunctionRecoveryExecutor {
             FunctionCandidateOutcome,
         ) -> Result<bool, AnalysisError>,
     ) -> Result<Vec<AddressWithContext>, AnalysisError> {
+        let worker_limit = analysis.worker_limit();
         let FunctionCandidateBatch {
             candidates,
             context,
-            worker_limit,
         } = batch;
-        let workers = Self::worker_count(analysis, builder, candidates.len(), worker_limit);
+
+        let workers = worker_count(analysis, builder, candidates.len(), worker_limit);
         if workers <= 1 {
             let mut candidates = candidates.into_iter();
             while let Some(candidate) = candidates.next() {
@@ -154,21 +168,5 @@ impl FunctionRecoveryExecutor {
                 })?,
         );
         Ok(())
-    }
-
-    fn worker_count(
-        analysis: &AnalysisContext<'_, '_>,
-        builder: &FunctionBuilder,
-        candidate_count: usize,
-        worker_limit: usize,
-    ) -> usize {
-        if builder.pre_resolution_passes().can_analyse(analysis) {
-            return 1;
-        }
-
-        thread::available_parallelism()
-            .map_or(1, usize::from)
-            .min(worker_limit)
-            .min(candidate_count)
     }
 }

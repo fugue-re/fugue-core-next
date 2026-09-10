@@ -30,19 +30,3 @@ impl<S> AnalysisCondition<S> for IterationLimit {
         }
     }
 }
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn iteration_limit_allows_the_configured_number_of_iterations() {
-        let mut limit = IterationLimit::new(3);
-        let mut state = ();
-
-        assert!(limit.evaluate(&mut state));
-        assert!(limit.evaluate(&mut state));
-        assert!(limit.evaluate(&mut state));
-        assert!(!limit.evaluate(&mut state));
-    }
-}

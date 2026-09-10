@@ -276,7 +276,7 @@ impl StridedInterval {
         )
     }
 
-    fn scale(&self, factor: &BitVec) -> Self {
+    pub fn scale(&self, factor: &BitVec) -> Self {
         let StridedIntervalRepr::Interval { lo, hi, stride } = &self.0 else {
             return Self(StridedIntervalRepr::Empty(self.width()));
         };
@@ -290,7 +290,7 @@ impl StridedInterval {
         Self::range(lo * factor, hi * factor, stride * factor)
     }
 
-    fn to_value(&self) -> Option<BitVec> {
+    pub fn to_value(&self) -> Option<BitVec> {
         match &self.0 {
             StridedIntervalRepr::Interval { lo, stride, .. } if stride.is_zero() => {
                 Some(lo.clone())

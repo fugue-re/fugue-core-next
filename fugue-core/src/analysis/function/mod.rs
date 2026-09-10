@@ -1,4 +1,4 @@
-pub(crate) mod recovery;
+pub mod recovery;
 pub use recovery::{
     FunctionBuilderContext, FunctionCommitContext, FunctionCommitPolicy, FunctionDiscoveryContext,
     FunctionDiscoveryRanges, FunctionRecovery, FunctionRecoveryConfig, FunctionRecoveryError,

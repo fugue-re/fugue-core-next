@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::il::pcode::{RawPCodeFlow, RawPCodeFlows};
 use crate::ir::{Address, FlowTarget, Id, Location, Reference, ReferenceOrigin};
-use crate::lifter::{Language, RawPCodeOp};
+use crate::lifter::{Language, RawPCodeOp, Op};
 use crate::storage::schema::bitflags::archived_bitflags;
 use crate::types::EstimateSize;
 
@@ -193,6 +193,10 @@ impl Insn {
         self.address
     }
 
+    pub fn next_address(&self) -> Address {
+        self.address + self.size as usize
+    }
+
     pub fn properties(&self) -> InsnProperties {
         self.properties
     }
@@ -235,10 +239,6 @@ impl Insn {
 
         self.properties = InsnProperties::from_targets(&self.targets)
             | (self.properties & !InsnProperties::FLOW & !InsnProperties::FALL_THROUGH);
-    }
-
-    pub fn next_address(&self) -> Address {
-        self.address + self.size as usize
     }
 
     pub fn call_target(&self) -> Option<Address> {
@@ -309,6 +309,41 @@ impl Insn {
     pub fn needs_flow_resolution(&self) -> bool {
         self.properties()
             .intersects(InsnProperties::NEEDS_FLOW_RESOLUTION)
+    }
+
+    pub(crate) fn indirect_target_pointer(
+        &self,
+        language: &'static Language,
+        operations: &[RawPCodeOp],
+    ) -> Option<Address> {
+        let (position, target) = operations
+            .iter()
+            .enumerate()
+            .find_map(|(index, operation)| {
+                if !matches!(operation.op(), Op::IBranch | Op::ICall) {
+                    return None;
+                }
+                operation.inputs().first().map(|target| (index, *target))
+            })?;
+
+        if language.in_default_space(&target) {
+            return Some(Address::new(self.address().space(), target.offset()));
+        }
+
+        let definition = operations[..position]
+            .iter()
+            .rev()
+            .find(|operation| operation.output() == Some(&target))?;
+
+        if !matches!(definition.op(), Op::Copy) {
+            return None;
+        }
+
+        definition
+            .inputs()
+            .first()
+            .filter(|source| language.in_default_space(source))
+            .map(|source| Address::new(self.address().space(), source.offset()))
     }
 
     pub(crate) fn resolve_flow(

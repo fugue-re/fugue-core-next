@@ -39,7 +39,6 @@ pub struct FunctionRecoveryPatternMatcher {
     patterns: Vec<PatternsWithContext>,
 }
 
-// NOTE: all segments are in the same space
 fn for_each_visible_byte_range(
     segments: &SegmentStorage,
     mapping_cache: &mut SegmentMappingCache,

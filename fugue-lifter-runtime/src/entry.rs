@@ -1,7 +1,7 @@
 use std::fmt;
 
 use crate::LiftingContextState;
-use crate::format::InstructionFormatter;
+use crate::format::{InstructionFormatError, InstructionFormatter};
 use crate::language::LanguageData;
 use crate::operand::{Operands, OperandsContext};
 use crate::pcode::{LiftingContext, PCodeOp};
@@ -103,7 +103,7 @@ pub fn disassemble_and_format<F: InstructionFormatter + ?Sized>(
     formatter: &mut F,
 ) -> Result<Option<usize>, fmt::Error> {
     let language = context.language();
-    disassemble_aux(address, bytes, context, |_data, state| unsafe {
+    disassemble_and_format_aux(address, bytes, context, |_data, state| unsafe {
         state.format_instruction(language, formatter)
     })
 }
@@ -127,7 +127,7 @@ pub fn disassemble_to(
     writer: impl fmt::Write,
 ) -> Result<Option<usize>, fmt::Error> {
     let language = context.language();
-    disassemble_aux(address, bytes, context, |_data, state| unsafe {
+    disassemble_and_format_aux(address, bytes, context, |_data, state| unsafe {
         state.format(language, writer)
     })
 }
@@ -141,7 +141,7 @@ pub fn disassemble_parts_to(
     operands: impl fmt::Write,
 ) -> Result<Option<usize>, fmt::Error> {
     let language = context.language();
-    disassemble_aux(address, bytes, context, |_data, state| unsafe {
+    disassemble_and_format_aux(address, bytes, context, |_data, state| unsafe {
         state.format_parts(language, mnemonic, operands)
     })
 }
@@ -155,6 +155,37 @@ pub fn disassemble_aux<F>(
 ) -> Result<Option<usize>, fmt::Error>
 where
     F: FnOnce(&'static LanguageData, &mut LiftingContextState<'_>) -> fmt::Result,
+{
+    disassemble_with(address, bytes, context, formatter)
+}
+
+fn disassemble_and_format_aux<F>(
+    address: u64,
+    bytes: &[u8],
+    context: &mut LiftingContext,
+    formatter: F,
+) -> Result<Option<usize>, fmt::Error>
+where
+    F: FnOnce(
+        &'static LanguageData,
+        &mut LiftingContextState<'_>,
+    ) -> Result<(), InstructionFormatError>,
+{
+    match disassemble_with(address, bytes, context, formatter) {
+        Ok(length) => Ok(length),
+        Err(InstructionFormatError::Formatting(error)) => Err(error),
+        Err(InstructionFormatError::Unresolved) => Ok(None),
+    }
+}
+
+fn disassemble_with<E, F>(
+    address: u64,
+    bytes: &[u8],
+    context: &mut LiftingContext,
+    formatter: F,
+) -> Result<Option<usize>, E>
+where
+    F: FnOnce(&'static LanguageData, &mut LiftingContextState<'_>) -> Result<(), E>,
 {
     let data = context.language().data();
     unsafe {

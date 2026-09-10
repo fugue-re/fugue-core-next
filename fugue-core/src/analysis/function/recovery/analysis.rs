@@ -20,7 +20,7 @@ use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
 use crate::engine::{
     Analyser, AnalyserProvider, AnalysisContext, Priority, ProjectUpdates, ProjectView,
 };
-use crate::extension::{self, Registration, submit};
+use crate::extension::{self, Registration};
 use crate::ir::{
     Address, AddressRange, AddressRangeExt, AddressRangeSet, AddressWithContext, CodeBlockTable,
     FunctionProperties, FunctionTable, IncompleteFunction, ProblemKind, RawAddressRangeSet,
@@ -230,19 +230,6 @@ impl FunctionConfidenceMap {
 
     fn remove(&mut self, address: Address) {
         self.entries.remove(&address);
-    }
-
-    fn candidate_known(
-        project_functions: &FunctionTable,
-        pending_functions: &BTreeMap<Address, IncompleteFunction>,
-        functions: &Self,
-        new_functions: &Self,
-        address: Address,
-    ) -> bool {
-        pending_functions.contains_key(&address)
-            || functions.contains(address)
-            || new_functions.contains(address)
-            || project_functions.contains(address)
     }
 }
 
@@ -541,15 +528,6 @@ impl FunctionCoverage {
     }
 }
 
-fn stage_function_updates(
-    updates: &mut ProjectUpdates,
-    address: Address,
-    function: IncompleteFunction,
-) {
-    tracing::debug!("staging recovered function at {address}");
-    updates.add_function(function);
-}
-
 impl FunctionBoundaries {
     fn new(functions: &FunctionTable) -> Self {
         Self {
@@ -835,64 +813,6 @@ impl FunctionRecovery {
         self.builder.add_post_structuring_pass(name, pass);
     }
 
-    fn update_function_boundaries(
-        &mut self,
-        project: &ProjectView<'_>,
-    ) -> Result<(), AnalysisError> {
-        let Some(boundaries) = self.boundaries.as_mut() else {
-            self.boundaries = Some(FunctionBoundaries::new(project.functions()));
-            return Ok(());
-        };
-        let changes = boundaries.update(project.functions());
-        if changes.added.is_empty() && changes.removed.is_empty() {
-            return Ok(());
-        }
-
-        let blocks = project.blocks();
-        let functions = project.functions();
-        let mut callers = BTreeSet::new();
-
-        for boundary in changes.added {
-            for function in functions.functions_containing(blocks, boundary) {
-                let Some(function) = functions.get_by_id(function) else {
-                    continue;
-                };
-                if function.entry() != boundary {
-                    callers.insert(function.entry());
-                }
-            }
-        }
-
-        for boundary in changes.removed {
-            let references = project
-                .references()
-                .references_to(boundary.into(), None)
-                .map_err(|error| AnalysisError::pass_failed(FUNCTION_RECOVERY_ANALYSER, error))?;
-            for reference in references {
-                let reference = reference.map_err(|error| {
-                    AnalysisError::pass_failed(FUNCTION_RECOVERY_ANALYSER, error)
-                })?;
-                if !(reference.is_call() && reference.is_jump() && reference.is_terminal()) {
-                    continue;
-                }
-                for function in functions.functions_containing(blocks, reference.from()) {
-                    let Some(function) = functions.get_by_id(function) else {
-                        continue;
-                    };
-                    callers.insert(function.entry());
-                }
-            }
-        }
-
-        for caller in callers {
-            if self.reanalysis_candidates.insert(caller) {
-                self.candidates.push_back(caller.into());
-            }
-        }
-
-        Ok(())
-    }
-
     fn add_project_candidates(&mut self, project: &ProjectView<'_>) {
         let mut candidates = BTreeSet::new();
 
@@ -1026,7 +946,8 @@ impl FunctionRecovery {
                 return;
             };
 
-            stage_function_updates(updates, address, function);
+            tracing::debug!("staging recovered function at {address}");
+            updates.add_function(function);
         }
     }
 
@@ -1094,7 +1015,9 @@ impl FunctionRecovery {
             let Some(function) = state.pending_functions.remove(&entry) else {
                 continue;
             };
-            stage_function_updates(&mut analysis.updates, entry, function);
+
+            tracing::debug!("staging recovered function at {entry}");
+            analysis.updates.add_function(function);
         }
 
         self.pending_functions = state.pending_functions;
@@ -1148,7 +1071,6 @@ impl FunctionRecovery {
     fn analyse_candidates(
         &mut self,
         analysis: &mut AnalysisContext<'_, '_>,
-        worker_limit: usize,
         budget: &mut FunctionRecoveryBudget,
         functions: &FunctionConfidenceMap,
         new_functions: &mut FunctionConfidenceMap,
@@ -1162,6 +1084,18 @@ impl FunctionRecovery {
         let coverage = &mut self.continuation_coverage;
         let mut yield_after_pass = false;
 
+        let is_known_candidate = |project_functions: &FunctionTable,
+                                  pending_functions: &BTreeMap<Address, IncompleteFunction>,
+                                  functions: &FunctionConfidenceMap,
+                                  new_functions: &FunctionConfidenceMap,
+                                  address: Address|
+         -> bool {
+            pending_functions.contains_key(&address)
+                || functions.contains(address)
+                || new_functions.contains(address)
+                || project_functions.contains(address)
+        };
+
         while !self.candidates.is_empty() {
             let batch_capacity = budget.remaining_candidates().min(self.candidates.len());
             if batch_capacity == 0 {
@@ -1172,26 +1106,25 @@ impl FunctionRecovery {
             let mut batch_addresses = FxHashSet::default();
             let mut replacements = BTreeMap::new();
             batch_addresses.reserve(batch_capacity);
+
             while batch.len() < batch_capacity {
                 let Some(candidate) = self.candidates.pop_front() else {
                     break;
                 };
+
                 let original_address = candidate.address();
                 let replacing = self.reanalysis_candidates.contains(&original_address);
+
                 budget.consume_candidate();
                 let at_limit = !self.candidates.is_empty() && budget.is_exhausted();
+
                 let candidate = match resolver_slot.as_mut() {
                     Some(resolver) => {
                         let confidence = candidate.confidence();
                         let (address, context) = candidate.into_parts();
                         self.builder
                             .context_mut()
-                            .function_entry_after_padding(
-                                analysis.project.segments(),
-                                analysis.project.arch(),
-                                resolver,
-                                address,
-                            )
+                            .resolve_insn_after_alignment(&analysis.project, resolver, address)
                             .map(|address| {
                                 AddressWithContext::new_with(address, context, confidence)
                             })
@@ -1200,7 +1133,7 @@ impl FunctionRecovery {
                 };
 
                 let Some(candidate) = candidate else {
-                    tracing::trace!("skipping candidate: not executable");
+                    tracing::trace!("skipping {original_address}: invalid instruction");
                     if replacing {
                         self.reanalysis_candidates.remove(&original_address);
                         analysis.updates.remove_function(original_address);
@@ -1229,7 +1162,7 @@ impl FunctionRecovery {
                         function_changes = true;
                     }
                 } else if (!replacing
-                    && FunctionConfidenceMap::candidate_known(
+                    && is_known_candidate(
                         analysis.project.functions(),
                         &self.pending_functions,
                         functions,
@@ -1265,17 +1198,20 @@ impl FunctionRecovery {
             let reanalysis_candidates = &mut self.reanalysis_candidates;
             let candidates = &mut self.candidates;
             let discovered_targets = &mut self.discovered_targets;
-            let mut handle_outcome = |analysis: &mut AnalysisContext<'_, '_>,
-                                      mut outcome: FunctionCandidateOutcome,
-                                      discovered_targets: &mut Vec<AddressWithContext>|
+
+            let mut process_candidate = |analysis: &mut AnalysisContext<'_, '_>,
+                                         mut outcome: FunctionCandidateOutcome,
+                                         discovered_targets: &mut Vec<AddressWithContext>|
              -> Result<bool, AnalysisError> {
                 let project = &analysis.project;
                 let address = outcome.address();
                 let confidence = outcome.confidence();
                 let replacement = replacements.remove(&address);
+
                 if let Some(replacement) = replacement {
                     reanalysis_candidates.remove(&replacement);
                 }
+
                 for (problem_address, kind) in outcome.drain_problems() {
                     analysis.updates.add_problem(problem_address, kind);
                 }
@@ -1318,7 +1254,8 @@ impl FunctionRecovery {
                 }
                 let budget_reached = should_commit && !budget.try_consume_function(function_bytes);
                 if should_commit && !budget_reached {
-                    stage_function_updates(&mut analysis.updates, address, function);
+                    tracing::debug!("staging recovered function at {address}");
+                    analysis.updates.add_function(function);
                     function_changes = true;
                 } else {
                     tracing::debug!("deferring commit of function at {address}");
@@ -1329,7 +1266,7 @@ impl FunctionRecovery {
                 discovered_targets.clear();
                 for candidate in outcome.drain_targets() {
                     let start = candidate.address();
-                    if !FunctionConfidenceMap::candidate_known(
+                    if !is_known_candidate(
                         project.functions(),
                         pending_functions,
                         functions,
@@ -1344,18 +1281,19 @@ impl FunctionRecovery {
                 Ok(budget_reached)
             };
 
-            let batch = FunctionCandidateBatch::new(context, batch, worker_limit);
+            let batch = FunctionCandidateBatch::new(context, batch);
             let remaining = self.executor.analyse_candidates(
                 analysis,
                 builder,
                 &mut resolver_slot,
                 batch,
                 |analysis, outcome| {
-                    let budget_reached = handle_outcome(analysis, outcome, discovered_targets)?;
+                    let budget_reached = process_candidate(analysis, outcome, discovered_targets)?;
                     candidates.extend(discovered_targets.drain(..));
                     Ok(budget_reached)
                 },
             )?;
+
             if !remaining.is_empty() {
                 for candidate in remaining.into_iter().rev() {
                     candidates.push_front(candidate);
@@ -1370,6 +1308,64 @@ impl FunctionRecovery {
         }
 
         Ok((function_changes, yield_after_pass))
+    }
+
+    fn update_function_boundaries(
+        &mut self,
+        project: &ProjectView<'_>,
+    ) -> Result<(), AnalysisError> {
+        let Some(boundaries) = self.boundaries.as_mut() else {
+            self.boundaries = Some(FunctionBoundaries::new(project.functions()));
+            return Ok(());
+        };
+        let changes = boundaries.update(project.functions());
+        if changes.added.is_empty() && changes.removed.is_empty() {
+            return Ok(());
+        }
+
+        let blocks = project.blocks();
+        let functions = project.functions();
+        let mut callers = BTreeSet::new();
+
+        for boundary in changes.added {
+            for function in functions.functions_containing(blocks, boundary) {
+                let Some(function) = functions.get_by_id(function) else {
+                    continue;
+                };
+                if function.entry() != boundary {
+                    callers.insert(function.entry());
+                }
+            }
+        }
+
+        for boundary in changes.removed {
+            let references = project
+                .references()
+                .references_to(boundary.into(), None)
+                .map_err(|error| AnalysisError::pass_failed(FUNCTION_RECOVERY_ANALYSER, error))?;
+            for reference in references {
+                let reference = reference.map_err(|error| {
+                    AnalysisError::pass_failed(FUNCTION_RECOVERY_ANALYSER, error)
+                })?;
+                if !(reference.is_call() && reference.is_jump() && reference.is_terminal()) {
+                    continue;
+                }
+                for function in functions.functions_containing(blocks, reference.from()) {
+                    let Some(function) = functions.get_by_id(function) else {
+                        continue;
+                    };
+                    callers.insert(function.entry());
+                }
+            }
+        }
+
+        for caller in callers {
+            if self.reanalysis_candidates.insert(caller) {
+                self.candidates.push_back(caller.into());
+            }
+        }
+
+        Ok(())
     }
 
     pub fn new_analyser(project: &Project) -> Result<Box<dyn Analyser>, AnalysisError> {
@@ -1477,14 +1473,8 @@ impl Analyser for FunctionRecovery {
             let mut new_functions = FunctionConfidenceMap::default();
             tracing::debug!("existing functions: {}", context.project.functions().len());
             loop {
-                let worker_limit = context.worker_limit();
-                let (function_changes, budget_reached) = self.analyse_candidates(
-                    context,
-                    worker_limit,
-                    &mut budget,
-                    &functions,
-                    &mut new_functions,
-                )?;
+                let (function_changes, budget_reached) =
+                    self.analyse_candidates(context, &mut budget, &functions, &mut new_functions)?;
                 if function_changes || budget_reached {
                     break 'recovery function_changes;
                 }
@@ -1549,7 +1539,7 @@ impl Analyser for FunctionRecovery {
     }
 }
 
-submit! {
+extension::submit! {
     AnalyserProvider::new::<FunctionRecovery>(
         FUNCTION_RECOVERY_ANALYSER,
         FunctionRecovery::new_analyser,
