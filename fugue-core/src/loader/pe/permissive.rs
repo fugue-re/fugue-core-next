@@ -8,7 +8,7 @@ use object::pe::{
     ImageNtHeaders64, ImageSectionHeader,
 };
 use object::read::pe::{
-    ExportTable, ImageNtHeaders, ImageOptionalHeader, ImportTable, PeFile, PeSection,
+    ExportTable, ImageNtHeaders, ImageOptionalHeader, ImportTable, PeFile, PeSection, Relocation,
 };
 use object::{FileKind, ObjectSection, ReadRef, pod};
 use thiserror::Error;
@@ -105,6 +105,49 @@ where
             }))
         }
     }
+}
+
+pub(super) fn read_base_relocations<'data, Pe, R>(
+    pe: &PeFile<'data, Pe, R>,
+    config: PeLoaderProperties,
+) -> Result<Vec<Relocation>, LoaderError>
+where
+    Pe: ImageNtHeaders,
+    R: ReadRef<'data>,
+{
+    let mut blocks = match pe
+        .data_directories()
+        .relocation_blocks(pe.data(), &pe.section_table())
+    {
+        Ok(Some(blocks)) => blocks,
+        Ok(None) => return Ok(Vec::new()),
+        Err(err) => {
+            if !config.is_permissive() {
+                return Err(LoaderError::format(err));
+            }
+            tracing::warn!("unable to read PE relocation directory: {err}; skipping base relocations");
+            return Ok(Vec::new());
+        }
+    };
+
+    let mut relocations = Vec::new();
+    loop {
+        match blocks.next() {
+            Ok(Some(block)) => relocations.extend(block),
+            Ok(None) => break,
+            Err(err) => {
+                if !config.is_permissive() {
+                    return Err(LoaderError::format(err));
+                }
+                tracing::warn!(
+                    "stopping PE relocation parse early: {err}; using partial relocations"
+                );
+                break;
+            }
+        }
+    }
+
+    Ok(relocations)
 }
 
 pub(super) fn read_section_data<'data, Pe, R>(

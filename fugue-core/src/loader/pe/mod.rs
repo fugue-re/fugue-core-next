@@ -12,7 +12,7 @@ use object::pe::{
     IMAGE_DIRECTORY_ENTRY_BASERELOC, IMAGE_SCN_CNT_UNINITIALIZED_DATA, IMAGE_SCN_MEM_EXECUTE,
     IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE, ImageNtHeaders32, ImageNtHeaders64,
 };
-use object::read::pe::{self, ImageNtHeaders, PeFile, PeSection, PeSectionIterator};
+use object::read::pe::{self, ImageNtHeaders, PeFile, PeSection, PeSectionIterator, Relocation};
 use object::{FileKind, Object, ObjectSection, ReadRef, SectionFlags};
 use smallvec::{SmallVec, smallvec};
 
@@ -240,6 +240,7 @@ struct PeLoadState {
     symbols: SymbolTable<ImageAddress>,
     extern_segm: ExternSegment,
     import_slots: BTreeMap<RawAddress, RawAddress>,
+    base_relocations: Vec<Relocation>,
     segments: Vec<PeImageSegment>,
 }
 
@@ -255,18 +256,23 @@ impl PeLoadState {
             .get_attr::<RawAddress>(ATTRIBUTE_IMAGE_BASE)
             .unwrap_or(preferred_base);
 
-        if base != preferred_base {
-            let has_relocations = with_pe!(
-                view,
-                pe | pe.data_directory(IMAGE_DIRECTORY_ENTRY_BASERELOC).is_some()
-            );
+        let base_relocations = (base != preferred_base)
+            .then(|| {
+                let has_relocations = with_pe!(
+                    view,
+                    pe | pe.data_directory(IMAGE_DIRECTORY_ENTRY_BASERELOC).is_some()
+                );
 
-            if !has_relocations {
-                return Err(LoaderError::format_with(
-                    "cannot rebase PE image without a base relocation directory",
-                ));
-            }
-        }
+                if !has_relocations {
+                    return Err(LoaderError::format_with(
+                        "cannot rebase PE image without a base relocation directory",
+                    ));
+                }
+
+                with_pe!(view, pe | permissive::read_base_relocations(pe, config))
+            })
+            .transpose()?
+            .unwrap_or_default();
 
         let entry = with_pe!(view, pe | pe.entry());
         let entry = if entry != 0 {
@@ -279,6 +285,7 @@ impl PeLoadState {
         } else {
             None
         };
+
         let image_entry = entry.map(|entry| ImageAddress::in_default_space(entry.offset()));
         let context = ImageContext::new(view, base, preferred_base, entry, attributes);
         let architecture = context.resolve_architecture()?;
@@ -374,6 +381,7 @@ impl PeLoadState {
             symbols: image_symbols,
             extern_segm,
             import_slots,
+            base_relocations,
             segments: placements,
         })
     }
@@ -659,6 +667,7 @@ where
     current_base: RawAddress,
     preferred_base: RawAddress,
     import_slots: &'file BTreeMap<RawAddress, RawAddress>,
+    base_relocations: &'file [Relocation],
     extern_segm: Option<&'file ExternSegment>,
     endian: Endian,
 }
@@ -675,6 +684,7 @@ where
         current_base: RawAddress,
         preferred_base: RawAddress,
         import_slots: &'file BTreeMap<RawAddress, RawAddress>,
+        base_relocations: &'file [Relocation],
         extern_segm: &'file ExternSegment,
     ) -> Self {
         Self {
@@ -684,6 +694,7 @@ where
             current_base,
             preferred_base,
             import_slots,
+            base_relocations,
             extern_segm: Some(extern_segm),
             endian,
         }
@@ -695,6 +706,7 @@ where
             self.current_base,
             self.preferred_base,
             self.import_slots,
+            self.base_relocations,
         )
     }
 
@@ -1090,6 +1102,7 @@ impl Loadable for Pe<'_> {
                 self.state.base,
                 self.state.preferred_base,
                 &self.state.import_slots,
+                &self.state.base_relocations,
                 &self.state.extern_segm,
             )) as ImageSegmentContentsIterator<'b>
         )
