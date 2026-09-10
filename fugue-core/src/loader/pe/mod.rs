@@ -15,7 +15,7 @@ use object::pe::{
     ImageNtHeaders32, ImageNtHeaders64,
 };
 use object::read::pe::{
-    self, ImageNtHeaders, ImageOptionalHeader, PeFile, PeSection, PeSectionIterator,
+    self, ImageNtHeaders, ImageOptionalHeader, PeFile, PeSection, PeSectionIterator, Relocation,
 };
 use object::{FileKind, Object, ObjectSection, ReadRef, SectionFlags};
 use smallvec::{SmallVec, smallvec};
@@ -271,6 +271,7 @@ impl<'this, 'data> PeLoadedRepr<'this, 'data> {
 struct PeLoadState {
     architecture: Arch,
     base: RawAddress,
+    base_relocations: Vec<Relocation>,
     preferred_base: RawAddress,
     entry: Option<ImageAddress>,
     layout: ImageLayout,
@@ -292,19 +293,24 @@ impl PeLoadState {
         let base = attributes
             .get_attr::<RawAddress>(ATTRIBUTE_IMAGE_BASE)
             .unwrap_or(preferred_base);
+        let config = PeLoaderProperties::new(attributes);
+        let base_relocations = (base != preferred_base)
+            .then(|| {
+                let has_relocations = with_pe!(
+                    view,
+                    pe | pe.data_directory(IMAGE_DIRECTORY_ENTRY_BASERELOC).is_some()
+                );
 
-        if base != preferred_base {
-            let has_relocations = with_pe!(
-                view,
-                pe | pe.data_directory(IMAGE_DIRECTORY_ENTRY_BASERELOC).is_some()
-            );
+                if !has_relocations {
+                    return Err(LoaderError::format_with(
+                        "cannot rebase PE image without a base relocation directory",
+                    ));
+                }
 
-            if !has_relocations {
-                return Err(LoaderError::format_with(
-                    "cannot rebase PE image without a base relocation directory",
-                ));
-            }
-        }
+                with_pe!(view, pe | permissive::read_base_relocations(pe, config))
+            })
+            .transpose()?
+            .unwrap_or_default();
 
         let entry = with_pe!(view, pe | pe.entry());
         let entry = if entry != 0 {
@@ -320,11 +326,10 @@ impl PeLoadState {
         let image_entry = entry.map(|entry| ImageAddress::in_default_space(entry.offset()));
         let context = ImageContext::new(view, base, preferred_base, entry, attributes);
         let architecture = context.resolve_architecture()?;
-        let config = PeLoaderProperties::new(attributes);
 
         let symbols = with_pe!(
             view,
-            pe | PeSymbolLayout::from_pe(pe, &architecture, base, preferred_base)
+            pe | PeSymbolLayout::from_pe(pe, &architecture, base, preferred_base, config)
         )?;
 
         let PeSymbolLayout {
@@ -412,6 +417,7 @@ impl PeLoadState {
         Ok(Self {
             architecture,
             base,
+            base_relocations,
             preferred_base,
             entry: image_entry,
             layout,
@@ -451,6 +457,7 @@ impl PeSymbolLayout {
         arch: &Arch,
         base: RawAddress,
         preferred_base: RawAddress,
+        config: PeLoaderProperties,
     ) -> Result<Self, LoaderError>
     where
         Pe: ImageNtHeaders,
@@ -501,31 +508,56 @@ impl PeSymbolLayout {
         let mut import_slots = BTreeMap::new();
         let mut external_addresses = BTreeMap::<Symbol, RawAddress>::new();
 
-        for (index, export) in pe
-            .exports()
-            .map_err(LoaderError::format)?
-            .into_iter()
-            .enumerate()
+        let exports = (|| -> Result<(), LoaderError> {
+            let Some(export_table) = permissive::read_exports(pe, config)? else {
+                return Ok(());
+            };
+            let mut export_index = 0usize;
+
+            for (name_pointer, address_index) in export_table.name_iter() {
+                let name = export_table
+                    .name_from_pointer(name_pointer)
+                    .map_err(LoaderError::format)?;
+                let export_address = export_table
+                    .address_by_index(address_index.into())
+                    .map_err(LoaderError::format)?;
+                if export_table.is_forward(export_address) {
+                    continue;
+                }
+
+                let address = base
+                    .checked_add(export_address)
+                    .ok_or_else(|| LoaderError::address_overflow(base))?;
+                let properties = symbol_properties_for_address(address, &sections)
+                    | SymbolProperties::LOCAL
+                    | SymbolProperties::EXPORT;
+                symbols.insert(
+                    SymbolIndex::new(PE_EXPORT_SELECTOR, export_index),
+                    RawPeSymbol {
+                        address,
+                        symbol: String::from_utf8_lossy(name).into_owned().into(),
+                        properties,
+                    },
+                );
+                export_index += 1;
+            }
+
+            Ok(())
+        })();
+        if let Err(error) = &exports
+            && config.is_permissive()
         {
-            let address = export
-                .address()
-                .checked_sub(preferred_base.offset())
-                .and_then(|offset| base.checked_add(offset))
-                .ok_or_else(|| LoaderError::address_overflow(base))?;
-            let properties = symbol_properties_for_address(address, &sections)
-                | SymbolProperties::LOCAL
-                | SymbolProperties::EXPORT;
-            symbols.insert(
-                SymbolIndex::new(PE_EXPORT_SELECTOR, index),
-                RawPeSymbol {
-                    address,
-                    symbol: String::from_utf8_lossy(export.name()).into_owned().into(),
-                    properties,
-                },
+            tracing::warn!(
+                "unable to fully read PE export table ({error}); keeping partial exports"
             );
+        } else {
+            exports?;
         }
 
-        if let Some(import_table) = pe.import_table().map_err(LoaderError::format)? {
+        let imports = (|| -> Result<(), LoaderError> {
+            let Some(import_table) = permissive::read_imports(pe, config)? else {
+                return Ok(());
+            };
             let mut descriptors = import_table.descriptors().map_err(LoaderError::format)?;
             let mut import_index = 0usize;
 
@@ -597,6 +629,17 @@ impl PeSymbolLayout {
                         .ok_or_else(|| LoaderError::address_overflow(base))?;
                 }
             }
+
+            Ok(())
+        })();
+        if let Err(error) = &imports
+            && config.is_permissive()
+        {
+            tracing::warn!(
+                "unable to fully read PE import table ({error}); keeping partial imports"
+            );
+        } else {
+            imports?;
         }
 
         let max_addr = external_thunks.last().unwrap_or(max_addr);
@@ -764,6 +807,7 @@ where
 {
     pe: &'file PeFile<'data, Pe, R>,
     import_slots: &'file BTreeMap<RawAddress, RawAddress>,
+    base_relocations: &'file [Relocation],
     external_thunks: &'file ExternalThunkLayout,
     endian: Endian,
     region_bank: &'file PeRegionBankMap,
@@ -780,6 +824,7 @@ where
         pe: &'file PeFile<'data, Pe, R>,
         endian: Endian,
         import_slots: &'file BTreeMap<RawAddress, RawAddress>,
+        base_relocations: &'file [Relocation],
         external_thunks: &'file ExternalThunkLayout,
         region_bank: &'file PeRegionBankMap,
         config: PeLoaderProperties,
@@ -787,6 +832,7 @@ where
         Self {
             pe,
             import_slots,
+            base_relocations,
             external_thunks,
             endian,
             region_bank,
@@ -796,6 +842,10 @@ where
 
     fn pe(&self) -> &'file PeFile<'data, Pe, R> {
         self.pe
+    }
+
+    fn base_relocations(&self) -> &'file [Relocation] {
+        self.base_relocations
     }
 
     fn import_slots(&self) -> &'file BTreeMap<RawAddress, RawAddress> {
@@ -868,6 +918,7 @@ where
             self.current_base,
             self.preferred_base,
             self.context.import_slots(),
+            self.context.base_relocations(),
         )
     }
 
@@ -964,7 +1015,7 @@ where
                 continue;
             }
 
-            let data = sect.data().unwrap_or_default();
+            let data = permissive::read_section_data(self.context.pe(), &sect);
             let emit = (data.len() as u64).min(sect.size()) as usize;
 
             let mut bytes = ImageSegmentContents::new_sparse_in_bank(
@@ -1364,6 +1415,7 @@ impl Loadable for Pe<'_> {
                     pe,
                     self.architecture().endian(),
                     &state.import_slots,
+                    &state.base_relocations,
                     &state.external_thunks,
                     &state.region_bank,
                     PeLoaderProperties::new(self.attributes()),
@@ -1658,6 +1710,7 @@ mod test {
             &pe,
             Endian::Little,
             &imports,
+            &[],
             &external_thunks,
             &region_bank,
             config,

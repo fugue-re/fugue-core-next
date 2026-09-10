@@ -9,6 +9,10 @@ use crate::storage::entities::schema::{
 use crate::storage::entities::{Entity, EntityId, EntityKey, EntityKeyCodec, EntityKeyId};
 use crate::storage::schema::bitflags::archived_bitflags;
 
+mod index;
+pub(crate) use index::PreparedReferenceIndexRecord;
+pub use index::ReferenceIndex;
+
 #[derive(
     Debug,
     Clone,
@@ -390,10 +394,6 @@ impl ReferenceRecord {
 impl Entity for ReferenceRecord {
     const ID: EntityId = ENTITY_REFERENCE_RECORD_ID;
 }
-
-mod index;
-pub(crate) use index::PreparedReferenceIndexRecord;
-pub use index::ReferenceIndex;
 
 #[cfg(test)]
 mod test {

@@ -26,7 +26,8 @@ impl Revision {
     }
 
     pub const fn next(&self) -> Self {
-        Self(self.0 + 1)
+        let next = self.0.checked_add(1).expect("revision should not overflow");
+        Self(next)
     }
 }
 
