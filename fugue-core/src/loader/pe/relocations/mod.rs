@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use object::read::pe::{ImageNtHeaders, PeFile};
+use object::read::pe::{ImageNtHeaders, PeFile, Relocation};
 use object::{Architecture, Object, ReadRef};
 
 use crate::ir::RawAddress;
@@ -24,6 +24,7 @@ where
     preferred_base: RawAddress,
     current_base: RawAddress,
     import_slots: &'file BTreeMap<RawAddress, RawAddress>,
+    base_relocations: &'file [Relocation],
 }
 
 impl<'data, 'file, Pe, R> PeSegmentRelocator<'data, 'file, Pe, R>
@@ -37,12 +38,14 @@ where
         current_base: RawAddress,
         preferred_base: RawAddress,
         import_slots: &'file BTreeMap<RawAddress, RawAddress>,
+        base_relocations: &'file [Relocation],
     ) -> Self {
         Self {
             pe,
             preferred_base,
             current_base,
             import_slots,
+            base_relocations,
         }
     }
 
@@ -76,35 +79,24 @@ where
             return Ok(());
         }
 
-        let Some(mut blocks) = self
-            .pe
-            .data_directories()
-            .relocation_blocks(self.pe.data(), &self.pe.section_table())
-            .map_err(LoaderError::format)?
-        else {
-            return Ok(());
-        };
-
         let start = bytes.address().offset();
         let end = start
             .checked_add(bytes.len())
             .ok_or_else(|| LoaderError::address_overflow(bytes.address()))?;
 
-        while let Some(block) = blocks.next().map_err(LoaderError::format)? {
-            for reloc in block {
-                let address = self
-                    .current_base
-                    .offset()
-                    .wrapping_add(reloc.virtual_address as u64);
-                if address < start || address >= end {
-                    continue;
-                }
-
-                let Some(offset) = address.checked_sub(start) else {
-                    continue;
-                };
-                self.apply_relocation(bytes, offset, reloc.typ)?;
+        for reloc in self.base_relocations {
+            let address = self
+                .current_base
+                .offset()
+                .wrapping_add(reloc.virtual_address as u64);
+            if address < start || address >= end {
+                continue;
             }
+
+            let Some(offset) = address.checked_sub(start) else {
+                continue;
+            };
+            self.apply_relocation(bytes, offset, reloc.typ)?;
         }
 
         Ok(())
