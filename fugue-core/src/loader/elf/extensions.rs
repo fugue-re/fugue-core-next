@@ -6,8 +6,8 @@ use crate::extension::{self, Registration};
 use crate::ir::RawAddress;
 use crate::lifter::{LanguageId, LanguageSource};
 use crate::loader::elf::ElfFileRepr;
-use crate::loader::{ImageSegmentContents, LoaderError};
-use crate::types::AttributeMap;
+use crate::loader::{ImageSegmentContents, LanguageVariantOverride, LoaderError};
+use crate::types::{ATTRIBUTE_LANGUAGE_VARIANT, AttributeMap};
 
 pub struct ImageContext<'a> {
     is_64: bool,
@@ -88,13 +88,36 @@ impl<'a> ImageContext<'a> {
             }
         }
 
-        match matches.len() {
-            0 => Err(LoaderError::UnsupportedArch),
-            1 => Ok(matches.remove(0)),
-            _ => Err(LoaderError::extension_with(
-                "ambiguous ELF architecture resolver",
-            )),
-        }
+        let arch = match matches.len() {
+            0 => return Err(LoaderError::UnsupportedArch),
+            1 => matches.remove(0),
+            _ => {
+                return Err(LoaderError::extension_with(
+                    "ambiguous ELF architecture resolver",
+                ));
+            }
+        };
+
+        let Some(overrides) = self
+            .attributes
+            .get_attr::<LanguageVariantOverride>(ATTRIBUTE_LANGUAGE_VARIANT)
+        else {
+            return Ok(arch);
+        };
+
+        let language = arch.language();
+        let Some(variant) = overrides.variant_for(language) else {
+            return Ok(arch);
+        };
+
+        let id = LanguageId::new_with(
+            language.processor(),
+            language.is_big_endian(),
+            language.bits(),
+            Some(variant),
+        );
+
+        Arch::try_new(source.load(&id)?).map_err(LoaderError::extension)
     }
 
     pub fn resolve_architecture_using(

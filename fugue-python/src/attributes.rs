@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use fugue_core::ir::RawAddress;
 use fugue_core::loader::ATTRIBUTE_ELF_OVERRIDE_SEGMENT_PERMISSIONS as ATTRIBUTE_OVERRIDE_SEGMENT_PERMISSIONS;
 use fugue_core::types::{
-    ATTRIBUTE_ADDRESS_SPACE, ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_FILE_PATH, ATTRIBUTE_IMAGE_BASE,
+    ATTRIBUTE_ADDRESS_SPACE, ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE, ATTRIBUTE_INPUT_PATH,
     ATTRIBUTE_PROJECT_PATH, AttributeMap,
 };
 use pyo3::prelude::*;
@@ -93,8 +93,8 @@ fn set_attribute(
         "project_path" | ATTRIBUTE_PROJECT_PATH => {
             attributes.set_attr(ATTRIBUTE_PROJECT_PATH, value.extract::<PathBuf>()?);
         }
-        "input_path" | "file_path" | ATTRIBUTE_FILE_PATH => {
-            attributes.set_attr(ATTRIBUTE_FILE_PATH, value.extract::<PathBuf>()?);
+        "input_path" | "file_path" | ATTRIBUTE_INPUT_PATH => {
+            attributes.set_attr(ATTRIBUTE_INPUT_PATH, value.extract::<PathBuf>()?);
         }
         "override_segment_permissions" | ATTRIBUTE_OVERRIDE_SEGMENT_PERMISSIONS => {
             attributes.set_attr(

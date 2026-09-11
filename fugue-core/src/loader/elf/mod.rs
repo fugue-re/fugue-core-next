@@ -2184,6 +2184,7 @@ mod test {
         R_PPC64_RELATIVE, R_RISCV_CALL_PLT, R_RISCV_RELATIVE,
     };
     use object::{Object, ObjectSection, ObjectSymbol, RelocationFlags, RelocationTarget};
+    use rustc_hash::FxHashMap;
 
     use super::{
         ATTRIBUTE_LOAD_HEADERS, ELF_DYNSYM_SELECTOR, ELF_SYMTAB_SELECTOR, Elf, ElfFileRepr,
@@ -2196,7 +2197,9 @@ mod test {
     };
     use crate::storage::segments::{InMemorySegmentStorage, SegmentStorage};
     use crate::types::BytesOrMapping;
-    use crate::types::attributes::{ATTRIBUTE_IMAGE_BASE, AttributeMap};
+    use crate::types::attributes::{
+        ATTRIBUTE_IMAGE_BASE, ATTRIBUTE_LANGUAGE_VARIANT, AttributeMap,
+    };
 
     struct Placement {
         address: Address,
@@ -2698,6 +2701,58 @@ mod test {
         }
 
         assert_eq!(relocated_value, Some(expected_value as u32));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_elf_language_variant_override() -> Result<(), Box<dyn std::error::Error>> {
+        let path = "tests/libhello-ppc64le.so";
+
+        let detected = Elf::new(BytesOrMapping::from_file(path)?)?;
+        assert_eq!(detected.architecture().language().variant(), "default");
+
+        let mut attributes = AttributeMap::new();
+        attributes.set_attr(ATTRIBUTE_LANGUAGE_VARIANT, "A2ALT");
+
+        let overridden = Elf::new_with(BytesOrMapping::from_file(path)?, attributes)?;
+        let language = overridden.architecture().language();
+
+        assert_eq!(language.variant(), "A2ALT");
+        assert_eq!(language.processor(), "PowerPC");
+        assert_eq!(language.bits(), 64);
+        assert!(!language.is_big_endian());
+
+        let mut attributes = AttributeMap::new();
+        attributes.set_attr(ATTRIBUTE_LANGUAGE_VARIANT, "nonexistent");
+
+        assert!(Elf::new_with(BytesOrMapping::from_file(path)?, attributes).is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_elf_language_variant_override_scoped() -> Result<(), Box<dyn std::error::Error>> {
+        let scoped = FxHashMap::from_iter([
+            (String::from("PowerPC:LE:64"), String::from("A2ALT")),
+            (String::from("ARM:LE:32"), String::from("v8T")),
+        ]);
+
+        let mut attributes = AttributeMap::new();
+        attributes.set_attr(ATTRIBUTE_LANGUAGE_VARIANT, &scoped);
+
+        let matched = Elf::new_with(
+            BytesOrMapping::from_file("tests/libhello-ppc64le.so")?,
+            attributes.clone(),
+        )?;
+        assert_eq!(matched.architecture().language().variant(), "A2ALT");
+
+        let unmatched = Elf::new_with(
+            BytesOrMapping::from_file("tests/libhello-ppc32.so")?,
+            attributes,
+        )?;
+        assert_eq!(unmatched.architecture().language().variant(), "default");
+        assert_eq!(unmatched.architecture().language().bits(), 32);
 
         Ok(())
     }

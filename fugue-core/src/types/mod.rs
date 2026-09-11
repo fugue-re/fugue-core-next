@@ -8,9 +8,9 @@ pub(crate) mod memmap;
 pub(crate) mod revision;
 
 pub use attributes::{
-    ATTRIBUTE_ADDRESS_SPACE, ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_FILE_PATH, ATTRIBUTE_IMAGE_BASE,
-    ATTRIBUTE_PROJECT_PATH, ArchivedAttributeMap, ArchivedJsonValue, Attribute, AttributeMap,
-    serde_json,
+    ATTRIBUTE_ADDRESS_SPACE, ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE, ATTRIBUTE_INPUT_PATH,
+    ATTRIBUTE_LANGUAGE_VARIANT, ATTRIBUTE_PROJECT_PATH, ArchivedAttributeMap, ArchivedJsonValue,
+    Attribute, AttributeMap, serde_json,
 };
 pub use bytes::BytesOrSlice;
 pub use fugue_specs::Confidence;
