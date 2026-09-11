@@ -14,22 +14,31 @@ use crate::storage::entities::{Entity, EntityId};
 pub(crate) mod aarch64;
 pub(crate) mod arm;
 pub(crate) mod mips;
+pub(crate) mod mips64;
+pub(crate) mod ppc;
+pub(crate) mod ppc64;
 pub(crate) mod registry;
+pub(crate) mod riscv;
+pub(crate) mod riscv64;
 pub(crate) mod thunk;
+pub(crate) mod traits;
 pub(crate) mod x86;
 pub(crate) mod x86_64;
 
 pub use aarch64::AArch64;
 pub use arm::Arm;
 pub use mips::Mips;
+pub use mips64::Mips64;
+pub use ppc::Ppc;
+pub use ppc64::Ppc64;
 pub use registry::{ArchError, ArchProvider, LanguageProvider, provide_arch, provide_language};
+pub use riscv::RiscV;
+pub use riscv64::RiscV64;
 pub use thunk::ExternalThunkTemplate;
-pub use x86::X86;
-pub use x86_64::X86_64;
-
-pub(crate) mod traits;
 use traits::Arch as ArchT;
 pub use traits::{Flag, FlagKind};
+pub use x86::X86;
+pub use x86_64::X86_64;
 
 bitflags::bitflags! {
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]

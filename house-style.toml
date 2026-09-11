@@ -762,6 +762,31 @@ reason = "the private constructor deliberately returns the type-erased architect
 
 [[exception]]
 rule = "allow_attribute"
+path = "fugue-core/src/arch/mips64.rs"
+reason = "the private constructor deliberately returns the type-erased architecture facade"
+
+[[exception]]
+rule = "allow_attribute"
+path = "fugue-core/src/arch/ppc.rs"
+reason = "the private constructor deliberately returns the type-erased architecture facade"
+
+[[exception]]
+rule = "allow_attribute"
+path = "fugue-core/src/arch/ppc64.rs"
+reason = "the private constructor deliberately returns the type-erased architecture facade"
+
+[[exception]]
+rule = "allow_attribute"
+path = "fugue-core/src/arch/riscv.rs"
+reason = "the private constructor deliberately returns the type-erased architecture facade"
+
+[[exception]]
+rule = "allow_attribute"
+path = "fugue-core/src/arch/riscv64.rs"
+reason = "the private constructor deliberately returns the type-erased architecture facade"
+
+[[exception]]
+rule = "allow_attribute"
 path = "fugue-core/src/arch/traits.rs"
 reason = "default architecture hooks retain named parameters to document the callback contract"
 
@@ -791,6 +816,36 @@ reason = "ArchData is the established private aggregate for architecture-specifi
 rule = "rejected_term"
 path = "fugue-core/src/arch/mips.rs"
 item = "crate::arch::mips::ArchData"
+reason = "ArchData is the established private aggregate for architecture-specific cached values whose roles vary by architecture"
+
+[[exception]]
+rule = "rejected_term"
+path = "fugue-core/src/arch/mips64.rs"
+item = "crate::arch::mips64::ArchData"
+reason = "ArchData is the established private aggregate for architecture-specific cached values whose roles vary by architecture"
+
+[[exception]]
+rule = "rejected_term"
+path = "fugue-core/src/arch/ppc.rs"
+item = "crate::arch::ppc::ArchData"
+reason = "ArchData is the established private aggregate for architecture-specific cached values whose roles vary by architecture"
+
+[[exception]]
+rule = "rejected_term"
+path = "fugue-core/src/arch/ppc64.rs"
+item = "crate::arch::ppc64::ArchData"
+reason = "ArchData is the established private aggregate for architecture-specific cached values whose roles vary by architecture"
+
+[[exception]]
+rule = "rejected_term"
+path = "fugue-core/src/arch/riscv.rs"
+item = "crate::arch::riscv::ArchData"
+reason = "ArchData is the established private aggregate for architecture-specific cached values whose roles vary by architecture"
+
+[[exception]]
+rule = "rejected_term"
+path = "fugue-core/src/arch/riscv64.rs"
+item = "crate::arch::riscv64::ArchData"
 reason = "ArchData is the established private aggregate for architecture-specific cached values whose roles vary by architecture"
 
 [[exception]]

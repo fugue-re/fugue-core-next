@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
-use fugue_sleigh_marshal::sla::*;
 use fugue_sleigh_marshal::Decoder;
+use fugue_sleigh_marshal::sla::*;
 
 use crate::deserialise::{DeserialiseError, XmlExt};
 use crate::opcode::Opcode;
@@ -482,13 +482,9 @@ impl ConstructTpl {
     pub fn from_xml(input: xml::Node, spaces: &AddressSpaces) -> Result<Self, DeserialiseError> {
         let delay_slot = input.attribute_int_opt("delay", 0)?;
         let labels = input.attribute_int_opt("labels", 0)?;
-        let section_id = input.attribute_int_opt::<i64>("section", -1).map(|i| {
-            if i < 0 {
-                None
-            } else {
-                Some(i as usize)
-            }
-        })?;
+        let section_id = input
+            .attribute_int_opt::<i64>("section", -1)
+            .map(|i| if i < 0 { None } else { Some(i as usize) })?;
         let mut children = input.children().filter(xml::Node::is_element);
 
         let result = children

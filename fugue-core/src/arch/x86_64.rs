@@ -33,8 +33,8 @@ const PADDING: &[&[u8]] = &[&[0xcc]];
 
 #[derive(Clone)]
 struct ArchData {
-    flags: Vec<Flag>,
-    gprs: Vec<Varnode>,
+    flags: [Flag; 7],
+    gprs: [Varnode; 16],
     frame_pointer: Option<Varnode>,
     swi_op: Option<u16>,
     invalid_insn_op: Option<u16>,
@@ -43,7 +43,9 @@ struct ArchData {
 impl ArchData {
     fn new(language: &'static Language) -> Self {
         let reg = |name| language.register_by_name(name);
-        let flag = |name, ctor: fn(Varnode) -> Flag| reg(name).map(ctor);
+        let flag = |name: &'static str, ctor: fn(Varnode) -> Flag| {
+            ctor(reg(name).unwrap_or_else(|| panic!("x86 language must define flag `{name}`")))
+        };
 
         let flags = [
             flag("AF", Flag::a),
@@ -53,18 +55,15 @@ impl ArchData {
             flag("PF", Flag::p),
             flag("SF", Flag::n),
             flag("ZF", Flag::z),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
+        ];
 
         let gprs = [
             "RAX", "RBX", "RCX", "RDX", "RSI", "RDI", "RBP", "RSP", "R8", "R9", "R10", "R11",
             "R12", "R13", "R14", "R15",
         ]
-        .into_iter()
-        .filter_map(reg)
-        .collect();
+        .map(|name| {
+            reg(name).unwrap_or_else(|| panic!("x86 language must define register `{name}`"))
+        });
 
         Self {
             flags,

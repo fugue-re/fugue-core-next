@@ -499,13 +499,9 @@ impl SymbolBuilder {
 
                 let handle_index = input.read_signed_integer_with_id(&ATTRIB_INDEX)? as usize;
                 let offset = input.read_signed_integer_with_id(&ATTRIB_OFF)? as usize;
-                let base = input.read_signed_integer_with_id(&ATTRIB_BASE).map(|v| {
-                    if v < 0 {
-                        None
-                    } else {
-                        Some(v as usize)
-                    }
-                })?;
+                let base = input
+                    .read_signed_integer_with_id(&ATTRIB_BASE)
+                    .map(|v| if v < 0 { None } else { Some(v as usize) })?;
 
                 let min_length = input.read_signed_integer_with_id(&ATTRIB_MINLEN)? as usize;
 
@@ -859,13 +855,9 @@ impl SymbolBuilder {
 
                 let handle_index = input.attribute_int("index")?;
                 let offset = input.attribute_int("off")?;
-                let base = input.attribute_int::<i64>("base").map(|v| {
-                    if v < 0 {
-                        None
-                    } else {
-                        Some(v as usize)
-                    }
-                })?;
+                let base = input
+                    .attribute_int::<i64>("base")
+                    .map(|v| if v < 0 { None } else { Some(v as usize) })?;
 
                 let min_length = input.attribute_int("minlen")?;
 

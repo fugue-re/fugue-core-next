@@ -1,7 +1,7 @@
 use std::mem::size_of;
 
-use fugue_sleigh_marshal::sla::*;
 use fugue_sleigh_marshal::Decoder;
+use fugue_sleigh_marshal::sla::*;
 
 use crate::construct::ConstructTpl;
 use crate::deserialise::{DeserialiseError, XmlExt};
@@ -326,13 +326,9 @@ impl Constructor {
         Ok(Self {
             id,
             parent_id: input.attribute_int("parent")?,
-            first_whitespace: input.attribute_int::<i64>("first").map(|i| {
-                if i < 0 {
-                    None
-                } else {
-                    Some(i as usize)
-                }
-            })?,
+            first_whitespace: input
+                .attribute_int::<i64>("first")
+                .map(|i| if i < 0 { None } else { Some(i as usize) })?,
             min_length: input.attribute_int("length")?,
             source_file_index,
             line_number,

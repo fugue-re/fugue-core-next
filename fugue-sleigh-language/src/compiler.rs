@@ -6,7 +6,7 @@ use std::path::Path;
 use ahash::AHashMap as Map;
 use ustr::UstrSet;
 
-use crate::deserialise::{parse_int_radix, DeserialiseError, XmlExt};
+use crate::deserialise::{DeserialiseError, XmlExt, parse_int_radix};
 use crate::language::LanguageError;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -747,7 +747,7 @@ impl CompilerSpec {
                     let proto = child.children().find(xml::Node::is_element);
                     if proto.is_none() {
                         return Err(DeserialiseError::Invariant(
-                                "compiler specification does not define prototype for default prototype"
+                            "compiler specification does not define prototype for default prototype",
                         ));
                     }
                     default_prototype = Some(Prototype::from_xml(proto.unwrap())?);

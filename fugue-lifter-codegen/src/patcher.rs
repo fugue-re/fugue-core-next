@@ -31,9 +31,7 @@ pub enum PatcherError {
     },
     #[error("patch `{path}` (segment {segment}) has no `+++` target header")]
     MissingTarget { path: PathBuf, segment: usize },
-    #[error(
-        "patch `{path}` (segment {segment}) targets `{target}`, which escapes the source root"
-    )]
+    #[error("patch `{path}` (segment {segment}) targets `{target}`, which escapes the source root")]
     EscapingTarget {
         path: PathBuf,
         segment: usize,

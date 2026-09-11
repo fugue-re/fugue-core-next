@@ -1,6 +1,6 @@
+use fugue_sleigh_language::Language;
 use fugue_sleigh_language::pattern::PatternExpression;
 use fugue_sleigh_language::symbol::Symbol;
-use fugue_sleigh_language::Language;
 use proc_macro2::TokenStream;
 use quote::quote;
 

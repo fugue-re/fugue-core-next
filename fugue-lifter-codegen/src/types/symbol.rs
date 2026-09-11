@@ -1,6 +1,6 @@
+use fugue_sleigh_language::Language;
 use fugue_sleigh_language::pattern::PatternExpression;
 use fugue_sleigh_language::symbol::Symbol;
-use fugue_sleigh_language::Language;
 use proc_macro2::TokenStream;
 use quote::quote;
 
@@ -56,13 +56,10 @@ impl<'a, 'b> SymbolAdaptor<'a, 'b> {
                 table_is_filled,
                 ..
             } if !*table_is_filled => {
-                let bad_indices = name_table.iter().enumerate().filter_map(|(i, v)| {
-                    if v == "\t" {
-                        Some(i)
-                    } else {
-                        None
-                    }
-                });
+                let bad_indices = name_table
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, v)| if v == "\t" { Some(i) } else { None });
                 let limit = name_table.len();
 
                 Some(self.build_filter(pattern_value, bad_indices, limit))
@@ -73,13 +70,10 @@ impl<'a, 'b> SymbolAdaptor<'a, 'b> {
                 table_is_filled,
                 ..
             } if !*table_is_filled => {
-                let bad_indices = value_table.iter().enumerate().filter_map(|(i, v)| {
-                    if *v == 0xbadbeef {
-                        Some(i)
-                    } else {
-                        None
-                    }
-                });
+                let bad_indices = value_table
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, v)| if *v == 0xbadbeef { Some(i) } else { None });
                 let limit = value_table.len();
 
                 Some(self.build_filter(pattern_value, bad_indices, limit))
@@ -90,13 +84,10 @@ impl<'a, 'b> SymbolAdaptor<'a, 'b> {
                 table_is_filled,
                 ..
             } if !*table_is_filled => {
-                let bad_indices = varnode_table.iter().enumerate().filter_map(|(i, v)| {
-                    if v.is_none() {
-                        Some(i)
-                    } else {
-                        None
-                    }
-                });
+                let bad_indices = varnode_table
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, v)| if v.is_none() { Some(i) } else { None });
                 let limit = varnode_table.len();
 
                 Some(self.build_filter(pattern_value, bad_indices, limit))

@@ -103,6 +103,14 @@ const SYNC_TARGETS: &[SyncTarget] = &[
         destination: "fugue-lifter-mips/data/processors/MIPS",
     },
     SyncTarget {
+        source_processor: "PowerPC",
+        destination: "fugue-lifter-ppc/data/processors/PowerPC",
+    },
+    SyncTarget {
+        source_processor: "RISCV",
+        destination: "fugue-lifter-riscv/data/processors/RISCV",
+    },
+    SyncTarget {
         source_processor: "x86",
         destination: "fugue-lifter-x86/data/processors/x86",
     },
@@ -362,7 +370,7 @@ impl<'a> LanguageDir<'a> {
         let mut missing = Vec::new();
 
         for file in self.whitelist()? {
-            if !file.ends_with(".slaspec") {
+            if !file.ends_with(".slaspec") && !file.ends_with(".sinc") {
                 continue;
             }
             let path = self.path.join(file);
@@ -434,11 +442,29 @@ impl StagedTarget {
         let staged = LanguageDir::new(&staged_path);
         let destination_dir = LanguageDir::new(&destination);
 
-        for file in destination_dir.whitelist()? {
+        let whitelist = if destination.is_dir() {
+            let existing = destination_dir.whitelist()?;
+            if existing.is_empty() {
+                source.whitelist()?
+            } else {
+                existing
+            }
+        } else {
+            source.whitelist()?
+        };
+
+        for file in whitelist {
             staged.copy_file_from(&source, &file)?;
         }
-        for file in staged.missing_sinc_includes()? {
-            staged.copy_file_from(&source, &file)?;
+
+        loop {
+            let missing = staged.missing_sinc_includes()?;
+            if missing.is_empty() {
+                break;
+            }
+            for file in missing {
+                staged.copy_file_from(&source, &file)?;
+            }
         }
 
         Ok(Self {
@@ -570,6 +596,36 @@ deadbeef refs/tags/Ghidra_12.1_RC1_build\n";
     }
 
     #[test]
+    fn seeds_missing_destination_from_source_listing() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace_root = root.path().join("workspace");
+        let source_root = root.path().join("ghidra");
+
+        create_workspace_tree(&workspace_root);
+        create_source_tree(&source_root);
+
+        let seeded = SYNC_TARGETS.last().unwrap();
+        fs::remove_dir_all(workspace_root.join(seeded.destination)).unwrap();
+
+        SyncJob {
+            workspace_root: &workspace_root,
+        }
+        .local(&source_root)
+        .unwrap();
+
+        let destination = workspace_root.join(seeded.destination);
+        let processor = seeded.source_processor;
+        assert_eq!(
+            fs::read_to_string(destination.join(format!("{processor}.slaspec"))).unwrap(),
+            format!("@include \"{processor}.sinc\"\n@include \"extra.sinc\"\n"),
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("extra.sinc")).unwrap(),
+            "source:extra.sinc",
+        );
+    }
+
+    #[test]
     fn sync_failure_preserves_existing_directories() {
         let root = tempfile::tempdir().unwrap();
         let workspace_root = root.path().join("workspace");
@@ -637,7 +693,7 @@ deadbeef refs/tags/Ghidra_12.1_RC1_build\n";
     }
 
     #[test]
-    fn finds_missing_sinc_includes_in_whitelisted_slaspecs() {
+    fn finds_missing_sinc_includes_through_nested_sincs() {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path();
 
@@ -647,14 +703,14 @@ deadbeef refs/tags/Ghidra_12.1_RC1_build\n";
         )
         .unwrap();
         fs::write(
-            directory.join("skip.sinc"),
+            directory.join("present.sinc"),
             "@include \"nested-missing.sinc\"",
         )
         .unwrap();
-        fs::write(directory.join("present.sinc"), "").unwrap();
 
-        let missing = LanguageDir::new(directory).missing_sinc_includes().unwrap();
+        let mut missing = LanguageDir::new(directory).missing_sinc_includes().unwrap();
+        missing.sort();
 
-        assert_eq!(missing, vec!["missing.sinc"]);
+        assert_eq!(missing, vec!["missing.sinc", "nested-missing.sinc"]);
     }
 }

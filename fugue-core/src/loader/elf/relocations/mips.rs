@@ -10,7 +10,7 @@ use object::{ReadRef, Relocation, RelocationTarget};
 use super::{ElfSegmentRelocator, elf_relocation_type};
 use crate::loader::ImageSegmentContents;
 
-fn mips_implicit_addend<T: ByteCast + Default>(
+pub(crate) fn mips_implicit_addend<T: ByteCast + Default>(
     bytes: &ImageSegmentContents<'_>,
     offset: u64,
     reloc: &Relocation,

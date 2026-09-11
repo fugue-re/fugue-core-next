@@ -1,8 +1,8 @@
+use fugue_sleigh_language::Language;
 use fugue_sleigh_language::construct::{
     ConstTpl, ConstructTpl, HandleKind, HandleTpl, OpTpl, VarnodeTpl,
 };
 use fugue_sleigh_language::opcode::Opcode;
-use fugue_sleigh_language::Language;
 use quote::quote;
 
 use crate::core::Tables;
