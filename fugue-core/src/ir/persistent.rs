@@ -14,7 +14,8 @@ use crate::storage::entities::{
 };
 
 const TABLE_INDEX_SCHEMA: u32 = 1;
-const FREE_ID_PREVIEW_BATCH: usize = 256;
+const FREE_ID_PREFETCH_BATCH_SIZE: usize = 256;
+const INDEX_REBUILD_BATCH_SIZE: usize = 512;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -61,6 +62,57 @@ impl EntityKeyCodec for PersistentTable {
     }
 }
 
+pub(crate) struct PersistentIndexRebuilder<'a, T> {
+    live: usize,
+    next_index: usize,
+    storage: &'a EntityStorage,
+    table: PersistentTable,
+    writes: EntityWriteBatch,
+    _marker: PhantomData<T>,
+}
+
+impl<'a, T> PersistentIndexRebuilder<'a, T> {
+    pub(crate) fn new(storage: &'a EntityStorage, table: PersistentTable) -> Self {
+        Self {
+            live: 0,
+            next_index: 0,
+            storage,
+            table,
+            writes: EntityWriteBatch::with_capacity(INDEX_REBUILD_BATCH_SIZE),
+            _marker: PhantomData,
+        }
+    }
+
+    pub(crate) fn append(
+        &mut self,
+        id: Id<T>,
+        append_writes: impl FnOnce(&mut EntityWriteBatch) -> Result<(), EntityStorageError>,
+    ) -> Result<(), EntityStorageError> {
+        append_writes(&mut self.writes)?;
+        self.live += 1;
+        self.next_index = self.next_index.max(id.index() + 1);
+        if self.writes.len() >= INDEX_REBUILD_BATCH_SIZE {
+            self.storage.apply_batch(&self.writes)?;
+            self.writes.clear();
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish(
+        mut self,
+        append_writes: impl FnOnce(&mut EntityWriteBatch) -> Result<(), EntityStorageError>,
+    ) -> Result<PersistentIdAllocator<T>, EntityStorageError> {
+        append_writes(&mut self.writes)?;
+        self.storage.apply_batch(&self.writes)?;
+        PersistentIdAllocator::initialise(
+            self.storage.clone(),
+            self.table,
+            self.next_index,
+            self.live,
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct FreeIdKey {
     table: PersistentTable,
@@ -68,8 +120,8 @@ struct FreeIdKey {
 }
 
 impl FreeIdKey {
-    fn first(table: PersistentTable) -> Self {
-        Self { table, index: 0 }
+    fn new(table: PersistentTable, index: u32) -> Self {
+        Self { table, index }
     }
 }
 
@@ -78,10 +130,7 @@ impl EntityKeyCodec for FreeIdKey {
         let table = PersistentTable::decode(input)?;
         let (index, rest) = input.split_at_checked(size_of::<u32>())?;
         *input = rest;
-        Some(Self {
-            table,
-            index: u32::from_be_bytes(index.try_into().ok()?),
-        })
+        Some(Self::new(table, u32::from_be_bytes(index.try_into().ok()?)))
     }
 
     fn encode(&self, output: &mut impl Extend<u8>) {
@@ -226,17 +275,12 @@ impl<T> PersistentIdAllocator<T> {
         required: usize,
     ) -> Result<(), EntityStorageError> {
         while !pending.free_exhausted && pending.ids.len() < required {
-            let requested = required
+            let batch_size = required
                 .saturating_sub(pending.ids.len())
-                .max(FREE_ID_PREVIEW_BATCH);
+                .max(FREE_ID_PREFETCH_BATCH_SIZE);
             let start = pending.last_free.map_or_else(
-                || Bound::Included(FreeIdKey::first(self.table)),
-                |index| {
-                    Bound::Excluded(FreeIdKey {
-                        table: self.table,
-                        index,
-                    })
-                },
+                || Bound::Included(FreeIdKey::new(self.table, 0)),
+                |index| Bound::Excluded(FreeIdKey::new(self.table, index)),
             );
             let mut read = 0usize;
             for entry in self
@@ -244,7 +288,7 @@ impl<T> PersistentIdAllocator<T> {
                 .iter_range::<FreeIdKey, FreeIdRecord>(start.as_ref())?
             {
                 let (key, record) = entry?;
-                if key.table != self.table || read == requested {
+                if key.table != self.table || read == batch_size {
                     break;
                 }
                 pending
@@ -253,7 +297,7 @@ impl<T> PersistentIdAllocator<T> {
                 pending.last_free = Some(key.index);
                 read += 1;
             }
-            if read < requested {
+            if read < batch_size {
                 pending.free_exhausted = true;
             }
         }
@@ -291,10 +335,7 @@ impl<T> PersistentIdAllocator<T> {
         }
 
         for (index, generation) in free {
-            let key = FreeIdKey {
-                table: self.table,
-                index,
-            };
+            let key = FreeIdKey::new(self.table, index);
             match generation {
                 Some(generation) => writes.insert_entity(&key, &FreeIdRecord { generation })?,
                 None => writes.remove_entity::<_, FreeIdRecord>(&key),

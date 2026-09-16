@@ -4,10 +4,12 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 use crate::ir::problem::{Problem, ProblemId, ProblemKey, ProblemKind, ProblemScope};
-use crate::ir::{Address, AddressRange, IdAllocator};
+use crate::ir::{Address, AddressRange};
 use crate::storage::entities::cursor::cursor_bound;
 use crate::storage::entities::schema::ENTITY_PROBLEM_TABLE_ID;
-use crate::storage::entities::{Entity, EntityId, EntityRef, ProjectEntity, WriteBackWorker};
+use crate::storage::entities::{
+    Entity, EntityId, EntityRef, EntityWrite, EntityWriteBatch, ProjectEntity, WriteBackWorker,
+};
 use crate::storage::project::PersistableProjectEntity;
 use crate::storage::{EntityStorage, EntityStorageError};
 use crate::types::Revision;
@@ -35,14 +37,12 @@ impl Entity for ProblemTableHeader {
 }
 
 struct ProblemIndex {
-    allocator: IdAllocator<Problem>,
     problems: BTreeMap<ProblemKey, ProblemId>,
 }
 
 impl ProblemIndex {
     fn new() -> Self {
         Self {
-            allocator: IdAllocator::new(),
             problems: BTreeMap::new(),
         }
     }
@@ -101,6 +101,22 @@ impl ProblemIndex {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct ProblemTableStaging {
+    staged_problems: BTreeMap<ProblemKey, Option<Problem>>,
+}
+
+pub(crate) struct PreparedProblemBatch {
+    records: Vec<PreparedProblemRecord>,
+    reservations: Vec<ProblemId>,
+}
+
+struct PreparedProblemRecord {
+    encoded_size: usize,
+    key: ProblemKey,
+    problem: Option<Problem>,
+}
+
 pub enum ProblemTable {
     Persistent(PersistentProblemTable),
     Transient(TransientProblemTable),
@@ -133,27 +149,20 @@ impl ProblemTableError {
 }
 
 impl ProblemTable {
-    pub fn new(entities: EntityStorage, cache_bytes: usize) -> Result<Self, EntityStorageError> {
+    pub fn new_transient() -> Self {
+        Self::Transient(TransientProblemTable::new())
+    }
+
+    pub fn new_persistent(
+        entities: EntityStorage,
+        cache_bytes: usize,
+        worker: Arc<WriteBackWorker>,
+    ) -> Result<Self, EntityStorageError> {
         Ok(Self::Persistent(PersistentProblemTable::new(
             entities,
             cache_bytes,
-        )?))
-    }
-
-    pub fn with_worker(
-        entities: EntityStorage,
-        worker: Arc<WriteBackWorker>,
-        cache_bytes: usize,
-    ) -> Result<Self, EntityStorageError> {
-        Ok(Self::Persistent(PersistentProblemTable::with_worker(
-            entities,
             worker,
-            cache_bytes,
         )?))
-    }
-
-    pub fn new_transient() -> Self {
-        Self::Transient(TransientProblemTable::new())
     }
 
     pub fn contains(&self, address: Address) -> bool {
@@ -252,7 +261,7 @@ impl ProblemTable {
         }
     }
 
-    pub(crate) fn for_each_key_in_range(&self, range: AddressRange, mut f: impl FnMut(ProblemKey)) {
+    pub fn for_each_key_in_range(&self, range: AddressRange, mut f: impl FnMut(ProblemKey)) {
         match self {
             Self::Persistent(table) => table.for_each_key_in_range(range, &mut f),
             Self::Transient(table) => table.for_each_key_in_range(range, &mut f),
@@ -355,10 +364,36 @@ impl ProblemTable {
         }
     }
 
-    pub(crate) fn publish_upsert(&mut self, problem: Problem, encoded_size: usize, is_new: bool) {
+    pub(crate) fn append_allocation_writes(
+        &self,
+        reservations: &[ProblemId],
+        releases: &[ProblemId],
+        added: usize,
+        removed: usize,
+        writes: &mut EntityWriteBatch,
+    ) -> Result<(), EntityStorageError> {
+        if let Self::Persistent(table) = self {
+            table.append_allocation_writes(reservations, releases, added, removed, writes)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn publish_allocations(
+        &mut self,
+        reservations: &[ProblemId],
+        added: usize,
+        removed: usize,
+    ) {
         match self {
-            Self::Persistent(table) => table.publish_upsert(problem, encoded_size, is_new),
-            Self::Transient(table) => table.publish_upsert(problem, is_new),
+            Self::Persistent(table) => table.publish_allocations(reservations, added, removed),
+            Self::Transient(table) => table.publish_allocations(reservations),
+        }
+    }
+
+    pub(crate) fn publish_upsert(&mut self, problem: Problem, encoded_size: usize) {
+        match self {
+            Self::Persistent(table) => table.publish_upsert(problem, encoded_size),
+            Self::Transient(table) => table.publish_upsert(problem),
         }
     }
 
@@ -366,6 +401,163 @@ impl ProblemTable {
         match self {
             Self::Persistent(table) => table.publish_remove(key),
             Self::Transient(table) => table.publish_remove(key),
+        }
+    }
+}
+
+impl ProblemTableStaging {
+    pub(crate) fn contains(&self, problems: &ProblemTable, address: Address) -> bool {
+        if self
+            .staged_problems
+            .iter()
+            .any(|(key, problem)| key.address() == Some(address) && problem.is_some())
+        {
+            return true;
+        }
+
+        problems
+            .keys()
+            .filter(|key| key.address() == Some(address))
+            .any(|key| !self.staged_problems.contains_key(&key))
+    }
+
+    pub(crate) fn contains_key(&self, key: ProblemKey) -> bool {
+        self.staged_problems.contains_key(&key)
+    }
+
+    pub(crate) fn insert(
+        &mut self,
+        problems: &ProblemTable,
+        scope: ProblemScope,
+        kind: ProblemKind,
+        observed_revision: Revision,
+    ) -> Result<(), EntityStorageError> {
+        let key = ProblemKey::scoped(scope, kind);
+        let (mut problem, repeated) = match self.staged_problems.get(&key) {
+            Some(Some(problem)) => (problem.clone(), true),
+            Some(None) | None => match problems.try_get_by_key(key)? {
+                Some(problem) => (problem.as_ref().clone(), true),
+                None => (
+                    Problem::new_scoped(ProblemId::INVALID, scope, kind, observed_revision),
+                    false,
+                ),
+            },
+        };
+
+        if repeated {
+            problem.record_attempt(observed_revision);
+        }
+        self.staged_problems.insert(key, Some(problem));
+        Ok(())
+    }
+
+    pub(crate) fn remove(&mut self, key: ProblemKey) {
+        self.staged_problems.insert(key, None);
+    }
+
+    pub(crate) fn prepare(
+        self,
+        problems: &ProblemTable,
+    ) -> Result<(PreparedProblemBatch, EntityWriteBatch), EntityStorageError> {
+        let persistent = problems.is_persistent();
+        let mut inserted = 0usize;
+        let mut records = Vec::with_capacity(self.staged_problems.len());
+        let mut reservations = Vec::new();
+        let mut releases = Vec::new();
+        let mut writes = EntityWriteBatch::with_capacity(if persistent {
+            self.staged_problems.len()
+        } else {
+            0
+        });
+
+        for (key, problem) in self.staged_problems {
+            let previous = problems.try_get_by_key(key)?;
+            let is_new = previous.is_none();
+            let previous_id = previous.as_ref().map(|problem| problem.id());
+            drop(previous);
+
+            match problem {
+                Some(problem) => {
+                    let problem = if is_new {
+                        let id = problems.pending_id(inserted);
+                        inserted += 1;
+                        reservations.push(id);
+                        problem.with_id(id)
+                    } else {
+                        problem
+                    };
+                    let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&problem)
+                        .map_err(EntityStorageError::encode)?;
+                    let encoded_size = encoded.len();
+                    if persistent {
+                        writes.push(EntityWrite::insert_archived(
+                            Problem::ID.key_for(&problem.id()),
+                            encoded,
+                        ));
+                    }
+                    records.push(PreparedProblemRecord {
+                        encoded_size,
+                        key,
+                        problem: Some(problem),
+                    });
+                }
+                None => {
+                    let Some(id) = previous_id else {
+                        continue;
+                    };
+                    releases.push(id);
+                    if persistent {
+                        writes.push(EntityWrite::remove(Problem::ID.key_for(&id)));
+                    }
+                    records.push(PreparedProblemRecord {
+                        encoded_size: 0,
+                        key,
+                        problem: None,
+                    });
+                }
+            }
+        }
+
+        problems.append_allocation_writes(
+            &reservations,
+            &releases,
+            reservations.len(),
+            releases.len(),
+            &mut writes,
+        )?;
+
+        Ok((
+            PreparedProblemBatch {
+                records,
+                reservations,
+            },
+            writes,
+        ))
+    }
+}
+
+impl PreparedProblemBatch {
+    pub(crate) fn changes(&self) -> impl Iterator<Item = (ProblemKey, bool)> + '_ {
+        self.records
+            .iter()
+            .map(|record| (record.key, record.problem.is_some()))
+    }
+
+    pub(crate) fn publish(self, problems: &mut ProblemTable) {
+        let Self {
+            records,
+            reservations,
+        } = self;
+        let removed = records
+            .iter()
+            .filter(|record| record.problem.is_none())
+            .count();
+        problems.publish_allocations(&reservations, reservations.len(), removed);
+        for record in records {
+            match record.problem {
+                Some(problem) => problems.publish_upsert(problem, record.encoded_size),
+                None => problems.publish_remove(record.key),
+            }
         }
     }
 }

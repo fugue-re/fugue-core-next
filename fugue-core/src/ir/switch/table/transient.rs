@@ -1,8 +1,9 @@
 use super::{SwitchIndex, SwitchTableError};
 use crate::ir::switch::{Switch, SwitchId};
-use crate::ir::{Address, FunctionId};
+use crate::ir::{Address, FunctionId, IdAllocator};
 
 pub struct SwitchTable {
+    allocator: IdAllocator<Switch>,
     index: SwitchIndex,
     entries: Vec<Option<Switch>>,
 }
@@ -16,6 +17,7 @@ impl Default for SwitchTable {
 impl SwitchTable {
     pub fn new() -> Self {
         Self {
+            allocator: IdAllocator::new(),
             index: SwitchIndex::new(),
             entries: Vec::new(),
         }
@@ -29,7 +31,7 @@ impl SwitchTable {
     }
 
     pub(crate) fn pending_id(&self, offset: usize) -> SwitchId {
-        self.index.allocator.pending_id(offset)
+        self.allocator.pending_id(offset)
     }
 
     pub fn get_by_id(&self, id: SwitchId) -> Option<&Switch> {
@@ -70,35 +72,6 @@ impl SwitchTable {
         self.index.len()
     }
 
-    pub(crate) fn publish_reservation(&mut self, id: SwitchId) {
-        let allocated = self.index.allocator.allocate();
-        debug_assert_eq!(allocated, id);
-    }
-
-    pub(crate) fn publish_release(&mut self, id: SwitchId) {
-        self.index.allocator.release(id);
-    }
-
-    pub(crate) fn publish_upsert(&mut self, switch: Switch, previous_function: Option<FunctionId>) {
-        let id = switch.id();
-        let branch = switch.branch();
-        if let Some(previous_function) = previous_function {
-            self.index.remove(previous_function, branch);
-        }
-        self.index.insert(id, switch.function(), branch);
-        let slot = id.index();
-        if slot >= self.entries.len() {
-            self.entries.resize_with(slot + 1, || None);
-        }
-        self.entries[slot] = Some(switch);
-    }
-
-    pub(crate) fn publish_remove(&mut self, id: SwitchId, function: FunctionId, branch: Address) {
-        self.entries[id.index()] = None;
-        self.index.remove(function, branch);
-        self.index.allocator.release(id);
-    }
-
     pub fn insert<F>(&mut self, branch: Address, f: F) -> Result<SwitchId, SwitchTableError>
     where
         F: FnOnce(SwitchId, Address) -> Result<Switch, SwitchTableError>,
@@ -116,7 +89,7 @@ impl SwitchTable {
             return Ok(existing);
         }
 
-        let (id, switch) = self.index.allocator.try_allocate(|id| {
+        let (id, switch) = self.allocator.try_allocate(|id| {
             let switch = f(id, branch)?;
             if switch.branch() != branch {
                 return Err(SwitchTableError::AddressMismatch);
@@ -172,7 +145,7 @@ impl SwitchTable {
             return false;
         };
         self.index.remove(switch.function(), switch.branch());
-        self.index.allocator.release(id);
+        self.allocator.release(id);
         true
     }
 
@@ -181,5 +154,34 @@ impl SwitchTable {
             return false;
         };
         self.remove_by_id(id)
+    }
+
+    pub(crate) fn publish_reservation(&mut self, id: SwitchId) {
+        let allocated = self.allocator.allocate();
+        debug_assert_eq!(allocated, id);
+    }
+
+    pub(crate) fn publish_release(&mut self, id: SwitchId) {
+        self.allocator.release(id);
+    }
+
+    pub(crate) fn publish_upsert(&mut self, switch: Switch, previous_function: Option<FunctionId>) {
+        let id = switch.id();
+        let branch = switch.branch();
+        if let Some(previous_function) = previous_function {
+            self.index.remove(previous_function, branch);
+        }
+        self.index.insert(id, switch.function(), branch);
+        let slot = id.index();
+        if slot >= self.entries.len() {
+            self.entries.resize_with(slot + 1, || None);
+        }
+        self.entries[slot] = Some(switch);
+    }
+
+    pub(crate) fn publish_remove(&mut self, id: SwitchId, function: FunctionId, branch: Address) {
+        self.entries[id.index()] = None;
+        self.index.remove(function, branch);
+        self.allocator.release(id);
     }
 }

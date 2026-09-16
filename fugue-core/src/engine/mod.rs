@@ -22,7 +22,7 @@ use crate::il::common::{IlAnalyser, IlArtefact, IlFormId};
 use crate::il::registry::IlRegistry;
 use crate::ir::{
     Address, AddressRange, AddressRangeSet, FunctionId, IncompleteFunction, Reference,
-    ReferenceTarget, Switch, SymbolEntry, SymbolIndex,
+    ReferenceKey, Switch, SymbolEntry, SymbolIndex,
 };
 use crate::project::{
     AnalysisPhase, ChangeKinds, ChangeProvenance, ChangeSet, ChangeSource, Project, ProjectError,
@@ -813,14 +813,10 @@ impl AnalysisEngine {
         )
     }
 
-    pub fn remove_reference(
-        &self,
-        from: Address,
-        target: ReferenceTarget,
-    ) -> Result<ChangeSet, EngineError> {
+    pub fn remove_reference(&self, key: ReferenceKey) -> Result<ChangeSet, EngineError> {
         self.apply_update(
             ChangeSource::engine("update"),
-            ProjectUpdate::remove_reference(from, target),
+            ProjectUpdate::remove_reference(key),
         )
     }
 

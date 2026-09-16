@@ -1,26 +1,37 @@
 use std::collections::BTreeSet;
 use std::ops::Bound;
 
-use super::{CallGraphEdgeKey, InverseCallGraphEdgeKey, PreparedCallGraphBatch};
+use super::{InverseCallGraphEdgeKey, PreparedCallGraphBatch};
 use crate::ir::Address;
+use crate::ir::call_graph::CallGraphEdgeKey;
 use crate::storage::entities::EntityStorageError;
 
-#[derive(Default)]
 pub struct CallGraphIndex {
     forward: BTreeSet<CallGraphEdgeKey>,
-    // pub(crate) solely so the consistency verifier in the facade test module can
-    // enumerate the inverse index without a production-only accessor.
-    pub(crate) inverse: BTreeSet<InverseCallGraphEdgeKey>,
+    inverse: BTreeSet<InverseCallGraphEdgeKey>,
+}
+
+impl Default for CallGraphIndex {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CallGraphIndex {
+    pub(crate) fn new() -> Self {
+        Self {
+            forward: BTreeSet::new(),
+            inverse: BTreeSet::new(),
+        }
+    }
+
     pub(crate) fn callees(
         &self,
         caller: Address,
         after: Option<Address>,
     ) -> impl Iterator<Item = Result<Address, EntityStorageError>> + '_ {
         let start = after.map_or_else(
-            || Bound::Included(CallGraphEdgeKey::minimum_for(caller)),
+            || Bound::Included(CallGraphEdgeKey::new(caller, Address::MINIMUM)),
             |after| Bound::Excluded(CallGraphEdgeKey::new(caller, after)),
         );
         self.forward
@@ -35,7 +46,7 @@ impl CallGraphIndex {
         after: Option<Address>,
     ) -> impl Iterator<Item = Result<Address, EntityStorageError>> + '_ {
         let start = after.map_or_else(
-            || Bound::Included(InverseCallGraphEdgeKey::minimum_for(callee)),
+            || Bound::Included(InverseCallGraphEdgeKey::new(Address::MINIMUM, callee)),
             |after| Bound::Excluded(InverseCallGraphEdgeKey::new(after, callee)),
         );
         self.inverse
@@ -54,19 +65,6 @@ impl CallGraphIndex {
             .map(|&edge| Ok(edge))
     }
 
-    pub(crate) fn publish(&mut self, batch: PreparedCallGraphBatch) {
-        for edge in batch.edges {
-            let inverse = InverseCallGraphEdgeKey::new(edge.key.source(), edge.key.target());
-            if edge.present {
-                self.forward.insert(edge.key);
-                self.inverse.insert(inverse);
-            } else {
-                self.forward.remove(&edge.key);
-                self.inverse.remove(&inverse);
-            }
-        }
-    }
-
     pub(crate) fn clear(&mut self) {
         self.forward.clear();
         self.inverse.clear();
@@ -82,5 +80,18 @@ impl CallGraphIndex {
         self.forward.remove(&CallGraphEdgeKey::new(caller, callee));
         self.inverse
             .remove(&InverseCallGraphEdgeKey::new(caller, callee));
+    }
+
+    pub(crate) fn publish_batch(&mut self, batch: PreparedCallGraphBatch) {
+        for edge in batch.edges {
+            let inverse = InverseCallGraphEdgeKey::new(edge.key.source(), edge.key.target());
+            if edge.present {
+                self.forward.insert(edge.key);
+                self.inverse.insert(inverse);
+            } else {
+                self.forward.remove(&edge.key);
+                self.inverse.remove(&inverse);
+            }
+        }
     }
 }

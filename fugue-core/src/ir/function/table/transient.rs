@@ -98,45 +98,6 @@ impl FunctionTable {
         self.index.addresses.len()
     }
 
-    pub(crate) fn publish_reservations(&mut self, reservations: &[FunctionId]) {
-        let mut required = self.entries.len();
-        for &id in reservations {
-            let allocated = self.index.allocator.allocate();
-            debug_assert_eq!(allocated, id);
-            required = required.max(id.index() + 1);
-        }
-        if required > self.entries.len() {
-            self.entries.resize_with(required, || None);
-        }
-    }
-
-    pub(crate) fn publish_release(&mut self, id: FunctionId) {
-        self.index.allocator.release(id);
-    }
-
-    pub(crate) fn publish_upsert(&mut self, function: Function, previous_entry: Option<Address>) {
-        if let Some(previous_entry) = previous_entry {
-            self.index.addresses.remove(&previous_entry);
-        }
-        let id = function.id();
-        let index = id.index();
-        if index >= self.entries.len() {
-            self.entries.resize_with(index + 1, || None);
-        }
-        self.index.addresses.insert(function.entry(), id);
-        self.entries[index] = Some(function);
-    }
-
-    pub(crate) fn publish_remove(&mut self, id: FunctionId, entry: Address) {
-        self.index.addresses.remove(&entry);
-        self.entries[id.index()] = None;
-        self.index.allocator.release(id);
-    }
-
-    pub(crate) fn publish_membership(&mut self, by_block: FxHashMap<CodeBlockId, IdSet<Function>>) {
-        self.index.publish_membership(by_block);
-    }
-
     pub(crate) fn insert_with<R, F>(
         &mut self,
         addr: Address,
@@ -233,5 +194,44 @@ impl FunctionTable {
         self.index.allocator.release(id);
 
         true
+    }
+
+    pub(crate) fn publish_reservations(&mut self, reservations: &[FunctionId]) {
+        let mut required = self.entries.len();
+        for &id in reservations {
+            let allocated = self.index.allocator.allocate();
+            debug_assert_eq!(allocated, id);
+            required = required.max(id.index() + 1);
+        }
+        if required > self.entries.len() {
+            self.entries.resize_with(required, || None);
+        }
+    }
+
+    pub(crate) fn publish_release(&mut self, id: FunctionId) {
+        self.index.allocator.release(id);
+    }
+
+    pub(crate) fn publish_upsert(&mut self, function: Function, previous_entry: Option<Address>) {
+        if let Some(previous_entry) = previous_entry {
+            self.index.addresses.remove(&previous_entry);
+        }
+        let id = function.id();
+        let index = id.index();
+        if index >= self.entries.len() {
+            self.entries.resize_with(index + 1, || None);
+        }
+        self.index.addresses.insert(function.entry(), id);
+        self.entries[index] = Some(function);
+    }
+
+    pub(crate) fn publish_remove(&mut self, id: FunctionId, entry: Address) {
+        self.index.addresses.remove(&entry);
+        self.entries[id.index()] = None;
+        self.index.allocator.release(id);
+    }
+
+    pub(crate) fn publish_membership(&mut self, by_block: FxHashMap<CodeBlockId, IdSet<Function>>) {
+        self.index.publish_membership(by_block);
     }
 }

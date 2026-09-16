@@ -7,10 +7,12 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::ir::switch::{Switch, SwitchId};
-use crate::ir::{Address, FunctionId, IdAllocator};
+use crate::ir::{Address, FunctionId, IdSet};
 use crate::storage::entities::cursor::cursor_bound;
 use crate::storage::entities::schema::ENTITY_SWITCH_TABLE_ID;
-use crate::storage::entities::{Entity, EntityId, EntityRef, ProjectEntity, WriteBackWorker};
+use crate::storage::entities::{
+    Entity, EntityId, EntityRef, EntityWrite, EntityWriteBatch, ProjectEntity, WriteBackWorker,
+};
 use crate::storage::project::PersistableProjectEntity;
 use crate::storage::{EntityStorage, EntityStorageError};
 
@@ -37,7 +39,6 @@ impl Entity for SwitchTableHeader {
 }
 
 struct SwitchIndex {
-    allocator: IdAllocator<Switch>,
     branches: BTreeMap<Address, SwitchId>,
     by_function: BTreeMap<FunctionId, BTreeSet<Address>>,
 }
@@ -45,7 +46,6 @@ struct SwitchIndex {
 impl SwitchIndex {
     fn new() -> Self {
         Self {
-            allocator: IdAllocator::new(),
             branches: BTreeMap::new(),
             by_function: BTreeMap::new(),
         }
@@ -113,6 +113,32 @@ impl SwitchIndex {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct SwitchTableStaging {
+    cancelled_switches: IdSet<Switch>,
+    staged_switches: BTreeMap<Address, Option<Switch>>,
+    switch_reservations: Vec<SwitchId>,
+}
+
+pub(crate) struct PreparedSwitchBatch {
+    cancelled_switches: IdSet<Switch>,
+    records: Vec<PreparedSwitchRecord>,
+    switch_reservations: Vec<SwitchId>,
+}
+
+struct PreparedSwitchRecord {
+    branch: Address,
+    encoded_size: usize,
+    previous: Option<PreviousSwitch>,
+    switch: Option<Switch>,
+}
+
+#[derive(Clone, Copy)]
+struct PreviousSwitch {
+    function: FunctionId,
+    id: SwitchId,
+}
+
 pub enum SwitchTable {
     Persistent(PersistentSwitchTable),
     Transient(TransientSwitchTable),
@@ -145,27 +171,20 @@ impl SwitchTableError {
 }
 
 impl SwitchTable {
-    pub fn new(entities: EntityStorage, cache_bytes: usize) -> Result<Self, EntityStorageError> {
+    pub fn new_transient() -> Self {
+        Self::Transient(TransientSwitchTable::new())
+    }
+
+    pub fn new_persistent(
+        entities: EntityStorage,
+        cache_bytes: usize,
+        worker: Arc<WriteBackWorker>,
+    ) -> Result<Self, EntityStorageError> {
         Ok(Self::Persistent(PersistentSwitchTable::new(
             entities,
             cache_bytes,
-        )?))
-    }
-
-    pub fn with_worker(
-        entities: EntityStorage,
-        worker: Arc<WriteBackWorker>,
-        cache_bytes: usize,
-    ) -> Result<Self, EntityStorageError> {
-        Ok(Self::Persistent(PersistentSwitchTable::with_worker(
-            entities,
             worker,
-            cache_bytes,
         )?))
-    }
-
-    pub fn new_transient() -> Self {
-        Self::Transient(TransientSwitchTable::new())
     }
 
     pub fn contains(&self, branch: Address) -> bool {
@@ -338,19 +357,39 @@ impl SwitchTable {
         }
     }
 
-    pub(crate) fn publish_reservations(&mut self, reservations: &[SwitchId]) {
-        for &id in reservations {
-            match self {
-                Self::Persistent(table) => table.publish_reservation(id),
-                Self::Transient(table) => table.publish_reservation(id),
-            }
+    pub(crate) fn append_allocation_writes(
+        &self,
+        reservations: &[SwitchId],
+        releases: &[SwitchId],
+        added: usize,
+        removed: usize,
+        writes: &mut EntityWriteBatch,
+    ) -> Result<(), EntityStorageError> {
+        if let Self::Persistent(table) = self {
+            table.append_allocation_writes(reservations, releases, added, removed, writes)?;
         }
+        Ok(())
     }
 
-    pub(crate) fn publish_release(&mut self, id: SwitchId) {
+    pub(crate) fn publish_allocations(
+        &mut self,
+        reservations: &[SwitchId],
+        cancelled: &IdSet<Switch>,
+        added: usize,
+        removed: usize,
+    ) {
         match self {
-            Self::Persistent(table) => table.publish_release(id),
-            Self::Transient(table) => table.publish_release(id),
+            Self::Persistent(table) => table.publish_allocations(reservations, added, removed),
+            Self::Transient(table) => {
+                for &id in reservations {
+                    table.publish_reservation(id);
+                }
+                let mut cancelled = cancelled.iter().collect::<Vec<_>>();
+                cancelled.sort_unstable();
+                for id in cancelled {
+                    table.publish_release(id);
+                }
+            }
         }
     }
 
@@ -372,6 +411,203 @@ impl SwitchTable {
         match self {
             Self::Persistent(table) => table.publish_remove(id, function, branch),
             Self::Transient(table) => table.publish_remove(id, function, branch),
+        }
+    }
+}
+
+impl SwitchTableStaging {
+    pub(crate) fn get_by_branch<'a>(
+        &'a self,
+        switches: &'a SwitchTable,
+        branch: Address,
+    ) -> Result<Option<SwitchRef<'a>>, EntityStorageError> {
+        match self.staged_switches.get(&branch) {
+            Some(Some(switch)) => Ok(Some(EntityRef::borrowed(switch))),
+            Some(None) => Ok(None),
+            None => switches.try_get_by_branch(branch),
+        }
+    }
+
+    pub(crate) fn branches_for_function(
+        &self,
+        switches: &SwitchTable,
+        function: FunctionId,
+    ) -> BTreeSet<Address> {
+        let mut branches = switches
+            .branches_for_function(function)
+            .collect::<BTreeSet<_>>();
+        for (&branch, switch) in &self.staged_switches {
+            match switch {
+                Some(switch) if switch.function() == function => {
+                    branches.insert(branch);
+                }
+                Some(_) | None => {
+                    branches.remove(&branch);
+                }
+            }
+        }
+        branches
+    }
+
+    pub(crate) fn insert(&mut self, switch: Switch) {
+        self.staged_switches.insert(switch.branch(), Some(switch));
+    }
+
+    pub(crate) fn remove(
+        &mut self,
+        switches: &SwitchTable,
+        branch: Address,
+    ) -> Result<Option<Switch>, EntityStorageError> {
+        let Some(switch) = self
+            .get_by_branch(switches, branch)?
+            .map(|switch| switch.as_ref().clone())
+        else {
+            return Ok(None);
+        };
+
+        if switches.try_get_by_branch(branch)?.is_some() {
+            self.staged_switches.insert(branch, None);
+        } else {
+            self.staged_switches.remove(&branch);
+            self.cancelled_switches.insert(switch.id());
+        }
+        Ok(Some(switch))
+    }
+
+    pub(crate) fn reserve_id(&mut self, switches: &SwitchTable) -> SwitchId {
+        let id = switches.pending_id(self.switch_reservations.len());
+        self.switch_reservations.push(id);
+        id
+    }
+
+    pub(crate) fn prepare(
+        self,
+        switches: &SwitchTable,
+    ) -> Result<(PreparedSwitchBatch, EntityWriteBatch), EntityStorageError> {
+        let Self {
+            cancelled_switches,
+            staged_switches,
+            switch_reservations,
+        } = self;
+        let persistent = switches.is_persistent();
+        let mut records = Vec::with_capacity(staged_switches.len());
+        let mut added = 0usize;
+        let mut removed = 0usize;
+        let mut releases = cancelled_switches.iter().collect::<Vec<_>>();
+        let mut writes =
+            EntityWriteBatch::with_capacity(if persistent { staged_switches.len() } else { 0 });
+
+        for (branch, switch) in staged_switches {
+            let previous = switches.try_get_by_branch(branch)?;
+            if previous
+                .as_ref()
+                .is_some_and(|previous| switch.as_ref() == Some(previous.as_ref()))
+            {
+                continue;
+            }
+            if switch.is_none() && previous.is_none() {
+                continue;
+            }
+            let previous = previous.map(|switch| PreviousSwitch {
+                function: switch.function(),
+                id: switch.id(),
+            });
+            match &switch {
+                Some(entry) => {
+                    if previous.is_none() {
+                        added += 1;
+                    }
+                    let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(entry)
+                        .map_err(EntityStorageError::encode)?;
+                    let encoded_size = encoded.len();
+                    if persistent {
+                        writes.push(EntityWrite::insert_archived(
+                            Switch::ID.key_for(&entry.id()),
+                            encoded,
+                        ));
+                    }
+                    records.push(PreparedSwitchRecord {
+                        branch,
+                        encoded_size,
+                        previous,
+                        switch,
+                    });
+                }
+                None => {
+                    let id = previous
+                        .expect("prepared switch removal has a previous switch")
+                        .id;
+                    removed += 1;
+                    releases.push(id);
+                    if persistent {
+                        writes.push(EntityWrite::remove(Switch::ID.key_for(&id)));
+                    }
+                    records.push(PreparedSwitchRecord {
+                        branch,
+                        encoded_size: 0,
+                        previous,
+                        switch: None,
+                    });
+                }
+            }
+        }
+
+        releases.sort_unstable();
+        switches.append_allocation_writes(
+            &switch_reservations,
+            &releases,
+            added,
+            removed,
+            &mut writes,
+        )?;
+
+        Ok((
+            PreparedSwitchBatch {
+                cancelled_switches,
+                records,
+                switch_reservations,
+            },
+            writes,
+        ))
+    }
+}
+
+impl PreparedSwitchBatch {
+    pub(crate) fn changes(&self) -> impl Iterator<Item = (Address, bool)> + '_ {
+        self.records
+            .iter()
+            .map(|record| (record.branch, record.switch.is_some()))
+    }
+
+    pub(crate) fn publish(self, switches: &mut SwitchTable) {
+        let Self {
+            cancelled_switches,
+            records,
+            switch_reservations,
+        } = self;
+        let added = records
+            .iter()
+            .filter(|record| record.switch.is_some() && record.previous.is_none())
+            .count();
+        let removed = records
+            .iter()
+            .filter(|record| record.switch.is_none())
+            .count();
+        switches.publish_allocations(&switch_reservations, &cancelled_switches, added, removed);
+        for record in records {
+            match record.switch {
+                Some(switch) => switches.publish_upsert(
+                    switch,
+                    record.previous.map(|previous| previous.function),
+                    record.encoded_size,
+                ),
+                None => {
+                    let previous = record
+                        .previous
+                        .expect("prepared switch removal has a previous switch");
+                    switches.publish_remove(previous.id, previous.function, record.branch);
+                }
+            }
         }
     }
 }
@@ -402,9 +638,10 @@ mod test {
 
     fn tables() -> [SwitchTable; 2] {
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
+        let worker = WriteBackWorker::new(storage.clone()).unwrap();
         [
             SwitchTable::new_transient(),
-            SwitchTable::new(storage, 64 * 1024).unwrap(),
+            SwitchTable::new_persistent(storage, 64 * 1024, worker).unwrap(),
         ]
     }
 

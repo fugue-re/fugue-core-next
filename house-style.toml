@@ -149,6 +149,214 @@ modules = ["crate::analysis::function::recovery"]
 reason = "retained function-recovery facts are context, not generic inputs"
 
 [[vocabulary.term]]
+reject = "from_storage"
+prefer = "new"
+roles = ["function", "method"]
+modules = ["crate::storage::entities::cache"]
+reason = "EntityCache has one compulsory worker-backed constructor"
+
+[[vocabulary.term]]
+reject = "with_worker"
+prefer = "new for EntityCache or new_persistent for an IR facade"
+roles = ["function", "method"]
+modules = ["crate::ir", "crate::storage::entities::cache"]
+reason = "worker-backed construction uses the agreed constructor vocabulary"
+
+[[vocabulary.term]]
+reject = "from_sink"
+prefer = "new"
+roles = ["function", "method"]
+modules = ["crate::storage::entities::cache"]
+reason = "EntityCache has no alternate sink construction mode"
+
+[[vocabulary.term]]
+reject = "new_with"
+prefer = "new"
+roles = ["function", "method"]
+modules = ["crate::storage::entities::cache"]
+reason = "EntityCache has one compulsory worker-backed constructor"
+
+[[vocabulary.term]]
+reject = "new_with_sink"
+prefer = "new"
+roles = ["function", "method"]
+modules = ["crate::storage::entities::cache"]
+reason = "EntityCache has no alternate sink construction mode"
+
+[[vocabulary.term]]
+reject = "from_entries"
+prefer = "new_with"
+roles = ["function", "method"]
+modules = [
+    "crate::ir::block::table::persistent",
+    "crate::ir::call_graph::index::persistent",
+    "crate::ir::function::table::persistent",
+    "crate::ir::problem::table::persistent",
+    "crate::ir::reference::index::persistent",
+    "crate::ir::switch::table::persistent",
+    "crate::ir::symbol::table::persistent",
+]
+reason = "persistent IR implementations use new_with for constructors assembled from a prepared entity cache"
+
+[[vocabulary.term]]
+reject = "record"
+prefer = "get or a semantic operation"
+roles = ["function", "method"]
+modules = ["crate::ir::reference::index"]
+reason = "ReferenceEntry is internal index state and must not define the reference-index operation vocabulary"
+
+[[vocabulary.term]]
+reject = "get_record"
+prefer = "get or a semantic operation"
+roles = ["function", "method"]
+modules = ["crate::ir::reference::index"]
+reason = "ReferenceEntry lookup remains inside staging and concrete backend boundaries"
+
+[[vocabulary.term]]
+reject = "get_by_key"
+prefer = "get"
+roles = ["function", "method"]
+modules = ["crate::ir::reference::index"]
+reason = "ReferenceKey is the canonical reference identity"
+
+[[vocabulary.term]]
+reject = "try_get_by_key"
+prefer = "try_get"
+roles = ["function", "method"]
+modules = ["crate::ir::reference::index"]
+reason = "ReferenceKey is the canonical reference identity"
+
+[[vocabulary.term]]
+reject = "insert_or_update"
+prefer = "add_or_update"
+roles = ["function", "method"]
+modules = [
+    "crate::ir::symbol::table",
+    "crate::ir::symbol::table::persistent",
+    "crate::ir::symbol::table::transient",
+]
+reason = "symbol insertion uses the table's established add vocabulary across staging and storage implementations"
+
+[[vocabulary.term]]
+reject = "find_referent"
+prefer = "get_referent"
+roles = ["function", "method"]
+modules = ["crate::ir::symbol::table"]
+reason = "symbol referent lookup uses the table's established get vocabulary"
+
+[[vocabulary.term]]
+reject = "preview"
+prefer = "prefetch"
+roles = ["constant", "local"]
+modules = ["crate::ir::persistent"]
+reason = "free IDs are fetched ahead of allocator demand rather than presented for inspection"
+
+[[vocabulary.term]]
+reject = "publish_prepared"
+prefer = "publish_allocations"
+roles = ["function", "method"]
+modules = ["crate::ir"]
+reason = "publishing prepared table allocation state uses publish_allocations"
+
+[[vocabulary.term]]
+reject = "publish_transition"
+prefer = "publish_allocations"
+roles = ["function", "method"]
+modules = [
+    "crate::ir::block::table::persistent",
+    "crate::ir::function::table::persistent",
+    "crate::ir::symbol::table::persistent",
+]
+reason = "persistent table publication names the allocation state made visible"
+
+[[vocabulary.term]]
+reject = "append_prepared_transition_writes"
+prefer = "append_allocation_writes"
+roles = ["function", "method"]
+modules = [
+    "crate::ir::problem::table",
+    "crate::ir::switch::table",
+    "crate::ir::symbol::table",
+]
+reason = "allocator transition writes use the same allocation vocabulary as their publication operation"
+
+[[vocabulary.term]]
+reject = "publish_new_batch"
+prefer = "publish_batch"
+roles = ["function", "method"]
+modules = ["crate::ir"]
+reason = "batch publication uses the representation-neutral publish_batch name"
+
+[[vocabulary.term]]
+reject = "minimum_for"
+prefer = "new"
+roles = ["function", "method"]
+modules = ["crate::ir"]
+reason = "persisted keys use ordinary constructors and search call sites supply minimum trailing values"
+
+[[vocabulary.term]]
+reject = "first"
+prefer = "new"
+roles = ["function", "method"]
+modules = [
+    "crate::ir::block::table::persistent",
+    "crate::ir::call_graph",
+    "crate::ir::function::table::persistent",
+    "crate::ir::persistent",
+    "crate::ir::reference",
+]
+reason = "persisted keys use complete ordinary constructors; symbol-table first-result queries remain valid query vocabulary"
+
+[[vocabulary.term]]
+reject = "function_edges"
+prefer = "callees"
+roles = ["field", "function", "method", "type"]
+modules = ["crate::ir::call_graph"]
+reason = "call-graph replacement operations name the callees associated with a caller"
+
+[[vocabulary.term]]
+reject = "set_function_edges"
+prefer = "set_callees"
+roles = ["function", "method"]
+modules = ["crate::ir::call_graph"]
+reason = "call-graph replacement operations set the complete callee set for a caller"
+
+[[vocabulary.term]]
+reject = "remove_function_edges"
+prefer = "clear_callees"
+roles = ["function", "method"]
+modules = ["crate::ir::call_graph"]
+reason = "call-graph removal clears the complete callee set for a caller"
+
+[[vocabulary.term]]
+reject = "for_range"
+prefer = "new"
+roles = ["function", "method"]
+modules = ["crate::ir"]
+reason = "persisted keys use ordinary constructors rather than search-specific constructors"
+
+[[vocabulary.term]]
+reject = "supported"
+prefer = "remove the backing-reference workaround"
+roles = ["function", "method"]
+modules = ["crate::ir::function::table"]
+reason = "function staging preserves reference provenance directly and must not reconstruct a supposedly supported backing reference"
+
+[[vocabulary.term]]
+reject = "append_size_bucket_changes"
+prefer = "append_bucket_occupancy_writes"
+roles = ["function", "method"]
+modules = ["crate::ir::block::table::persistent"]
+reason = "the operation appends writes which publish bucket occupancy"
+
+[[vocabulary.term]]
+reject = "size_bucket_has_other"
+prefer = "bucket_contains_retained_block"
+roles = ["function", "method"]
+modules = ["crate::ir::block::table::persistent"]
+reason = "the predicate tests whether a bucket still contains a block outside the removal set"
+
+[[vocabulary.term]]
 reject = "ssa"
 prefer = "omit the redundant SSA marker"
 roles = ["module", "type"]
@@ -164,6 +372,7 @@ additional = [
     "evaluate",
     "fold",
     "optimise",
+    "publish",
     "produce",
     "recover",
     "rewrite",
@@ -228,6 +437,42 @@ modules = [
     "crate::ir::problem::table",
     "crate::ir::switch::table",
     "crate::ir::symbol::table",
+]
+
+[[family]]
+name = "ir-bidirectional-index-facades"
+modules = ["crate::ir::call_graph::index", "crate::ir::reference::index"]
+
+[[family]]
+name = "ir-staging"
+modules = [
+    "crate::ir::call_graph::index",
+    "crate::ir::function::table",
+    "crate::ir::reference::index",
+]
+
+[[family]]
+name = "ir-persistent-tables"
+modules = [
+    "crate::ir::block::table::persistent",
+    "crate::ir::call_graph::index::persistent",
+    "crate::ir::function::table::persistent",
+    "crate::ir::problem::table::persistent",
+    "crate::ir::reference::index::persistent",
+    "crate::ir::switch::table::persistent",
+    "crate::ir::symbol::table::persistent",
+]
+
+[[family]]
+name = "ir-transient-tables"
+modules = [
+    "crate::ir::block::table::transient",
+    "crate::ir::call_graph::index::transient",
+    "crate::ir::function::table::transient",
+    "crate::ir::problem::table::transient",
+    "crate::ir::reference::index::transient",
+    "crate::ir::switch::table::transient",
+    "crate::ir::symbol::table::transient",
 ]
 
 [[family]]
@@ -389,7 +634,7 @@ reason = "ids_by_address and ids_by_name are parallel per-index scans; the share
 [[exception]]
 rule = "family_visibility_drift"
 path = "fugue-core/src/ir/function/table/mod.rs"
-item = "publish_prepared"
+item = "publish_allocations"
 reason = "publish visibility follows the caller: function materialises internally while the transaction layer drives the other tables"
 
 [[exception]]
@@ -407,7 +652,7 @@ reason = "publish visibility follows the caller: function materialises internall
 [[exception]]
 rule = "family_visibility_drift"
 path = "fugue-core/src/ir/symbol/table/mod.rs"
-item = "publish_prepared"
+item = "publish_allocations"
 reason = "publish visibility follows the caller: the prepared half-tie mirrors function's internal materialisation"
 
 [[exception]]
@@ -466,9 +711,27 @@ path = "fugue-core/src/ir/block/mod.rs"
 reason = "address_range and coverage assemble small owned range views at one natural point; not repeated accessors"
 
 [[exception]]
+rule = "allocating_getter"
+path = "fugue-core/src/ir/block/incomplete.rs"
+item = "crate::ir::block::incomplete::CodeBlockRecord::address_range"
+reason = "address_range constructs a small Copy range view and matches the corresponding CodeBlock accessor"
+
+[[exception]]
 rule = "associated_namespace_helper"
 path = "fugue-core/src/ir/block/table/persistent.rs"
 reason = "write-batch builders group on their table type deliberately; the batch is the subject, the table names the domain"
+
+[[exception]]
+rule = "trivial_helper"
+path = "fugue-core/src/ir/block/table/persistent.rs"
+item = "crate::ir::block::table::persistent::CodeBlockSizeBucket::all"
+reason = "the bucket type owns enumeration of its bounded u16 size domain so callers do not duplicate its representation invariant"
+
+[[exception]]
+rule = "collection_custody"
+path = "fugue-core/src/ir/reference/index/mod.rs"
+item = "crate::ir::reference::index::ReferenceStaging::staged_references"
+reason = "staged references, asserted keys and derived coverage form one transaction-staging aggregate; the private methods implement its persisted-plus-staged reference view"
 
 [[exception]]
 rule = "associated_namespace_helper"

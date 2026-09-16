@@ -26,7 +26,9 @@ pub(crate) use block::{CodeBlockIdsByAddress, CodeBlockRecord, PreparedCodeBlock
 
 pub(crate) mod call_graph;
 pub(crate) use call_graph::CallGraphStaging;
-pub use call_graph::{CallGraphEdgeKey, CallGraphIndex};
+pub use call_graph::{
+    CallGraphAddressIterator, CallGraphEdgeIterator, CallGraphEdgeKey, CallGraphIndex,
+};
 
 pub(crate) mod cfg;
 pub use cfg::{FlowKind, FlowTarget};
@@ -45,6 +47,7 @@ pub(crate) mod location;
 pub use location::Location;
 
 pub(crate) mod problem;
+pub(crate) use problem::{PreparedProblemBatch, ProblemTableStaging};
 pub use problem::{
     Problem, ProblemClass, ProblemId, ProblemKey, ProblemKind, ProblemRef, ProblemScope,
     ProblemTable, ProblemTableError,
@@ -53,25 +56,25 @@ pub use problem::{
 pub(crate) mod persistent;
 
 pub(crate) mod reference;
-pub(crate) use reference::PreparedReferenceIndexRecord;
+pub(crate) use reference::{DerivedReferenceBatch, PreparedReferenceBatch, ReferenceStaging};
 pub use reference::{
-    Reference, ReferenceIndex, ReferenceKey, ReferenceKind, ReferenceOrigin, ReferenceProperties,
-    ReferenceTarget,
+    Reference, ReferenceIndex, ReferenceIndexError, ReferenceIterator, ReferenceKey, ReferenceKind,
+    ReferenceOrigin, ReferenceProperties, ReferenceProvenance, ReferenceTarget,
 };
 
 pub(crate) mod switch;
+pub(crate) use switch::{PreparedSwitchBatch, SwitchTableStaging};
 pub use switch::{
     Switch, SwitchCase, SwitchCaseLabel, SwitchId, SwitchModel, SwitchProperties, SwitchRef,
     SwitchTable, SwitchTableError,
 };
 
 pub(crate) mod symbol;
-pub(crate) use symbol::SymbolIndexState;
 pub use symbol::{
-    LazySymbol, Symbol, SymbolEntry, SymbolId, SymbolIndex, SymbolInsertion, SymbolMap,
-    SymbolProperties, SymbolRef, SymbolTable, SymbolTableSelector, TransientSymbolTable,
-    existing_symbol, symbol,
+    LazySymbol, Symbol, SymbolEntry, SymbolId, SymbolIndex, SymbolMap, SymbolProperties, SymbolRef,
+    SymbolTable, SymbolTableSelector, TransientSymbolTable, existing_symbol, symbol,
 };
+pub(crate) use symbol::{PreparedSymbolBatch, SymbolTableStaging};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 struct IndexMetadata {
@@ -293,12 +296,6 @@ impl<T> IdAllocator<T> {
     pub(crate) fn release(&mut self, id: Id<T>) {
         self.free_ids.push(id.next_generation());
     }
-
-    pub(crate) fn mark_allocated(&mut self, id: Id<T>) {
-        self.next_index = self.next_index.max(id.index() + 1);
-        self.free_ids
-            .retain(|free_id| free_id.index() != id.index());
-    }
 }
 
 #[repr(transparent)]
@@ -336,6 +333,20 @@ impl<T> PartialEq for IdSet<T> {
 
 impl<T> Eq for IdSet<T> {}
 
+impl<T> Extend<Id<T>> for IdSet<T> {
+    fn extend<I: IntoIterator<Item = Id<T>>>(&mut self, iter: I) {
+        self.set.extend(iter.into_iter().map(|id| id.key()));
+    }
+}
+
+impl<T> FromIterator<Id<T>> for IdSet<T> {
+    fn from_iter<I: IntoIterator<Item = Id<T>>>(iter: I) -> Self {
+        let mut set = Self::new();
+        set.extend(iter);
+        set
+    }
+}
+
 impl<T> IdSet<T> {
     pub const fn new() -> Self {
         IdSet {
@@ -346,6 +357,10 @@ impl<T> IdSet<T> {
 
     pub fn contains(&self, id: Id<T>) -> bool {
         self.set.contains(id.key())
+    }
+
+    pub fn difference<'a>(&'a self, other: &'a Self) -> impl Iterator<Item = Id<T>> + 'a {
+        self.iter().filter(|&id| !other.contains(id))
     }
 
     pub fn iter(&self) -> impl Iterator<Item = Id<T>> + '_ {

@@ -1,13 +1,14 @@
+use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroU16;
 use std::ops::Bound;
 use std::sync::Arc;
 
 use smallvec::SmallVec;
 
 use super::{CodeBlockIds, CodeBlockIdsByAddress};
-use crate::ir::persistent::{PersistentIdAllocator, PersistentTable};
-use crate::ir::{Address, AddressRange, CodeBlock, Id, PreparedCodeBlockRecord, RawAddress};
+use crate::ir::persistent::{PersistentIdAllocator, PersistentIndexRebuilder, PersistentTable};
+use crate::ir::{Address, AddressRange, CodeBlock, Id, IdSet, PreparedCodeBlockRecord, RawAddress};
 use crate::lifter::ContextSet;
 use crate::storage::entities::schema::{
     ENTITY_CODE_BLOCK_SIZE_BUCKET_INDEX_ID, ENTITY_CODE_BLOCK_SIZE_BUCKETS_INDEX_ID,
@@ -20,8 +21,6 @@ use crate::storage::entities::{
 };
 use crate::storage::segments::space::AddressSpaceId;
 
-const INDEX_REBUILD_BATCH: usize = 512;
-
 type Ref<'a> = CachedRef<'a, CodeBlock>;
 type Iter<'a> = Box<dyn Iterator<Item = Ref<'a>> + 'a>;
 
@@ -31,35 +30,57 @@ pub struct CodeBlockTable {
     storage: EntityStorage,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+struct CodeBlockSizeBucket(u8);
+
+impl CodeBlockSizeBucket {
+    const MAX: Self = Self(u16::BITS as u8);
+
+    fn new(range: AddressRange) -> Self {
+        let size = u16::try_from(range.size())
+            .ok()
+            .and_then(NonZeroU16::new)
+            .expect("code block size must fit in u16");
+        Self(
+            (u16::BITS - (size.get() - 1).leading_zeros())
+                .try_into()
+                .expect("code block size bucket must fit in u8"),
+        )
+    }
+
+    fn overlap_search_start(self, address: RawAddress) -> RawAddress {
+        let width = (1u32 << self.0) - 1;
+        address.checked_sub(width).unwrap_or_else(RawAddress::zero)
+    }
+
+    fn all() -> impl Iterator<Item = Self> {
+        (0..=Self::MAX.0).map(Self)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct CodeBlockStartKey {
-    space: AddressSpaceId,
-    start: RawAddress,
+    address: Address,
     id: Id<CodeBlock>,
 }
 
 impl CodeBlockStartKey {
-    fn first(space: AddressSpaceId, start: RawAddress) -> Self {
-        Self {
-            space,
-            start,
-            id: Id::with_generation(0, 0),
-        }
+    fn new(address: Address, id: Id<CodeBlock>) -> Self {
+        Self { address, id }
     }
 }
 
 impl EntityKeyCodec for CodeBlockStartKey {
     fn decode(input: &mut &[u8]) -> Option<Self> {
-        Some(Self {
-            space: AddressSpaceId::decode(input)?,
-            start: RawAddress::decode(input)?,
-            id: Id::decode(input)?,
-        })
+        let space = AddressSpaceId::decode(input)?;
+        let address = Address::new(space, RawAddress::decode(input)?);
+        Some(Self::new(address, Id::decode(input)?))
     }
 
     fn encode(&self, output: &mut impl Extend<u8>) {
-        self.space.encode(output);
-        self.start.encode(output);
+        self.address.space().encode(output);
+        self.address.raw_address().encode(output);
         self.id.encode(output);
     }
 }
@@ -70,19 +91,17 @@ impl EntityKey for CodeBlockStartKey {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct CodeBlockSizeBucketKey {
-    space: AddressSpaceId,
-    bucket: u8,
-    start: RawAddress,
+    address: Address,
     id: Id<CodeBlock>,
+    bucket: CodeBlockSizeBucket,
 }
 
 impl CodeBlockSizeBucketKey {
-    fn first(space: AddressSpaceId, bucket: u8, start: RawAddress) -> Self {
+    fn new(address: Address, id: Id<CodeBlock>, bucket: CodeBlockSizeBucket) -> Self {
         Self {
-            space,
+            address,
+            id,
             bucket,
-            start,
-            id: Id::with_generation(0, 0),
         }
     }
 }
@@ -92,18 +111,15 @@ impl EntityKeyCodec for CodeBlockSizeBucketKey {
         let space = AddressSpaceId::decode(input)?;
         let (&bucket, rest) = input.split_first()?;
         *input = rest;
-        Some(Self {
-            space,
-            bucket,
-            start: RawAddress::decode(input)?,
-            id: Id::decode(input)?,
-        })
+        let address = Address::new(space, RawAddress::decode(input)?);
+        let id = Id::decode(input)?;
+        Some(Self::new(address, id, CodeBlockSizeBucket(bucket)))
     }
 
     fn encode(&self, output: &mut impl Extend<u8>) {
-        self.space.encode(output);
-        output.extend([self.bucket]);
-        self.start.encode(output);
+        self.address.space().encode(output);
+        output.extend([self.bucket.0]);
+        self.address.raw_address().encode(output);
         self.id.encode(output);
     }
 }
@@ -116,9 +132,15 @@ impl EntityKey for CodeBlockSizeBucketKey {
 #[repr(transparent)]
 struct CodeBlockSizeBucketsKey(AddressSpaceId);
 
+impl CodeBlockSizeBucketsKey {
+    fn new(space: AddressSpaceId) -> Self {
+        Self(space)
+    }
+}
+
 impl EntityKeyCodec for CodeBlockSizeBucketsKey {
     fn decode(input: &mut &[u8]) -> Option<Self> {
-        AddressSpaceId::decode(input).map(Self)
+        AddressSpaceId::decode(input).map(Self::new)
     }
 
     fn encode(&self, output: &mut impl Extend<u8>) {
@@ -148,41 +170,28 @@ impl Entity for CodeBlockSizeBucketRecord {
 
 #[derive(Debug, Clone, Copy, Default, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 struct CodeBlockSizeBucketsRecord {
-    bucket_bits: u64,
-    full_width: bool,
+    bucket_bits: u32,
 }
 
 impl CodeBlockSizeBucketsRecord {
-    fn contains(self, bucket: u8) -> bool {
-        if bucket == 64 {
-            self.full_width
-        } else {
-            self.bucket_bits & (1u64 << bucket) != 0
-        }
+    fn contains(self, bucket: CodeBlockSizeBucket) -> bool {
+        self.bucket_bits & (1u32 << bucket.0) != 0
     }
 
     fn is_empty(self) -> bool {
-        self.bucket_bits == 0 && !self.full_width
+        self.bucket_bits == 0
     }
 
-    fn insert(&mut self, bucket: u8) {
-        if bucket == 64 {
-            self.full_width = true;
-        } else {
-            self.bucket_bits |= 1u64 << bucket;
-        }
+    fn insert(&mut self, bucket: CodeBlockSizeBucket) {
+        self.bucket_bits |= 1u32 << bucket.0;
     }
 
-    fn remove(&mut self, bucket: u8) {
-        if bucket == 64 {
-            self.full_width = false;
-        } else {
-            self.bucket_bits &= !(1u64 << bucket);
-        }
+    fn remove(&mut self, bucket: CodeBlockSizeBucket) {
+        self.bucket_bits &= !(1u32 << bucket.0);
     }
 
-    fn buckets(self) -> impl Iterator<Item = u8> {
-        (0..=64).filter(move |&bucket| self.contains(bucket))
+    fn buckets(self) -> impl Iterator<Item = CodeBlockSizeBucket> {
+        CodeBlockSizeBucket::all().filter(move |&bucket| self.contains(bucket))
     }
 }
 
@@ -193,35 +202,76 @@ impl Entity for CodeBlockSizeBucketsRecord {
 #[derive(Default)]
 struct CodeBlockSizeBucketChange {
     inserted: bool,
-    removed: BTreeSet<Id<CodeBlock>>,
+    removed: IdSet<CodeBlock>,
+}
+
+fn append_range_insert(
+    writes: &mut EntityWriteBatch,
+    id: Id<CodeBlock>,
+    range: AddressRange,
+    bucket: CodeBlockSizeBucket,
+) -> Result<(), EntityStorageError> {
+    writes.insert_entity(
+        &CodeBlockStartKey::new(range.start_address(), id),
+        &CodeBlockStartRecord,
+    )?;
+    writes.insert_entity(
+        &CodeBlockSizeBucketKey::new(range.start_address(), id, bucket),
+        &CodeBlockSizeBucketRecord { end: range.end() },
+    )
+}
+
+fn append_range_remove(writes: &mut EntityWriteBatch, id: Id<CodeBlock>, range: AddressRange) {
+    writes.remove_entity::<_, CodeBlockStartRecord>(&CodeBlockStartKey::new(
+        range.start_address(),
+        id,
+    ));
+    writes.remove_entity::<_, CodeBlockSizeBucketRecord>(&CodeBlockSizeBucketKey::new(
+        range.start_address(),
+        id,
+        CodeBlockSizeBucket::new(range),
+    ));
+}
+
+fn rebuild_indexes(
+    storage: &EntityStorage,
+    entries: &EntityCache<Id<CodeBlock>, CodeBlock>,
+) -> Result<PersistentIdAllocator<CodeBlock>, EntityStorageError> {
+    let mut buckets = BTreeMap::<AddressSpaceId, CodeBlockSizeBucketsRecord>::new();
+    let mut rebuilder = PersistentIndexRebuilder::new(storage, PersistentTable::CodeBlocks);
+    for entry in entries.try_iter()? {
+        let (id, block) = entry?;
+        let range = block.address_range();
+        let bucket = CodeBlockSizeBucket::new(range);
+        rebuilder.append(id, |writes| append_range_insert(writes, id, range, bucket))?;
+        buckets.entry(range.space()).or_default().insert(bucket);
+    }
+    rebuilder.finish(|writes| {
+        for (space, record) in buckets {
+            writes.insert_entity(&CodeBlockSizeBucketsKey::new(space), &record)?;
+        }
+        Ok(())
+    })
 }
 
 impl CodeBlockTable {
     pub(crate) fn new(
         storage: EntityStorage,
         cache_bytes: usize,
-    ) -> Result<Self, EntityStorageError> {
-        let entries = EntityCache::new(storage.clone(), cache_bytes)?;
-        Self::from_entries(storage, entries)
-    }
-
-    pub(crate) fn with_worker(
-        storage: EntityStorage,
         worker: Arc<WriteBackWorker>,
-        cache_bytes: usize,
     ) -> Result<Self, EntityStorageError> {
-        let entries = EntityCache::with_worker(storage.clone(), worker, cache_bytes);
-        Self::from_entries(storage, entries)
+        let entries = EntityCache::new(storage.clone(), cache_bytes, worker);
+        Self::new_with(storage, entries)
     }
 
-    fn from_entries(
+    fn new_with(
         storage: EntityStorage,
         entries: EntityCache<Id<CodeBlock>, CodeBlock>,
     ) -> Result<Self, EntityStorageError> {
         let allocator =
             match PersistentIdAllocator::load(storage.clone(), PersistentTable::CodeBlocks)? {
                 Some(allocator) => allocator,
-                None => Self::rebuild_indexes(&storage, &entries)?,
+                None => rebuild_indexes(&storage, &entries)?,
             };
         Ok(Self {
             allocator,
@@ -266,15 +316,11 @@ impl CodeBlockTable {
     }
 
     fn ids_starting_at(&self, address: Address) -> Result<CodeBlockIds, EntityStorageError> {
-        let start = CodeBlockStartKey::first(address.space(), address.raw_address());
+        let start = CodeBlockStartKey::new(address, Id::with_generation(0, 0));
         self.storage
             .iter_range::<CodeBlockStartKey, CodeBlockStartRecord>(Bound::Included(&start))?
             .map_while(|entry| match entry {
-                Ok((key, _))
-                    if key.space == address.space() && key.start == address.raw_address() =>
-                {
-                    Some(Ok(key.id))
-                }
+                Ok((key, _)) if key.address == address => Some(Ok(key.id)),
                 Ok(_) => None,
                 Err(error) => Some(Err(error)),
             })
@@ -288,7 +334,7 @@ impl CodeBlockTable {
         let mut ids_by_address = CodeBlockIdsByAddress::with_capacity(addresses.len());
         for addresses in addresses.chunk_by(|left, right| left.space() == right.space()) {
             let space = addresses[0].space();
-            let first = CodeBlockStartKey::first(space, addresses[0].raw_address());
+            let first = CodeBlockStartKey::new(addresses[0], Id::with_generation(0, 0));
             let mut records = self
                 .storage
                 .iter_range::<CodeBlockStartKey, CodeBlockStartRecord>(Bound::Included(&first))?;
@@ -296,11 +342,12 @@ impl CodeBlockTable {
 
             for &address in addresses {
                 let mut ids = SmallVec::new();
-                while current.as_ref().is_some_and(|(key, _)| {
-                    key.space == space && key.start <= address.raw_address()
-                }) {
+                while current
+                    .as_ref()
+                    .is_some_and(|(key, _)| key.address.space() == space && key.address <= address)
+                {
                     let (key, _) = current.take().expect("current record must exist");
-                    if key.start == address.raw_address() {
+                    if key.address == address {
                         ids.push(key.id);
                     }
                     current = records.next().transpose()?;
@@ -340,17 +387,17 @@ impl CodeBlockTable {
         let mut ids = self
             .overlap_ids(range.start_address())
             .unwrap_or_else(|error| error.into_fatal());
-        let start = CodeBlockStartKey::first(range.space(), range.start());
+        let start = CodeBlockStartKey::new(range.start_address(), Id::with_generation(0, 0));
         let iter = self
             .storage
             .iter_range::<CodeBlockStartKey, CodeBlockStartRecord>(Bound::Excluded(&start))
             .unwrap_or_else(|error| error.into_fatal());
         for entry in iter {
             let (key, _) = entry.unwrap_or_else(|error| error.into_fatal());
-            if key.space != range.space() || key.start > range.end() {
+            if key.address.space() != range.space() || key.address > range.end_address() {
                 break;
             }
-            if key.start > range.start() {
+            if key.address > range.start_address() {
                 ids.push(key.id);
             }
         }
@@ -359,14 +406,6 @@ impl CodeBlockTable {
 
     pub(crate) fn flush(&self) -> Result<(), EntityStorageError> {
         self.entries.flush()
-    }
-
-    pub(crate) fn publish_upsert(&self, block: CodeBlock, encoded_size: usize) {
-        self.entries.publish_insert(block.id(), block, encoded_size);
-    }
-
-    pub(crate) fn publish_remove(&self, id: Id<CodeBlock>) {
-        self.entries.publish_remove(&id);
     }
 
     pub(crate) fn find_by_range_and_context(
@@ -387,7 +426,7 @@ impl CodeBlockTable {
         let Some(buckets) = self
             .storage
             .get::<CodeBlockSizeBucketsKey, CodeBlockSizeBucketsRecord>(
-                &CodeBlockSizeBucketsKey(address.space()),
+                &CodeBlockSizeBucketsKey::new(address.space()),
             )?
         else {
             return Ok(SmallVec::new());
@@ -395,10 +434,10 @@ impl CodeBlockTable {
         let raw = address.raw_address();
         let mut ids = SmallVec::new();
         for bucket in buckets.buckets() {
-            let start = CodeBlockSizeBucketKey::first(
-                address.space(),
+            let start = CodeBlockSizeBucketKey::new(
+                Address::new(address.space(), bucket.overlap_search_start(raw)),
+                Id::with_generation(0, 0),
                 bucket,
-                Self::bucket_window_start(raw, bucket),
             );
             for entry in self
                 .storage
@@ -407,7 +446,10 @@ impl CodeBlockTable {
                 ))?
             {
                 let (key, record) = entry?;
-                if key.space != address.space() || key.bucket != bucket || key.start > raw {
+                if key.address.space() != address.space()
+                    || key.bucket != bucket
+                    || key.address > address
+                {
                     break;
                 }
                 if record.end >= raw {
@@ -418,108 +460,23 @@ impl CodeBlockTable {
         Ok(ids)
     }
 
-    fn rebuild_indexes(
-        storage: &EntityStorage,
-        entries: &EntityCache<Id<CodeBlock>, CodeBlock>,
-    ) -> Result<PersistentIdAllocator<CodeBlock>, EntityStorageError> {
-        let mut buckets = BTreeMap::<AddressSpaceId, CodeBlockSizeBucketsRecord>::new();
-        let mut live = 0usize;
-        let mut next_index = 0usize;
-        let mut writes = EntityWriteBatch::with_capacity(INDEX_REBUILD_BATCH);
-        for entry in entries.try_iter()? {
-            let (id, block) = entry?;
-            let range = block.address_range();
-            let bucket = Self::size_bucket(range);
-            Self::append_range_insert(&mut writes, id, range, bucket)?;
-            buckets.entry(range.space()).or_default().insert(bucket);
-            live += 1;
-            next_index = next_index.max(id.index() + 1);
-            if writes.len() >= INDEX_REBUILD_BATCH {
-                storage.apply_batch(&writes)?;
-                writes.clear();
-            }
-        }
-        for (space, record) in buckets {
-            writes.insert_entity(&CodeBlockSizeBucketsKey(space), &record)?;
-        }
-        storage.apply_batch(&writes)?;
-        PersistentIdAllocator::initialise(
-            storage.clone(),
-            PersistentTable::CodeBlocks,
-            next_index,
-            live,
-        )
-    }
-
-    fn size_bucket(range: AddressRange) -> u8 {
-        let size = u128::from(range.end().offset()) - u128::from(range.start().offset()) + 1;
-        (u128::BITS - (size - 1).leading_zeros()) as u8
-    }
-
-    fn bucket_window_start(address: RawAddress, bucket: u8) -> RawAddress {
-        let width = if bucket == 64 {
-            u64::MAX
-        } else {
-            (1u64 << bucket) - 1
-        };
-        RawAddress::from(address.offset().saturating_sub(width))
-    }
-
-    fn append_range_insert(
-        writes: &mut EntityWriteBatch,
-        id: Id<CodeBlock>,
-        range: AddressRange,
-        bucket: u8,
-    ) -> Result<(), EntityStorageError> {
-        writes.insert_entity(
-            &CodeBlockStartKey {
-                space: range.space(),
-                start: range.start(),
-                id,
-            },
-            &CodeBlockStartRecord,
-        )?;
-        writes.insert_entity(
-            &CodeBlockSizeBucketKey {
-                space: range.space(),
-                bucket,
-                start: range.start(),
-                id,
-            },
-            &CodeBlockSizeBucketRecord { end: range.end() },
-        )
-    }
-
-    fn append_range_remove(writes: &mut EntityWriteBatch, id: Id<CodeBlock>, range: AddressRange) {
-        writes.remove_entity::<_, CodeBlockStartRecord>(&CodeBlockStartKey {
-            space: range.space(),
-            start: range.start(),
-            id,
-        });
-        writes.remove_entity::<_, CodeBlockSizeBucketRecord>(&CodeBlockSizeBucketKey {
-            space: range.space(),
-            bucket: Self::size_bucket(range),
-            start: range.start(),
-            id,
-        });
-    }
-
     pub(crate) fn append_prepared_writes(
         &self,
         entries: &[PreparedCodeBlockRecord],
         reservations: &[Id<CodeBlock>],
-        cancelled: &BTreeSet<Id<CodeBlock>>,
+        cancelled: &IdSet<CodeBlock>,
         writes: &mut EntityWriteBatch,
     ) -> Result<(), EntityStorageError> {
-        let mut bucket_changes = BTreeMap::<(AddressSpaceId, u8), CodeBlockSizeBucketChange>::new();
+        let mut bucket_changes =
+            BTreeMap::<(AddressSpaceId, CodeBlockSizeBucket), CodeBlockSizeBucketChange>::new();
         let mut added = 0usize;
         let mut removed = 0usize;
-        let mut releases = cancelled.iter().copied().collect::<SmallVec<[_; 8]>>();
+        let mut releases = cancelled.iter().collect::<SmallVec<[_; 8]>>();
         for entry in entries {
             if let Some(previous) = entry.previous {
-                Self::append_range_remove(writes, entry.id, previous);
+                append_range_remove(writes, entry.id, previous);
                 bucket_changes
-                    .entry((previous.space(), Self::size_bucket(previous)))
+                    .entry((previous.space(), CodeBlockSizeBucket::new(previous)))
                     .or_default()
                     .removed
                     .insert(entry.id);
@@ -527,8 +484,8 @@ impl CodeBlockTable {
             match entry.block.as_ref() {
                 Some(block) => {
                     let range = block.address_range();
-                    let bucket = Self::size_bucket(range);
-                    Self::append_range_insert(writes, entry.id, range, bucket)?;
+                    let bucket = CodeBlockSizeBucket::new(range);
+                    append_range_insert(writes, entry.id, range, bucket)?;
                     bucket_changes
                         .entry((range.space(), bucket))
                         .or_default()
@@ -543,27 +500,28 @@ impl CodeBlockTable {
                 }
             }
         }
-        self.append_size_bucket_changes(bucket_changes, writes)?;
+        releases.sort_unstable();
+        self.append_bucket_writes(bucket_changes, writes)?;
         self.allocator
             .append_transition(reservations, &releases, added, removed, writes)
     }
 
-    fn append_size_bucket_changes(
+    fn append_bucket_writes(
         &self,
-        changes: BTreeMap<(AddressSpaceId, u8), CodeBlockSizeBucketChange>,
+        changes: BTreeMap<(AddressSpaceId, CodeBlockSizeBucket), CodeBlockSizeBucketChange>,
         writes: &mut EntityWriteBatch,
     ) -> Result<(), EntityStorageError> {
         let mut records = BTreeMap::<AddressSpaceId, CodeBlockSizeBucketsRecord>::new();
         for ((space, bucket), change) in changes {
-            let occupied =
-                change.inserted || self.size_bucket_has_other(space, bucket, &change.removed)?;
+            let occupied = change.inserted
+                || self.bucket_has_remaining_block(space, bucket, &change.removed)?;
             let record = match records.entry(space) {
                 Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => {
                     let record = self
                         .storage
                         .get::<CodeBlockSizeBucketsKey, CodeBlockSizeBucketsRecord>(
-                            &CodeBlockSizeBucketsKey(space),
+                            &CodeBlockSizeBucketsKey::new(space),
                         )?
                         .unwrap_or_default();
                     entry.insert(record)
@@ -577,40 +535,52 @@ impl CodeBlockTable {
         }
         for (space, record) in records {
             if record.is_empty() {
-                writes.remove_entity::<_, CodeBlockSizeBucketsRecord>(&CodeBlockSizeBucketsKey(
-                    space,
-                ));
+                writes.remove_entity::<_, CodeBlockSizeBucketsRecord>(
+                    &CodeBlockSizeBucketsKey::new(space),
+                );
             } else {
-                writes.insert_entity(&CodeBlockSizeBucketsKey(space), &record)?;
+                writes.insert_entity(&CodeBlockSizeBucketsKey::new(space), &record)?;
             }
         }
         Ok(())
     }
 
-    fn size_bucket_has_other(
+    fn bucket_has_remaining_block(
         &self,
         space: AddressSpaceId,
-        bucket: u8,
-        removed: &BTreeSet<Id<CodeBlock>>,
+        bucket: CodeBlockSizeBucket,
+        removed: &IdSet<CodeBlock>,
     ) -> Result<bool, EntityStorageError> {
         for entry in self
             .storage
             .iter_range::<CodeBlockSizeBucketKey, CodeBlockSizeBucketRecord>(Bound::Included(
-                &CodeBlockSizeBucketKey::first(space, bucket, RawAddress::from(0u64)),
+                &CodeBlockSizeBucketKey::new(
+                    Address::new(space, RawAddress::zero()),
+                    Id::with_generation(0, 0),
+                    bucket,
+                ),
             ))?
         {
             let (key, _) = entry?;
-            if key.space != space || key.bucket != bucket {
+            if key.address.space() != space || key.bucket != bucket {
                 break;
             }
-            if !removed.contains(&key.id) {
+            if !removed.contains(key.id) {
                 return Ok(true);
             }
         }
         Ok(false)
     }
 
-    pub(crate) fn publish_transition(
+    pub(crate) fn publish_upsert(&self, block: CodeBlock, encoded_size: usize) {
+        self.entries.publish_insert(block.id(), block, encoded_size);
+    }
+
+    pub(crate) fn publish_remove(&self, id: Id<CodeBlock>) {
+        self.entries.publish_remove(&id);
+    }
+
+    pub(crate) fn publish_allocations(
         &mut self,
         reservations: &[Id<CodeBlock>],
         added: usize,

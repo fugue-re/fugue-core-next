@@ -1,5 +1,5 @@
+use std::collections::BTreeMap;
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use iset::IntervalMap;
@@ -100,11 +100,11 @@ impl CodeBlockIdsByAddress {
         }
     }
 
-    pub(in crate::ir) fn contains(&self, address: Address) -> bool {
+    pub(crate) fn contains(&self, address: Address) -> bool {
         self.first.contains_key(&address)
     }
 
-    pub(in crate::ir) fn ids(&self, address: Address) -> impl Iterator<Item = CodeBlockId> + '_ {
+    pub(crate) fn ids(&self, address: Address) -> impl Iterator<Item = CodeBlockId> + '_ {
         self.first
             .get(&address)
             .copied()
@@ -118,7 +118,7 @@ impl CodeBlockIdsByAddress {
         }
     }
 
-    pub(in crate::ir) fn append(&mut self, ids_by_address: Self) {
+    pub(crate) fn append(&mut self, ids_by_address: Self) {
         for (address, id) in ids_by_address.first {
             self.insert(address, id);
         }
@@ -129,7 +129,7 @@ impl CodeBlockIdsByAddress {
         }
     }
 
-    pub(in crate::ir) fn insert(&mut self, address: Address, id: CodeBlockId) {
+    pub(crate) fn insert(&mut self, address: Address, id: CodeBlockId) {
         match self.first.entry(address) {
             Entry::Vacant(entry) => {
                 entry.insert(id);
@@ -138,7 +138,7 @@ impl CodeBlockIdsByAddress {
         }
     }
 
-    pub(in crate::ir) fn remove(&mut self, address: Address, id: CodeBlockId) {
+    pub(crate) fn remove(&mut self, address: Address, id: CodeBlockId) {
         if self.first.get(&address).copied() == Some(id) {
             let replacement = self
                 .additional
@@ -171,33 +171,26 @@ impl CodeBlockIdsByAddress {
         }
     }
 
-    pub(in crate::ir) fn reserve(&mut self, additional: usize) {
+    pub(crate) fn reserve(&mut self, additional: usize) {
         self.first.reserve(additional);
     }
 }
 
 impl CodeBlockTable {
-    pub fn new(entities: EntityStorage, cache_bytes: usize) -> Result<Self, EntityStorageError> {
+    pub fn new_transient() -> Self {
+        Self::Transient(TransientCodeBlockTable::new())
+    }
+
+    pub fn new_persistent(
+        entities: EntityStorage,
+        cache_bytes: usize,
+        worker: Arc<WriteBackWorker>,
+    ) -> Result<Self, EntityStorageError> {
         Ok(Self::Persistent(PersistentCodeBlockTable::new(
             entities,
             cache_bytes,
-        )?))
-    }
-
-    pub fn with_worker(
-        entities: EntityStorage,
-        worker: Arc<WriteBackWorker>,
-        cache_bytes: usize,
-    ) -> Result<Self, EntityStorageError> {
-        Ok(Self::Persistent(PersistentCodeBlockTable::with_worker(
-            entities,
             worker,
-            cache_bytes,
         )?))
-    }
-
-    pub fn new_transient() -> Self {
-        Self::Transient(TransientCodeBlockTable::new())
     }
 
     pub fn contains(&self, addr: Address) -> bool {
@@ -332,7 +325,7 @@ impl CodeBlockTable {
         }
     }
 
-    pub(crate) fn find_by_range_and_context(
+    pub fn find_by_range_and_context(
         &self,
         range: AddressRange,
         context: &ContextSet,
@@ -362,18 +355,20 @@ impl CodeBlockTable {
         }
     }
 
-    pub(crate) fn publish_prepared(
+    pub(crate) fn publish_allocations(
         &mut self,
         reservations: &[Id<CodeBlock>],
-        cancelled: &BTreeSet<Id<CodeBlock>>,
+        cancelled: &IdSet<CodeBlock>,
         added: usize,
         removed: usize,
     ) {
         match self {
-            Self::Persistent(table) => table.publish_transition(reservations, added, removed),
+            Self::Persistent(table) => table.publish_allocations(reservations, added, removed),
             Self::Transient(table) => {
                 table.publish_reservations(reservations);
-                for &id in cancelled {
+                let mut cancelled = cancelled.iter().collect::<SmallVec<[_; 8]>>();
+                cancelled.sort_unstable();
+                for id in cancelled {
                     table.publish_release(id);
                 }
             }
@@ -387,7 +382,7 @@ impl CodeBlockTable {
         }
     }
 
-    pub(crate) fn publish_new_batch(&mut self, blocks: impl IntoIterator<Item = CodeBlock>) {
+    pub(crate) fn publish_batch(&mut self, blocks: impl IntoIterator<Item = CodeBlock>) {
         if let Self::Transient(table) = self {
             table.publish_batch(blocks);
         }

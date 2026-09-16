@@ -1,7 +1,7 @@
 use std::fmt;
 use std::ops::{Add, AddAssign};
 
-use crate::ir::{Address, RawAddress};
+use crate::ir::{Address, RawAddress, ToRawAddress};
 use crate::lifter::{Language, Varnode};
 
 #[derive(
@@ -95,8 +95,8 @@ impl Location {
         address: Varnode,
         position: u16,
     ) -> Option<Self> {
-        if language.in_default_space(&address) {
-            return Some(Self::new(Address::new(base.space(), address.offset()), 0));
+        if let Some(address) = address.to_address(language) {
+            return Some(Self::new(Address::new(base.space(), address), 0));
         }
 
         if !language.in_constant_space(&address) {

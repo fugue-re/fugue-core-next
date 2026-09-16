@@ -1,11 +1,9 @@
-use std::collections::BTreeSet;
-
 use smallvec::SmallVec;
 
 use super::ProjectTransaction;
 use crate::ir::{
-    Address, AddressRange, AddressRangeSet, FunctionId, Reference, ReferenceKind, Switch, SwitchId,
-    SwitchTableError,
+    Address, AddressRange, AddressRangeSet, FunctionId, Reference, ReferenceKind,
+    ReferenceProvenance, Switch, SwitchId, SwitchTableError,
 };
 use crate::project::ProjectError;
 
@@ -22,17 +20,13 @@ impl ProjectTransaction<'_> {
                 &self.function_staging,
                 branch,
             )?;
-        let existing = self.staged_switch(branch)?;
+        let existing = self
+            .switch_staging
+            .get_by_branch(&self.project.switches, branch)?
+            .map(|switch| switch.as_ref().clone());
         let id = match existing {
             Some(ref switch) => switch.id(),
-            None => {
-                let id = self
-                    .project
-                    .switches
-                    .pending_id(self.switch_reservations.len());
-                self.switch_reservations.push(id);
-                id
-            }
+            None => self.switch_staging.reserve_id(&self.project.switches),
         };
         let switch = f(id, branch);
         if switch.branch() != branch {
@@ -43,7 +37,7 @@ impl ProjectTransaction<'_> {
             None => switch,
         };
         self.synchronise_switch_references(&switch)?;
-        self.staged_switches.insert(branch, Some(switch));
+        self.switch_staging.insert(switch);
         Ok(id)
     }
 
@@ -60,28 +54,26 @@ impl ProjectTransaction<'_> {
                 &self.function_staging,
                 branch,
             )?;
-        let Some(mut switch) = self.staged_switch(branch)? else {
+        let Some(mut switch) = self
+            .switch_staging
+            .get_by_branch(&self.project.switches, branch)?
+            .map(|switch| switch.as_ref().clone())
+        else {
             return Ok(None);
         };
         let result = f(&mut switch);
         switch.set_function(function.unwrap_or(FunctionId::INVALID));
         self.synchronise_switch_references(&switch)?;
-        self.staged_switches.insert(branch, Some(switch));
+        self.switch_staging.insert(switch);
         Ok(Some(result))
     }
 
     pub fn remove_switch(&mut self, branch: Address) -> Result<bool, ProjectError> {
-        let Some(switch) = self.staged_switch(branch)? else {
+        let Some(switch) = self.switch_staging.remove(&self.project.switches, branch)? else {
             return Ok(false);
         };
 
-        self.replace_switch_references(branch, [])?;
-        if self.project.switches.try_get_by_branch(branch)?.is_some() {
-            self.staged_switches.insert(branch, None);
-        } else {
-            self.staged_switches.remove(&branch);
-            self.cancelled_switches.push(switch.id());
-        }
+        self.replace_switch_references(switch.id(), branch, [])?;
         Ok(true)
     }
 
@@ -89,23 +81,10 @@ impl ProjectTransaction<'_> {
         &mut self,
         function: FunctionId,
     ) -> Result<(), ProjectError> {
-        let mut branches = self
-            .project
-            .switches
-            .branches_for_function(function)
-            .collect::<BTreeSet<_>>();
-        for (&branch, switch) in &self.staged_switches {
-            match switch {
-                Some(switch) if switch.function() == function => {
-                    branches.insert(branch);
-                }
-                Some(_) | None => {
-                    branches.remove(&branch);
-                }
-            }
-        }
-
-        for branch in branches {
+        for branch in self
+            .switch_staging
+            .branches_for_function(&self.project.switches, function)
+        {
             self.remove_switch(branch)?;
         }
 
@@ -114,22 +93,12 @@ impl ProjectTransaction<'_> {
 
     fn synchronise_switch_references(&mut self, switch: &Switch) -> Result<bool, ProjectError> {
         let references = switch.derived_references().collect::<SmallVec<[_; 8]>>();
-        self.replace_switch_references(switch.branch(), references)
-    }
-
-    fn staged_switch(&self, branch: Address) -> Result<Option<Switch>, ProjectError> {
-        match self.staged_switches.get(&branch) {
-            Some(switch) => Ok(switch.clone()),
-            None => Ok(self
-                .project
-                .switches
-                .try_get_by_branch(branch)?
-                .map(|switch| switch.as_ref().clone())),
-        }
+        self.replace_switch_references(switch.id(), switch.branch(), references)
     }
 
     fn replace_switch_references(
         &mut self,
+        id: SwitchId,
         branch: Address,
         references: impl IntoIterator<Item = Reference>,
     ) -> Result<bool, ProjectError> {
@@ -139,9 +108,15 @@ impl ProjectTransaction<'_> {
         let (flow, data) = references
             .into_iter()
             .partition::<Vec<_>, _>(Reference::is_flow);
-        let flow_changed =
-            self.replace_derived_references(coverage.clone(), ReferenceKind::Flow, flow)?;
-        let data_changed = self.replace_derived_references(coverage, ReferenceKind::Data, data)?;
+        let provenance = ReferenceProvenance::Switch(id);
+        let flow_changed = self.replace_derived_references(
+            coverage.clone(),
+            ReferenceKind::Flow,
+            provenance,
+            flow,
+        )?;
+        let data_changed =
+            self.replace_derived_references(coverage, ReferenceKind::Data, provenance, data)?;
         Ok(flow_changed || data_changed)
     }
 }

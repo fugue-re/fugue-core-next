@@ -261,11 +261,11 @@ pub(crate) struct FunctionTableStaging {
     staged_functions: StagedEntityRecords<Function, StagedFunctionRecord>,
     function_addresses: FxHashMap<Address, Option<FunctionId>>,
     function_reservations: Vec<FunctionId>,
-    cancelled_functions: BTreeSet<FunctionId>,
+    cancelled_functions: IdSet<Function>,
     staged_code_blocks: StagedEntityRecords<CodeBlock, StagedCodeBlockRecord>,
     block_ids_by_address: CodeBlockIdsByAddress,
     block_reservations: Vec<CodeBlockId>,
-    cancelled_blocks: BTreeSet<CodeBlockId>,
+    cancelled_blocks: IdSet<CodeBlock>,
     by_block: FxHashMap<CodeBlockId, IdSet<Function>>,
     original_by_block: FxHashMap<CodeBlockId, IdSet<Function>>,
 }
@@ -284,8 +284,8 @@ pub(crate) struct PreparedFunctionBatch {
     block_reservations: Vec<CodeBlockId>,
     blocks: Vec<PreparedCodeBlockRecord>,
     blocks_are_new: bool,
-    cancelled_blocks: BTreeSet<CodeBlockId>,
-    cancelled_functions: BTreeSet<FunctionId>,
+    cancelled_blocks: IdSet<CodeBlock>,
+    cancelled_functions: IdSet<Function>,
     function_reservations: Vec<FunctionId>,
     functions: Vec<PreparedFunctionRecord>,
     by_block: FxHashMap<CodeBlockId, IdSet<Function>>,
@@ -353,8 +353,419 @@ pub(crate) struct PreparedFunctionRecord {
     previous: Option<Address>,
 }
 
+pub enum FunctionTable {
+    Persistent(PersistentFunctionTable),
+    Transient(TransientFunctionTable),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum FunctionTableError {
+    #[error("function to insert has a different address than that used for insertion")]
+    AddressMismatch,
+    #[error(transparent)]
+    Other(anyhow::Error),
+    #[error(transparent)]
+    Storage(#[from] EntityStorageError),
+}
+
+impl FunctionTableError {
+    pub fn other<E>(error: E) -> Self
+    where
+        E: Error + Send + Sync + 'static,
+    {
+        Self::Other(anyhow::Error::new(error))
+    }
+
+    pub fn other_with<M>(msg: M) -> Self
+    where
+        M: fmt::Debug + fmt::Display + Send + Sync + 'static,
+    {
+        Self::Other(anyhow::Error::msg(msg))
+    }
+}
+
+impl FunctionTable {
+    pub fn new_transient() -> Self {
+        Self::Transient(TransientFunctionTable::new())
+    }
+
+    pub fn new_persistent(
+        entities: EntityStorage,
+        cache_bytes: usize,
+        worker: Arc<WriteBackWorker>,
+    ) -> Result<Self, EntityStorageError> {
+        Ok(Self::Persistent(PersistentFunctionTable::new(
+            entities,
+            cache_bytes,
+            worker,
+        )?))
+    }
+
+    pub fn contains(&self, addr: Address) -> bool {
+        match self {
+            Self::Persistent(table) => table.contains(addr),
+            Self::Transient(table) => table.contains(addr),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Persistent(table) => table.is_empty(),
+            Self::Transient(table) => table.is_empty(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Persistent(table) => table.len(),
+            Self::Transient(table) => table.len(),
+        }
+    }
+
+    pub(crate) fn is_persistent(&self) -> bool {
+        matches!(self, Self::Persistent(_))
+    }
+
+    pub fn get_by_id(&self, id: Id<Function>) -> Option<FunctionRef<'_>> {
+        self.try_get_by_id(id)
+            .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub fn try_get_by_id(
+        &self,
+        id: Id<Function>,
+    ) -> Result<Option<FunctionRef<'_>>, EntityStorageError> {
+        match self {
+            Self::Persistent(table) => Ok(table.try_get_by_id(id)?.map(EntityRef::cached)),
+            Self::Transient(table) => Ok(table.get_by_id(id).map(EntityRef::borrowed)),
+        }
+    }
+
+    pub fn get_by_id_mut(&mut self, id: Id<Function>) -> Option<FunctionMut<'_>> {
+        self.try_get_by_id_mut(id)
+            .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub fn try_get_by_id_mut(
+        &mut self,
+        id: Id<Function>,
+    ) -> Result<Option<FunctionMut<'_>>, EntityStorageError> {
+        match self {
+            Self::Persistent(table) => Ok(table.try_get_by_id_mut(id)?.map(EntityMut::cached)),
+            Self::Transient(table) => Ok(table.get_by_id_mut(id).map(EntityMut::borrowed)),
+        }
+    }
+
+    pub fn get_by_address(&self, addr: Address) -> Option<FunctionRef<'_>> {
+        self.try_get_by_address(addr)
+            .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub fn try_get_by_address(
+        &self,
+        addr: Address,
+    ) -> Result<Option<FunctionRef<'_>>, EntityStorageError> {
+        match self {
+            Self::Persistent(table) => Ok(table.try_get_by_address(addr)?.map(EntityRef::cached)),
+            Self::Transient(table) => Ok(table.get_by_address(addr).map(EntityRef::borrowed)),
+        }
+    }
+
+    pub fn get_by_address_mut(&mut self, addr: Address) -> Option<FunctionMut<'_>> {
+        self.try_get_by_address_mut(addr)
+            .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub fn try_get_by_address_mut(
+        &mut self,
+        addr: Address,
+    ) -> Result<Option<FunctionMut<'_>>, EntityStorageError> {
+        match self {
+            Self::Persistent(table) => {
+                Ok(table.try_get_by_address_mut(addr)?.map(EntityMut::cached))
+            }
+            Self::Transient(table) => Ok(table.get_by_address_mut(addr).map(EntityMut::borrowed)),
+        }
+    }
+
+    pub fn addresses(&self) -> Box<dyn Iterator<Item = Address> + '_> {
+        match self {
+            Self::Persistent(table) => Box::new(table.addresses()),
+            Self::Transient(table) => Box::new(table.addresses()),
+        }
+    }
+
+    pub fn addresses_in_range<R>(
+        &self,
+        space: AddressSpaceId,
+        range: R,
+    ) -> Box<dyn Iterator<Item = Address> + '_>
+    where
+        R: RangeBounds<RawAddress>,
+    {
+        match self {
+            Self::Persistent(table) => Box::new(table.addresses_in_range(space, range)),
+            Self::Transient(table) => Box::new(table.addresses_in_range(space, range)),
+        }
+    }
+
+    pub fn addresses_in_space_after(
+        &self,
+        space: AddressSpaceId,
+        after: Option<RawAddress>,
+    ) -> Box<dyn Iterator<Item = Address> + '_> {
+        let start = cursor_bound(after);
+        self.addresses_in_range(space, (start, Bound::Unbounded))
+    }
+
+    pub fn overlaps<'a>(
+        &'a self,
+        blocks: &'a CodeBlockTable,
+        range: &'a AddressRange,
+    ) -> impl Iterator<Item = Id<Function>> + 'a {
+        let mut functions = SmallVec::<[FunctionId; 8]>::new();
+        for block in blocks.overlaps(range) {
+            for function in self.get_by_block_id(block.id()).iter() {
+                if let Err(index) = functions.binary_search(&function) {
+                    functions.insert(index, function);
+                }
+            }
+        }
+        functions.into_iter()
+    }
+
+    pub fn get_by_block_id(&self, block: CodeBlockId) -> IdSet<Function> {
+        match self {
+            Self::Persistent(table) => table.get_by_block_id(block),
+            Self::Transient(table) => table.get_by_block_id(block),
+        }
+    }
+
+    pub fn iter(&self) -> Box<dyn Iterator<Item = FunctionRef<'_>> + '_> {
+        match self {
+            Self::Persistent(table) => Box::new(table.iter().map(EntityRef::cached)),
+            Self::Transient(table) => Box::new(table.iter().map(EntityRef::borrowed)),
+        }
+    }
+
+    pub fn iter_mut(&mut self) -> Box<dyn Iterator<Item = FunctionMut<'_>> + '_> {
+        match self {
+            Self::Persistent(table) => Box::new(table.iter_mut().map(EntityMut::cached)),
+            Self::Transient(table) => Box::new(table.iter_mut().map(EntityMut::borrowed)),
+        }
+    }
+
+    pub fn functions_containing(
+        &self,
+        blocks: &CodeBlockTable,
+        address: Address,
+    ) -> SmallVec<[FunctionId; 4]> {
+        let mut functions = SmallVec::new();
+
+        for block in blocks.overlaps_address(address) {
+            for function in self.get_by_block_id(block.id()).iter() {
+                if let Err(index) = functions.binary_search(&function) {
+                    functions.insert(index, function);
+                }
+            }
+        }
+
+        functions
+    }
+
+    pub(crate) fn staged_by_address(
+        &self,
+        staging: &FunctionTableStaging,
+        entry: Address,
+    ) -> Result<Option<Function>, IncompleteFunctionError> {
+        staging.function_by_address(self, entry)
+    }
+
+    pub(crate) fn staged_by_id(
+        &self,
+        staging: &FunctionTableStaging,
+        id: FunctionId,
+    ) -> Result<Option<Function>, IncompleteFunctionError> {
+        staging.function_by_id(self, id)
+    }
+
+    pub(crate) fn staged_origin(
+        &self,
+        staging: &FunctionTableStaging,
+        id: FunctionId,
+    ) -> Result<Option<ReferenceOrigin>, IncompleteFunctionError> {
+        staging.function_origin(self, id)
+    }
+
+    pub(crate) fn staged_overlaps(
+        &self,
+        blocks: &CodeBlockTable,
+        staging: &FunctionTableStaging,
+        range: &AddressRange,
+    ) -> Result<SmallVec<[FunctionId; 8]>, IncompleteFunctionError> {
+        staging.functions_overlapping(self, blocks, range)
+    }
+
+    pub(crate) fn staged_unique_function_containing_address(
+        &self,
+        blocks: &CodeBlockTable,
+        staging: &FunctionTableStaging,
+        address: Address,
+    ) -> Result<Option<FunctionId>, IncompleteFunctionError> {
+        staging.unique_function_containing_address(self, blocks, address)
+    }
+
+    pub(crate) fn pending_id(&self, offset: usize) -> FunctionId {
+        match self {
+            Self::Persistent(table) => table.pending_id(offset),
+            Self::Transient(table) => table.pending_id(offset),
+        }
+    }
+
+    pub fn insert<F>(&mut self, addr: Address, f: F) -> Result<Id<Function>, FunctionTableError>
+    where
+        F: FnOnce(Id<Function>, Address) -> Result<Function, FunctionTableError>,
+    {
+        self.insert_with(addr, |id, address| {
+            f(id, address).map(|function| (function, ()))
+        })
+        .map(|(id, ())| id)
+    }
+
+    pub(crate) fn insert_with<R, F>(
+        &mut self,
+        addr: Address,
+        f: F,
+    ) -> Result<(FunctionId, R), FunctionTableError>
+    where
+        F: FnOnce(Id<Function>, Address) -> Result<(Function, R), FunctionTableError>,
+    {
+        match self {
+            Self::Persistent(table) => table.insert_with(addr, f),
+            Self::Transient(table) => table.insert_with(addr, f),
+        }
+    }
+
+    pub fn modify_by_id<R>(
+        &mut self,
+        id: Id<Function>,
+        f: impl FnOnce(&mut Function) -> R,
+    ) -> Option<R> {
+        self.try_modify_by_id(id, f)
+            .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub fn try_modify_by_id<R>(
+        &mut self,
+        id: Id<Function>,
+        f: impl FnOnce(&mut Function) -> R,
+    ) -> Result<Option<R>, EntityStorageError> {
+        match self {
+            Self::Persistent(table) => table.try_modify_by_id(id, f),
+            Self::Transient(table) => Ok(table.modify_by_id(id, f)),
+        }
+    }
+
+    pub fn modify_by_address<R>(
+        &mut self,
+        addr: Address,
+        f: impl FnOnce(&mut Function) -> R,
+    ) -> Option<R> {
+        self.try_modify_by_address(addr, f)
+            .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub fn try_modify_by_address<R>(
+        &mut self,
+        addr: Address,
+        f: impl FnOnce(&mut Function) -> R,
+    ) -> Result<Option<R>, EntityStorageError> {
+        match self {
+            Self::Persistent(table) => table.try_modify_by_address(addr, f),
+            Self::Transient(table) => Ok(table.modify_by_address(addr, f)),
+        }
+    }
+
+    pub fn remove_by_id(&mut self, id: Id<Function>) -> bool {
+        self.try_remove_by_id(id)
+            .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub fn try_remove_by_id(&mut self, id: Id<Function>) -> Result<bool, EntityStorageError> {
+        match self {
+            Self::Persistent(table) => table.try_remove_by_id(id),
+            Self::Transient(table) => Ok(table.remove_by_id(id)),
+        }
+    }
+
+    pub fn remove_by_address(&mut self, addr: Address) -> bool {
+        self.try_remove_by_address(addr)
+            .unwrap_or_else(|error| error.into_fatal())
+    }
+
+    pub fn try_remove_by_address(&mut self, addr: Address) -> Result<bool, EntityStorageError> {
+        match self {
+            Self::Persistent(table) => table.try_remove_by_address(addr),
+            Self::Transient(table) => Ok(table.remove_by_address(addr)),
+        }
+    }
+
+    pub fn flush(&self) -> Result<(), EntityStorageError> {
+        match self {
+            Self::Persistent(table) => table.flush(),
+            Self::Transient(_) => Ok(()),
+        }
+    }
+
+    fn publish_allocations(
+        &mut self,
+        reservations: &[FunctionId],
+        cancelled: &IdSet<Function>,
+        added: usize,
+        removed: usize,
+    ) {
+        match self {
+            Self::Persistent(table) => table.publish_allocations(reservations, added, removed),
+            Self::Transient(table) => {
+                table.publish_reservations(reservations);
+                let mut cancelled = cancelled.iter().collect::<SmallVec<[_; 8]>>();
+                cancelled.sort_unstable();
+                for id in cancelled {
+                    table.publish_release(id);
+                }
+            }
+        }
+    }
+
+    fn publish_upsert(
+        &mut self,
+        function: Function,
+        previous_entry: Option<Address>,
+        encoded_size: usize,
+    ) {
+        match self {
+            Self::Persistent(table) => table.publish_upsert(function, encoded_size),
+            Self::Transient(table) => table.publish_upsert(function, previous_entry),
+        }
+    }
+
+    fn publish_remove(&mut self, id: FunctionId, entry: Address) {
+        match self {
+            Self::Persistent(table) => table.publish_remove(id),
+            Self::Transient(table) => table.publish_remove(id, entry),
+        }
+    }
+
+    fn publish_membership(&mut self, by_block: FxHashMap<CodeBlockId, IdSet<Function>>) {
+        match self {
+            Self::Persistent(_) => {}
+            Self::Transient(table) => table.publish_membership(by_block),
+        }
+    }
+}
+
 impl FunctionTableStaging {
-    fn set_properties(
+    pub(crate) fn set_properties(
         &mut self,
         functions: &FunctionTable,
         blocks: &CodeBlockTable,
@@ -450,7 +861,7 @@ impl FunctionTableStaging {
         self.function_reservations.reserve(additional);
     }
 
-    fn stage_materialisation(
+    pub(crate) fn stage_materialisation(
         &mut self,
         functions: &FunctionTable,
         blocks: &CodeBlockTable,
@@ -484,7 +895,7 @@ impl FunctionTableStaging {
         self.stage_change(functions, blocks, function, previous, is_new, record)
     }
 
-    fn stage_membership(
+    pub(crate) fn stage_membership(
         &mut self,
         functions: &FunctionTable,
         blocks: &CodeBlockTable,
@@ -601,7 +1012,7 @@ impl FunctionTableStaging {
         Ok(record)
     }
 
-    fn remove(
+    pub(crate) fn remove(
         &mut self,
         functions: &FunctionTable,
         blocks: &CodeBlockTable,
@@ -882,43 +1293,6 @@ impl FunctionTableStaging {
         Ok(containing)
     }
 
-    pub(crate) fn supported_backing_flow_reference(
-        &self,
-        table: &FunctionTable,
-        blocks: &CodeBlockTable,
-        reference: Reference,
-    ) -> Result<Option<Reference>, IncompleteFunctionError> {
-        let mut supported = None::<Reference>;
-        for block in blocks.overlaps_address(reference.from()) {
-            let functions = self
-                .by_block
-                .get(&block.id())
-                .cloned()
-                .unwrap_or_else(|| table.get_by_block_id(block.id()));
-            for function in functions.iter() {
-                let Some(function) = self.function_by_id(table, function)? else {
-                    continue;
-                };
-                for target in block.flow_targets() {
-                    let target = function.classify_flow_target(target);
-                    if !target.kind().is_global()
-                        || target.from() != reference.from()
-                        || Some(target.to()) != reference.target().address()
-                    {
-                        continue;
-                    }
-                    let candidate = Reference::from_flow(target.from(), target.to(), target.kind())
-                        .with_origin(ReferenceOrigin::Derived);
-                    supported = Some(match supported {
-                        Some(reference) => reference.with_merged_properties(candidate.properties()),
-                        None => candidate,
-                    });
-                }
-            }
-        }
-        Ok(supported)
-    }
-
     fn functions_overlapping(
         &self,
         functions: &FunctionTable,
@@ -1190,7 +1564,7 @@ impl PreparedFunctionBatch {
             .iter()
             .filter(|entry| entry.function.is_none() && entry.previous.is_some())
             .count();
-        functions.publish_prepared(
+        functions.publish_allocations(
             &function_reservations,
             &cancelled_functions,
             functions_added,
@@ -1204,7 +1578,7 @@ impl PreparedFunctionBatch {
             .iter()
             .filter(|entry| entry.is_removal())
             .count();
-        blocks.publish_prepared(
+        blocks.publish_allocations(
             &block_reservations,
             &cancelled_blocks,
             blocks_added,
@@ -1212,7 +1586,7 @@ impl PreparedFunctionBatch {
         );
 
         if blocks_are_new {
-            blocks.publish_new_batch(block_entries.into_iter().map(|entry| {
+            blocks.publish_batch(block_entries.into_iter().map(|entry| {
                 entry
                     .into_block()
                     .expect("new block batch contains only insertions")
@@ -1236,460 +1610,6 @@ impl PreparedFunctionBatch {
             }
         }
         functions.publish_membership(by_block);
-    }
-}
-
-pub enum FunctionTable {
-    Persistent(PersistentFunctionTable),
-    Transient(TransientFunctionTable),
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum FunctionTableError {
-    #[error("function to insert has a different address than that used for insertion")]
-    AddressMismatch,
-    #[error(transparent)]
-    Other(anyhow::Error),
-    #[error(transparent)]
-    Storage(#[from] EntityStorageError),
-}
-
-impl FunctionTableError {
-    pub fn other<E>(error: E) -> Self
-    where
-        E: Error + Send + Sync + 'static,
-    {
-        Self::Other(anyhow::Error::new(error))
-    }
-
-    pub fn other_with<M>(msg: M) -> Self
-    where
-        M: fmt::Debug + fmt::Display + Send + Sync + 'static,
-    {
-        Self::Other(anyhow::Error::msg(msg))
-    }
-}
-
-impl FunctionTable {
-    pub fn new(entities: EntityStorage, cache_bytes: usize) -> Result<Self, EntityStorageError> {
-        Ok(Self::Persistent(PersistentFunctionTable::new(
-            entities,
-            cache_bytes,
-        )?))
-    }
-
-    pub fn with_worker(
-        entities: EntityStorage,
-        worker: Arc<WriteBackWorker>,
-        cache_bytes: usize,
-    ) -> Result<Self, EntityStorageError> {
-        Ok(Self::Persistent(PersistentFunctionTable::with_worker(
-            entities,
-            worker,
-            cache_bytes,
-        )?))
-    }
-
-    pub fn new_transient() -> Self {
-        Self::Transient(TransientFunctionTable::new())
-    }
-
-    pub fn contains(&self, addr: Address) -> bool {
-        match self {
-            Self::Persistent(table) => table.contains(addr),
-            Self::Transient(table) => table.contains(addr),
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        match self {
-            Self::Persistent(table) => table.is_empty(),
-            Self::Transient(table) => table.is_empty(),
-        }
-    }
-
-    pub fn len(&self) -> usize {
-        match self {
-            Self::Persistent(table) => table.len(),
-            Self::Transient(table) => table.len(),
-        }
-    }
-
-    pub(crate) fn is_persistent(&self) -> bool {
-        matches!(self, Self::Persistent(_))
-    }
-
-    pub fn get_by_id(&self, id: Id<Function>) -> Option<FunctionRef<'_>> {
-        self.try_get_by_id(id)
-            .unwrap_or_else(|error| error.into_fatal())
-    }
-
-    pub fn try_get_by_id(
-        &self,
-        id: Id<Function>,
-    ) -> Result<Option<FunctionRef<'_>>, EntityStorageError> {
-        match self {
-            Self::Persistent(table) => Ok(table.try_get_by_id(id)?.map(EntityRef::cached)),
-            Self::Transient(table) => Ok(table.get_by_id(id).map(EntityRef::borrowed)),
-        }
-    }
-
-    pub fn get_by_id_mut(&mut self, id: Id<Function>) -> Option<FunctionMut<'_>> {
-        self.try_get_by_id_mut(id)
-            .unwrap_or_else(|error| error.into_fatal())
-    }
-
-    pub fn try_get_by_id_mut(
-        &mut self,
-        id: Id<Function>,
-    ) -> Result<Option<FunctionMut<'_>>, EntityStorageError> {
-        match self {
-            Self::Persistent(table) => Ok(table.try_get_by_id_mut(id)?.map(EntityMut::cached)),
-            Self::Transient(table) => Ok(table.get_by_id_mut(id).map(EntityMut::borrowed)),
-        }
-    }
-
-    pub fn get_by_address(&self, addr: Address) -> Option<FunctionRef<'_>> {
-        self.try_get_by_address(addr)
-            .unwrap_or_else(|error| error.into_fatal())
-    }
-
-    pub fn try_get_by_address(
-        &self,
-        addr: Address,
-    ) -> Result<Option<FunctionRef<'_>>, EntityStorageError> {
-        match self {
-            Self::Persistent(table) => Ok(table.try_get_by_address(addr)?.map(EntityRef::cached)),
-            Self::Transient(table) => Ok(table.get_by_address(addr).map(EntityRef::borrowed)),
-        }
-    }
-
-    pub fn get_by_address_mut(&mut self, addr: Address) -> Option<FunctionMut<'_>> {
-        self.try_get_by_address_mut(addr)
-            .unwrap_or_else(|error| error.into_fatal())
-    }
-
-    pub fn try_get_by_address_mut(
-        &mut self,
-        addr: Address,
-    ) -> Result<Option<FunctionMut<'_>>, EntityStorageError> {
-        match self {
-            Self::Persistent(table) => {
-                Ok(table.try_get_by_address_mut(addr)?.map(EntityMut::cached))
-            }
-            Self::Transient(table) => Ok(table.get_by_address_mut(addr).map(EntityMut::borrowed)),
-        }
-    }
-
-    pub fn addresses(&self) -> Box<dyn Iterator<Item = Address> + '_> {
-        match self {
-            Self::Persistent(table) => Box::new(table.addresses()),
-            Self::Transient(table) => Box::new(table.addresses()),
-        }
-    }
-
-    pub fn addresses_in_range<R>(
-        &self,
-        space: AddressSpaceId,
-        range: R,
-    ) -> Box<dyn Iterator<Item = Address> + '_>
-    where
-        R: RangeBounds<RawAddress>,
-    {
-        match self {
-            Self::Persistent(table) => Box::new(table.addresses_in_range(space, range)),
-            Self::Transient(table) => Box::new(table.addresses_in_range(space, range)),
-        }
-    }
-
-    pub fn addresses_in_space_after(
-        &self,
-        space: AddressSpaceId,
-        after: Option<RawAddress>,
-    ) -> Box<dyn Iterator<Item = Address> + '_> {
-        let start = cursor_bound(after);
-        self.addresses_in_range(space, (start, Bound::Unbounded))
-    }
-
-    pub fn overlaps<'a>(
-        &'a self,
-        blocks: &'a CodeBlockTable,
-        range: &'a AddressRange,
-    ) -> impl Iterator<Item = Id<Function>> + 'a {
-        let mut functions = SmallVec::<[FunctionId; 8]>::new();
-        for block in blocks.overlaps(range) {
-            for function in self.get_by_block_id(block.id()).iter() {
-                if let Err(index) = functions.binary_search(&function) {
-                    functions.insert(index, function);
-                }
-            }
-        }
-        functions.into_iter()
-    }
-
-    pub fn get_by_block_id(&self, block: CodeBlockId) -> IdSet<Function> {
-        match self {
-            Self::Persistent(table) => table.get_by_block_id(block),
-            Self::Transient(table) => table.get_by_block_id(block),
-        }
-    }
-
-    pub fn iter(&self) -> Box<dyn Iterator<Item = FunctionRef<'_>> + '_> {
-        match self {
-            Self::Persistent(table) => Box::new(table.iter().map(EntityRef::cached)),
-            Self::Transient(table) => Box::new(table.iter().map(EntityRef::borrowed)),
-        }
-    }
-
-    pub fn iter_mut(&mut self) -> Box<dyn Iterator<Item = FunctionMut<'_>> + '_> {
-        match self {
-            Self::Persistent(table) => Box::new(table.iter_mut().map(EntityMut::cached)),
-            Self::Transient(table) => Box::new(table.iter_mut().map(EntityMut::borrowed)),
-        }
-    }
-
-    pub(crate) fn functions_containing(
-        &self,
-        blocks: &CodeBlockTable,
-        address: Address,
-    ) -> SmallVec<[FunctionId; 4]> {
-        let mut functions = SmallVec::new();
-
-        for block in blocks.overlaps_address(address) {
-            for function in self.get_by_block_id(block.id()).iter() {
-                if let Err(index) = functions.binary_search(&function) {
-                    functions.insert(index, function);
-                }
-            }
-        }
-
-        functions
-    }
-
-    pub(crate) fn staged_by_address(
-        &self,
-        staging: &FunctionTableStaging,
-        entry: Address,
-    ) -> Result<Option<Function>, IncompleteFunctionError> {
-        staging.function_by_address(self, entry)
-    }
-
-    pub(crate) fn staged_by_id(
-        &self,
-        staging: &FunctionTableStaging,
-        id: FunctionId,
-    ) -> Result<Option<Function>, IncompleteFunctionError> {
-        staging.function_by_id(self, id)
-    }
-
-    pub(crate) fn staged_origin(
-        &self,
-        staging: &FunctionTableStaging,
-        id: FunctionId,
-    ) -> Result<Option<ReferenceOrigin>, IncompleteFunctionError> {
-        staging.function_origin(self, id)
-    }
-
-    pub(crate) fn staged_overlaps(
-        &self,
-        blocks: &CodeBlockTable,
-        staging: &FunctionTableStaging,
-        range: &AddressRange,
-    ) -> Result<SmallVec<[FunctionId; 8]>, IncompleteFunctionError> {
-        staging.functions_overlapping(self, blocks, range)
-    }
-
-    pub(crate) fn staged_unique_function_containing_address(
-        &self,
-        blocks: &CodeBlockTable,
-        staging: &FunctionTableStaging,
-        address: Address,
-    ) -> Result<Option<FunctionId>, IncompleteFunctionError> {
-        staging.unique_function_containing_address(self, blocks, address)
-    }
-
-    pub(crate) fn pending_id(&self, offset: usize) -> FunctionId {
-        match self {
-            Self::Persistent(table) => table.pending_id(offset),
-            Self::Transient(table) => table.pending_id(offset),
-        }
-    }
-
-    pub fn insert<F>(&mut self, addr: Address, f: F) -> Result<Id<Function>, FunctionTableError>
-    where
-        F: FnOnce(Id<Function>, Address) -> Result<Function, FunctionTableError>,
-    {
-        self.insert_with(addr, |id, address| {
-            f(id, address).map(|function| (function, ()))
-        })
-        .map(|(id, ())| id)
-    }
-
-    pub(crate) fn insert_with<R, F>(
-        &mut self,
-        addr: Address,
-        f: F,
-    ) -> Result<(FunctionId, R), FunctionTableError>
-    where
-        F: FnOnce(Id<Function>, Address) -> Result<(Function, R), FunctionTableError>,
-    {
-        match self {
-            Self::Persistent(table) => table.insert_with(addr, f),
-            Self::Transient(table) => table.insert_with(addr, f),
-        }
-    }
-
-    pub fn modify_by_id<R>(
-        &mut self,
-        id: Id<Function>,
-        f: impl FnOnce(&mut Function) -> R,
-    ) -> Option<R> {
-        self.try_modify_by_id(id, f)
-            .unwrap_or_else(|error| error.into_fatal())
-    }
-
-    pub fn try_modify_by_id<R>(
-        &mut self,
-        id: Id<Function>,
-        f: impl FnOnce(&mut Function) -> R,
-    ) -> Result<Option<R>, EntityStorageError> {
-        match self {
-            Self::Persistent(table) => table.try_modify_by_id(id, f),
-            Self::Transient(table) => Ok(table.modify_by_id(id, f)),
-        }
-    }
-
-    pub fn modify_by_address<R>(
-        &mut self,
-        addr: Address,
-        f: impl FnOnce(&mut Function) -> R,
-    ) -> Option<R> {
-        self.try_modify_by_address(addr, f)
-            .unwrap_or_else(|error| error.into_fatal())
-    }
-
-    pub fn try_modify_by_address<R>(
-        &mut self,
-        addr: Address,
-        f: impl FnOnce(&mut Function) -> R,
-    ) -> Result<Option<R>, EntityStorageError> {
-        match self {
-            Self::Persistent(table) => table.try_modify_by_address(addr, f),
-            Self::Transient(table) => Ok(table.modify_by_address(addr, f)),
-        }
-    }
-
-    pub fn remove_by_id(&mut self, id: Id<Function>) -> bool {
-        self.try_remove_by_id(id)
-            .unwrap_or_else(|error| error.into_fatal())
-    }
-
-    pub fn try_remove_by_id(&mut self, id: Id<Function>) -> Result<bool, EntityStorageError> {
-        match self {
-            Self::Persistent(table) => table.try_remove_by_id(id),
-            Self::Transient(table) => Ok(table.remove_by_id(id)),
-        }
-    }
-
-    pub fn remove_by_address(&mut self, addr: Address) -> bool {
-        self.try_remove_by_address(addr)
-            .unwrap_or_else(|error| error.into_fatal())
-    }
-
-    pub fn try_remove_by_address(&mut self, addr: Address) -> Result<bool, EntityStorageError> {
-        match self {
-            Self::Persistent(table) => table.try_remove_by_address(addr),
-            Self::Transient(table) => Ok(table.remove_by_address(addr)),
-        }
-    }
-
-    pub fn flush(&self) -> Result<(), EntityStorageError> {
-        match self {
-            Self::Persistent(table) => table.flush(),
-            Self::Transient(_) => Ok(()),
-        }
-    }
-
-    pub(crate) fn stage_materialisation(
-        &self,
-        blocks: &CodeBlockTable,
-        staging: &mut FunctionTableStaging,
-        function: FunctionRecord,
-    ) -> Result<StagedFunctionChangeRecord, IncompleteFunctionError> {
-        staging.stage_materialisation(self, blocks, function)
-    }
-
-    pub(crate) fn stage_membership(
-        &self,
-        blocks: &CodeBlockTable,
-        staging: &mut FunctionTableStaging,
-        function: Function,
-    ) -> Result<StagedFunctionChangeRecord, IncompleteFunctionError> {
-        staging.stage_membership(self, blocks, function)
-    }
-
-    pub(crate) fn stage_properties(
-        &self,
-        blocks: &CodeBlockTable,
-        staging: &mut FunctionTableStaging,
-        entry: Address,
-        properties: FunctionProperties,
-        input_revision: Revision,
-    ) -> Result<Option<AddressRangeSet>, IncompleteFunctionError> {
-        staging.set_properties(self, blocks, entry, properties, input_revision)
-    }
-
-    pub(crate) fn stage_removal(
-        &self,
-        blocks: &CodeBlockTable,
-        staging: &mut FunctionTableStaging,
-        id: FunctionId,
-    ) -> Result<Option<StagedFunctionRemovalRecord>, IncompleteFunctionError> {
-        staging.remove(self, blocks, id)
-    }
-
-    fn publish_prepared(
-        &mut self,
-        reservations: &[FunctionId],
-        cancelled: &BTreeSet<FunctionId>,
-        added: usize,
-        removed: usize,
-    ) {
-        match self {
-            Self::Persistent(table) => table.publish_transition(reservations, added, removed),
-            Self::Transient(table) => {
-                table.publish_reservations(reservations);
-                for &id in cancelled {
-                    table.publish_release(id);
-                }
-            }
-        }
-    }
-
-    fn publish_upsert(
-        &mut self,
-        function: Function,
-        previous_entry: Option<Address>,
-        encoded_size: usize,
-    ) {
-        match self {
-            Self::Persistent(table) => table.publish_upsert(function, encoded_size),
-            Self::Transient(table) => table.publish_upsert(function, previous_entry),
-        }
-    }
-
-    fn publish_remove(&mut self, id: FunctionId, entry: Address) {
-        match self {
-            Self::Persistent(table) => table.publish_remove(id),
-            Self::Transient(table) => table.publish_remove(id, entry),
-        }
-    }
-
-    fn publish_membership(&mut self, by_block: FxHashMap<CodeBlockId, IdSet<Function>>) {
-        match self {
-            Self::Persistent(_) => {}
-            Self::Transient(table) => table.publish_membership(by_block),
-        }
     }
 }
 
@@ -1721,7 +1641,8 @@ mod test {
 
     fn table() -> FunctionTable {
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
-        FunctionTable::new(storage, 64 * 1024).unwrap()
+        let worker = WriteBackWorker::new(storage.clone()).unwrap();
+        FunctionTable::new_persistent(storage, 64 * 1024, worker).unwrap()
     }
 
     #[test]
@@ -1844,7 +1765,9 @@ mod test {
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
 
         {
-            let mut table = FunctionTable::new(storage.clone(), 64 * 1024).unwrap();
+            let worker = WriteBackWorker::new(storage.clone()).unwrap();
+            let mut table =
+                FunctionTable::new_persistent(storage.clone(), 64 * 1024, worker).unwrap();
             table
                 .insert(Address::from(0x1000), |id, entry| {
                     Ok(Function::new(id, entry))
@@ -1857,7 +1780,8 @@ mod test {
                 .unwrap();
         }
 
-        let table = FunctionTable::new(storage, 64 * 1024).unwrap();
+        let worker = WriteBackWorker::new(storage.clone()).unwrap();
+        let table = FunctionTable::new_persistent(storage, 64 * 1024, worker).unwrap();
         assert_eq!(table.len(), 2);
         assert!(table.get_by_address(Address::from(0x1000)).is_some());
         assert!(table.get_by_address(Address::from(0x2000)).is_some());
@@ -1869,7 +1793,8 @@ mod test {
 
         {
             let worker = WriteBackWorker::new(storage.clone()).unwrap();
-            let mut table = FunctionTable::with_worker(storage.clone(), worker, 64 * 1024).unwrap();
+            let mut table =
+                FunctionTable::new_persistent(storage.clone(), 64 * 1024, worker).unwrap();
             table
                 .insert(Address::from(0x1000), |id, entry| {
                     Ok(Function::new(id, entry))
@@ -1884,7 +1809,7 @@ mod test {
         }
 
         let worker = WriteBackWorker::new(storage.clone()).unwrap();
-        let table = FunctionTable::with_worker(storage, worker, 64 * 1024).unwrap();
+        let table = FunctionTable::new_persistent(storage, 64 * 1024, worker).unwrap();
         assert_eq!(table.len(), 2);
         assert!(table.get_by_address(Address::from(0x1000)).is_some());
         assert!(table.get_by_address(Address::from(0x2000)).is_some());
@@ -1899,7 +1824,7 @@ mod test {
             let storage =
                 EntityStorage::new(SqliteEntityStorage::<PERSISTENT>::new(dir.path()).unwrap());
             let worker = WriteBackWorker::new(storage.clone()).unwrap();
-            let mut table = FunctionTable::with_worker(storage, worker, 64 * 1024).unwrap();
+            let mut table = FunctionTable::new_persistent(storage, 64 * 1024, worker).unwrap();
 
             for base in 1..=5u64 {
                 table
@@ -1918,7 +1843,7 @@ mod test {
         let storage =
             EntityStorage::new(SqliteEntityStorage::<PERSISTENT>::new(dir.path()).unwrap());
         let worker = WriteBackWorker::new(storage.clone()).unwrap();
-        let mut table = FunctionTable::with_worker(storage, worker, 64 * 1024).unwrap();
+        let mut table = FunctionTable::new_persistent(storage, 64 * 1024, worker).unwrap();
 
         assert_eq!(table.len(), 3);
 

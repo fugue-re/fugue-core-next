@@ -140,7 +140,7 @@ impl<'p> ProjectQuery<'p> {
         let references = self
             .project
             .references()
-            .references_from(from, after.as_ref())
+            .references_from(from, after.map(|reference| reference.key()))
             .unwrap_or_else(|err| err.into_fatal())
             .map(|result| result.unwrap_or_else(|err| err.into_fatal()));
 
@@ -156,7 +156,7 @@ impl<'p> ProjectQuery<'p> {
         let references = self
             .project
             .references()
-            .references_to(target, after.as_ref())
+            .references_to(target, after.map(|reference| reference.key()))
             .unwrap_or_else(|err| err.into_fatal())
             .map(|result| result.unwrap_or_else(|err| err.into_fatal()));
 

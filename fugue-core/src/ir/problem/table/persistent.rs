@@ -2,44 +2,63 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 use super::{ProblemIndex, ProblemTableError};
+use crate::ir::persistent::{PersistentIdAllocator, PersistentIndexRebuilder, PersistentTable};
 use crate::ir::problem::{Problem, ProblemId, ProblemKey, ProblemKind, ProblemScope};
 use crate::ir::{Address, AddressRange};
-use crate::storage::entities::{CachedRef, EntityCache, WriteBackWorker};
+use crate::storage::entities::{
+    CachedRef, Entity, EntityCache, EntityWrite, EntityWriteBatch, WriteBackWorker,
+};
 use crate::storage::{EntityStorage, EntityStorageError};
 
 type Ref<'a> = CachedRef<'a, Problem>;
 
 pub struct ProblemTable {
+    allocator: PersistentIdAllocator<Problem>,
     index: ProblemIndex,
     entries: EntityCache<ProblemId, Problem>,
+    storage: EntityStorage,
 }
 
 impl ProblemTable {
     pub(crate) fn new(
-        entities: EntityStorage,
+        storage: EntityStorage,
         cache_bytes: usize,
-    ) -> Result<Self, EntityStorageError> {
-        Self::from_entries(EntityCache::new(entities, cache_bytes)?)
-    }
-
-    pub(crate) fn with_worker(
-        entities: EntityStorage,
         worker: Arc<WriteBackWorker>,
-        cache_bytes: usize,
     ) -> Result<Self, EntityStorageError> {
-        Self::from_entries(EntityCache::with_worker(entities, worker, cache_bytes))
+        let entries = EntityCache::new(storage.clone(), cache_bytes, worker);
+        Self::new_with(storage, entries)
     }
 
-    fn from_entries(entries: EntityCache<ProblemId, Problem>) -> Result<Self, EntityStorageError> {
+    fn new_with(
+        storage: EntityStorage,
+        entries: EntityCache<ProblemId, Problem>,
+    ) -> Result<Self, EntityStorageError> {
+        let allocator = PersistentIdAllocator::load(storage.clone(), PersistentTable::Problems)?;
+        let mut rebuilder = allocator
+            .is_none()
+            .then(|| PersistentIndexRebuilder::new(&storage, PersistentTable::Problems));
         let mut index = ProblemIndex::new();
 
         for entry in entries.try_iter_range(Bound::Unbounded)? {
             let (id, problem) = entry?;
             index.insert(id, problem.key());
-            index.allocator.mark_allocated(id);
+            if let Some(rebuilder) = &mut rebuilder {
+                rebuilder.append(id, |_| Ok(()))?;
+            }
         }
 
-        Ok(Self { index, entries })
+        let allocator = match allocator {
+            Some(allocator) => allocator,
+            None => rebuilder
+                .expect("missing problem allocator requires index rebuild")
+                .finish(|_| Ok(()))?,
+        };
+        Ok(Self {
+            allocator,
+            index,
+            entries,
+            storage,
+        })
     }
 
     pub(crate) fn flush(&self) -> Result<(), EntityStorageError> {
@@ -47,7 +66,9 @@ impl ProblemTable {
     }
 
     pub(crate) fn pending_id(&self, offset: usize) -> ProblemId {
-        self.index.allocator.pending_id(offset)
+        self.allocator
+            .pending_id(offset)
+            .unwrap_or_else(|error| error.into_fatal())
     }
 
     pub(crate) fn try_get_by_id(
@@ -103,25 +124,16 @@ impl ProblemTable {
         self.index.len()
     }
 
-    pub(crate) fn publish_upsert(&mut self, problem: Problem, encoded_size: usize, is_new: bool) {
-        let id = problem.id();
-        let key = problem.key();
-        self.entries.publish_insert(id, problem, encoded_size);
-        self.index.insert(id, key);
-        if is_new {
-            let allocated = self.index.allocator.allocate();
-            debug_assert_eq!(allocated, id);
-        }
-    }
-
-    pub(crate) fn publish_remove(&mut self, key: ProblemKey) {
-        let Some(id) = self.index.id(key) else {
-            return;
-        };
-
-        self.entries.publish_remove(&id);
-        self.index.remove(key);
-        self.index.allocator.release(id);
+    pub(crate) fn append_allocation_writes(
+        &self,
+        reservations: &[ProblemId],
+        releases: &[ProblemId],
+        added: usize,
+        removed: usize,
+        writes: &mut EntityWriteBatch,
+    ) -> Result<(), EntityStorageError> {
+        self.allocator
+            .append_transition(reservations, releases, added, removed, writes)
     }
 
     pub(crate) fn insert<F>(
@@ -144,16 +156,33 @@ impl ProblemTable {
             return Ok(existing);
         }
 
-        let entries = &self.entries;
-        let (id, ()) = self.index.allocator.try_allocate(|id| {
-            let problem = f(id, scope)?;
-            if problem.key() != key {
-                return Err(ProblemTableError::KeyMismatch);
-            }
-            entries.try_insert(id, problem)?;
-            Ok(())
-        })?;
-
+        let id = self.pending_id(0);
+        let problem = f(id, scope)?;
+        if problem.key() != key {
+            return Err(ProblemTableError::KeyMismatch);
+        }
+        let encoded =
+            rkyv::to_bytes::<rkyv::rancor::Error>(&problem).map_err(EntityStorageError::encode)?;
+        let encoded_size = encoded.len();
+        let reservations = [id];
+        let releases = [];
+        let mut writes = EntityWriteBatch::new();
+        writes.push(EntityWrite::insert_archived(
+            Problem::ID.key_for(&id),
+            encoded,
+        ));
+        self.allocator.append_transition(
+            &reservations,
+            &releases,
+            reservations.len(),
+            releases.len(),
+            &mut writes,
+        )?;
+        self.entries.flush()?;
+        self.storage.apply_batch(&writes)?;
+        self.entries.publish_insert(id, problem, encoded_size);
+        self.allocator
+            .publish_transition(&reservations, reservations.len(), releases.len());
         self.index.insert(id, key);
 
         Ok(id)
@@ -182,9 +211,15 @@ impl ProblemTable {
             None => return Ok(false),
         };
 
-        self.entries.try_remove(&id)?;
+        let mut writes = EntityWriteBatch::new();
+        writes.push(EntityWrite::remove(Problem::ID.key_for(&id)));
+        self.allocator
+            .append_transition(&[], &[id], 0, 1, &mut writes)?;
+        self.entries.flush()?;
+        self.storage.apply_batch(&writes)?;
+        self.entries.publish_remove(&id);
+        self.allocator.publish_transition(&[], 0, 1);
         self.index.remove(key);
-        self.index.allocator.release(id);
 
         Ok(true)
     }
@@ -197,5 +232,31 @@ impl ProblemTable {
             return Ok(false);
         };
         self.try_remove_by_id(id)
+    }
+
+    pub(crate) fn publish_allocations(
+        &mut self,
+        reservations: &[ProblemId],
+        added: usize,
+        removed: usize,
+    ) {
+        self.allocator
+            .publish_transition(reservations, added, removed);
+    }
+
+    pub(crate) fn publish_upsert(&mut self, problem: Problem, encoded_size: usize) {
+        let id = problem.id();
+        let key = problem.key();
+        self.entries.publish_insert(id, problem, encoded_size);
+        self.index.insert(id, key);
+    }
+
+    pub(crate) fn publish_remove(&mut self, key: ProblemKey) {
+        let Some(id) = self.index.id(key) else {
+            return;
+        };
+
+        self.entries.publish_remove(&id);
+        self.index.remove(key);
     }
 }

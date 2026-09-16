@@ -25,8 +25,9 @@ use fugue_core::il::mcode::{MCodeIr, MCodeOpcode, MCodeVarKind};
 use fugue_core::il::pcode::PCodeIr;
 use fugue_core::ir::{
     Address, AddressRange, AddressRangeSet, AddressTable, AddressWithContext, Endian, ProblemKind,
-    ProblemScope, RawAddress, Reference, ReferenceProperties, ReferenceTarget, Switch, SwitchCase,
-    SwitchId, SwitchModel, SymbolEntry, SymbolIndex, SymbolProperties, SymbolTableSelector,
+    ProblemScope, RawAddress, Reference, ReferenceKey, ReferenceKind, ReferenceProperties, Switch,
+    SwitchCase, SwitchId, SwitchModel, SymbolEntry, SymbolIndex, SymbolProperties,
+    SymbolTableSelector,
 };
 use fugue_core::lifter::{ContextSet, resolve_language};
 use fugue_core::loader::{
@@ -3801,6 +3802,7 @@ fn test_engine_asserted_reference_round_trips() -> Result<(), Box<dyn Error>> {
     let to = entry + 0x40u64;
     let changes = engine.add_reference(Reference::data(entry, to, ReferenceProperties::READ))?;
     assert!(changes.contains(ChangeKinds::REFERENCE_ADDED));
+    engine.add_reference(Reference::flow(entry, to, ReferenceProperties::JUMP))?;
 
     let outgoing = engine
         .query_reader()?
@@ -3808,7 +3810,7 @@ fn test_engine_asserted_reference_round_trips() -> Result<(), Box<dyn Error>> {
         .collect::<Result<Vec<_>, _>>()?;
     let asserted = outgoing
         .iter()
-        .find(|reference| reference.target().address() == Some(to))
+        .find(|reference| reference.target().address() == Some(to) && reference.is_data())
         .ok_or_else(|| io::Error::other("asserted reference missing"))?;
     assert!(asserted.is_read());
     assert!(asserted.origin().is_asserted());
@@ -3820,12 +3822,12 @@ fn test_engine_asserted_reference_round_trips() -> Result<(), Box<dyn Error>> {
         .entries()
         .iter()
         .copied()
-        .find(|reference| reference.from() == entry)
+        .find(|reference| reference.from() == entry && reference.is_data())
         .ok_or_else(|| io::Error::other("merged reference missing"))?;
     assert!(merged.is_read());
     assert!(merged.is_write());
 
-    engine.remove_reference(entry, ReferenceTarget::from(to))?;
+    engine.remove_reference(ReferenceKey::new(entry, to.into(), ReferenceKind::Data))?;
     let after = engine
         .query_reader()?
         .outgoing_references(entry)
@@ -3833,7 +3835,12 @@ fn test_engine_asserted_reference_round_trips() -> Result<(), Box<dyn Error>> {
     assert!(
         after
             .iter()
-            .all(|reference| reference.target().address() != Some(to))
+            .any(|reference| { reference.target().address() == Some(to) && reference.is_flow() })
+    );
+    assert!(
+        after
+            .iter()
+            .all(|reference| { reference.target().address() != Some(to) || !reference.is_data() })
     );
 
     Ok(())

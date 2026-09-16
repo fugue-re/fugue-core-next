@@ -18,6 +18,7 @@ pub mod types;
 mod util;
 
 pub use core::LifterGenerator;
+
 pub use error::LifterGeneratorError;
 pub use patcher::{PatchSet, PatcherError};
 

@@ -3,7 +3,7 @@ use fugue_core::ir::{
     SwitchProperties, SwitchTable,
 };
 use fugue_core::lifter::ContextSet;
-use fugue_core::storage::{EntityStorage, InMemoryEntityStorage};
+use fugue_core::storage::{EntityStorage, InMemoryEntityStorage, WriteBackWorker};
 
 fn table_of(size: u32, shift: u8) -> AddressTable {
     AddressTable::new(Address::from(0x2000u64), size)
@@ -109,7 +109,8 @@ fn persistent_table_survives_reopen() {
     let branch = Address::from(0x401000u64);
 
     {
-        let mut table = SwitchTable::new(storage.clone(), 64 * 1024).unwrap();
+        let worker = WriteBackWorker::new(storage.clone()).unwrap();
+        let mut table = SwitchTable::new_persistent(storage.clone(), 64 * 1024, worker).unwrap();
         table
             .insert(branch, |id, branch| {
                 let mut switch = Switch::new(id, branch, SwitchModel::Absolute(table_of(4, 0)));
@@ -123,7 +124,8 @@ fn persistent_table_survives_reopen() {
         table.flush().unwrap();
     }
 
-    let table = SwitchTable::new(storage, 64 * 1024).unwrap();
+    let worker = WriteBackWorker::new(storage.clone()).unwrap();
+    let table = SwitchTable::new_persistent(storage, 64 * 1024, worker).unwrap();
     assert_eq!(table.len(), 1);
     let switch = table.get_by_branch(branch).unwrap();
     assert_eq!(switch.case_count(), 1);

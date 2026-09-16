@@ -5,8 +5,8 @@ use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::il::pcode::{RawPCodeFlow, RawPCodeFlows};
-use crate::ir::{Address, FlowTarget, Id, Location, Reference, ReferenceOrigin};
-use crate::lifter::{Language, RawPCodeOp, Op};
+use crate::ir::{Address, FlowTarget, Id, Location, Reference, ReferenceOrigin, ToRawAddress};
+use crate::lifter::{Language, Op, RawPCodeOp};
 use crate::storage::schema::bitflags::archived_bitflags;
 use crate::types::EstimateSize;
 
@@ -326,8 +326,8 @@ impl Insn {
                 operation.inputs().first().map(|target| (index, *target))
             })?;
 
-        if language.in_default_space(&target) {
-            return Some(Address::new(self.address().space(), target.offset()));
+        if let Some(target) = target.to_address(language) {
+            return Some(Address::new(self.address().space(), target));
         }
 
         let definition = operations[..position]
@@ -342,8 +342,8 @@ impl Insn {
         definition
             .inputs()
             .first()
-            .filter(|source| language.in_default_space(source))
-            .map(|source| Address::new(self.address().space(), source.offset()))
+            .and_then(|source| source.to_address(language))
+            .map(|source| Address::new(self.address().space(), source))
     }
 
     pub(crate) fn resolve_flow(

@@ -1,38 +1,41 @@
 use std::sync::Arc;
 
+use bytes::Bytes;
+
 use super::{
-    CallGraphEdgeKey, CallGraphEdgeRecord, InverseCallGraphEdgeKey, PreparedCallGraphBatch,
+    CallGraphEdgeRecord, InverseCallGraphEdgeKey, PreparedCallGraphBatch,
+    PreparedCallGraphEdgeRecord,
 };
+use crate::ir::call_graph::CallGraphEdgeKey;
 use crate::ir::{Address, IndexMetadata};
 use crate::storage::EntityStorage;
 use crate::storage::entities::cursor::{cursor_bound, cursor_bound_or_minimum};
-use crate::storage::entities::{EntityCache, EntityStorageError, ProjectEntity, WriteBackWorker};
+use crate::storage::entities::{
+    Entity, EntityCache, EntityStorageError, EntityWrite, EntityWriteBatch, ProjectEntity,
+    WriteBackWorker,
+};
 use crate::types::Revision;
 
 pub struct CallGraphIndex {
     forward: EntityCache<CallGraphEdgeKey, CallGraphEdgeRecord>,
-    // pub(crate) solely so the consistency verifier in the facade test module can
-    // enumerate the inverse index without a production-only accessor.
-    pub(crate) inverse: EntityCache<InverseCallGraphEdgeKey, CallGraphEdgeRecord>,
+    inverse: EntityCache<InverseCallGraphEdgeKey, CallGraphEdgeRecord>,
     storage: EntityStorage,
 }
 
 impl CallGraphIndex {
-    const CACHE_BYTES: usize = 4 * 1024 * 1024;
-
     pub(crate) fn new(
         storage: EntityStorage,
-        worker: Option<Arc<WriteBackWorker>>,
-    ) -> Result<Self, EntityStorageError> {
-        let forward =
-            EntityCache::from_storage(storage.clone(), worker.clone(), Self::CACHE_BYTES)?;
-        let inverse = EntityCache::from_storage(storage.clone(), worker, Self::CACHE_BYTES)?;
+        cache_bytes: usize,
+        worker: Arc<WriteBackWorker>,
+    ) -> Self {
+        let forward = EntityCache::new(storage.clone(), cache_bytes, worker.clone());
+        let inverse = EntityCache::new(storage.clone(), cache_bytes, worker);
 
-        Ok(Self {
+        Self {
             forward,
             inverse,
             storage,
-        })
+        }
     }
 
     pub(crate) fn callees(
@@ -42,7 +45,7 @@ impl CallGraphIndex {
     ) -> Result<impl Iterator<Item = Result<Address, EntityStorageError>> + '_, EntityStorageError>
     {
         let after = after.map(|after| CallGraphEdgeKey::new(caller, after));
-        let start = cursor_bound_or_minimum(after, CallGraphEdgeKey::minimum_for(caller));
+        let start = cursor_bound_or_minimum(after, CallGraphEdgeKey::new(caller, Address::MINIMUM));
         Ok(self
             .forward
             .try_iter_range(start.as_ref())?
@@ -61,7 +64,10 @@ impl CallGraphIndex {
     ) -> Result<impl Iterator<Item = Result<Address, EntityStorageError>> + '_, EntityStorageError>
     {
         let after = after.map(|after| InverseCallGraphEdgeKey::new(after, callee));
-        let start = cursor_bound_or_minimum(after, InverseCallGraphEdgeKey::minimum_for(callee));
+        let start = cursor_bound_or_minimum(
+            after,
+            InverseCallGraphEdgeKey::new(Address::MINIMUM, callee),
+        );
         Ok(self
             .inverse
             .try_iter_range(start.as_ref())?
@@ -106,21 +112,6 @@ impl CallGraphIndex {
         self.inverse.flush()
     }
 
-    pub(crate) fn publish(&self, batch: PreparedCallGraphBatch) {
-        for edge in batch.edges {
-            let inverse_key = InverseCallGraphEdgeKey::new(edge.key.source(), edge.key.target());
-            if edge.present {
-                self.forward
-                    .publish_insert(edge.key, CallGraphEdgeRecord, edge.encoded_size);
-                self.inverse
-                    .publish_insert(inverse_key, CallGraphEdgeRecord, edge.encoded_size);
-            } else {
-                self.forward.publish_remove(&edge.key);
-                self.inverse.publish_remove(&inverse_key);
-            }
-        }
-    }
-
     pub(crate) fn clear(&self) -> Result<(), EntityStorageError> {
         self.forward.try_clear()?;
         self.inverse.try_clear()
@@ -150,4 +141,50 @@ impl CallGraphIndex {
         self.inverse
             .try_remove(&InverseCallGraphEdgeKey::new(caller, callee))
     }
+
+    pub(crate) fn publish_batch(&self, batch: PreparedCallGraphBatch) {
+        for edge in batch.edges {
+            let inverse_key = InverseCallGraphEdgeKey::new(edge.key.source(), edge.key.target());
+            if edge.present {
+                self.forward
+                    .publish_insert(edge.key, CallGraphEdgeRecord, edge.encoded_size);
+                self.inverse
+                    .publish_insert(inverse_key, CallGraphEdgeRecord, edge.encoded_size);
+            } else {
+                self.forward.publish_remove(&edge.key);
+                self.inverse.publish_remove(&inverse_key);
+            }
+        }
+    }
+}
+
+pub(crate) fn append_prepared_writes(
+    edges: &mut [PreparedCallGraphEdgeRecord],
+    writes: &mut EntityWriteBatch,
+) -> Result<(), EntityStorageError> {
+    let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&CallGraphEdgeRecord)
+        .map(Bytes::from_owner)
+        .map_err(EntityStorageError::encode)?;
+    for edge in edges {
+        let inverse = InverseCallGraphEdgeKey::new(edge.key.source(), edge.key.target());
+        if edge.present {
+            edge.encoded_size = encoded.len();
+            writes.push(EntityWrite::insert(
+                CallGraphEdgeRecord::ID.key_for(&edge.key),
+                encoded.clone(),
+            ));
+            writes.push(EntityWrite::insert(
+                CallGraphEdgeRecord::ID.key_for(&inverse),
+                encoded.clone(),
+            ));
+        } else {
+            writes.push(EntityWrite::remove(
+                CallGraphEdgeRecord::ID.key_for(&edge.key),
+            ));
+            writes.push(EntityWrite::remove(
+                CallGraphEdgeRecord::ID.key_for(&inverse),
+            ));
+        }
+    }
+    Ok(())
 }

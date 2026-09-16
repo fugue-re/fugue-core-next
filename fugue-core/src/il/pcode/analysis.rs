@@ -3,7 +3,7 @@ use crate::engine::{AnalyserProvider, AnalysisContext};
 use crate::extension;
 use crate::il::common::IlAnalyser;
 use crate::il::pcode::PCodeIr;
-use crate::ir::{AddressRangeSet, FunctionId, ReferenceKind};
+use crate::ir::{AddressRangeSet, FunctionId, ReferenceKind, ReferenceProvenance};
 use crate::project::{AnalysisPhase, ChangeKinds, Project};
 
 struct PCodeReferenceAnalyser;
@@ -46,6 +46,7 @@ impl IlAnalyser for PCodeReferenceAnalyser {
         context.updates.replace_derived_references(
             coverage,
             ReferenceKind::Data,
+            ReferenceProvenance::Function(function),
             pcode.data_references().collect(),
         );
         Ok(())

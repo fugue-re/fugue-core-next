@@ -1,17 +1,18 @@
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 
-use crate::ir::Address;
 use crate::ir::cfg::FlowKind;
-use crate::storage::entities::schema::{
-    ENTITY_KEY_REFERENCE_FORWARD_ID, ENTITY_REFERENCE_RECORD_ID,
-};
-use crate::storage::entities::{Entity, EntityId, EntityKey, EntityKeyCodec, EntityKeyId};
+use crate::ir::{Address, FunctionId, SwitchId};
+use crate::storage::entities::schema::ENTITY_KEY_REFERENCE_FORWARD_ID;
+use crate::storage::entities::{EntityKey, EntityKeyCodec, EntityKeyId};
 use crate::storage::schema::bitflags::archived_bitflags;
 
 mod index;
-pub(crate) use index::PreparedReferenceIndexRecord;
-pub use index::ReferenceIndex;
+pub(crate) use index::{
+    ATTRIBUTE_REFERENCE_INDEX_CACHE_SIZE, DEFAULT_REFERENCE_INDEX_CACHE_BYTES,
+    DerivedReferenceBatch, PreparedReferenceBatch, ReferenceEntry, ReferenceStaging,
+};
+pub use index::{ReferenceIndex, ReferenceIndexError, ReferenceIterator};
 
 #[derive(
     Debug,
@@ -42,6 +43,22 @@ impl ReferenceKind {
     }
 }
 
+impl EntityKeyCodec for ReferenceKind {
+    fn decode(input: &mut &[u8]) -> Option<Self> {
+        let (&kind, rest) = input.split_first()?;
+        *input = rest;
+        match kind {
+            kind if kind == Self::Flow as u8 => Some(Self::Flow),
+            kind if kind == Self::Data as u8 => Some(Self::Data),
+            _ => None,
+        }
+    }
+
+    fn encode(&self, output: &mut impl Extend<u8>) {
+        output.extend([*self as u8]);
+    }
+}
+
 #[derive(
     Debug,
     Clone,
@@ -61,6 +78,26 @@ pub enum ReferenceOrigin {
     #[default]
     Derived = 0,
     Asserted = 1,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[rkyv(derive(Debug, PartialEq, Eq))]
+pub enum ReferenceProvenance {
+    Asserted,
+    Function(FunctionId),
+    Switch(SwitchId),
 }
 
 impl ReferenceOrigin {
@@ -279,18 +316,14 @@ impl Reference {
         self.properties.contains(ReferenceProperties::INDIRECT)
     }
 
-    pub(crate) fn same_fact(&self, other: &Self) -> bool {
-        self.from == other.from
-            && self.target == other.target
-            && self.kind == other.kind
-            && self.properties == other.properties
-            && self.origin == other.origin
+    pub fn key(&self) -> ReferenceKey {
+        ReferenceKey::new(self.from, self.target, self.kind)
     }
 }
 
 impl PartialEq for Reference {
     fn eq(&self, other: &Self) -> bool {
-        self.from == other.from && self.target == other.target
+        self.key() == other.key()
     }
 }
 
@@ -304,16 +337,13 @@ impl PartialOrd for Reference {
 
 impl Ord for Reference {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.from
-            .cmp(&other.from)
-            .then_with(|| self.target.cmp(&other.target))
+        self.key().cmp(&other.key())
     }
 }
 
 impl Hash for Reference {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.from.hash(state);
-        self.target.hash(state);
+        self.key().hash(state);
     }
 }
 
@@ -321,15 +351,12 @@ impl Hash for Reference {
 pub struct ReferenceKey {
     from: Address,
     target: ReferenceTarget,
+    kind: ReferenceKind,
 }
 
 impl ReferenceKey {
-    pub fn new(from: Address, target: ReferenceTarget) -> Self {
-        Self { from, target }
-    }
-
-    pub(crate) fn minimum_for(from: Address) -> Self {
-        Self::new(from, ReferenceTarget::minimum())
+    pub fn new(from: Address, target: ReferenceTarget, kind: ReferenceKind) -> Self {
+        Self { from, target, kind }
     }
 
     pub fn from(&self) -> Address {
@@ -339,60 +366,29 @@ impl ReferenceKey {
     pub fn target(&self) -> ReferenceTarget {
         self.target
     }
+
+    pub fn kind(&self) -> ReferenceKind {
+        self.kind
+    }
 }
 
 impl EntityKeyCodec for ReferenceKey {
     fn decode(input: &mut &[u8]) -> Option<Self> {
         let from = Address::decode(input)?;
         let target = ReferenceTarget::decode(input)?;
-        Some(Self { from, target })
+        let kind = ReferenceKind::decode(input)?;
+        Some(Self::new(from, target, kind))
     }
 
     fn encode(&self, output: &mut impl Extend<u8>) {
         self.from.encode(output);
         self.target.encode(output);
+        self.kind.encode(output);
     }
 }
 
 impl EntityKey for ReferenceKey {
     const ID: EntityKeyId = ENTITY_KEY_REFERENCE_FORWARD_ID;
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-pub struct ReferenceRecord {
-    kind: ReferenceKind,
-    properties: ReferenceProperties,
-    origin: ReferenceOrigin,
-}
-
-impl ReferenceRecord {
-    fn of(reference: &Reference) -> Self {
-        Self {
-            kind: reference.kind(),
-            properties: reference.properties(),
-            origin: reference.origin(),
-        }
-    }
-
-    fn kind(&self) -> ReferenceKind {
-        self.kind
-    }
-
-    fn properties(&self) -> ReferenceProperties {
-        self.properties
-    }
-
-    fn origin(&self) -> ReferenceOrigin {
-        self.origin
-    }
-
-    fn materialise(self, from: Address, target: ReferenceTarget) -> Reference {
-        Reference::new(from, target, self.kind(), self.properties()).with_origin(self.origin())
-    }
-}
-
-impl Entity for ReferenceRecord {
-    const ID: EntityId = ENTITY_REFERENCE_RECORD_ID;
 }
 
 #[cfg(test)]
@@ -410,7 +406,9 @@ mod test {
     };
     use crate::lifter::{ContextSet, Language, Op, RawPCodeOp, Varnode, resolve_language};
     use crate::storage::EntityStorage;
-    use crate::storage::entities::{EntityKeyPrefix, EntityStorageError, InMemoryEntityStorage};
+    use crate::storage::entities::{
+        Entity, EntityKeyPrefix, InMemoryEntityStorage, WriteBackWorker,
+    };
     use crate::storage::segments::space::AddressSpaceId;
     use crate::types::Revision;
 
@@ -418,16 +416,12 @@ mod test {
         Address::new(AddressSpaceId::from(space), offset)
     }
 
-    fn index() -> Result<ReferenceIndex, EntityStorageError> {
-        ReferenceIndex::new(EntityStorage::new(InMemoryEntityStorage::new()), None)
+    fn index() -> ReferenceIndex {
+        ReferenceIndex::new_transient()
     }
 
     fn flow_reference(from: Address, to: Address) -> Reference {
-        Reference::flow(from, to, ReferenceProperties::CALL).with_origin(ReferenceOrigin::Derived)
-    }
-
-    fn derived_read(from: Address, to: Address) -> Reference {
-        Reference::data(from, to, ReferenceProperties::READ).with_origin(ReferenceOrigin::Derived)
+        Reference::flow(from, to, ReferenceProperties::CALL)
     }
 
     fn insert_function(
@@ -477,49 +471,12 @@ mod test {
 
         let mut staging = FunctionTableStaging::default();
         let function = function.normalise()?;
-        let record = functions.stage_materialisation(blocks, &mut staging, function)?;
+        let record = staging.stage_materialisation(functions, blocks, function)?;
         let id = record.id();
         let (batch, writes) = staging.prepare(functions, blocks)?;
         assert!(writes.is_empty());
         batch.publish(functions, blocks);
         Ok(id)
-    }
-
-    #[test]
-    fn derived_kind_matches_ignores_kind_and_shadowing() {
-        let from = address(0, 0x1000);
-        let data_target = address(0, 0x2000);
-        let flow_target = address(0, 0x3000);
-
-        let current = [
-            derived_read(from, data_target),
-            flow_reference(from, flow_target),
-        ];
-        let derived = [derived_read(from, data_target)];
-        assert!(ReferenceIndex::derived_kind_matches(
-            &current,
-            &derived,
-            ReferenceKind::Data,
-        ));
-
-        let upgraded = [Reference::data(
-            from,
-            data_target,
-            ReferenceProperties::READ | ReferenceProperties::WRITE,
-        )
-        .with_origin(ReferenceOrigin::Derived)];
-        assert!(!ReferenceIndex::derived_kind_matches(
-            &current,
-            &upgraded,
-            ReferenceKind::Data,
-        ));
-
-        let asserted = [derived_read(from, data_target).with_origin(ReferenceOrigin::Asserted)];
-        assert!(ReferenceIndex::derived_kind_matches(
-            &asserted,
-            &derived,
-            ReferenceKind::Data,
-        ));
     }
 
     #[test]
@@ -565,32 +522,25 @@ mod test {
     }
 
     #[test]
-    fn reference_record_round_trips_kind_and_origin() {
-        for (kind, properties) in [
-            (
-                ReferenceKind::Flow,
-                ReferenceProperties::CALL | ReferenceProperties::CONDITIONAL,
-            ),
-            (
-                ReferenceKind::Flow,
-                ReferenceProperties::JUMP | ReferenceProperties::COMPUTED,
-            ),
-            (
-                ReferenceKind::Data,
-                ReferenceProperties::READ | ReferenceProperties::INDIRECT,
-            ),
-            (ReferenceKind::Data, ReferenceProperties::WRITE),
-        ] {
-            for origin in [ReferenceOrigin::Derived, ReferenceOrigin::Asserted] {
-                let reference =
-                    Reference::new(address(0, 0x1000), address(0, 0x2000), kind, properties)
-                        .with_origin(origin);
-                let record = ReferenceRecord::of(&reference);
-                assert_eq!(record.kind(), kind);
-                assert_eq!(record.properties(), properties);
-                assert_eq!(record.origin(), origin);
-            }
-        }
+    fn reference_entry_merges_derived_provenance() {
+        let from = address(0, 0x1000);
+        let target = address(0, 0x2000);
+        let reference = Reference::data(from, target, ReferenceProperties::READ);
+        let mut entry = ReferenceEntry::new(
+            ReferenceProvenance::Function(FunctionId::default()),
+            reference.properties(),
+        );
+        entry.merge_provenance(
+            ReferenceProvenance::Switch(SwitchId::default()),
+            ReferenceProperties::WRITE,
+        );
+
+        let reference = entry
+            .materialise(reference.key())
+            .expect("derived provenance must materialise a reference");
+        assert!(reference.origin().is_derived());
+        assert!(reference.is_read());
+        assert!(reference.is_write());
     }
 
     #[test]
@@ -599,9 +549,12 @@ mod test {
         let mid = ReferenceTarget::from(address(0, 0x20));
         let high = ReferenceTarget::from(address(1, 0x00));
         let from = Address::MINIMUM;
-        let low_encoded = ReferenceRecord::ID.key_for(&ReferenceKey::new(from, low));
-        let mid_encoded = ReferenceRecord::ID.key_for(&ReferenceKey::new(from, mid));
-        let high_encoded = ReferenceRecord::ID.key_for(&ReferenceKey::new(from, high));
+        let low_encoded =
+            ReferenceEntry::ID.key_for(&ReferenceKey::new(from, low, ReferenceKind::Flow));
+        let mid_encoded =
+            ReferenceEntry::ID.key_for(&ReferenceKey::new(from, mid, ReferenceKind::Flow));
+        let high_encoded =
+            ReferenceEntry::ID.key_for(&ReferenceKey::new(from, high, ReferenceKind::Flow));
 
         assert!(low_encoded < mid_encoded);
         assert!(mid_encoded < high_encoded);
@@ -610,6 +563,10 @@ mod test {
             EntityKeyPrefix::split(&low_encoded).expect("encoded key has prefix");
         assert_eq!(Address::decode(&mut encoded), Some(from));
         assert_eq!(ReferenceTarget::decode(&mut encoded), Some(low));
+        assert_eq!(
+            ReferenceKind::decode(&mut encoded),
+            Some(ReferenceKind::Flow)
+        );
         assert!(encoded.is_empty());
     }
 
@@ -629,6 +586,13 @@ mod test {
         assert_eq!(base, repainted);
         assert_eq!(base.cmp(&repainted), Ordering::Equal);
 
+        let data = Reference::data(
+            address(0, 0x1000),
+            address(0, 0x2000),
+            ReferenceProperties::READ,
+        );
+        assert_ne!(base, data);
+
         let elsewhere = Reference::flow(
             address(0, 0x1000),
             address(0, 0x3000),
@@ -640,36 +604,42 @@ mod test {
 
     #[test]
     fn reference_index_serves_both_directions() -> Result<(), Box<dyn std::error::Error>> {
-        let mut index = index()?;
+        let mut index = index();
         let a = address(0, 0x1000);
         let b = address(0, 0x2000);
         let c = address(0, 0x3000);
 
         index.insert(&flow_reference(a, b))?;
+        index.insert(&Reference::data(a, b, ReferenceProperties::READ))?;
         index.insert(&Reference::data(a, c, ReferenceProperties::READ))?;
         index.insert(&flow_reference(c, b))?;
 
         let from_a = index
             .references_from(a, None)?
             .collect::<Result<Vec<_>, _>>()?;
-        assert_eq!(from_a.len(), 2);
+        assert_eq!(from_a.len(), 3);
         assert_eq!(from_a[0].target().address(), Some(b));
         assert!(from_a[0].is_call());
-        assert_eq!(from_a[1].target().address(), Some(c));
+        assert_eq!(from_a[1].target().address(), Some(b));
         assert!(from_a[1].is_read());
+        assert_eq!(from_a[2].target().address(), Some(c));
+        assert!(from_a[2].is_read());
 
         let to_b = index
             .references_to(b.into(), None)?
             .collect::<Result<Vec<_>, _>>()?;
-        assert_eq!(to_b.len(), 2);
+        assert_eq!(to_b.len(), 3);
         assert_eq!(to_b[0].from(), a);
-        assert_eq!(to_b[1].from(), c);
+        assert!(to_b[0].is_flow());
+        assert_eq!(to_b[1].from(), a);
+        assert!(to_b[1].is_data());
+        assert_eq!(to_b[2].from(), c);
         Ok(())
     }
 
     #[test]
     fn cross_space_references_scan_from_both_sides() -> Result<(), Box<dyn std::error::Error>> {
-        let mut index = index()?;
+        let mut index = index();
         let base_from = address(0, 0x1000);
         let overlay_to = address(1, 0x2000);
 
@@ -690,12 +660,13 @@ mod test {
     }
 
     #[test]
-    fn reference_index_get_reads_record() -> Result<(), Box<dyn std::error::Error>> {
-        let mut index = index()?;
+    fn reference_index_get_returns_reference() -> Result<(), Box<dyn std::error::Error>> {
+        let mut index = index();
         let a = address(0, 0x1000);
         let b = address(0, 0x2000);
 
-        assert!(index.get(a, b.into())?.is_none());
+        let key = ReferenceKey::new(a, b.into(), ReferenceKind::Data);
+        assert!(index.get(key)?.is_none());
 
         index.insert(&Reference::data(
             a,
@@ -703,42 +674,40 @@ mod test {
             ReferenceProperties::READ | ReferenceProperties::INDIRECT,
         ))?;
 
-        let stored = index
-            .get(a, b.into())?
-            .ok_or("reference absent after insert")?;
-        assert!(stored.is_read());
-        assert!(stored.is_indirect());
-        assert!(stored.origin().is_asserted());
+        let reference = index.get(key)?.ok_or("reference absent after insert")?;
+        assert!(reference.is_read());
+        assert!(reference.is_indirect());
+        assert!(reference.origin().is_asserted());
         Ok(())
     }
 
     #[test]
     fn reference_index_remove_clears_both_sides() -> Result<(), Box<dyn std::error::Error>> {
-        let mut index = index()?;
+        let mut index = index();
         let a = address(0, 0x1000);
         let b = address(0, 0x2000);
 
         index.insert(&flow_reference(a, b))?;
-        index.remove(a, b.into())?;
+        index.insert(&Reference::data(a, b, ReferenceProperties::READ))?;
+        index.remove(ReferenceKey::new(a, b.into(), ReferenceKind::Flow))?;
 
-        assert!(
-            index
-                .references_from(a, None)?
-                .collect::<Result<Vec<_>, _>>()?
-                .is_empty()
-        );
-        assert!(
-            index
-                .references_to(b.into(), None)?
-                .collect::<Result<Vec<_>, _>>()?
-                .is_empty()
-        );
+        let outgoing = index
+            .references_from(a, None)?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(outgoing.len(), 1);
+        assert!(outgoing[0].is_data());
+
+        let incoming = index
+            .references_to(b.into(), None)?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(incoming.len(), 1);
+        assert!(incoming[0].is_data());
         Ok(())
     }
 
     #[test]
     fn reference_index_pages_from_cursor() -> Result<(), Box<dyn std::error::Error>> {
-        let mut index = index()?;
+        let mut index = index();
         let from = address(0, 0x1000);
         for offset in 0..8u64 {
             index.insert(&flow_reference(from, address(0, 0x2000 + offset * 0x10)))?;
@@ -748,7 +717,7 @@ mod test {
         let mut cursor = None;
         loop {
             let page = index
-                .references_from(from, cursor.as_ref())?
+                .references_from(from, cursor.map(|reference: Reference| reference.key()))?
                 .take(3)
                 .collect::<Result<Vec<_>, _>>()?;
             if page.is_empty() {
@@ -773,15 +742,28 @@ mod test {
         let a = address(0, 0x1000);
         let b = address(0, 0x2000);
 
-        let mut writer = ReferenceIndex::new(storage.clone(), None)?;
+        let worker = WriteBackWorker::new(storage.clone())?;
+        let mut writer = ReferenceIndex::new_persistent(
+            storage.clone(),
+            DEFAULT_REFERENCE_INDEX_CACHE_BYTES,
+            worker.clone(),
+        );
         writer.insert(&flow_reference(a, b))?;
+        writer.insert(&Reference::data(a, b, ReferenceProperties::READ))?;
 
-        let reader = ReferenceIndex::new(storage.clone(), None)?;
+        let reader = ReferenceIndex::new_persistent(
+            storage.clone(),
+            DEFAULT_REFERENCE_INDEX_CACHE_BYTES,
+            worker,
+        );
         let from_a = reader
             .references_from(a, None)?
             .collect::<Result<Vec<_>, _>>()?;
-        assert_eq!(from_a.len(), 1);
+        assert_eq!(from_a.len(), 2);
         assert_eq!(from_a[0].target().address(), Some(b));
+        assert!(from_a[0].is_flow());
+        assert_eq!(from_a[1].target().address(), Some(b));
+        assert!(from_a[1].is_data());
         Ok(())
     }
 
@@ -789,7 +771,7 @@ mod test {
     fn reference_index_ensure_current_derives_flow_references()
     -> Result<(), Box<dyn std::error::Error>> {
         let language = resolve_language("x86:LE:64")?;
-        let mut index = index()?;
+        let mut index = index();
         let mut functions = FunctionTable::new_transient();
         let mut blocks = CodeBlockTable::new_transient();
         let entry = address(0, 0x1000);
@@ -944,7 +926,7 @@ mod test {
     #[test]
     fn rebuild_preserves_asserted_references() -> Result<(), Box<dyn std::error::Error>> {
         let language = resolve_language("x86:LE:64")?;
-        let mut index = index()?;
+        let mut index = index();
         let mut functions = FunctionTable::new_transient();
         let mut blocks = CodeBlockTable::new_transient();
         let entry = address(0, 0x1000);
@@ -960,7 +942,11 @@ mod test {
 
         index.ensure_current(functions.iter(), &blocks, Revision::new(7))?;
 
-        let survived = index.get(asserted_from, asserted_to.into())?;
+        let survived = index.get(ReferenceKey::new(
+            asserted_from,
+            asserted_to.into(),
+            ReferenceKind::Data,
+        ))?;
         assert!(survived.is_some_and(|reference| reference.origin().is_asserted()));
 
         let derived = index

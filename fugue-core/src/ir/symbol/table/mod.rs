@@ -1,14 +1,15 @@
+use std::collections::BTreeMap;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
 use smallvec::SmallVec;
 
 use super::{SymbolEntry, SymbolId, SymbolIndex, SymbolProperties, SymbolTableSelector};
-use crate::ir::Address;
 use crate::ir::symbol::Symbol;
+use crate::ir::{Address, IdSet};
 use crate::storage::entities::schema::ENTITY_SYMBOL_TABLE_ID;
 use crate::storage::entities::{
-    Entity, EntityId, EntityRef, EntityWriteBatch, ProjectEntity, WriteBackWorker,
+    Entity, EntityId, EntityRef, EntityWrite, EntityWriteBatch, ProjectEntity, WriteBackWorker,
 };
 use crate::storage::project::PersistableProjectEntity;
 use crate::storage::{EntityStorage, EntityStorageError};
@@ -52,24 +53,25 @@ impl SymbolIndexState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SymbolInsertion {
-    id: SymbolId,
-    is_new: bool,
+#[derive(Default)]
+pub(crate) struct SymbolTableStaging {
+    cancelled_symbols: Vec<SymbolId>,
+    staged_indices: BTreeMap<SymbolIndex, Option<SymbolId>>,
+    staged_symbols: BTreeMap<SymbolId, Option<SymbolEntry>>,
+    symbol_reservations: Vec<SymbolId>,
 }
 
-impl SymbolInsertion {
-    const fn new(id: SymbolId, is_new: bool) -> Self {
-        Self { id, is_new }
-    }
+pub(crate) struct PreparedSymbolBatch {
+    cancelled_symbols: Vec<SymbolId>,
+    records: Vec<PreparedSymbolRecord>,
+    symbol_reservations: Vec<SymbolId>,
+}
 
-    pub const fn id(&self) -> SymbolId {
-        self.id
-    }
-
-    pub const fn is_new(&self) -> bool {
-        self.is_new
-    }
+struct PreparedSymbolRecord {
+    encoded_size: usize,
+    entry: Option<SymbolEntry>,
+    id: SymbolId,
+    previous: Option<SymbolIndexState>,
 }
 
 const SYMBOL_TABLE_VERSION: u32 = 1;
@@ -89,27 +91,20 @@ pub enum SymbolTable {
 }
 
 impl SymbolTable {
-    pub fn new(entities: EntityStorage, cache_bytes: usize) -> Result<Self, EntityStorageError> {
+    pub fn new_transient() -> Self {
+        Self::Transient(TransientSymbolTable::new())
+    }
+
+    pub fn new_persistent(
+        entities: EntityStorage,
+        cache_bytes: usize,
+        worker: Arc<WriteBackWorker>,
+    ) -> Result<Self, EntityStorageError> {
         Ok(Self::Persistent(PersistentSymbolTable::new(
             entities,
             cache_bytes,
-        )?))
-    }
-
-    pub fn with_worker(
-        entities: EntityStorage,
-        worker: Arc<WriteBackWorker>,
-        cache_bytes: usize,
-    ) -> Result<Self, EntityStorageError> {
-        Ok(Self::Persistent(PersistentSymbolTable::with_worker(
-            entities,
             worker,
-            cache_bytes,
         )?))
-    }
-
-    pub fn new_transient() -> Self {
-        Self::Transient(TransientSymbolTable::new())
     }
 
     pub fn contains(&self, symbol: impl AsRef<str>) -> bool {
@@ -197,7 +192,7 @@ impl SymbolTable {
         }
     }
 
-    pub(crate) fn get_id_by_index(&self, index: SymbolIndex) -> Option<SymbolId> {
+    pub fn get_id_by_index(&self, index: SymbolIndex) -> Option<SymbolId> {
         match self {
             Self::Persistent(table) => table.get_id_by_index(index),
             Self::Transient(table) => table.get_id_by_index(index),
@@ -368,7 +363,7 @@ impl SymbolTable {
         address: impl Into<Address>,
         symbol: impl Into<Symbol>,
         properties: SymbolProperties,
-    ) -> Result<SymbolInsertion, EntityStorageError> {
+    ) -> Result<SymbolId, EntityStorageError> {
         let address = address.into();
         let symbol = symbol.into();
         match self {
@@ -490,7 +485,7 @@ impl SymbolTable {
         Ok(())
     }
 
-    pub(crate) fn append_prepared_transition_writes(
+    pub(crate) fn append_allocation_writes(
         &self,
         reservations: &[SymbolId],
         releases: &[SymbolId],
@@ -499,18 +494,12 @@ impl SymbolTable {
         writes: &mut EntityWriteBatch,
     ) -> Result<(), EntityStorageError> {
         if let Self::Persistent(table) = self {
-            table.append_prepared_transition_writes(
-                reservations,
-                releases,
-                added,
-                removed,
-                writes,
-            )?;
+            table.append_allocation_writes(reservations, releases, added, removed, writes)?;
         }
         Ok(())
     }
 
-    pub(crate) fn publish_prepared(
+    pub(crate) fn publish_allocations(
         &mut self,
         reservations: &[SymbolId],
         cancelled: &[SymbolId],
@@ -518,7 +507,7 @@ impl SymbolTable {
         removed: usize,
     ) {
         match self {
-            Self::Persistent(table) => table.publish_transition(reservations, added, removed),
+            Self::Persistent(table) => table.publish_allocations(reservations, added, removed),
             Self::Transient(table) => {
                 for &id in reservations {
                     table.publish_reservation(id);
@@ -547,6 +536,378 @@ impl SymbolTable {
         match self {
             Self::Persistent(table) => table.publish_remove(id),
             Self::Transient(table) => table.publish_remove(id, previous),
+        }
+    }
+}
+
+impl SymbolTableStaging {
+    pub(crate) fn set_properties(
+        &mut self,
+        symbols: &SymbolTable,
+        id: SymbolId,
+        properties: SymbolProperties,
+    ) -> Result<bool, EntityStorageError> {
+        let Some(mut entry) = self.symbol(symbols, id)? else {
+            return Ok(false);
+        };
+        if entry.properties() == properties {
+            return Ok(false);
+        }
+
+        entry.set_properties(properties);
+        self.stage(symbols, id, Some(entry))?;
+        Ok(true)
+    }
+
+    pub(crate) fn add(
+        &mut self,
+        symbols: &SymbolTable,
+        index: SymbolIndex,
+        entry: SymbolEntry,
+    ) -> Result<SymbolId, EntityStorageError> {
+        let entry = entry.with_index(index);
+        if let Some(existing_id) = self.symbol_id_by_index(symbols, index) {
+            let Some(mut existing) = self.symbol(symbols, existing_id)? else {
+                unreachable!("staged symbol index refers to an existing entry");
+            };
+            if existing == entry {
+                return Ok(existing_id);
+            }
+
+            if existing.indices().len() > 1 {
+                existing.remove_index(index);
+                self.stage(symbols, existing_id, Some(existing))?;
+            } else {
+                self.remove_symbol(symbols, existing_id)?;
+            }
+        }
+
+        self.add_or_update(symbols, index, entry)
+    }
+
+    pub(crate) fn remove_by_address(
+        &mut self,
+        symbols: &SymbolTable,
+        address: Address,
+    ) -> Result<usize, EntityStorageError> {
+        let ids = self.symbol_ids_matching(symbols, |entry| entry.address() == address)?;
+        let count = ids.len();
+        for id in ids.iter() {
+            self.remove_symbol(symbols, id)?;
+        }
+        Ok(count)
+    }
+
+    pub(crate) fn remove_by_id(
+        &mut self,
+        symbols: &SymbolTable,
+        id: SymbolId,
+    ) -> Result<bool, EntityStorageError> {
+        if self.symbol(symbols, id)?.is_none() {
+            return Ok(false);
+        }
+        self.remove_symbol(symbols, id)?;
+        Ok(true)
+    }
+
+    pub(crate) fn remove_by_index(
+        &mut self,
+        symbols: &SymbolTable,
+        index: SymbolIndex,
+    ) -> Result<bool, EntityStorageError> {
+        let Some(id) = self.symbol_id_by_index(symbols, index) else {
+            return Ok(false);
+        };
+        self.remove_symbol(symbols, id)?;
+        Ok(true)
+    }
+
+    pub(crate) fn remove_by_name(
+        &mut self,
+        symbols: &SymbolTable,
+        symbol: impl AsRef<str>,
+    ) -> Result<usize, EntityStorageError> {
+        let Some(symbol) = Symbol::from_existing(symbol.as_ref()) else {
+            return Ok(0);
+        };
+        let ids = self.symbol_ids_matching(symbols, |entry| entry.symbol() == symbol)?;
+        let count = ids.len();
+        for id in ids.iter() {
+            self.remove_symbol(symbols, id)?;
+        }
+        Ok(count)
+    }
+
+    fn add_or_update(
+        &mut self,
+        symbols: &SymbolTable,
+        index: SymbolIndex,
+        entry: SymbolEntry,
+    ) -> Result<SymbolId, EntityStorageError> {
+        if let Some(id) = self.get_referent(symbols, &entry)? {
+            let mut existing = self
+                .symbol(symbols, id)?
+                .expect("symbol referent was resolved from an existing entry");
+            existing.add_index(index);
+            existing.update_visibility(entry.properties());
+            self.stage(symbols, id, Some(existing))?;
+            return Ok(id);
+        }
+
+        let id = symbols.pending_id(self.symbol_reservations.len());
+        self.symbol_reservations.push(id);
+        self.stage(symbols, id, Some(entry))?;
+        Ok(id)
+    }
+
+    fn get_referent(
+        &self,
+        symbols: &SymbolTable,
+        entry: &SymbolEntry,
+    ) -> Result<Option<SymbolId>, EntityStorageError> {
+        for (id, _) in symbols.get_by_address(entry.address()) {
+            if let Some(candidate) = self.symbol(symbols, id)?
+                && candidate.has_same_referent(entry)
+            {
+                return Ok(Some(id));
+            }
+        }
+
+        Ok(self.staged_symbols.iter().find_map(|(&id, candidate)| {
+            candidate
+                .as_ref()
+                .is_some_and(|candidate| candidate.has_same_referent(entry))
+                .then_some(id)
+        }))
+    }
+
+    fn remove_symbol(
+        &mut self,
+        symbols: &SymbolTable,
+        id: SymbolId,
+    ) -> Result<(), EntityStorageError> {
+        self.stage(symbols, id, None)?;
+        if symbols.try_get_by_id(id)?.is_none() {
+            self.staged_symbols.remove(&id);
+            self.cancelled_symbols.push(id);
+        }
+        Ok(())
+    }
+
+    fn stage(
+        &mut self,
+        symbols: &SymbolTable,
+        id: SymbolId,
+        entry: Option<SymbolEntry>,
+    ) -> Result<(), EntityStorageError> {
+        if let Some(previous) = self.symbol(symbols, id)? {
+            for &index in previous.indices() {
+                if self.symbol_id_by_index(symbols, index) == Some(id) {
+                    self.staged_indices.insert(index, None);
+                }
+            }
+        }
+        if let Some(entry) = &entry {
+            for &index in entry.indices() {
+                self.staged_indices.insert(index, Some(id));
+            }
+        }
+        self.staged_symbols.insert(id, entry);
+        Ok(())
+    }
+
+    fn symbol(
+        &self,
+        symbols: &SymbolTable,
+        id: SymbolId,
+    ) -> Result<Option<SymbolEntry>, EntityStorageError> {
+        match self.staged_symbols.get(&id) {
+            Some(entry) => Ok(entry.clone()),
+            None => Ok(symbols
+                .try_get_by_id(id)?
+                .map(|entry| entry.as_ref().clone())),
+        }
+    }
+
+    fn symbol_id_by_index(&self, symbols: &SymbolTable, index: SymbolIndex) -> Option<SymbolId> {
+        match self.staged_indices.get(&index) {
+            Some(id) => *id,
+            None => symbols.get_id_by_index(index).and_then(|id| {
+                self.staged_symbols.get(&id).map_or(Some(id), |entry| {
+                    entry
+                        .as_ref()
+                        .filter(|entry| entry.indices().contains(&index))
+                        .map(|_| id)
+                })
+            }),
+        }
+    }
+
+    fn symbol_ids_matching(
+        &self,
+        symbols: &SymbolTable,
+        mut predicate: impl FnMut(&SymbolEntry) -> bool,
+    ) -> Result<IdSet<Symbol>, EntityStorageError> {
+        let mut ids = IdSet::new();
+        for (id, _) in symbols.iter() {
+            if let Some(entry) = self.symbol(symbols, id)?
+                && predicate(&entry)
+            {
+                ids.insert(id);
+            }
+        }
+        for (&id, entry) in &self.staged_symbols {
+            if entry.as_ref().is_some_and(&mut predicate) {
+                ids.insert(id);
+            } else {
+                ids.remove(id);
+            }
+        }
+        Ok(ids)
+    }
+
+    pub(crate) fn prepare(
+        self,
+        symbols: &SymbolTable,
+    ) -> Result<(PreparedSymbolBatch, EntityWriteBatch), EntityStorageError> {
+        let Self {
+            cancelled_symbols,
+            staged_indices: _,
+            staged_symbols,
+            symbol_reservations,
+        } = self;
+        let persistent = symbols.is_persistent();
+        let mut records = Vec::with_capacity(staged_symbols.len());
+        let mut writes =
+            EntityWriteBatch::with_capacity(if persistent { staged_symbols.len() } else { 0 });
+
+        for (id, entry) in staged_symbols {
+            let previous = symbols.try_get_by_id(id)?;
+            if previous
+                .as_ref()
+                .is_some_and(|previous| entry.as_ref() == Some(previous.as_ref()))
+            {
+                continue;
+            }
+            if entry.is_none() && previous.is_none() {
+                continue;
+            }
+            let previous = previous.map(|entry| SymbolIndexState::new(&entry));
+
+            match &entry {
+                Some(symbol) => {
+                    let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(symbol)
+                        .map_err(EntityStorageError::encode)?;
+                    let encoded_size = encoded.len();
+                    if persistent {
+                        writes.push(EntityWrite::insert_archived(
+                            SymbolEntry::ID.key_for(&id),
+                            encoded,
+                        ));
+                    }
+                    records.push(PreparedSymbolRecord {
+                        encoded_size,
+                        entry,
+                        id,
+                        previous,
+                    });
+                }
+                None => {
+                    if persistent {
+                        writes.push(EntityWrite::remove(SymbolEntry::ID.key_for(&id)));
+                    }
+                    records.push(PreparedSymbolRecord {
+                        encoded_size: 0,
+                        entry: None,
+                        id,
+                        previous,
+                    });
+                }
+            }
+        }
+
+        let mut added = 0usize;
+        let mut removed = 0usize;
+        let mut releases = cancelled_symbols.clone();
+        for record in &records {
+            symbols.append_prepared_writes(
+                record.id,
+                record.entry.as_ref(),
+                record.previous.as_ref(),
+                &mut writes,
+            )?;
+            match (&record.entry, &record.previous) {
+                (Some(_), None) => added += 1,
+                (None, Some(_)) => {
+                    removed += 1;
+                    releases.push(record.id);
+                }
+                _ => {}
+            }
+        }
+        symbols.append_allocation_writes(
+            &symbol_reservations,
+            &releases,
+            added,
+            removed,
+            &mut writes,
+        )?;
+
+        Ok((
+            PreparedSymbolBatch {
+                cancelled_symbols,
+                records,
+                symbol_reservations,
+            },
+            writes,
+        ))
+    }
+}
+
+impl PreparedSymbolBatch {
+    pub(crate) fn for_each_change(
+        &self,
+        mut f: impl FnMut(Option<&SymbolEntry>, Option<&SymbolIndexState>),
+    ) {
+        for record in &self.records {
+            f(record.entry.as_ref(), record.previous.as_ref());
+        }
+    }
+
+    pub(crate) fn publish(self, symbols: &mut SymbolTable) {
+        let Self {
+            cancelled_symbols,
+            records,
+            symbol_reservations,
+        } = self;
+        let added = records
+            .iter()
+            .filter(|record| record.entry.is_some() && record.previous.is_none())
+            .count();
+        let removed = records
+            .iter()
+            .filter(|record| record.entry.is_none() && record.previous.is_some())
+            .count();
+        symbols.publish_allocations(&symbol_reservations, &cancelled_symbols, added, removed);
+
+        for record in records.iter().filter(|record| record.entry.is_none()) {
+            let previous = record
+                .previous
+                .as_ref()
+                .expect("prepared symbol removal has a previous entry");
+            symbols.publish_remove(record.id, previous);
+        }
+
+        for record in records.into_iter().filter(|record| record.entry.is_some()) {
+            let entry = record
+                .entry
+                .expect("prepared symbol upsert has a final entry");
+            symbols.publish_upsert(
+                record.id,
+                entry,
+                record.previous.as_ref(),
+                record.encoded_size,
+            );
         }
     }
 }
@@ -580,7 +941,8 @@ mod test {
 
     fn persistent_table() -> SymbolTable {
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
-        SymbolTable::new(storage, 64 * 1024).unwrap()
+        let worker = WriteBackWorker::new(storage.clone()).unwrap();
+        SymbolTable::new_persistent(storage, 64 * 1024, worker).unwrap()
     }
 
     #[test]
@@ -588,7 +950,7 @@ mod test {
         let mut table = persistent_table();
         let sel = SymbolTableSelector::new(0);
 
-        let insertion = table
+        let id1 = table
             .insert(
                 SymbolIndex::new(sel, 1),
                 Address::from(0x1000u32),
@@ -596,10 +958,8 @@ mod test {
                 SymbolProperties::LOCAL,
             )
             .unwrap();
-        assert!(insertion.is_new());
-        let id1 = insertion.id();
 
-        let insertion = table
+        table
             .insert(
                 SymbolIndex::new(sel, 2),
                 Address::from(0x2000u32),
@@ -607,13 +967,12 @@ mod test {
                 SymbolProperties::LOCAL,
             )
             .unwrap();
-        assert!(insertion.is_new());
         assert_eq!(table.len(), 2);
 
         assert!(table.remove_by_id(id1));
         assert_eq!(table.len(), 1);
 
-        let insertion = table
+        let id3 = table
             .insert(
                 SymbolIndex::new(sel, 3),
                 Address::from(0x3000u32),
@@ -621,15 +980,13 @@ mod test {
                 SymbolProperties::LOCAL,
             )
             .unwrap();
-        assert!(insertion.is_new());
-        let id3 = insertion.id();
         assert_eq!(table.len(), 2);
         assert_eq!(id1.index(), id3.index());
         assert_eq!(id1.generation() + 1, id3.generation());
         assert!(table.get_by_id(id1).is_none());
         assert!(!table.remove_by_id(id1));
 
-        let insertion = table
+        let id4 = table
             .insert(
                 SymbolIndex::new(sel, 4),
                 Address::from(0x3000u32),
@@ -637,12 +994,10 @@ mod test {
                 SymbolProperties::LOCAL,
             )
             .unwrap();
-        assert!(!insertion.is_new());
-        let id4 = insertion.id();
         assert_eq!(id3, id4);
         assert_eq!(table.len(), 2);
 
-        let insertion = table
+        table
             .insert(
                 SymbolIndex::new(sel, 5),
                 Address::from(0x3000u32),
@@ -650,7 +1005,6 @@ mod test {
                 SymbolProperties::LOCAL,
             )
             .unwrap();
-        assert!(insertion.is_new());
         assert_eq!(table.len(), 3);
 
         assert_eq!(table.remove_by_name("symbol3"), 1);
@@ -669,7 +1023,9 @@ mod test {
         {
             let storage =
                 EntityStorage::new(SqliteEntityStorage::<PERSISTENT>::new(dir.path()).unwrap());
-            let mut table = SymbolTable::new(storage.clone(), 64 * 1024).unwrap();
+            let worker = WriteBackWorker::new(storage.clone()).unwrap();
+            let mut table =
+                SymbolTable::new_persistent(storage.clone(), 64 * 1024, worker).unwrap();
 
             let hole = table
                 .insert(
@@ -678,8 +1034,7 @@ mod test {
                     "alpha",
                     SymbolProperties::LOCAL,
                 )
-                .unwrap()
-                .id();
+                .unwrap();
             table
                 .insert(
                     SymbolIndex::new(sel, 2),
@@ -705,7 +1060,8 @@ mod test {
 
         let storage =
             EntityStorage::new(SqliteEntityStorage::<PERSISTENT>::new(dir.path()).unwrap());
-        let reloaded = SymbolTable::new(storage, 64 * 1024).unwrap();
+        let worker = WriteBackWorker::new(storage.clone()).unwrap();
+        let reloaded = SymbolTable::new_persistent(storage, 64 * 1024, worker).unwrap();
 
         assert_eq!(reloaded.len(), 2);
         assert!(reloaded.get_first("beta").is_some());

@@ -16,8 +16,11 @@ use crate::storage::schema::bitflags::archived_bitflags;
 
 mod table;
 
-pub(crate) use table::{ATTRIBUTE_SYMBOL_CACHE_SIZE, DEFAULT_SYMBOL_CACHE_BYTES, SymbolIndexState};
-pub use table::{SymbolInsertion, SymbolRef, SymbolTable, TransientSymbolTable};
+pub(crate) use table::{
+    ATTRIBUTE_SYMBOL_CACHE_SIZE, DEFAULT_SYMBOL_CACHE_BYTES, PreparedSymbolBatch,
+    SymbolTableStaging,
+};
+pub use table::{SymbolRef, SymbolTable, TransientSymbolTable};
 
 pub type SymbolId = Id<Symbol>;
 pub type LazySymbol = LazyLock<Symbol>;

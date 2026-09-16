@@ -304,7 +304,7 @@ impl FunctionBuilder {
         })
     }
 
-    pub(super) fn analyse_candidate(
+    pub(crate) fn analyse_candidate(
         &mut self,
         analysis: &mut AnalysisContext<'_, '_>,
         context: &FunctionRecoveryContext,
@@ -361,7 +361,7 @@ impl StructuredFunctionContext {
         &mut self.function
     }
 
-    pub(in crate::analysis) fn function_and_resolver(
+    pub(crate) fn function_and_resolver(
         &mut self,
         arch: &Arch,
     ) -> (&IncompleteFunction, &mut InsnResolver) {
@@ -1013,7 +1013,7 @@ impl<'p> FunctionCandidateState<'p> {
         }
     }
 
-    pub(super) fn view(&self) -> &ProjectView<'p> {
+    pub(crate) fn view(&self) -> &ProjectView<'p> {
         &self.view
     }
 
@@ -1024,7 +1024,7 @@ impl<'p> FunctionCandidateState<'p> {
         )
     }
 
-    pub(super) fn resolve(
+    pub(crate) fn resolve(
         &mut self,
         config: &FunctionRecoveryConfig,
         context: &FunctionRecoveryContext,

@@ -5,7 +5,7 @@ use std::slice::Iter;
 
 use smallvec::SmallVec;
 
-use super::{SymbolIndexState, SymbolInsertion};
+use super::SymbolIndexState;
 use crate::ir::symbol::{
     Symbol, SymbolEntry, SymbolId, SymbolIndex, SymbolMap, SymbolProperties, SymbolTableSelector,
 };
@@ -318,48 +318,6 @@ where
         true
     }
 
-    pub(crate) fn publish_reservation(&mut self, id: SymbolId) {
-        let allocated = self.allocator.allocate();
-        debug_assert_eq!(allocated, id);
-        if id.index() >= self.symbols.len() {
-            self.symbols
-                .resize_with(id.index() + 1, SymbolEntry::default);
-            self.generations.resize(id.index() + 1, 0);
-        }
-        self.generations[id.index()] = id.generation();
-    }
-
-    pub(crate) fn publish_release(&mut self, id: SymbolId) {
-        self.generations[id.index()] = id.next_generation().generation();
-        self.allocator.release(id);
-    }
-
-    pub(crate) fn publish_upsert(
-        &mut self,
-        id: SymbolId,
-        entry: SymbolEntry<A>,
-        previous: Option<&SymbolIndexState>,
-    ) {
-        if previous.is_some() {
-            self.clear_entry(id);
-        }
-        self.symbols[id.index()] = entry;
-        self.generations[id.index()] = id.generation();
-        let entry = &self.symbols[id.index()];
-        self.names.entry(entry.symbol()).or_default().push(id);
-        self.addresses.entry(entry.address()).or_default().push(id);
-        for &index in entry.indices() {
-            self.indices.insert(index, id);
-        }
-    }
-
-    pub(crate) fn publish_remove(&mut self, id: SymbolId, _previous: &SymbolIndexState) {
-        let removed = self.clear_entry(id);
-        debug_assert!(removed);
-        self.generations[id.index()] = id.next_generation().generation();
-        self.allocator.release(id);
-    }
-
     pub fn modify_by_id<R>(
         &mut self,
         id: SymbolId,
@@ -373,7 +331,7 @@ where
         index: SymbolIndex,
         address: impl Into<A>,
         symbol: impl Into<Symbol>,
-    ) -> SymbolInsertion {
+    ) -> SymbolId {
         self.insert_local_with(index, address, symbol, SymbolProperties::NONE)
     }
 
@@ -383,7 +341,7 @@ where
         address: impl Into<A>,
         symbol: impl Into<Symbol>,
         properties: SymbolProperties,
-    ) -> SymbolInsertion {
+    ) -> SymbolId {
         self.insert(index, address, symbol, properties | SymbolProperties::LOCAL)
     }
 
@@ -392,7 +350,7 @@ where
         index: SymbolIndex,
         address: impl Into<A>,
         symbol: impl Into<Symbol>,
-    ) -> SymbolInsertion {
+    ) -> SymbolId {
         self.insert_extern_with(index, address, symbol, SymbolProperties::NONE)
     }
 
@@ -402,7 +360,7 @@ where
         address: impl Into<A>,
         symbol: impl Into<Symbol>,
         properties: SymbolProperties,
-    ) -> SymbolInsertion {
+    ) -> SymbolId {
         self.insert(
             index,
             address,
@@ -411,7 +369,7 @@ where
         )
     }
 
-    fn insert_or_update(
+    fn add_or_update(
         addresses: &mut BTreeMap<A, SmallVec<[SymbolId; 2]>>,
         names: &mut SymbolMap<SmallVec<[SymbolId; 2]>>,
         symbols: &mut Vec<SymbolEntry<A>>,
@@ -419,7 +377,7 @@ where
         allocator: &mut IdAllocator<Symbol>,
         index: SymbolIndex,
         entry: SymbolEntry<A>,
-    ) -> SymbolInsertion {
+    ) -> SymbolId {
         let address = entry.address();
         let symbol = entry.symbol();
 
@@ -436,7 +394,7 @@ where
             symbol.add_index(index);
             symbol.update_visibility(entry.properties());
 
-            SymbolInsertion::new(symbol_id, false)
+            symbol_id
         } else {
             let symbol_id = allocator.allocate();
             if symbol_id.index() < symbols.len() {
@@ -450,7 +408,7 @@ where
             names.entry(symbol).or_default().push(symbol_id);
             addresses.entry(address).or_default().push(symbol_id);
 
-            SymbolInsertion::new(symbol_id, true)
+            symbol_id
         }
     }
 
@@ -460,7 +418,7 @@ where
         address: impl Into<A>,
         symbol: impl Into<Symbol>,
         properties: SymbolProperties,
-    ) -> SymbolInsertion {
+    ) -> SymbolId {
         use std::collections::btree_map::Entry;
 
         let address = address.into();
@@ -469,7 +427,7 @@ where
 
         match self.indices.entry(index) {
             Entry::Vacant(entry) => {
-                let insertion = Self::insert_or_update(
+                let symbol_id = Self::add_or_update(
                     &mut self.addresses,
                     &mut self.names,
                     &mut self.symbols,
@@ -479,16 +437,16 @@ where
                     symbol_entry,
                 );
 
-                entry.insert(insertion.id());
+                entry.insert(symbol_id);
 
-                insertion
+                symbol_id
             }
             Entry::Occupied(mut entry) => {
                 let symbol_id = *entry.get();
                 let existing = &mut self.symbols[symbol_id.index()];
 
                 if *existing == symbol_entry {
-                    return SymbolInsertion::new(symbol_id, false);
+                    return symbol_id;
                 }
 
                 // NOTE: if existing has multiple indices referring to it, then
@@ -497,7 +455,7 @@ where
                     // remove the index from existing
                     existing.remove_index(index);
 
-                    let insertion = Self::insert_or_update(
+                    let symbol_id = Self::add_or_update(
                         &mut self.addresses,
                         &mut self.names,
                         &mut self.symbols,
@@ -507,9 +465,9 @@ where
                         symbol_entry,
                     );
 
-                    entry.insert(insertion.id());
+                    entry.insert(symbol_id);
 
-                    return insertion;
+                    return symbol_id;
                 }
 
                 // NOTE: we have a single referent, so it's easier to remove the current
@@ -653,6 +611,48 @@ where
         self.remove_by_id(id)
     }
 
+    pub(crate) fn publish_reservation(&mut self, id: SymbolId) {
+        let allocated = self.allocator.allocate();
+        debug_assert_eq!(allocated, id);
+        if id.index() >= self.symbols.len() {
+            self.symbols
+                .resize_with(id.index() + 1, SymbolEntry::default);
+            self.generations.resize(id.index() + 1, 0);
+        }
+        self.generations[id.index()] = id.generation();
+    }
+
+    pub(crate) fn publish_release(&mut self, id: SymbolId) {
+        self.generations[id.index()] = id.next_generation().generation();
+        self.allocator.release(id);
+    }
+
+    pub(crate) fn publish_upsert(
+        &mut self,
+        id: SymbolId,
+        entry: SymbolEntry<A>,
+        previous: Option<&SymbolIndexState>,
+    ) {
+        if previous.is_some() {
+            self.clear_entry(id);
+        }
+        self.symbols[id.index()] = entry;
+        self.generations[id.index()] = id.generation();
+        let entry = &self.symbols[id.index()];
+        self.names.entry(entry.symbol()).or_default().push(id);
+        self.addresses.entry(entry.address()).or_default().push(id);
+        for &index in entry.indices() {
+            self.indices.insert(index, id);
+        }
+    }
+
+    pub(crate) fn publish_remove(&mut self, id: SymbolId, _previous: &SymbolIndexState) {
+        let removed = self.clear_entry(id);
+        debug_assert!(removed);
+        self.generations[id.index()] = id.next_generation().generation();
+        self.allocator.release(id);
+    }
+
     pub(crate) fn into_entries(self) -> impl Iterator<Item = SymbolEntry<A>> {
         self.symbols.into_iter().filter(SymbolEntry::is_valid)
     }
@@ -668,20 +668,17 @@ mod test {
         let mut table = SymbolTable::<Address>::new();
         let sel = SymbolTableSelector::new(0);
 
-        let insertion = table.insert_local(
+        let id1 = table.insert_local(
             SymbolIndex::new(sel, 1),
             Address::from(0x1000u32),
             "symbol1",
         );
-        assert!(insertion.is_new());
-        let id1 = insertion.id();
 
-        let insertion = table.insert_local(
+        table.insert_local(
             SymbolIndex::new(sel, 2),
             Address::from(0x2000u32),
             "symbol2",
         );
-        assert!(insertion.is_new());
 
         assert_eq!(table.len(), 2);
 
@@ -689,13 +686,11 @@ mod test {
         assert!(removed);
         assert_eq!(table.len(), 1);
 
-        let insertion = table.insert_local(
+        let id3 = table.insert_local(
             SymbolIndex::new(sel, 3),
             Address::from(0x3000u32),
             "symbol3",
         );
-        assert!(insertion.is_new());
-        let id3 = insertion.id();
         assert_eq!(table.len(), 2);
 
         assert_eq!(id1.index(), id3.index());
@@ -704,24 +699,21 @@ mod test {
         assert!(!table.remove_by_id(id1));
         assert_eq!(table.len(), 2);
 
-        let insertion = table.insert_local(
+        let id4 = table.insert_local(
             SymbolIndex::new(sel, 4),
             Address::from(0x3000u32),
             "symbol3",
         );
-        assert!(!insertion.is_new());
-        let id4 = insertion.id();
         assert_eq!(table.len(), 2);
 
         // check that the ID is the same as the existing one (same referent, different symbol index)
         assert_eq!(id3, id4);
 
-        let insertion = table.insert_local(
+        table.insert_local(
             SymbolIndex::new(sel, 5),
             Address::from(0x3000u32),
             "symbol4",
         );
-        assert!(insertion.is_new());
 
         // check that we inserted a new symbol referring to the same address as id3 and id4
         assert_eq!(table.len(), 3);

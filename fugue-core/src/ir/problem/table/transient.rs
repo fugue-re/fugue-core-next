@@ -1,8 +1,9 @@
 use super::{ProblemIndex, ProblemTableError};
 use crate::ir::problem::{Problem, ProblemId, ProblemKey, ProblemKind, ProblemScope};
-use crate::ir::{Address, AddressRange};
+use crate::ir::{Address, AddressRange, IdAllocator};
 
 pub struct ProblemTable {
+    allocator: IdAllocator<Problem>,
     index: ProblemIndex,
     entries: Vec<Option<Problem>>,
 }
@@ -16,13 +17,14 @@ impl Default for ProblemTable {
 impl ProblemTable {
     pub fn new() -> Self {
         Self {
+            allocator: IdAllocator::new(),
             index: ProblemIndex::new(),
             entries: Vec::new(),
         }
     }
 
     pub(crate) fn pending_id(&self, offset: usize) -> ProblemId {
-        self.index.allocator.pending_id(offset)
+        self.allocator.pending_id(offset)
     }
 
     pub fn get_by_id(&self, id: ProblemId) -> Option<&Problem> {
@@ -71,31 +73,6 @@ impl ProblemTable {
         self.index.len()
     }
 
-    pub(crate) fn publish_upsert(&mut self, problem: Problem, is_new: bool) {
-        let id = problem.id();
-        let key = problem.key();
-        let slot = id.index();
-        if slot >= self.entries.len() {
-            self.entries.resize_with(slot + 1, || None);
-        }
-        self.entries[slot] = Some(problem);
-        self.index.insert(id, key);
-        if is_new {
-            let allocated = self.index.allocator.allocate();
-            debug_assert_eq!(allocated, id);
-        }
-    }
-
-    pub(crate) fn publish_remove(&mut self, key: ProblemKey) {
-        let Some(id) = self.index.id(key) else {
-            return;
-        };
-
-        self.entries[id.index()] = None;
-        self.index.remove(key);
-        self.index.allocator.release(id);
-    }
-
     pub fn insert<F>(
         &mut self,
         scope: ProblemScope,
@@ -116,7 +93,7 @@ impl ProblemTable {
             return Ok(existing);
         }
 
-        let (id, problem) = self.index.allocator.try_allocate(|id| {
+        let (id, problem) = self.allocator.try_allocate(|id| {
             let problem = f(id, scope)?;
             if problem.key() != key {
                 return Err(ProblemTableError::KeyMismatch);
@@ -157,7 +134,7 @@ impl ProblemTable {
             return false;
         };
         self.index.remove(problem.key());
-        self.index.allocator.release(id);
+        self.allocator.release(id);
         true
     }
 
@@ -170,5 +147,33 @@ impl ProblemTable {
             return false;
         };
         self.remove_by_id(id)
+    }
+
+    pub(crate) fn publish_upsert(&mut self, problem: Problem) {
+        let id = problem.id();
+        let key = problem.key();
+        let slot = id.index();
+        if slot >= self.entries.len() {
+            self.entries.resize_with(slot + 1, || None);
+        }
+        self.entries[slot] = Some(problem);
+        self.index.insert(id, key);
+    }
+
+    pub(crate) fn publish_remove(&mut self, key: ProblemKey) {
+        let Some(id) = self.index.id(key) else {
+            return;
+        };
+
+        self.entries[id.index()] = None;
+        self.index.remove(key);
+        self.allocator.release(id);
+    }
+
+    pub(crate) fn publish_allocations(&mut self, reservations: &[ProblemId]) {
+        for &id in reservations {
+            let allocated = self.allocator.allocate();
+            debug_assert_eq!(allocated, id);
+        }
     }
 }

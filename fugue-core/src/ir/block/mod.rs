@@ -1,9 +1,8 @@
-use std::num::NonZeroUsize;
 use std::ops::RangeInclusive;
 
 use smallvec::SmallVec;
 
-use crate::ir::{Address, AddressRange, AddressRangeSet, FlowKind, FlowTarget, Id, Insn};
+use crate::ir::{Address, AddressRange, AddressRangeSet, FlowKind, FlowTarget, Id};
 use crate::lifter::ContextSet;
 use crate::storage::entities::schema::{ENTITY_CODE_BLOCK_ID, ENTITY_KEY_CODE_BLOCK_ID};
 use crate::storage::entities::{Entity, EntityId, EntityKey, EntityKeyId, MutableEntity};
@@ -11,6 +10,7 @@ use crate::storage::schema::bitflags::archived_bitflags;
 use crate::storage::segments::space::AddressSpaceId;
 
 pub(crate) mod incomplete;
+pub(crate) use incomplete::CodeBlockRecord;
 pub use incomplete::{IncompleteCodeBlock, IncompleteCodeBlockId};
 
 mod table;
@@ -50,8 +50,7 @@ impl CodeBlockFlowTarget {
         assert_eq!(block.space(), flow.from().space());
         let source_offset = flow
             .from()
-            .offset()
-            .checked_sub(block.offset())
+            .checked_offset_from(block)
             .and_then(|offset| offset.try_into().ok())
             .expect("flow source must fall within its code block");
         assert!(
@@ -72,14 +71,6 @@ impl CodeBlockFlowTarget {
             self.kind,
         )
     }
-}
-
-pub(crate) struct CodeBlockRecord {
-    address: Address,
-    context: ContextSet,
-    targets: SmallVec<[CodeBlockFlowTarget; 2]>,
-    properties: CodeBlockProperties,
-    size: NonZeroUsize,
 }
 
 impl AsRef<CodeBlock> for CodeBlock {
@@ -177,11 +168,8 @@ impl CodeBlock {
     }
 
     pub fn address_range(&self) -> AddressRange {
-        AddressRange::new(
-            self.space(),
-            self.address().raw_address(),
-            self.last_address().raw_address(),
-        )
+        AddressRange::from_size(self.address(), u64::from(self.size))
+            .expect("code block range must fit within its address space")
     }
 
     pub fn coverage(&self) -> AddressRangeSet {
@@ -196,96 +184,5 @@ impl CodeBlock {
 
     pub fn flow_targets(&self) -> impl Iterator<Item = FlowTarget> + '_ {
         self.targets.iter().map(|target| target.to_flow(self.start))
-    }
-}
-
-impl CodeBlockRecord {
-    pub(crate) fn new<'a>(
-        address: Address,
-        size: NonZeroUsize,
-        insns: impl IntoIterator<Item = &'a Insn>,
-        context: ContextSet,
-    ) -> Self {
-        let mut targets = SmallVec::new();
-        let mut properties = CodeBlockProperties::NONE;
-        let mut terminator = None;
-        for insn in insns {
-            targets.extend(
-                insn.flow_targets()
-                    .filter(|target| {
-                        !target.kind().is_fall_through() || target.to() == address + size.get()
-                    })
-                    .map(|target| CodeBlockFlowTarget::from_flow(address, size.get(), target)),
-            );
-            terminator = Some(insn);
-        }
-        if let Some(terminator) = terminator {
-            if terminator.is_call() {
-                properties |= CodeBlockProperties::CALL;
-            }
-            if terminator.is_return() {
-                properties |= CodeBlockProperties::RETURN;
-            }
-            if terminator.is_branch()
-                && terminator.is_indirect()
-                && !terminator.is_call()
-                && !terminator.is_return()
-                && terminator.iter_targets().next().is_none()
-            {
-                properties |= CodeBlockProperties::UNRESOLVED;
-            }
-        }
-        Self {
-            address,
-            context,
-            targets,
-            properties,
-            size,
-        }
-    }
-
-    pub(crate) fn address(&self) -> Address {
-        self.address
-    }
-
-    pub(crate) fn context(&self) -> &ContextSet {
-        &self.context
-    }
-
-    pub(crate) fn address_range(&self) -> AddressRange {
-        AddressRange::new(
-            self.address.space(),
-            self.address.raw_address(),
-            (self.address + self.size.get() - 1usize).raw_address(),
-        )
-    }
-
-    pub(crate) fn flow_targets(&self) -> impl Iterator<Item = FlowTarget> + '_ {
-        self.targets
-            .iter()
-            .map(|target| target.to_flow(self.address))
-    }
-
-    pub(crate) fn matches(&self, block: &CodeBlock) -> bool {
-        block.start == self.address
-            && block.size() == self.size.get()
-            && block.context == self.context
-            && block.targets == self.targets
-            && block.properties == self.properties
-    }
-
-    pub(crate) fn materialise(self, id: CodeBlockId) -> CodeBlock {
-        CodeBlock {
-            id,
-            start: self.address,
-            size: self
-                .size
-                .get()
-                .try_into()
-                .expect("basic block size must not exceed 65535 bytes"),
-            targets: self.targets,
-            properties: self.properties,
-            context: self.context,
-        }
     }
 }

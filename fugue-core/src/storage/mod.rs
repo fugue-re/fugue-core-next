@@ -153,6 +153,10 @@ pub struct StorageContainer {
     cleanup_handler: StorageCleanupHandlerOneShot,
 }
 
+type PersistentTableConstructor<T> =
+    fn(EntityStorage, usize, Arc<WriteBackWorker>) -> Result<T, EntityStorageError>;
+type TransientTableConstructor<T> = fn() -> T;
+
 #[derive(Default)]
 struct StorageCleanupHandlerOneShot(Option<Box<dyn StorageCleanupHandler>>);
 
@@ -300,16 +304,12 @@ impl StorageContainer {
     pub(crate) fn table<T>(
         &self,
         cache_bytes: usize,
-        with_worker: fn(
-            EntityStorage,
-            Arc<WriteBackWorker>,
-            usize,
-        ) -> Result<T, EntityStorageError>,
-        new_transient: fn() -> T,
+        new_persistent: PersistentTableConstructor<T>,
+        new_transient: TransientTableConstructor<T>,
         table: &str,
     ) -> Result<T, EntityStorageError> {
         match self.write_back() {
-            Some(worker) => with_worker(self.entities.clone(), worker.clone(), cache_bytes)
+            Some(worker) => new_persistent(self.entities.clone(), cache_bytes, worker.clone())
                 .inspect_err(|e| tracing::error!("failed to load {table} table: {e}")),
             None => Ok(new_transient()),
         }

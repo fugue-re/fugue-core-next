@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::collections::hash_map::Entry;
 use std::mem::{self, size_of};
-use std::num::NonZeroUsize;
+use std::num::NonZeroU16;
 
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -781,7 +781,11 @@ impl IncompleteFunction {
         let mut pending_coverage = None::<AddressRange>;
         let mut references = Vec::with_capacity(self.blocks.len());
         for block in &self.blocks {
-            let size = NonZeroUsize::new(block.size())
+            let size = block
+                .size()
+                .try_into()
+                .ok()
+                .and_then(NonZeroU16::new)
                 .ok_or_else(|| IncompleteFunctionError::invalid_block_size(block.address()))?;
             let block_insns = block.insn_ids().iter().map(|&id| {
                 self.insn(id)

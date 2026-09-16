@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
@@ -6,7 +5,7 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 use super::{FunctionTableError, PreparedFunctionRecord};
-use crate::ir::persistent::{PersistentIdAllocator, PersistentTable};
+use crate::ir::persistent::{PersistentIdAllocator, PersistentIndexRebuilder, PersistentTable};
 use crate::ir::{Address, CodeBlockId, Function, FunctionId, Id, IdSet, RawAddress};
 use crate::storage::entities::schema::{
     ENTITY_FUNCTION_BLOCK_INDEX_ID, ENTITY_FUNCTION_ENTRY_INDEX_ID, ENTITY_KEY_FUNCTION_BLOCK_ID,
@@ -16,8 +15,6 @@ use crate::storage::entities::{
     EntityStorage, EntityStorageError, EntityWrite, EntityWriteBatch, WriteBackWorker,
 };
 use crate::storage::segments::space::AddressSpaceId;
-
-const INDEX_REBUILD_BATCH: usize = 512;
 
 type Ref<'a> = CachedRef<'a, Function>;
 type RefMut<'a> = CachedMut<'a, Function>;
@@ -38,20 +35,16 @@ struct FunctionBlockKey {
 }
 
 impl FunctionBlockKey {
-    fn first(block: CodeBlockId) -> Self {
-        Self {
-            block,
-            function: FunctionId::with_generation(0, 0),
-        }
+    fn new(function: FunctionId, block: CodeBlockId) -> Self {
+        Self { block, function }
     }
 }
 
 impl EntityKeyCodec for FunctionBlockKey {
     fn decode(input: &mut &[u8]) -> Option<Self> {
-        Some(Self {
-            block: CodeBlockId::decode(input)?,
-            function: FunctionId::decode(input)?,
-        })
+        let block = CodeBlockId::decode(input)?;
+        let function = FunctionId::decode(input)?;
+        Some(Self::new(function, block))
     }
 
     fn encode(&self, output: &mut impl Extend<u8>) {
@@ -77,32 +70,42 @@ pub struct FunctionTable {
     storage: EntityStorage,
 }
 
+fn rebuild_indexes(
+    storage: &EntityStorage,
+    entries: &EntityCache<Id<Function>, Function>,
+) -> Result<PersistentIdAllocator<Function>, EntityStorageError> {
+    let mut rebuilder = PersistentIndexRebuilder::new(storage, PersistentTable::Functions);
+    for entry in entries.try_iter()? {
+        let (id, function) = entry?;
+        rebuilder.append(id, |writes| {
+            writes.insert_entity(&function.entry(), &FunctionEntryRecord { id })?;
+            for (_, block) in function.blocks() {
+                writes.insert_entity(&FunctionBlockKey::new(id, block), &FunctionBlockRecord)?;
+            }
+            Ok(())
+        })?;
+    }
+    rebuilder.finish(|_| Ok(()))
+}
+
 impl FunctionTable {
     pub(crate) fn new(
         storage: EntityStorage,
         cache_bytes: usize,
-    ) -> Result<Self, EntityStorageError> {
-        let entries = EntityCache::new(storage.clone(), cache_bytes)?;
-        Self::from_entries(storage, entries)
-    }
-
-    pub(crate) fn with_worker(
-        storage: EntityStorage,
         worker: Arc<WriteBackWorker>,
-        cache_bytes: usize,
     ) -> Result<Self, EntityStorageError> {
-        let entries = EntityCache::with_worker(storage.clone(), worker, cache_bytes);
-        Self::from_entries(storage, entries)
+        let entries = EntityCache::new(storage.clone(), cache_bytes, worker);
+        Self::new_with(storage, entries)
     }
 
-    fn from_entries(
+    fn new_with(
         storage: EntityStorage,
         entries: EntityCache<Id<Function>, Function>,
     ) -> Result<Self, EntityStorageError> {
         let allocator =
             match PersistentIdAllocator::load(storage.clone(), PersistentTable::Functions)? {
                 Some(allocator) => allocator,
-                None => Self::rebuild_indexes(&storage, &entries)?,
+                None => rebuild_indexes(&storage, &entries)?,
             };
         Ok(Self {
             allocator,
@@ -119,15 +122,6 @@ impl FunctionTable {
         self.allocator
             .pending_id(offset)
             .unwrap_or_else(|error| error.into_fatal())
-    }
-
-    pub(crate) fn publish_upsert(&self, function: Function, encoded_size: usize) {
-        self.entries
-            .publish_insert(function.id(), function, encoded_size);
-    }
-
-    pub(crate) fn publish_remove(&self, id: FunctionId) {
-        self.entries.publish_remove(&id);
     }
 
     pub(crate) fn try_get_by_id(
@@ -202,7 +196,7 @@ impl FunctionTable {
         for function in self
             .storage
             .iter_range::<FunctionBlockKey, FunctionBlockRecord>(Bound::Included(
-                &FunctionBlockKey::first(block),
+                &FunctionBlockKey::new(FunctionId::with_generation(0, 0), block),
             ))
             .unwrap_or_else(|error| error.into_fatal())
             .map_while(|entry| {
@@ -242,47 +236,11 @@ impl FunctionTable {
         self.allocator.len()
     }
 
-    fn rebuild_indexes(
-        storage: &EntityStorage,
-        entries: &EntityCache<Id<Function>, Function>,
-    ) -> Result<PersistentIdAllocator<Function>, EntityStorageError> {
-        let mut live = 0usize;
-        let mut next_index = 0usize;
-        let mut writes = EntityWriteBatch::with_capacity(INDEX_REBUILD_BATCH);
-
-        for entry in entries.try_iter()? {
-            let (id, function) = entry?;
-            writes.insert_entity(&function.entry(), &FunctionEntryRecord { id })?;
-            for (_, block) in function.blocks() {
-                writes.insert_entity(
-                    &FunctionBlockKey {
-                        block,
-                        function: id,
-                    },
-                    &FunctionBlockRecord,
-                )?;
-            }
-            live += 1;
-            next_index = next_index.max(id.index() + 1);
-            if writes.len() >= INDEX_REBUILD_BATCH {
-                storage.apply_batch(&writes)?;
-                writes.clear();
-            }
-        }
-        storage.apply_batch(&writes)?;
-        PersistentIdAllocator::initialise(
-            storage.clone(),
-            PersistentTable::Functions,
-            next_index,
-            live,
-        )
-    }
-
     pub(crate) fn append_prepared_writes(
         &self,
         entries: &[PreparedFunctionRecord],
         reservations: &[FunctionId],
-        cancelled: &BTreeSet<FunctionId>,
+        cancelled: &IdSet<Function>,
         by_block: &FxHashMap<CodeBlockId, IdSet<Function>>,
         original_by_block: &FxHashMap<CodeBlockId, IdSet<Function>>,
         writes: &mut EntityWriteBatch,
@@ -318,37 +276,30 @@ impl FunctionTable {
                 .flat_map(IdSet::iter)
                 .filter(|function| !final_functions.contains(*function))
             {
-                writes
-                    .remove_entity::<_, FunctionBlockRecord>(&FunctionBlockKey { block, function });
+                writes.remove_entity::<_, FunctionBlockRecord>(&FunctionBlockKey::new(
+                    function, block,
+                ));
             }
             for function in final_functions
                 .iter()
                 .filter(|function| previous.is_none_or(|previous| !previous.contains(*function)))
             {
-                writes
-                    .insert_entity(&FunctionBlockKey { block, function }, &FunctionBlockRecord)?;
+                writes.insert_entity(
+                    &FunctionBlockKey::new(function, block),
+                    &FunctionBlockRecord,
+                )?;
             }
         }
 
-        let releases = cancelled
+        let mut releases = cancelled
             .iter()
-            .copied()
             .chain(entries.iter().filter_map(|entry| {
                 (entry.function.is_none() && entry.previous.is_some()).then_some(entry.id)
             }))
             .collect::<SmallVec<[_; 8]>>();
+        releases.sort_unstable();
         self.allocator
             .append_transition(reservations, &releases, added, removed, writes)
-    }
-
-    pub(crate) fn publish_transition(
-        &mut self,
-        reservations: &[FunctionId],
-        added: usize,
-        removed: usize,
-    ) {
-        self.allocator
-            .publish_transition(reservations, added, removed);
     }
 
     pub(crate) fn insert_with<R, F>(
@@ -394,22 +345,13 @@ impl FunctionTable {
             .iter()
             .filter(|block| !blocks.contains(block))
         {
-            writes.remove_entity::<_, FunctionBlockRecord>(&FunctionBlockKey {
-                block: *block,
-                function: id,
-            });
+            writes.remove_entity::<_, FunctionBlockRecord>(&FunctionBlockKey::new(id, *block));
         }
         for block in blocks
             .iter()
             .filter(|block| !previous_blocks.contains(block))
         {
-            writes.insert_entity(
-                &FunctionBlockKey {
-                    block: *block,
-                    function: id,
-                },
-                &FunctionBlockRecord,
-            )?;
+            writes.insert_entity(&FunctionBlockKey::new(id, *block), &FunctionBlockRecord)?;
         }
         let is_new = previous.is_none();
         let added = if is_new { 1 } else { 0 };
@@ -463,10 +405,7 @@ impl FunctionTable {
         writes.remove_entity::<_, Function>(&id);
         writes.remove_entity::<_, FunctionEntryRecord>(&address);
         for block in blocks {
-            writes.remove_entity::<_, FunctionBlockRecord>(&FunctionBlockKey {
-                block,
-                function: id,
-            });
+            writes.remove_entity::<_, FunctionBlockRecord>(&FunctionBlockKey::new(id, block));
         }
         self.allocator
             .append_transition(&[], &[id], 0, 1, &mut writes)?;
@@ -485,5 +424,24 @@ impl FunctionTable {
             return Ok(false);
         };
         self.try_remove_by_id(record.id)
+    }
+
+    pub(crate) fn publish_upsert(&self, function: Function, encoded_size: usize) {
+        self.entries
+            .publish_insert(function.id(), function, encoded_size);
+    }
+
+    pub(crate) fn publish_remove(&self, id: FunctionId) {
+        self.entries.publish_remove(&id);
+    }
+
+    pub(crate) fn publish_allocations(
+        &mut self,
+        reservations: &[FunctionId],
+        added: usize,
+        removed: usize,
+    ) {
+        self.allocator
+            .publish_transition(reservations, added, removed);
     }
 }

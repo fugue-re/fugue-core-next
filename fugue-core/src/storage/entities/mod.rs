@@ -1141,7 +1141,8 @@ mod test {
         }
 
         // test a cache
-        let cache = EntityCache::<Address, TestEntity>::new(storage.clone(), 64 * 1024).unwrap();
+        let worker = WriteBackWorker::new(storage.clone()).unwrap();
+        let cache = EntityCache::<Address, TestEntity>::new(storage.clone(), 64 * 1024, worker);
 
         for i in 0u64..5 {
             let entity = TestEntity {

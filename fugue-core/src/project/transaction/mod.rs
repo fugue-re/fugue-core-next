@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::mem;
 use std::sync::Arc;
 
@@ -12,17 +12,15 @@ use super::{
 use crate::il::registry::IlRegistry;
 use crate::il::storage::{IlStagedChange, IlStaging};
 use crate::ir::{
-    Address, AddressRange, AddressRangeSet, CallGraphStaging, CodeBlockTable, FunctionId,
-    FunctionRef, FunctionTable, FunctionTableStaging, PreparedReferenceIndexRecord, Problem,
-    ProblemKey, ProblemScope, ProblemTable, Reference, ReferenceIndex, ReferenceKey, Switch,
-    SwitchId, SwitchRef, SwitchTable, SymbolEntry, SymbolId, SymbolIndex, SymbolIndexState,
-    SymbolTable,
+    Address, AddressRange, AddressRangeSet, CallGraphStaging, CodeBlockTable, FunctionRef,
+    FunctionTable, FunctionTableStaging, PreparedProblemBatch, PreparedReferenceBatch,
+    PreparedSwitchBatch, PreparedSymbolBatch, ProblemScope, ProblemTable, ProblemTableStaging,
+    ReferenceStaging, SwitchRef, SwitchTable, SwitchTableStaging, SymbolTable, SymbolTableStaging,
 };
-use crate::storage::entities::{Entity, EntityWrite, EntityWriteBatch};
+use crate::storage::EntityRef;
 use crate::storage::segments::SegmentStorage;
 use crate::storage::segments::mapping::SegmentMappingId;
 use crate::storage::segments::staging::SegmentStorageStaging;
-use crate::storage::{EntityRef, EntityStorageError};
 use crate::types::Revision;
 
 mod function;
@@ -32,44 +30,6 @@ mod reference;
 mod segment;
 mod switch;
 mod symbol;
-
-struct PreparedProblemRecord {
-    encoded_size: usize,
-    is_new: bool,
-    key: ProblemKey,
-    problem: Option<Problem>,
-}
-
-struct PreparedSwitchRecord {
-    branch: Address,
-    encoded_size: usize,
-    previous: Option<PreviousSwitch>,
-    switch: Option<Switch>,
-}
-
-#[derive(Clone, Copy)]
-struct PreviousSwitch {
-    function: FunctionId,
-    id: SwitchId,
-}
-
-struct PreparedSymbolRecord {
-    encoded_size: usize,
-    entry: Option<SymbolEntry>,
-    id: SymbolId,
-    previous: Option<SymbolIndexState>,
-}
-
-struct PreparedReferenceRecord {
-    index_record: PreparedReferenceIndexRecord,
-    previous: Option<Reference>,
-}
-
-#[derive(Clone, Copy)]
-struct StagedReferenceRecord {
-    previous: Option<Reference>,
-    reference: Option<Reference>,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum StagedChangeKey {
@@ -335,18 +295,11 @@ pub struct ProjectTransaction<'p> {
     il_staging: IlStaging,
     function_staging: FunctionTableStaging,
     call_graph_staging: CallGraphStaging,
-    staged_symbols: BTreeMap<SymbolId, Option<SymbolEntry>>,
-    symbol_indices: BTreeMap<SymbolIndex, Option<SymbolId>>,
-    symbol_reservations: Vec<SymbolId>,
-    cancelled_symbols: Vec<SymbolId>,
+    symbol_staging: SymbolTableStaging,
     segment_staging: SegmentStorageStaging,
-    staged_references: BTreeMap<ReferenceKey, StagedReferenceRecord>,
-    asserted_references: BTreeSet<ReferenceKey>,
-    derived_reference_coverage: AddressRangeSet,
-    staged_problems: BTreeMap<ProblemKey, Option<Problem>>,
-    staged_switches: BTreeMap<Address, Option<Switch>>,
-    switch_reservations: Vec<SwitchId>,
-    cancelled_switches: Vec<SwitchId>,
+    reference_staging: ReferenceStaging,
+    problem_staging: ProblemTableStaging,
+    switch_staging: SwitchTableStaging,
     source: ChangeSource,
     span: Span,
 }
@@ -368,18 +321,11 @@ impl ProjectTransaction<'_> {
             il_staging: IlStaging::default(),
             function_staging: FunctionTableStaging::default(),
             call_graph_staging: CallGraphStaging::default(),
-            staged_symbols: BTreeMap::new(),
-            symbol_indices: BTreeMap::new(),
-            symbol_reservations: Vec::new(),
-            cancelled_symbols: Vec::new(),
+            symbol_staging: SymbolTableStaging::default(),
             segment_staging: SegmentStorageStaging::default(),
-            staged_references: BTreeMap::new(),
-            asserted_references: BTreeSet::new(),
-            derived_reference_coverage: AddressRangeSet::new(),
-            staged_problems: BTreeMap::new(),
-            staged_switches: BTreeMap::new(),
-            switch_reservations: Vec::new(),
-            cancelled_switches: Vec::new(),
+            reference_staging: ReferenceStaging::default(),
+            problem_staging: ProblemTableStaging::default(),
+            switch_staging: SwitchTableStaging::default(),
             source,
             span,
         }
@@ -438,28 +384,15 @@ impl ProjectTransaction<'_> {
 
     pub fn switch_at(&mut self, branch: Address) -> Option<SwitchRef<'_>> {
         self.record_read(ChangeKinds::SWITCHES, AddressRange::point(branch));
-        match self.staged_switches.get(&branch) {
-            Some(Some(switch)) => Some(EntityRef::owned(switch.clone())),
-            Some(None) => None,
-            None => self.project.switches().get_by_branch(branch),
-        }
+        self.switch_staging
+            .get_by_branch(&self.project.switches, branch)
+            .unwrap_or_else(|error| error.into_fatal())
     }
 
     pub fn contains_problem(&mut self, address: Address) -> bool {
         self.record_read(ChangeKinds::PROBLEMS, AddressRange::point(address));
-        if self
-            .staged_problems
-            .iter()
-            .any(|(key, problem)| key.address() == Some(address) && problem.is_some())
-        {
-            return true;
-        }
-
-        self.project
-            .problems()
-            .keys()
-            .filter(|key| key.address() == Some(address))
-            .any(|key| !self.staged_problems.contains_key(&key))
+        self.problem_staging
+            .contains(&self.project.problems, address)
     }
 
     fn record_read(&mut self, kinds: ChangeKinds, range: AddressRange) {
@@ -472,7 +405,7 @@ impl ProjectTransaction<'_> {
 
     pub fn function_callees(&mut self, entry: Address) -> Result<Vec<Address>, ProjectError> {
         self.record_read(ChangeKinds::FUNCTIONS, AddressRange::point(entry));
-        if let Some(callees) = self.call_graph_staging.function_edges(entry) {
+        if let Some(callees) = self.call_graph_staging.callees(entry) {
             return Ok(callees.iter().copied().collect());
         }
 
@@ -506,19 +439,24 @@ impl ProjectTransaction<'_> {
             });
         });
         self.invalidate_semantic_problems();
-        let (problems, mut writes) = self.prepare_problems()?;
-        let (switches, switch_writes) = self.prepare_switches()?;
+        let problem_staging = mem::take(&mut self.problem_staging);
+        let (problems, mut writes) = problem_staging.prepare(&self.project.problems)?;
+        let switch_staging = mem::take(&mut self.switch_staging);
+        let (switches, switch_writes) = switch_staging.prepare(&self.project.switches)?;
         writes.extend(switch_writes);
-        let (symbols, symbol_writes) = self.prepare_symbols()?;
+        let symbol_staging = mem::take(&mut self.symbol_staging);
+        let (symbols, symbol_writes) = symbol_staging.prepare(&self.project.symbols)?;
         writes.extend(symbol_writes);
-        let (references, reference_writes) = self.prepare_references()?;
+        let reference_staging = mem::take(&mut self.reference_staging);
+        let (references, reference_writes) = reference_staging.prepare(&self.project.references)?;
         writes.extend(reference_writes);
         let function_staging = mem::take(&mut self.function_staging);
         let (function_batch, function_writes) =
             function_staging.prepare(&self.project.functions, &self.project.blocks)?;
         writes.extend(function_writes);
+        let call_graph_staging = mem::take(&mut self.call_graph_staging);
         let (call_graph_batch, call_graph_writes) =
-            self.project.call_graph.prepare(&self.call_graph_staging)?;
+            call_graph_staging.prepare(&self.project.call_graph)?;
         writes.extend(call_graph_writes);
         writes.extend(self.il_staging.prepare()?);
         let segment_batch = mem::take(&mut self.segment_staging).prepare();
@@ -534,7 +472,7 @@ impl ProjectTransaction<'_> {
         self.publish_switches(switches);
         self.publish_symbols(symbols);
         function_batch.publish(&mut self.project.functions, &mut self.project.blocks);
-        self.project.call_graph.publish(call_graph_batch);
+        call_graph_batch.publish(&mut self.project.call_graph);
         self.publish_references(references);
         if !self.changes.is_empty() {
             self.project.revisions.advance(self.changes.semantic());
@@ -566,7 +504,7 @@ impl ProjectTransaction<'_> {
         }
 
         for key in candidates {
-            if self.staged_problems.contains_key(&key)
+            if self.problem_staging.contains_key(key)
                 || (!self.changes.collapsed
                     && !self.changes.records().iter().any(|record| {
                         ChangeKinds::for_problem(key.kind()).intersects(record.kind())
@@ -578,7 +516,7 @@ impl ProjectTransaction<'_> {
                 continue;
             }
 
-            self.staged_problems.insert(key, None);
+            self.problem_staging.remove(key);
         }
     }
 
@@ -598,393 +536,72 @@ impl ProjectTransaction<'_> {
         }
     }
 
-    fn prepare_problems(
-        &mut self,
-    ) -> Result<(Vec<PreparedProblemRecord>, EntityWriteBatch), ProjectError> {
-        let persistent = self.project.problems.is_persistent();
-        let records = mem::take(&mut self.staged_problems);
-        let mut inserted = 0usize;
-        let mut batch = Vec::with_capacity(records.len());
-        let mut writes =
-            EntityWriteBatch::with_capacity(if persistent { records.len() } else { 0 });
-
-        for (key, record) in records {
-            let previous = self.project.problems.try_get_by_key(key)?;
-            let is_new = previous.is_none();
-            let previous_id = previous.as_ref().map(|problem| problem.id());
-            drop(previous);
-
-            match record {
-                Some(problem) => {
-                    let problem = if is_new {
-                        let id = self.project.problems.pending_id(inserted);
-                        inserted += 1;
-                        problem.with_id(id)
-                    } else {
-                        problem
-                    };
-                    let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&problem)
-                        .map_err(EntityStorageError::encode)?;
-                    let encoded_size = encoded.len();
-                    if persistent {
-                        writes.push(EntityWrite::insert_archived(
-                            Problem::ID.key_for(&problem.id()),
-                            encoded,
-                        ));
-                    }
-                    batch.push(PreparedProblemRecord {
-                        encoded_size,
-                        is_new,
-                        key,
-                        problem: Some(problem),
-                    });
-                }
-                None => {
-                    let Some(id) = previous_id else {
-                        continue;
-                    };
-                    if persistent {
-                        writes.push(EntityWrite::remove(Problem::ID.key_for(&id)));
-                    }
-                    batch.push(PreparedProblemRecord {
-                        encoded_size: 0,
-                        is_new: false,
-                        key,
-                        problem: None,
-                    });
-                }
-            }
-        }
-
-        Ok((batch, writes))
-    }
-
-    fn publish_problems(&mut self, problems: Vec<PreparedProblemRecord>) {
-        for record in problems {
-            let scope = record.key.scope();
-            let kind = record.key.kind();
-            match record.problem {
-                Some(problem) => {
-                    self.project.problems.publish_upsert(
-                        problem,
-                        record.encoded_size,
-                        record.is_new,
-                    );
-                    self.changes
-                        .push(ChangeRecord::ProblemRecorded { scope, kind });
-                }
-                None => {
-                    self.project.problems.publish_remove(record.key);
-                    self.changes
-                        .push(ChangeRecord::ProblemResolved { scope, kind });
-                }
-            }
-        }
-    }
-
-    fn prepare_switches(
-        &mut self,
-    ) -> Result<(Vec<PreparedSwitchRecord>, EntityWriteBatch), ProjectError> {
-        let persistent = self.project.switches.is_persistent();
-        let records = mem::take(&mut self.staged_switches);
-        let mut batch = Vec::with_capacity(records.len());
-        let mut writes =
-            EntityWriteBatch::with_capacity(if persistent { records.len() } else { 0 });
-
-        for (branch, record) in records {
-            let previous = self.project.switches.try_get_by_branch(branch)?;
-            if previous
-                .as_ref()
-                .is_some_and(|previous| record.as_ref() == Some(previous.as_ref()))
-            {
-                continue;
-            }
-            if record.is_none() && previous.is_none() {
-                continue;
-            }
-            let previous = previous.map(|switch| PreviousSwitch {
-                function: switch.function(),
-                id: switch.id(),
+    fn publish_problems(&mut self, problems: PreparedProblemBatch) {
+        for (key, present) in problems.changes() {
+            let scope = key.scope();
+            let kind = key.kind();
+            self.changes.push(if present {
+                ChangeRecord::ProblemRecorded { scope, kind }
+            } else {
+                ChangeRecord::ProblemResolved { scope, kind }
             });
-            match &record {
-                Some(switch) => {
-                    let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(switch)
-                        .map_err(EntityStorageError::encode)?;
-                    let encoded_size = encoded.len();
-                    if persistent {
-                        writes.push(EntityWrite::insert_archived(
-                            Switch::ID.key_for(&switch.id()),
-                            encoded,
-                        ));
-                    }
-                    batch.push(PreparedSwitchRecord {
-                        branch,
-                        encoded_size,
-                        previous,
-                        switch: record,
-                    });
-                }
-                None => {
-                    let id = previous
-                        .expect("prepared switch removal has a previous switch")
-                        .id;
-                    if persistent {
-                        writes.push(EntityWrite::remove(Switch::ID.key_for(&id)));
-                    }
-                    batch.push(PreparedSwitchRecord {
-                        branch,
-                        encoded_size: 0,
-                        previous,
-                        switch: None,
-                    });
-                }
-            }
         }
-
-        Ok((batch, writes))
+        problems.publish(&mut self.project.problems);
     }
 
-    fn publish_switches(&mut self, switches: Vec<PreparedSwitchRecord>) {
-        self.project
-            .switches
-            .publish_reservations(&self.switch_reservations);
-        for id in self.cancelled_switches.drain(..) {
-            self.project.switches.publish_release(id);
+    fn publish_switches(&mut self, switches: PreparedSwitchBatch) {
+        for (branch, present) in switches.changes() {
+            self.changes.push(if present {
+                ChangeRecord::SwitchAdded { branch }
+            } else {
+                ChangeRecord::SwitchRemoved { branch }
+            });
         }
-        for record in switches {
-            match record.switch {
-                Some(switch) => {
-                    self.project.switches.publish_upsert(
-                        switch,
-                        record.previous.map(|previous| previous.function),
-                        record.encoded_size,
-                    );
-                    self.changes.push(ChangeRecord::SwitchAdded {
-                        branch: record.branch,
-                    });
-                }
-                None => {
-                    let previous = record
-                        .previous
-                        .expect("prepared switch removal has a previous switch");
-                    self.project.switches.publish_remove(
-                        previous.id,
-                        previous.function,
-                        record.branch,
-                    );
-                    self.changes.push(ChangeRecord::SwitchRemoved {
-                        branch: record.branch,
-                    });
-                }
-            }
-        }
+        switches.publish(&mut self.project.switches);
     }
 
-    fn prepare_symbols(
-        &mut self,
-    ) -> Result<(Vec<PreparedSymbolRecord>, EntityWriteBatch), ProjectError> {
-        let persistent = self.project.symbols.is_persistent();
-        let records = mem::take(&mut self.staged_symbols);
-        let mut batch = Vec::with_capacity(records.len());
-        let mut writes =
-            EntityWriteBatch::with_capacity(if persistent { records.len() } else { 0 });
-
-        for (id, record) in records {
-            let previous = self.project.symbols.try_get_by_id(id)?;
-            if previous
-                .as_ref()
-                .is_some_and(|previous| record.as_ref() == Some(previous.as_ref()))
-            {
-                continue;
-            }
-            if record.is_none() && previous.is_none() {
-                continue;
-            }
-            let previous = previous.map(|entry| SymbolIndexState::new(&entry));
-
-            match &record {
-                Some(entry) => {
-                    let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(entry)
-                        .map_err(EntityStorageError::encode)?;
-                    let encoded_size = encoded.len();
-                    if persistent {
-                        writes.push(EntityWrite::insert_archived(
-                            SymbolEntry::ID.key_for(&id),
-                            encoded,
-                        ));
-                    }
-                    batch.push(PreparedSymbolRecord {
-                        encoded_size,
-                        entry: record,
-                        id,
-                        previous,
-                    });
-                }
-                None => {
-                    if persistent {
-                        writes.push(EntityWrite::remove(SymbolEntry::ID.key_for(&id)));
-                    }
-                    batch.push(PreparedSymbolRecord {
-                        encoded_size: 0,
-                        entry: None,
-                        id,
-                        previous,
-                    });
-                }
-            }
-        }
-
-        let mut added = 0usize;
-        let mut removed = 0usize;
-        let mut releases = self.cancelled_symbols.clone();
-        for record in &batch {
-            self.project.symbols.append_prepared_writes(
-                record.id,
-                record.entry.as_ref(),
-                record.previous.as_ref(),
-                &mut writes,
-            )?;
-            match (&record.entry, &record.previous) {
-                (Some(_), None) => added += 1,
-                (None, Some(_)) => {
-                    removed += 1;
-                    releases.push(record.id);
-                }
-                _ => {}
-            }
-        }
-        self.project.symbols.append_prepared_transition_writes(
-            &self.symbol_reservations,
-            &releases,
-            added,
-            removed,
-            &mut writes,
-        )?;
-
-        Ok((batch, writes))
-    }
-
-    fn publish_symbols(&mut self, symbols: Vec<PreparedSymbolRecord>) {
-        let added = symbols
-            .iter()
-            .filter(|record| record.entry.is_some() && record.previous.is_none())
-            .count();
-        let removed = symbols
-            .iter()
-            .filter(|record| record.entry.is_none() && record.previous.is_some())
-            .count();
-        self.project.symbols.publish_prepared(
-            &self.symbol_reservations,
-            &self.cancelled_symbols,
-            added,
-            removed,
-        );
-
-        for record in symbols.iter().filter(|record| record.entry.is_none()) {
-            let previous = record
-                .previous
-                .as_ref()
-                .expect("prepared symbol removal has a previous entry");
-            self.project.symbols.publish_remove(record.id, previous);
-            self.changes.push(ChangeRecord::SymbolRemoved {
+    fn publish_symbols(&mut self, symbols: PreparedSymbolBatch) {
+        symbols.for_each_change(|entry, previous| match (entry, previous) {
+            (Some(entry), Some(_)) => self.changes.push(ChangeRecord::SymbolChanged {
+                address: entry.address(),
+                symbol: entry.symbol(),
+            }),
+            (Some(entry), None) => self.changes.push(ChangeRecord::SymbolAdded {
+                address: entry.address(),
+                symbol: entry.symbol(),
+            }),
+            (None, Some(previous)) => self.changes.push(ChangeRecord::SymbolRemoved {
                 address: previous.address(),
                 symbol: previous.symbol(),
-            });
-        }
-
-        for record in symbols.into_iter().filter(|record| record.entry.is_some()) {
-            let entry = record
-                .entry
-                .expect("prepared symbol upsert has a final entry");
-            let address = entry.address();
-            let symbol = entry.symbol();
-            self.project.symbols.publish_upsert(
-                record.id,
-                entry,
-                record.previous.as_ref(),
-                record.encoded_size,
-            );
-            self.changes.push(if record.previous.is_some() {
-                ChangeRecord::SymbolChanged { address, symbol }
-            } else {
-                ChangeRecord::SymbolAdded { address, symbol }
-            });
-        }
+            }),
+            (None, None) => unreachable!("prepared symbol record must describe a change"),
+        });
+        symbols.publish(&mut self.project.symbols);
     }
 
-    fn prepare_references(
-        &mut self,
-    ) -> Result<(Vec<PreparedReferenceRecord>, EntityWriteBatch), ProjectError> {
-        let records = mem::take(&mut self.staged_references);
-        let mut batch = Vec::with_capacity(records.len());
-        let mut writes = EntityWriteBatch::with_capacity(records.len().saturating_mul(2));
-
-        for (key, record) in records {
-            let StagedReferenceRecord {
-                previous,
-                reference,
-            } = record;
-            let unchanged = match (&reference, previous) {
-                (Some(reference), Some(previous)) => reference.same_fact(&previous),
-                (None, None) => true,
-                _ => false,
-            };
-            if unchanged {
-                continue;
-            }
-
-            let index_record = if self.project.references.is_persistent() {
-                let (index_record, encoded) = ReferenceIndex::prepare_record(key, reference)?;
-                writes.extend(encoded);
-                index_record
+    fn publish_references(&mut self, references: PreparedReferenceBatch) {
+        for (key, present) in references.asserted_changes() {
+            if present {
+                self.changes.push(ChangeRecord::ReferenceAdded {
+                    from: key.from(),
+                    target: key.target(),
+                    kind: key.kind(),
+                });
             } else {
-                PreparedReferenceIndexRecord::new(key, reference, 0)
-            };
-            batch.push(PreparedReferenceRecord {
-                index_record,
-                previous,
-            });
-        }
-
-        Ok((batch, writes))
-    }
-
-    fn publish_references(&mut self, references: Vec<PreparedReferenceRecord>) {
-        self.project
-            .references
-            .publish_records(references.iter().map(|record| record.index_record));
-
-        let mut derived_changed = false;
-        for record in references {
-            let index_record = record.index_record;
-            let key = index_record.key();
-            derived_changed |= self.derived_reference_coverage.contains(key.from());
-
-            if !self.asserted_references.contains(&key) {
-                continue;
-            }
-            match index_record.reference() {
-                Some(reference) => self.changes.push(ChangeRecord::ReferenceAdded {
+                self.changes.push(ChangeRecord::ReferenceRemoved {
                     from: key.from(),
                     target: key.target(),
-                    kind: reference.kind(),
-                }),
-                None => self.changes.push(ChangeRecord::ReferenceRemoved {
-                    from: key.from(),
-                    target: key.target(),
-                    kind: record
-                        .previous
-                        .expect("prepared reference removal has a previous reference")
-                        .kind(),
-                }),
+                    kind: key.kind(),
+                });
             }
         }
 
-        if derived_changed {
+        if references.derived_changed() {
             self.changes.push(ChangeRecord::ReferencesChanged {
-                coverage: self.derived_reference_coverage.clone(),
+                coverage: references.derived_coverage().clone(),
             });
         }
+        references.publish(&mut self.project.references);
     }
 }
 
@@ -999,9 +616,9 @@ mod test {
     use crate::il::ecode::{ECodeBuilder, ECodeIr};
     use crate::il::pcode::{PCodeBuilder, PCodeIr};
     use crate::ir::{
-        Address, IncompleteCodeBlock, IncompleteFunction, Insn, InsnEntry, ProblemKind, Reference,
-        ReferenceOrigin, ReferenceProperties, ReferenceTarget, SymbolEntry, SymbolIndex,
-        SymbolProperties, SymbolTableSelector,
+        Address, FunctionId, IncompleteCodeBlock, IncompleteFunction, Insn, InsnEntry, ProblemKind,
+        Reference, ReferenceKey, ReferenceKind, ReferenceOrigin, ReferenceProperties, SymbolEntry,
+        SymbolIndex, SymbolProperties, SymbolTableSelector,
     };
     use crate::lifter::{ContextSet, Op, RawPCodeOp, Varnode, resolve_language};
     use crate::storage::{AddressSpaceId, DEFAULT_SPACE_ID};
@@ -1496,7 +1113,11 @@ mod test {
 
         let changes = {
             let mut transaction = project.transaction("test");
-            assert!(transaction.remove_reference(entry, ReferenceTarget::from(target))?);
+            assert!(transaction.remove_reference(ReferenceKey::new(
+                entry,
+                target.into(),
+                ReferenceKind::Data,
+            ))?);
             transaction.commit()?
         };
 

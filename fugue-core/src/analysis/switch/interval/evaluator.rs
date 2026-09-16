@@ -24,10 +24,7 @@ enum EvaluationStep {
 }
 
 impl<'a, 'b> SwitchTargetEvaluator<'a, 'b> {
-    pub(crate) fn new(
-        context: &'a SwitchIntervalRecovery<'b>,
-        space: AddressSpaceId,
-    ) -> Self {
+    pub(crate) fn new(context: &'a SwitchIntervalRecovery<'b>, space: AddressSpaceId) -> Self {
         Self {
             context,
             space,

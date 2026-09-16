@@ -4,8 +4,8 @@ use smallvec::SmallVec;
 
 use crate::ir::{
     Address, AddressRangeSet, FunctionId, FunctionProperties, IncompleteFunction, ProblemKind,
-    Reference, ReferenceKind, ReferenceOrigin, ReferenceTarget, Switch, SymbolEntry, SymbolId,
-    SymbolIndex, SymbolProperties,
+    Reference, ReferenceKey, ReferenceKind, ReferenceOrigin, ReferenceProvenance, Switch,
+    SymbolEntry, SymbolId, SymbolIndex, SymbolProperties,
 };
 use crate::project::{ChangeSet, ProjectError, ProjectTransaction};
 use crate::storage::segments::mapping::{
@@ -218,43 +218,50 @@ impl SymbolRemoval {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ReferenceRemoval {
-    from: Address,
-    target: ReferenceTarget,
+    key: ReferenceKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DerivedReferenceReplacement {
     coverage: AddressRangeSet,
     kind: ReferenceKind,
+    provenance: ReferenceProvenance,
     references: Vec<Reference>,
 }
 
 impl DerivedReferenceReplacement {
-    fn new(coverage: AddressRangeSet, kind: ReferenceKind, references: Vec<Reference>) -> Self {
+    fn new(
+        coverage: AddressRangeSet,
+        kind: ReferenceKind,
+        provenance: ReferenceProvenance,
+        references: Vec<Reference>,
+    ) -> Self {
         Self {
             coverage,
             kind,
+            provenance,
             references,
         }
     }
 
     fn apply(self, transaction: &mut ProjectTransaction<'_>) -> Result<(), ProjectError> {
-        transaction.replace_derived_references(self.coverage, self.kind, self.references)?;
+        transaction.replace_derived_references(
+            self.coverage,
+            self.kind,
+            self.provenance,
+            self.references,
+        )?;
         Ok(())
     }
 }
 
 impl ReferenceRemoval {
-    fn new(from: Address, target: ReferenceTarget) -> Self {
-        Self { from, target }
+    fn new(key: ReferenceKey) -> Self {
+        Self { key }
     }
 
-    fn from(&self) -> Address {
-        self.from
-    }
-
-    fn target(&self) -> ReferenceTarget {
-        self.target
+    fn key(&self) -> ReferenceKey {
+        self.key
     }
 }
 
@@ -599,9 +606,8 @@ impl ProjectUpdates {
         self.updates.push(ProjectUpdate::remove_mapping(mapping));
     }
 
-    pub fn remove_reference(&mut self, from: Address, target: ReferenceTarget) {
-        self.updates
-            .push(ProjectUpdate::remove_reference(from, target));
+    pub fn remove_reference(&mut self, key: ReferenceKey) {
+        self.updates.push(ProjectUpdate::remove_reference(key));
     }
 
     pub fn remove_switch(&mut self, branch: impl Into<Address>) {
@@ -616,10 +622,13 @@ impl ProjectUpdates {
         &mut self,
         coverage: AddressRangeSet,
         kind: ReferenceKind,
+        provenance: ReferenceProvenance,
         references: Vec<Reference>,
     ) {
-        self.updates.push(ProjectUpdate::replace_derived_references(
-            coverage, kind, references,
+        self.updates.push(ProjectUpdate::new(
+            ProjectOperation::ReplaceDerivedReferences(DerivedReferenceReplacement::new(
+                coverage, kind, provenance, references,
+            )),
         ));
     }
 
@@ -783,20 +792,10 @@ impl ProjectUpdate {
         Self::new(ProjectOperation::AddReference(reference))
     }
 
-    pub(crate) fn remove_reference(from: Address, target: ReferenceTarget) -> Self {
+    pub(crate) fn remove_reference(key: ReferenceKey) -> Self {
         Self::new(ProjectOperation::RemoveReference(ReferenceRemoval::new(
-            from, target,
+            key,
         )))
-    }
-
-    pub(crate) fn replace_derived_references(
-        coverage: AddressRangeSet,
-        kind: ReferenceKind,
-        references: Vec<Reference>,
-    ) -> Self {
-        Self::new(ProjectOperation::ReplaceDerivedReferences(
-            DerivedReferenceReplacement::new(coverage, kind, references),
-        ))
     }
 
     pub(crate) fn add_switch(switch: Switch) -> Self {
@@ -909,7 +908,7 @@ impl ProjectUpdate {
                 transaction.remove_mapping(removal.mapping())
             }
             ProjectOperation::RemoveReference(removal) => {
-                transaction.remove_reference(removal.from(), removal.target())?;
+                transaction.remove_reference(removal.key())?;
                 Ok(())
             }
             ProjectOperation::RemoveSwitch(branch) => {

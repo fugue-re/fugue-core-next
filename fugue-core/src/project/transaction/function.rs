@@ -1,11 +1,10 @@
 use super::ProjectTransaction;
-use super::reference::DerivedReferenceBatch;
 use crate::il::common::IlArtefact;
 use crate::il::pcode::PCodeIr;
 use crate::ir::{
-    Address, AddressRangeSet, CodeBlockId, Function, FunctionId, FunctionProperties,
-    FunctionRecord, IncompleteFunction, IncompleteFunctionError, ProblemKind, Reference,
-    ReferenceKind, ReferenceOrigin, StagedFunctionChangeRecord,
+    Address, AddressRangeSet, CodeBlockId, DerivedReferenceBatch, Function, FunctionId,
+    FunctionProperties, FunctionRecord, IncompleteFunction, IncompleteFunctionError, ProblemKind,
+    Reference, ReferenceKind, ReferenceOrigin, ReferenceProvenance, StagedFunctionChangeRecord,
 };
 use crate::project::{ChangeRecord, FunctionChangeKind, ProjectError};
 
@@ -21,7 +20,12 @@ impl ProjectTransaction<'_> {
         function: IncompleteFunction,
     ) -> Result<FunctionId, ProjectError> {
         let record = self.stage_incomplete_function(function)?;
-        self.replace_derived_references(record.coverage, ReferenceKind::Flow, record.references)?;
+        self.replace_derived_references(
+            record.coverage,
+            ReferenceKind::Flow,
+            ReferenceProvenance::Function(record.id),
+            record.references,
+        )?;
         Ok(record.id)
     }
 
@@ -45,17 +49,18 @@ impl ProjectTransaction<'_> {
         let expected = functions.size_hint().0;
         self.function_staging.reserve_functions(expected);
         self.changes.reserve(expected);
-        let mut references = Vec::with_capacity(expected);
+        let mut batches = Vec::with_capacity(expected);
         for function in functions {
             let function = function?;
             let record = self.stage_normalised_function(function)?;
-            references.push(DerivedReferenceBatch::new(
+            batches.push(DerivedReferenceBatch::new(
                 record.coverage,
                 ReferenceKind::Flow,
+                ReferenceProvenance::Function(record.id),
                 record.references,
             ));
         }
-        self.replace_derived_reference_batches(references)?;
+        self.replace_derived_reference_batches(batches)?;
         Ok(())
     }
 
@@ -72,9 +77,9 @@ impl ProjectTransaction<'_> {
         function: FunctionRecord,
     ) -> Result<StagedFunctionReferenceRecord, ProjectError> {
         let entry = function.entry();
-        let record = self.project.functions.stage_materialisation(
+        let record = self.function_staging.stage_materialisation(
+            &self.project.functions,
             &self.project.blocks,
-            &mut self.function_staging,
             function,
         )?;
         self.stage_function_references(entry, record)
@@ -86,9 +91,9 @@ impl ProjectTransaction<'_> {
     ) -> Result<StagedFunctionReferenceRecord, ProjectError> {
         function.set_input_revision(self.project.revision());
         let entry = function.entry();
-        let record = self.project.functions.stage_membership(
+        let record = self.function_staging.stage_membership(
+            &self.project.functions,
             &self.project.blocks,
-            &mut self.function_staging,
             function,
         )?;
         self.stage_function_references(entry, record)
@@ -109,11 +114,8 @@ impl ProjectTransaction<'_> {
             coverage
         };
         let reference_coverage = covered.clone();
-        self.call_graph_staging.set_function_edges(
-            entry,
-            record.take_call_targets(),
-            !replaces_existing,
-        );
+        self.call_graph_staging
+            .set_callees(entry, record.take_call_targets(), !replaces_existing);
         if replaces_existing {
             self.remove_lifted_descendants(id, &PCodeIr::FORM)?;
         }
@@ -145,9 +147,9 @@ impl ProjectTransaction<'_> {
         entry: Address,
         properties: FunctionProperties,
     ) -> Result<bool, ProjectError> {
-        let Some(coverage) = self.project.functions.stage_properties(
+        let Some(coverage) = self.function_staging.set_properties(
+            &self.project.functions,
             &self.project.blocks,
-            &mut self.function_staging,
             entry,
             properties,
             self.project.revision(),
@@ -198,8 +200,18 @@ impl ProjectTransaction<'_> {
         let split = self.stage_function_membership(split)?;
         let retained = self.stage_function_membership(retained)?;
         self.replace_derived_reference_batches([
-            DerivedReferenceBatch::new(split.coverage, ReferenceKind::Flow, split.references),
-            DerivedReferenceBatch::new(retained.coverage, ReferenceKind::Flow, retained.references),
+            DerivedReferenceBatch::new(
+                split.coverage,
+                ReferenceKind::Flow,
+                ReferenceProvenance::Function(split.id),
+                split.references,
+            ),
+            DerivedReferenceBatch::new(
+                retained.coverage,
+                ReferenceKind::Flow,
+                ReferenceProvenance::Function(retained.id),
+                retained.references,
+            ),
         ])?;
 
         Ok(Some(split.id))
@@ -238,7 +250,12 @@ impl ProjectTransaction<'_> {
         };
         let record = self.stage_function_membership(merged)?;
         self.remove_function_by_id(source, ReferenceOrigin::Derived)?;
-        self.replace_derived_references(record.coverage, ReferenceKind::Flow, record.references)?;
+        self.replace_derived_references(
+            record.coverage,
+            ReferenceKind::Flow,
+            ReferenceProvenance::Function(record.id),
+            record.references,
+        )?;
 
         Ok(true)
     }
@@ -280,20 +297,23 @@ impl ProjectTransaction<'_> {
         &mut self,
         id: FunctionId,
     ) -> Result<Option<Function>, ProjectError> {
-        let Some(mut removed) = self.project.functions.stage_removal(
-            &self.project.blocks,
-            &mut self.function_staging,
-            id,
-        )?
+        let Some(mut removed) =
+            self.function_staging
+                .remove(&self.project.functions, &self.project.blocks, id)?
         else {
             return Ok(None);
         };
         let covered = removed.take_coverage();
         let function = removed.into_function();
         let entry = function.entry();
-        self.call_graph_staging.remove_function_edges(entry);
+        self.call_graph_staging.clear_callees(entry);
 
-        self.replace_derived_references(covered.clone(), ReferenceKind::Flow, [])?;
+        self.replace_derived_references(
+            covered.clone(),
+            ReferenceKind::Flow,
+            ReferenceProvenance::Function(id),
+            [],
+        )?;
 
         self.remove_switches_of_function(id)?;
 
@@ -317,7 +337,8 @@ mod test {
 
     use super::*;
     use crate::ir::{
-        FlowKind, IncompleteCodeBlock, IncompleteCodeBlockId, Insn, InsnEntry, ReferenceTarget,
+        FlowKind, IncompleteCodeBlock, IncompleteCodeBlockId, Insn, InsnEntry, ReferenceKey,
+        ReferenceTarget,
     };
     use crate::lifter::{ContextBitRange, ContextSet};
     use crate::project::Project;
@@ -476,7 +497,11 @@ mod test {
         assert!(
             project
                 .references()
-                .get(split, ReferenceTarget::from(external))?
+                .get(ReferenceKey::new(
+                    split,
+                    ReferenceTarget::from(external),
+                    ReferenceKind::Flow,
+                ))?
                 .is_some()
         );
 
@@ -509,7 +534,11 @@ mod test {
         assert!(
             project
                 .references()
-                .get(split, ReferenceTarget::from(external))?
+                .get(ReferenceKey::new(
+                    split,
+                    ReferenceTarget::from(external),
+                    ReferenceKind::Flow,
+                ))?
                 .is_some()
         );
 

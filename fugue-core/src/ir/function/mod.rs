@@ -6,8 +6,8 @@ use smallvec::SmallVec;
 use ustr::Ustr;
 
 use crate::ir::{
-    Address, CodeBlockId, CodeBlockTable, FlowKind, FlowTarget, Id, Reference, ReferenceKey,
-    ReferenceOrigin, ReferenceProperties,
+    Address, CodeBlock, CodeBlockId, CodeBlockTable, FlowKind, FlowTarget, Id, IdSet, Reference,
+    ReferenceKey, ReferenceOrigin, ReferenceProperties,
 };
 use crate::storage::entities::schema::{ENTITY_FUNCTION_ID, ENTITY_KEY_FUNCTION_ID};
 use crate::storage::entities::{Entity, EntityId, EntityKey, EntityKeyId, MutableEntity};
@@ -338,12 +338,12 @@ impl Function {
     fn reachable_blocks(
         &self,
         entry: CodeBlockId,
-        boundary: CodeBlockId,
-    ) -> FxHashSet<CodeBlockId> {
-        let mut reachable = FxHashSet::default();
+        excluded_block: CodeBlockId,
+    ) -> IdSet<CodeBlock> {
+        let mut reachable = IdSet::new();
         let mut pending = vec![entry];
         while let Some(block) = pending.pop() {
-            if block == boundary || !reachable.insert(block) {
+            if block == excluded_block || !reachable.insert(block) {
                 continue;
             }
             pending.extend(self.successors(block));
@@ -354,10 +354,10 @@ impl Function {
     fn tail_call_sites_in(
         &self,
         blocks: &CodeBlockTable,
-        members: &FxHashSet<CodeBlockId>,
+        members: &IdSet<CodeBlock>,
     ) -> Vec<Address> {
         let mut sites = Vec::new();
-        for (_, id) in self.blocks().filter(|(_, id)| members.contains(id)) {
+        for (_, id) in self.blocks().filter(|(_, id)| members.contains(*id)) {
             let block = blocks
                 .get_by_id(id)
                 .expect("function block must exist in the code block table");
@@ -376,11 +376,11 @@ impl Function {
     fn tail_call_sources_to(
         &self,
         blocks: &CodeBlockTable,
-        members: &FxHashSet<CodeBlockId>,
+        members: &IdSet<CodeBlock>,
         target: Address,
     ) -> Vec<(CodeBlockId, Address)> {
         let mut sources = Vec::new();
-        for (_, id) in self.blocks().filter(|(_, id)| members.contains(id)) {
+        for (_, id) in self.blocks().filter(|(_, id)| members.contains(*id)) {
             let block = blocks
                 .get_by_id(id)
                 .expect("function block must exist in the code block table");
@@ -415,20 +415,19 @@ impl Function {
         let parent_reachable = self.reachable_blocks(current_entry, new_entry);
         let exclusive_child = child_members
             .difference(&parent_reachable)
-            .copied()
-            .collect::<FxHashSet<_>>();
+            .collect::<IdSet<_>>();
         let parent_members = self
             .blocks()
-            .filter_map(|(_, block)| (!exclusive_child.contains(&block)).then_some(block))
-            .collect::<FxHashSet<_>>();
+            .filter_map(|(_, block)| (!exclusive_child.contains(block)).then_some(block))
+            .collect::<IdSet<_>>();
 
         let parent_blocks = self
             .blocks()
-            .filter(|(_, block)| parent_members.contains(block))
+            .filter(|(_, block)| parent_members.contains(*block))
             .collect::<Vec<_>>();
         let child_blocks = self
             .blocks()
-            .filter(|(_, block)| child_members.contains(block))
+            .filter(|(_, block)| child_members.contains(*block))
             .collect::<Vec<_>>();
         if parent_blocks.is_empty() || child_blocks.is_empty() {
             return None;
@@ -437,31 +436,47 @@ impl Function {
         let parent_edges = self
             .edges()
             .filter(|(source, target)| {
-                parent_members.contains(source) && parent_members.contains(target)
+                parent_members.contains(*source) && parent_members.contains(*target)
             })
             .collect::<Vec<_>>();
         let child_edges = self
             .edges()
             .filter(|(source, target)| {
-                child_members.contains(source) && child_members.contains(target)
+                child_members.contains(*source) && child_members.contains(*target)
             })
             .collect::<Vec<_>>();
         let parent_boundary_sources = self
             .edges()
             .filter_map(|(source, target)| {
-                (target == new_entry && parent_members.contains(&source)).then_some(source)
+                (target == new_entry && parent_members.contains(source)).then_some(source)
             })
-            .collect::<FxHashSet<_>>();
+            .collect::<IdSet<_>>();
         let child_boundary_sources = self
             .edges()
             .filter_map(|(source, target)| {
-                (target == current_entry && child_members.contains(&source)).then_some(source)
+                (target == current_entry && child_members.contains(source)).then_some(source)
             })
-            .collect::<FxHashSet<_>>();
-        let parent_boundary =
-            unconditional_branch_sites_to(blocks, &parent_boundary_sources, split_entry)?;
-        let child_boundary =
-            unconditional_branch_sites_to(blocks, &child_boundary_sources, self.entry)?;
+            .collect::<IdSet<_>>();
+        let unconditional_branch_sites_to = |sources: &IdSet<CodeBlock>, target: Address| {
+            let mut sites = Vec::new();
+            for source in sources.iter() {
+                let block = blocks
+                    .get_by_id(source)
+                    .expect("function block must exist in the code block table");
+                let before = sites.len();
+                sites.extend(block.flow_targets().filter_map(|flow| {
+                    (flow.kind() == FlowKind::Branch && flow.to() == target).then_some(flow.from())
+                }));
+                if sites.len() == before {
+                    return None;
+                }
+            }
+            sites.sort_unstable();
+            sites.dedup();
+            Some(sites)
+        };
+        let parent_boundary = unconditional_branch_sites_to(&parent_boundary_sources, split_entry)?;
+        let child_boundary = unconditional_branch_sites_to(&child_boundary_sources, self.entry)?;
 
         let mut parent_tail_calls = self.tail_call_sites_in(blocks, &parent_members);
         parent_tail_calls.extend(parent_boundary);
@@ -490,7 +505,7 @@ impl Function {
         let member_ids = members
             .iter()
             .map(|(_, block)| *block)
-            .collect::<FxHashSet<_>>();
+            .collect::<IdSet<_>>();
         let target_boundary = self.tail_call_sources_to(blocks, &member_ids, source.entry);
         let source_boundary = source.tail_call_sources_to(blocks, &member_ids, self.entry);
 
@@ -544,7 +559,7 @@ impl Function {
             .filter(|target| target.kind().is_global())
         {
             let reference = Reference::from_flow(target.from(), target.to(), target.kind());
-            let key = ReferenceKey::new(reference.from(), reference.target());
+            let key = reference.key();
             coalesced
                 .entry(key)
                 .and_modify(|properties| *properties |= reference.properties())
@@ -554,7 +569,7 @@ impl Function {
         coalesced
             .into_iter()
             .map(|(key, properties)| {
-                Reference::flow(key.from(), key.target(), properties)
+                Reference::new(key.from(), key.target(), key.kind(), properties)
                     .with_origin(ReferenceOrigin::Derived)
             })
             .collect()
@@ -577,27 +592,4 @@ impl Function {
     pub fn mark_external(&mut self) {
         self.properties.insert(FunctionProperties::EXTERNAL);
     }
-}
-
-fn unconditional_branch_sites_to(
-    blocks: &CodeBlockTable,
-    sources: &FxHashSet<CodeBlockId>,
-    target: Address,
-) -> Option<Vec<Address>> {
-    let mut sites = Vec::new();
-    for &source in sources {
-        let block = blocks
-            .get_by_id(source)
-            .expect("function block must exist in the code block table");
-        let before = sites.len();
-        sites.extend(block.flow_targets().filter_map(|flow| {
-            (flow.kind() == FlowKind::Branch && flow.to() == target).then_some(flow.from())
-        }));
-        if sites.len() == before {
-            return None;
-        }
-    }
-    sites.sort_unstable();
-    sites.dedup();
-    Some(sites)
 }

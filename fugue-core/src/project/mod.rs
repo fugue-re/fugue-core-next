@@ -12,8 +12,14 @@ use crate::il::pcode::{PCodeError, PCodeIr};
 use crate::il::registry::{IlFormRegistration, IlRegistry};
 use crate::il::storage::{IlPersist, IlStorageError};
 use crate::ir::block::{ATTRIBUTE_CODE_BLOCK_CACHE_SIZE, DEFAULT_CODE_BLOCK_CACHE_BYTES};
+use crate::ir::call_graph::{
+    ATTRIBUTE_CALL_GRAPH_INDEX_CACHE_SIZE, DEFAULT_CALL_GRAPH_INDEX_CACHE_BYTES,
+};
 use crate::ir::function::{ATTRIBUTE_FUNCTION_CACHE_SIZE, DEFAULT_FUNCTION_CACHE_BYTES};
 use crate::ir::problem::{ATTRIBUTE_PROBLEM_CACHE_SIZE, DEFAULT_PROBLEM_CACHE_BYTES};
+use crate::ir::reference::{
+    ATTRIBUTE_REFERENCE_INDEX_CACHE_SIZE, DEFAULT_REFERENCE_INDEX_CACHE_BYTES,
+};
 use crate::ir::switch::{ATTRIBUTE_SWITCH_CACHE_SIZE, DEFAULT_SWITCH_CACHE_BYTES};
 use crate::ir::symbol::{ATTRIBUTE_SYMBOL_CACHE_SIZE, DEFAULT_SYMBOL_CACHE_BYTES};
 use crate::ir::{
@@ -251,7 +257,7 @@ impl Project {
 
         let mut symbols = storage.table(
             symbol_cache_bytes,
-            SymbolTable::with_worker,
+            SymbolTable::new_persistent,
             SymbolTable::new_transient,
             "symbol",
         )?;
@@ -291,7 +297,7 @@ impl Project {
 
         let functions = storage.table(
             cache_bytes,
-            FunctionTable::with_worker,
+            FunctionTable::new_persistent,
             FunctionTable::new_transient,
             "function",
         )?;
@@ -304,7 +310,7 @@ impl Project {
 
         let blocks = storage.table(
             block_cache_bytes,
-            CodeBlockTable::with_worker,
+            CodeBlockTable::new_persistent,
             CodeBlockTable::new_transient,
             "code block",
         )?;
@@ -315,7 +321,7 @@ impl Project {
 
         let switches = storage.table(
             switch_cache_bytes,
-            SwitchTable::with_worker,
+            SwitchTable::new_persistent,
             SwitchTable::new_transient,
             "switch",
         )?;
@@ -326,7 +332,7 @@ impl Project {
 
         let problems = storage.table(
             problem_cache_bytes,
-            ProblemTable::with_worker,
+            ProblemTable::new_persistent,
             ProblemTable::new_transient,
             "problem",
         )?;
@@ -339,14 +345,28 @@ impl Project {
         let revisions = revision_record
             .unwrap_or_else(|| ProjectRevisionState::new(Revision::default(), Revision::default()));
 
+        let call_graph_cache_bytes = attributes
+            .get_attr::<usize>(ATTRIBUTE_CALL_GRAPH_INDEX_CACHE_SIZE)
+            .unwrap_or(DEFAULT_CALL_GRAPH_INDEX_CACHE_BYTES);
         let mut call_graph = match storage.write_back() {
-            Some(worker) => CallGraphIndex::new(storage.entities().clone(), Some(worker.clone()))?,
+            Some(worker) => CallGraphIndex::new_persistent(
+                storage.entities().clone(),
+                call_graph_cache_bytes,
+                worker.clone(),
+            ),
             None => CallGraphIndex::new_transient(),
         };
         call_graph.ensure_current(functions.iter(), &blocks, revisions.revision())?;
 
+        let reference_cache_bytes = attributes
+            .get_attr::<usize>(ATTRIBUTE_REFERENCE_INDEX_CACHE_SIZE)
+            .unwrap_or(DEFAULT_REFERENCE_INDEX_CACHE_BYTES);
         let mut references = match storage.write_back() {
-            Some(worker) => ReferenceIndex::new(storage.entities().clone(), Some(worker.clone()))?,
+            Some(worker) => ReferenceIndex::new_persistent(
+                storage.entities().clone(),
+                reference_cache_bytes,
+                worker.clone(),
+            ),
             None => ReferenceIndex::new_transient(),
         };
         references.ensure_current(functions.iter(), &blocks, revisions.revision())?;

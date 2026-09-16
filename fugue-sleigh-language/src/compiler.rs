@@ -6,7 +6,7 @@ use std::path::Path;
 use ahash::AHashMap as Map;
 use ustr::UstrSet;
 
-use crate::deserialise::{DeserialiseError, XmlExt, parse_int_radix};
+use crate::deserialise::{parse_int_radix, DeserialiseError, XmlExt};
 use crate::language::LanguageError;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]

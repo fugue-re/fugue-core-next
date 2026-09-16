@@ -1001,7 +1001,7 @@ mod test {
     use crate::ir::{Address, Switch, SwitchModel, SwitchTable};
     use crate::storage::TRANSIENT;
     use crate::storage::entities::schema::EntityId;
-    use crate::storage::entities::{Entity, EntityKeyPrefix, EntityStorage};
+    use crate::storage::entities::{Entity, EntityKeyPrefix, EntityStorage, WriteBackWorker};
 
     #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
     struct TestEntity {
@@ -1099,7 +1099,8 @@ mod test {
     fn sqlite_initialises_switch_tables() -> Result<(), Box<dyn std::error::Error>> {
         let storage = EntityStorage::new(SqliteEntityStorage::<TRANSIENT>::new()?);
         let branch = Address::from(0x401000u64);
-        let mut switches = SwitchTable::new(storage.clone(), 64 * 1024)?;
+        let worker = WriteBackWorker::new(storage.clone())?;
+        let mut switches = SwitchTable::new_persistent(storage.clone(), 64 * 1024, worker)?;
         let id = switches.insert(branch, |id, branch| {
             Ok(Switch::new(id, branch, SwitchModel::Explicit))
         })?;
@@ -1107,7 +1108,8 @@ mod test {
         switches.flush()?;
         drop(switches);
 
-        let switches = SwitchTable::new(storage, 64 * 1024)?;
+        let worker = WriteBackWorker::new(storage.clone())?;
+        let switches = SwitchTable::new_persistent(storage, 64 * 1024, worker)?;
         assert_eq!(
             switches.get_by_id(id).map(|switch| switch.branch()),
             Some(branch)

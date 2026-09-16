@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use smallvec::SmallVec;
 
+use super::SymbolIndexState;
 use super::transient::SymbolTable as TransientSymbolTable;
-use super::{SymbolIndexState, SymbolInsertion};
 use crate::ir::Address;
-use crate::ir::persistent::{PersistentIdAllocator, PersistentTable};
+use crate::ir::persistent::{PersistentIdAllocator, PersistentIndexRebuilder, PersistentTable};
 use crate::ir::symbol::{
     Symbol, SymbolEntry, SymbolId, SymbolIndex, SymbolProperties, SymbolTableSelector,
 };
@@ -20,9 +20,9 @@ use crate::storage::entities::{
     EntityStorage, EntityStorageError, EntityWrite, EntityWriteBatch, WriteBackWorker,
 };
 
-const INDEX_REBUILD_BATCH: usize = 512;
-
 type Ref<'a> = CachedRef<'a, SymbolEntry>;
+
+const SYMBOL_INITIALISATION_BATCH_SIZE: usize = 512;
 
 struct PreparedSymbolInsertionRecord {
     encoded_size: usize,
@@ -37,20 +37,14 @@ struct SymbolNameKey {
 }
 
 impl SymbolNameKey {
-    fn first(name: Symbol) -> Self {
-        Self {
-            name,
-            id: SymbolId::with_generation(0, 0),
-        }
+    fn new(name: Symbol, id: SymbolId) -> Self {
+        Self { name, id }
     }
 }
 
 impl EntityKeyCodec for SymbolNameKey {
     fn decode(input: &mut &[u8]) -> Option<Self> {
-        Some(Self {
-            name: Symbol::decode(input)?,
-            id: SymbolId::decode(input)?,
-        })
+        Some(Self::new(Symbol::decode(input)?, SymbolId::decode(input)?))
     }
 
     fn encode(&self, output: &mut impl Extend<u8>) {
@@ -70,20 +64,14 @@ struct SymbolAddressKey {
 }
 
 impl SymbolAddressKey {
-    fn first(address: Address) -> Self {
-        Self {
-            address,
-            id: SymbolId::with_generation(0, 0),
-        }
+    fn new(address: Address, id: SymbolId) -> Self {
+        Self { address, id }
     }
 }
 
 impl EntityKeyCodec for SymbolAddressKey {
     fn decode(input: &mut &[u8]) -> Option<Self> {
-        Some(Self {
-            address: Address::decode(input)?,
-            id: SymbolId::decode(input)?,
-        })
+        Some(Self::new(Address::decode(input)?, SymbolId::decode(input)?))
     }
 
     fn encode(&self, output: &mut impl Extend<u8>) {
@@ -103,17 +91,10 @@ struct SymbolLoaderKey {
 }
 
 impl SymbolLoaderKey {
-    fn new(index: SymbolIndex) -> Self {
-        Self {
-            selector: index.selector().index() as u8,
-            index: index.index() as u64,
-        }
-    }
-
-    fn first(selector: SymbolTableSelector) -> Self {
+    fn new(selector: SymbolTableSelector, index: usize) -> Self {
         Self {
             selector: selector.index() as u8,
-            index: 0,
+            index: index as u64,
         }
     }
 
@@ -130,10 +111,10 @@ impl EntityKeyCodec for SymbolLoaderKey {
         let (&selector, rest) = input.split_first()?;
         let (index, rest) = rest.split_at_checked(size_of::<u64>())?;
         *input = rest;
-        Some(Self {
-            selector,
-            index: u64::from_be_bytes(index.try_into().ok()?),
-        })
+        Some(Self::new(
+            SymbolTableSelector::new(usize::from(selector)),
+            usize::try_from(u64::from_be_bytes(index.try_into().ok()?)).ok()?,
+        ))
     }
 
     fn encode(&self, output: &mut impl Extend<u8>) {
@@ -175,32 +156,55 @@ pub struct SymbolTable {
     storage: EntityStorage,
 }
 
+fn append_links(
+    writes: &mut EntityWriteBatch,
+    id: SymbolId,
+    entry: &SymbolEntry,
+) -> Result<(), EntityStorageError> {
+    writes.insert_entity(&SymbolNameKey::new(entry.symbol(), id), &SymbolNameRecord)?;
+    writes.insert_entity(
+        &SymbolAddressKey::new(entry.address(), id),
+        &SymbolAddressRecord,
+    )?;
+    for &index in entry.indices() {
+        writes.insert_entity(
+            &SymbolLoaderKey::new(index.selector(), index.index()),
+            &SymbolLoaderRecord { id },
+        )?;
+    }
+    Ok(())
+}
+
+fn rebuild_indexes(
+    storage: &EntityStorage,
+    entries: &EntityCache<SymbolId, SymbolEntry>,
+) -> Result<PersistentIdAllocator<Symbol>, EntityStorageError> {
+    let mut rebuilder = PersistentIndexRebuilder::new(storage, PersistentTable::Symbols);
+    for entry in entries.try_iter()? {
+        let (id, entry) = entry?;
+        rebuilder.append(id, |writes| append_links(writes, id, &entry))?;
+    }
+    rebuilder.finish(|_| Ok(()))
+}
+
 impl SymbolTable {
     pub(crate) fn new(
         storage: EntityStorage,
         cache_bytes: usize,
-    ) -> Result<Self, EntityStorageError> {
-        let entries = EntityCache::new(storage.clone(), cache_bytes)?;
-        Self::from_entries(storage, entries)
-    }
-
-    pub(crate) fn with_worker(
-        storage: EntityStorage,
         worker: Arc<WriteBackWorker>,
-        cache_bytes: usize,
     ) -> Result<Self, EntityStorageError> {
-        let entries = EntityCache::with_worker(storage.clone(), worker, cache_bytes);
-        Self::from_entries(storage, entries)
+        let entries = EntityCache::new(storage.clone(), cache_bytes, worker);
+        Self::new_with(storage, entries)
     }
 
-    fn from_entries(
+    fn new_with(
         storage: EntityStorage,
         entries: EntityCache<SymbolId, SymbolEntry>,
     ) -> Result<Self, EntityStorageError> {
         let allocator =
             match PersistentIdAllocator::load(storage.clone(), PersistentTable::Symbols)? {
                 Some(allocator) => allocator,
-                None => Self::rebuild_indexes(&storage, &entries)?,
+                None => rebuild_indexes(&storage, &entries)?,
             };
         Ok(Self {
             allocator,
@@ -209,7 +213,7 @@ impl SymbolTable {
         })
     }
 
-    pub(crate) fn append_prepared_transition_writes(
+    pub(crate) fn append_allocation_writes(
         &self,
         reservations: &[SymbolId],
         releases: &[SymbolId],
@@ -259,17 +263,12 @@ impl SymbolTable {
         self.allocator.len()
     }
 
-    pub(crate) fn publish_upsert(&self, id: SymbolId, entry: SymbolEntry, encoded_size: usize) {
-        self.entries.publish_insert(id, entry, encoded_size);
-    }
-
-    pub(crate) fn publish_remove(&self, id: SymbolId) {
-        self.entries.publish_remove(&id);
-    }
-
     pub(crate) fn get_id_by_index(&self, index: SymbolIndex) -> Option<SymbolId> {
         self.storage
-            .get::<SymbolLoaderKey, SymbolLoaderRecord>(&SymbolLoaderKey::new(index))
+            .get::<SymbolLoaderKey, SymbolLoaderRecord>(&SymbolLoaderKey::new(
+                index.selector(),
+                index.index(),
+            ))
             .unwrap_or_else(|error| error.into_fatal())
             .map(|record| record.id)
     }
@@ -346,7 +345,7 @@ impl SymbolTable {
         &self,
         selector: SymbolTableSelector,
     ) -> impl Iterator<Item = (SymbolId, Ref<'_>)> + '_ {
-        let first = SymbolLoaderKey::first(selector);
+        let first = SymbolLoaderKey::new(selector, 0);
         self.storage
             .iter_range::<SymbolLoaderKey, SymbolLoaderRecord>(Bound::Included(&first))
             .unwrap_or_else(|error| error.into_fatal())
@@ -385,9 +384,9 @@ impl SymbolTable {
             Bound::Unbounded => Bound::Unbounded,
         };
         let start = match lower {
-            Bound::Included(address) | Bound::Excluded(address) => {
-                Bound::Included(SymbolAddressKey::first(address))
-            }
+            Bound::Included(address) | Bound::Excluded(address) => Bound::Included(
+                SymbolAddressKey::new(address, SymbolId::with_generation(0, 0)),
+            ),
             Bound::Unbounded => Bound::Unbounded,
         };
         self.storage
@@ -427,7 +426,7 @@ impl SymbolTable {
         &self,
         address: Address,
     ) -> Result<SmallVec<[SymbolId; 2]>, EntityStorageError> {
-        let first = SymbolAddressKey::first(address);
+        let first = SymbolAddressKey::new(address, SymbolId::with_generation(0, 0));
         self.storage
             .iter_range::<SymbolAddressKey, SymbolAddressRecord>(Bound::Included(&first))?
             .map_while(|entry| match entry {
@@ -439,7 +438,7 @@ impl SymbolTable {
     }
 
     fn ids_by_name(&self, name: Symbol) -> Result<Vec<SymbolId>, EntityStorageError> {
-        let first = SymbolNameKey::first(name);
+        let first = SymbolNameKey::new(name, SymbolId::with_generation(0, 0));
         self.storage
             .iter_range::<SymbolNameKey, SymbolNameRecord>(Bound::Included(&first))?
             .map_while(|entry| match entry {
@@ -450,68 +449,17 @@ impl SymbolTable {
             .collect()
     }
 
-    fn rebuild_indexes(
-        storage: &EntityStorage,
-        entries: &EntityCache<SymbolId, SymbolEntry>,
-    ) -> Result<PersistentIdAllocator<Symbol>, EntityStorageError> {
-        let mut live = 0usize;
-        let mut next_index = 0usize;
-        let mut writes = EntityWriteBatch::with_capacity(INDEX_REBUILD_BATCH);
-        for entry in entries.try_iter()? {
-            let (id, entry) = entry?;
-            Self::append_links(&mut writes, id, &entry)?;
-            live += 1;
-            next_index = next_index.max(id.index() + 1);
-            if writes.len() >= INDEX_REBUILD_BATCH {
-                storage.apply_batch(&writes)?;
-                writes.clear();
-            }
-        }
-        storage.apply_batch(&writes)?;
-        PersistentIdAllocator::initialise(
-            storage.clone(),
-            PersistentTable::Symbols,
-            next_index,
-            live,
-        )
-    }
-
-    fn append_links(
-        writes: &mut EntityWriteBatch,
-        id: SymbolId,
-        entry: &SymbolEntry,
-    ) -> Result<(), EntityStorageError> {
-        writes.insert_entity(
-            &SymbolNameKey {
-                name: entry.symbol(),
-                id,
-            },
-            &SymbolNameRecord,
-        )?;
-        writes.insert_entity(
-            &SymbolAddressKey {
-                address: entry.address(),
-                id,
-            },
-            &SymbolAddressRecord,
-        )?;
-        for &index in entry.indices() {
-            writes.insert_entity(&SymbolLoaderKey::new(index), &SymbolLoaderRecord { id })?;
-        }
-        Ok(())
-    }
-
     pub(crate) fn initialise(
         &mut self,
         symbols: TransientSymbolTable,
     ) -> Result<(), EntityStorageError> {
         let mut symbols = symbols.into_entries();
         loop {
-            let mut batch = Vec::with_capacity(INDEX_REBUILD_BATCH);
-            let mut reservations = Vec::with_capacity(INDEX_REBUILD_BATCH);
-            let mut writes = EntityWriteBatch::with_capacity(INDEX_REBUILD_BATCH * 4);
+            let mut batch = Vec::with_capacity(SYMBOL_INITIALISATION_BATCH_SIZE);
+            let mut reservations = Vec::with_capacity(SYMBOL_INITIALISATION_BATCH_SIZE);
+            let mut writes = EntityWriteBatch::with_capacity(SYMBOL_INITIALISATION_BATCH_SIZE * 4);
 
-            for offset in 0..INDEX_REBUILD_BATCH {
+            for offset in 0..SYMBOL_INITIALISATION_BATCH_SIZE {
                 let Some(entry) = symbols.next() else {
                     break;
                 };
@@ -523,7 +471,7 @@ impl SymbolTable {
                     SymbolEntry::ID.key_for(&id),
                     encoded,
                 ));
-                Self::append_links(&mut writes, id, &entry)?;
+                append_links(&mut writes, id, &entry)?;
                 reservations.push(id);
                 batch.push(PreparedSymbolInsertionRecord {
                     encoded_size,
@@ -549,16 +497,13 @@ impl SymbolTable {
     }
 
     fn append_unlinks(writes: &mut EntityWriteBatch, id: SymbolId, entry: &SymbolIndexState) {
-        writes.remove_entity::<_, SymbolNameRecord>(&SymbolNameKey {
-            name: entry.symbol(),
-            id,
-        });
-        writes.remove_entity::<_, SymbolAddressRecord>(&SymbolAddressKey {
-            address: entry.address(),
-            id,
-        });
+        writes.remove_entity::<_, SymbolNameRecord>(&SymbolNameKey::new(entry.symbol(), id));
+        writes.remove_entity::<_, SymbolAddressRecord>(&SymbolAddressKey::new(entry.address(), id));
         for &index in entry.indices() {
-            writes.remove_entity::<_, SymbolLoaderRecord>(&SymbolLoaderKey::new(index));
+            writes.remove_entity::<_, SymbolLoaderRecord>(&SymbolLoaderKey::new(
+                index.selector(),
+                index.index(),
+            ));
         }
     }
 
@@ -572,19 +517,9 @@ impl SymbolTable {
             Self::append_unlinks(writes, id, previous);
         }
         if let Some(entry) = entry {
-            Self::append_links(writes, id, entry)?;
+            append_links(writes, id, entry)?;
         }
         Ok(())
-    }
-
-    pub(crate) fn publish_transition(
-        &mut self,
-        reservations: &[SymbolId],
-        added: usize,
-        removed: usize,
-    ) {
-        self.allocator
-            .publish_transition(reservations, added, removed);
     }
 
     fn referent_of(&self, entry: &SymbolEntry) -> Result<Option<SymbolId>, EntityStorageError> {
@@ -631,14 +566,14 @@ impl SymbolTable {
         Ok(())
     }
 
-    fn insert_or_update(
+    fn add_or_update(
         &mut self,
         index: SymbolIndex,
         mut entry: SymbolEntry,
-    ) -> Result<SymbolInsertion, EntityStorageError> {
+    ) -> Result<SymbolId, EntityStorageError> {
         if let Some(id) = self.referent_of(&entry)? {
             let Some(existing) = self.entries.try_get(&id)? else {
-                return Ok(SymbolInsertion::new(id, false));
+                return Ok(id);
             };
             let previous = existing.as_ref().clone();
             drop(existing);
@@ -647,12 +582,12 @@ impl SymbolTable {
             entry.add_index(index);
             entry.update_visibility(properties);
             self.replace_entry(id, entry, Some(&previous), false)?;
-            return Ok(SymbolInsertion::new(id, false));
+            return Ok(id);
         }
 
         let id = self.pending_id(0);
         self.replace_entry(id, entry, None, true)?;
-        Ok(SymbolInsertion::new(id, true))
+        Ok(id)
     }
 
     pub(crate) fn insert(
@@ -661,16 +596,16 @@ impl SymbolTable {
         address: Address,
         name: Symbol,
         properties: SymbolProperties,
-    ) -> Result<SymbolInsertion, EntityStorageError> {
+    ) -> Result<SymbolId, EntityStorageError> {
         let entry = SymbolEntry::new(address, name, properties).with_index(index);
         let Some(existing_id) = self.get_id_by_index(index) else {
-            return self.insert_or_update(index, entry);
+            return self.add_or_update(index, entry);
         };
         let Some(existing) = self.entries.try_get(&existing_id)? else {
-            return self.insert_or_update(index, entry);
+            return self.add_or_update(index, entry);
         };
         if *existing == entry {
-            return Ok(SymbolInsertion::new(existing_id, false));
+            return Ok(existing_id);
         }
         let previous = existing.as_ref().clone();
         drop(existing);
@@ -678,10 +613,10 @@ impl SymbolTable {
             let mut updated = previous.clone();
             updated.remove_index(index);
             self.replace_entry(existing_id, updated, Some(&previous), false)?;
-            return self.insert_or_update(index, entry);
+            return self.add_or_update(index, entry);
         }
         self.remove_by_id(existing_id)?;
-        self.insert_or_update(index, entry)
+        self.add_or_update(index, entry)
     }
 
     pub(crate) fn try_modify_by_id<R>(
@@ -750,5 +685,23 @@ impl SymbolTable {
             return Ok(false);
         };
         self.remove_by_id(id)
+    }
+
+    pub(crate) fn publish_upsert(&self, id: SymbolId, entry: SymbolEntry, encoded_size: usize) {
+        self.entries.publish_insert(id, entry, encoded_size);
+    }
+
+    pub(crate) fn publish_remove(&self, id: SymbolId) {
+        self.entries.publish_remove(&id);
+    }
+
+    pub(crate) fn publish_allocations(
+        &mut self,
+        reservations: &[SymbolId],
+        added: usize,
+        removed: usize,
+    ) {
+        self.allocator
+            .publish_transition(reservations, added, removed);
     }
 }

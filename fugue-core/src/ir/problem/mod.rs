@@ -5,7 +5,10 @@ use crate::storage::entities::{Entity, EntityId, EntityKey, EntityKeyId, Mutable
 use crate::types::Revision;
 
 mod table;
-pub(crate) use table::{ATTRIBUTE_PROBLEM_CACHE_SIZE, DEFAULT_PROBLEM_CACHE_BYTES};
+pub(crate) use table::{
+    ATTRIBUTE_PROBLEM_CACHE_SIZE, DEFAULT_PROBLEM_CACHE_BYTES, PreparedProblemBatch,
+    ProblemTableStaging,
+};
 pub use table::{ProblemRef, ProblemTable, ProblemTableError};
 
 pub type ProblemId = Id<Problem>;

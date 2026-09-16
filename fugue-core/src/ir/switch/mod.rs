@@ -10,7 +10,10 @@ use crate::storage::schema::bitflags::archived_bitflags;
 use crate::types::Confidence;
 
 mod table;
-pub(crate) use table::{ATTRIBUTE_SWITCH_CACHE_SIZE, DEFAULT_SWITCH_CACHE_BYTES};
+pub(crate) use table::{
+    ATTRIBUTE_SWITCH_CACHE_SIZE, DEFAULT_SWITCH_CACHE_BYTES, PreparedSwitchBatch,
+    SwitchTableStaging,
+};
 pub use table::{SwitchRef, SwitchTable, SwitchTableError};
 
 pub type SwitchId = Id<Switch>;

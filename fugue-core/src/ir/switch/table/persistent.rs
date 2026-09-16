@@ -2,44 +2,63 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 use super::{SwitchIndex, SwitchTableError};
+use crate::ir::persistent::{PersistentIdAllocator, PersistentIndexRebuilder, PersistentTable};
 use crate::ir::switch::{Switch, SwitchId};
 use crate::ir::{Address, FunctionId};
-use crate::storage::entities::{CachedRef, EntityCache, WriteBackWorker};
+use crate::storage::entities::{
+    CachedRef, Entity, EntityCache, EntityWrite, EntityWriteBatch, WriteBackWorker,
+};
 use crate::storage::{EntityStorage, EntityStorageError};
 
 type Ref<'a> = CachedRef<'a, Switch>;
 
 pub struct SwitchTable {
+    allocator: PersistentIdAllocator<Switch>,
     index: SwitchIndex,
     entries: EntityCache<SwitchId, Switch>,
+    storage: EntityStorage,
 }
 
 impl SwitchTable {
     pub(crate) fn new(
-        entities: EntityStorage,
+        storage: EntityStorage,
         cache_bytes: usize,
-    ) -> Result<Self, EntityStorageError> {
-        Self::from_entries(EntityCache::new(entities, cache_bytes)?)
-    }
-
-    pub(crate) fn with_worker(
-        entities: EntityStorage,
         worker: Arc<WriteBackWorker>,
-        cache_bytes: usize,
     ) -> Result<Self, EntityStorageError> {
-        Self::from_entries(EntityCache::with_worker(entities, worker, cache_bytes))
+        let entries = EntityCache::new(storage.clone(), cache_bytes, worker);
+        Self::new_with(storage, entries)
     }
 
-    fn from_entries(entries: EntityCache<SwitchId, Switch>) -> Result<Self, EntityStorageError> {
+    fn new_with(
+        storage: EntityStorage,
+        entries: EntityCache<SwitchId, Switch>,
+    ) -> Result<Self, EntityStorageError> {
+        let allocator = PersistentIdAllocator::load(storage.clone(), PersistentTable::Switches)?;
+        let mut rebuilder = allocator
+            .is_none()
+            .then(|| PersistentIndexRebuilder::new(&storage, PersistentTable::Switches));
         let mut index = SwitchIndex::new();
 
         for entry in entries.try_iter_range(Bound::Unbounded)? {
             let (id, switch) = entry?;
             index.insert(id, switch.function(), switch.branch());
-            index.allocator.mark_allocated(id);
+            if let Some(rebuilder) = &mut rebuilder {
+                rebuilder.append(id, |_| Ok(()))?;
+            }
         }
 
-        Ok(Self { index, entries })
+        let allocator = match allocator {
+            Some(allocator) => allocator,
+            None => rebuilder
+                .expect("missing switch allocator requires index rebuild")
+                .finish(|_| Ok(()))?,
+        };
+        Ok(Self {
+            allocator,
+            index,
+            entries,
+            storage,
+        })
     }
 
     pub(crate) fn branches_for_function(
@@ -54,7 +73,9 @@ impl SwitchTable {
     }
 
     pub(crate) fn pending_id(&self, offset: usize) -> SwitchId {
-        self.index.allocator.pending_id(offset)
+        self.allocator
+            .pending_id(offset)
+            .unwrap_or_else(|error| error.into_fatal())
     }
 
     pub(crate) fn try_get_by_id(
@@ -106,35 +127,16 @@ impl SwitchTable {
         self.index.len()
     }
 
-    pub(crate) fn publish_reservation(&mut self, id: SwitchId) {
-        let allocated = self.index.allocator.allocate();
-        debug_assert_eq!(allocated, id);
-    }
-
-    pub(crate) fn publish_release(&mut self, id: SwitchId) {
-        self.index.allocator.release(id);
-    }
-
-    pub(crate) fn publish_upsert(
-        &mut self,
-        switch: Switch,
-        previous_function: Option<FunctionId>,
-        encoded_size: usize,
-    ) {
-        let id = switch.id();
-        let branch = switch.branch();
-        let function = switch.function();
-        self.entries.publish_insert(id, switch, encoded_size);
-        if let Some(previous_function) = previous_function {
-            self.index.remove(previous_function, branch);
-        }
-        self.index.insert(id, function, branch);
-    }
-
-    pub(crate) fn publish_remove(&mut self, id: SwitchId, function: FunctionId, branch: Address) {
-        self.entries.publish_remove(&id);
-        self.index.remove(function, branch);
-        self.index.allocator.release(id);
+    pub(crate) fn append_allocation_writes(
+        &self,
+        reservations: &[SwitchId],
+        releases: &[SwitchId],
+        added: usize,
+        removed: usize,
+        writes: &mut EntityWriteBatch,
+    ) -> Result<(), EntityStorageError> {
+        self.allocator
+            .append_transition(reservations, releases, added, removed, writes)
     }
 
     pub(crate) fn insert<F>(&mut self, branch: Address, f: F) -> Result<SwitchId, SwitchTableError>
@@ -159,17 +161,34 @@ impl SwitchTable {
             return Ok(existing);
         }
 
-        let entries = &self.entries;
-        let (id, function) = self.index.allocator.try_allocate(|id| {
-            let switch = f(id, branch)?;
-            if switch.branch() != branch {
-                return Err(SwitchTableError::AddressMismatch);
-            }
-            let function = switch.function();
-            entries.try_insert(id, switch)?;
-            Ok(function)
-        })?;
-
+        let id = self.pending_id(0);
+        let switch = f(id, branch)?;
+        if switch.branch() != branch {
+            return Err(SwitchTableError::AddressMismatch);
+        }
+        let function = switch.function();
+        let encoded =
+            rkyv::to_bytes::<rkyv::rancor::Error>(&switch).map_err(EntityStorageError::encode)?;
+        let encoded_size = encoded.len();
+        let reservations = [id];
+        let releases = [];
+        let mut writes = EntityWriteBatch::new();
+        writes.push(EntityWrite::insert_archived(
+            Switch::ID.key_for(&id),
+            encoded,
+        ));
+        self.allocator.append_transition(
+            &reservations,
+            &releases,
+            reservations.len(),
+            releases.len(),
+            &mut writes,
+        )?;
+        self.entries.flush()?;
+        self.storage.apply_batch(&writes)?;
+        self.entries.publish_insert(id, switch, encoded_size);
+        self.allocator
+            .publish_transition(&reservations, reservations.len(), releases.len());
         self.index.insert(id, function, branch);
 
         Ok(id)
@@ -214,9 +233,15 @@ impl SwitchTable {
             None => return Ok(false),
         };
 
-        self.entries.try_remove(&id)?;
+        let mut writes = EntityWriteBatch::new();
+        writes.push(EntityWrite::remove(Switch::ID.key_for(&id)));
+        self.allocator
+            .append_transition(&[], &[id], 0, 1, &mut writes)?;
+        self.entries.flush()?;
+        self.storage.apply_batch(&writes)?;
+        self.entries.publish_remove(&id);
+        self.allocator.publish_transition(&[], 0, 1);
         self.index.remove(function, branch);
-        self.index.allocator.release(id);
 
         Ok(true)
     }
@@ -229,5 +254,36 @@ impl SwitchTable {
             return Ok(false);
         };
         self.try_remove_by_id(id)
+    }
+
+    pub(crate) fn publish_allocations(
+        &mut self,
+        reservations: &[SwitchId],
+        added: usize,
+        removed: usize,
+    ) {
+        self.allocator
+            .publish_transition(reservations, added, removed);
+    }
+
+    pub(crate) fn publish_upsert(
+        &mut self,
+        switch: Switch,
+        previous_function: Option<FunctionId>,
+        encoded_size: usize,
+    ) {
+        let id = switch.id();
+        let branch = switch.branch();
+        let function = switch.function();
+        self.entries.publish_insert(id, switch, encoded_size);
+        if let Some(previous_function) = previous_function {
+            self.index.remove(previous_function, branch);
+        }
+        self.index.insert(id, function, branch);
+    }
+
+    pub(crate) fn publish_remove(&mut self, id: SwitchId, function: FunctionId, branch: Address) {
+        self.entries.publish_remove(&id);
+        self.index.remove(function, branch);
     }
 }
