@@ -7,53 +7,6 @@ use smallvec::SmallVec;
 
 use crate::types::BytesOrSlice;
 
-const INLINE_ENTITY_KEY_SIZE: usize = 16;
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-#[repr(transparent)]
-pub struct EntityKeyId(u8);
-
-impl EntityKeyId {
-    pub(crate) const fn new(index: usize) -> Self {
-        assert!(index <= u8::MAX as usize, "index out of range");
-        Self(index as u8)
-    }
-}
-
-impl TryFrom<usize> for EntityKeyId {
-    type Error = std::num::TryFromIntError;
-
-    fn try_from(index: usize) -> Result<Self, Self::Error> {
-        u8::try_from(index).map(Self)
-    }
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-#[repr(transparent)]
-pub struct EntityId(u8);
-
-impl EntityId {
-    pub(crate) const fn new(index: usize) -> Self {
-        assert!(index <= u8::MAX as usize, "index out of range");
-        Self(index as u8)
-    }
-
-    pub fn key_for<K: EntityKey>(self, key: &K) -> EntityKeyBytes {
-        let mut bytes = SmallVec::<[u8; INLINE_ENTITY_KEY_SIZE]>::new();
-        bytes.extend(EntityKeyPrefix::new(K::ID, self).0);
-        key.encode(&mut bytes);
-        EntityKeyBytes(bytes)
-    }
-}
-
-impl TryFrom<usize> for EntityId {
-    type Error = std::num::TryFromIntError;
-
-    fn try_from(index: usize) -> Result<Self, Self::Error> {
-        u8::try_from(index).map(Self)
-    }
-}
-
 // Packed entity key ID and entity (value) ID
 pub const ENTITY_PREFIX_SIZE: usize = mem::size_of::<EntityKeyId>() + mem::size_of::<EntityId>();
 
@@ -110,6 +63,53 @@ pub const ENTITY_CODE_BLOCK_SIZE_BUCKETS_INDEX_ID: EntityId = EntityId::new(30);
 pub const ENTITY_SYMBOL_NAME_INDEX_ID: EntityId = EntityId::new(31);
 pub const ENTITY_SYMBOL_ADDRESS_INDEX_ID: EntityId = EntityId::new(32);
 pub const ENTITY_SYMBOL_LOADER_INDEX_ID: EntityId = EntityId::new(33);
+
+const INLINE_ENTITY_KEY_SIZE: usize = 16;
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct EntityKeyId(u8);
+
+impl EntityKeyId {
+    pub(crate) const fn new(index: usize) -> Self {
+        assert!(index <= u8::MAX as usize, "index out of range");
+        Self(index as u8)
+    }
+}
+
+impl TryFrom<usize> for EntityKeyId {
+    type Error = std::num::TryFromIntError;
+
+    fn try_from(index: usize) -> Result<Self, Self::Error> {
+        u8::try_from(index).map(Self)
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct EntityId(u8);
+
+impl EntityId {
+    pub(crate) const fn new(index: usize) -> Self {
+        assert!(index <= u8::MAX as usize, "index out of range");
+        Self(index as u8)
+    }
+
+    pub fn key_for<K: EntityKey>(self, key: &K) -> EntityKeyBytes {
+        let mut bytes = SmallVec::<[u8; INLINE_ENTITY_KEY_SIZE]>::new();
+        bytes.extend(EntityKeyPrefix::new(K::ID, self).0);
+        key.encode(&mut bytes);
+        EntityKeyBytes(bytes)
+    }
+}
+
+impl TryFrom<usize> for EntityId {
+    type Error = std::num::TryFromIntError;
+
+    fn try_from(index: usize) -> Result<Self, Self::Error> {
+        u8::try_from(index).map(Self)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]

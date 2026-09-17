@@ -1,12 +1,12 @@
 use std::any::{Any, TypeId};
 use std::collections::{BTreeMap, BTreeSet};
-use std::error::Error;
+use std::error::Error as StdError;
 use std::fmt;
 use std::sync::{Arc, LazyLock};
 
 use runtime::IlRecipe;
 use rustc_hash::FxHashMap;
-use thiserror::Error as ThisError;
+use thiserror::Error;
 
 use crate::extension::{self, Registration};
 use crate::il::common::{
@@ -29,7 +29,7 @@ const PCODE_DIALECT: DialectId = DialectId::from_static("fugue.pcode");
 const ECODE_DIALECT: DialectId = DialectId::from_static("fugue.ecode");
 const MCODE_DIALECT: DialectId = DialectId::from_static("fugue.mcode");
 
-#[derive(Debug, ThisError, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Error)]
 pub enum IlRegistryError {
     #[error("form `{form}` refers to dialect `{dialect}`, which is not registered")]
     AbsentDialect { dialect: DialectId, form: IlFormId },
@@ -77,7 +77,7 @@ impl fmt::Display for IlRegistryErrors {
     }
 }
 
-impl Error for IlRegistryErrors {}
+impl StdError for IlRegistryErrors {}
 
 #[derive(Debug)]
 pub struct IlDialectRegistration {

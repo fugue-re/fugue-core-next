@@ -494,7 +494,7 @@ mod test {
         let writes = staging.prepare().expect("staging should prepare");
         storage
             .entities()
-            .apply_batch(&writes)
+            .write_batch(&writes)
             .expect("writes should apply");
 
         let mut staging = IlStaging::default();

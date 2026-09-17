@@ -7,9 +7,9 @@ use super::{
     PreparedCallGraphEdgeRecord,
 };
 use crate::ir::call_graph::CallGraphEdgeKey;
+use crate::ir::persistent::{cursor_bound, cursor_bound_or_minimum};
 use crate::ir::{Address, IndexMetadata};
 use crate::storage::EntityStorage;
-use crate::storage::entities::cursor::{cursor_bound, cursor_bound_or_minimum};
 use crate::storage::entities::{
     Entity, EntityCache, EntityStorageError, EntityWrite, EntityWriteBatch, ProjectEntity,
     WriteBackWorker,

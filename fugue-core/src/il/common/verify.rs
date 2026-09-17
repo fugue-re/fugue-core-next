@@ -6,6 +6,41 @@ use crate::il::common::{
 };
 
 #[derive(Debug, Error, PartialEq, Eq)]
+pub enum StructureError {
+    #[error("block source count mismatch: expected {expected}, found {found}")]
+    BlockSourceCount { expected: usize, found: usize },
+    #[error("block {block} has duplicate successor {successor}")]
+    DuplicateSuccessor { block: u32, successor: u32 },
+    #[error("edge kind count mismatch: expected {expected}, found {found}")]
+    EdgeKindCount { expected: usize, found: usize },
+    #[error("block {block} edge {edge} has kinds {kinds:?} its terminator cannot produce")]
+    EdgeKindMismatch {
+        block: u32,
+        edge: usize,
+        kinds: IlEdgeKinds,
+    },
+    #[error(transparent)]
+    Il(#[from] IlError),
+    #[error("block {block} operation range overlaps at operation {operation}")]
+    OverlappingBlockOps { block: u32, operation: usize },
+    #[error("parent spans overlap at destination node {node}")]
+    OverlappingParentSpan { node: usize },
+    #[error("source spans overlap at destination node {node}")]
+    OverlappingSourceSpan { node: usize },
+}
+
+pub trait StructureVerifierError: From<IlError> {
+    fn structure(error: StructureError) -> Self;
+
+    fn from_structure(error: StructureError) -> Self {
+        match error {
+            StructureError::Il(error) => error.into(),
+            error => Self::structure(error),
+        }
+    }
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum SsaVerifyError {
     #[error("block {block} argument count mismatch: expected {expected}, found {found}")]
     BlockArgCount {
@@ -355,41 +390,6 @@ where
                     .ok_or(SsaVerifyError::InvalidValueDef)?;
                 Ok(dominance.dominates(block, predecessor))
             }
-        }
-    }
-}
-
-#[derive(Debug, Error, PartialEq, Eq)]
-pub enum StructureError {
-    #[error("block source count mismatch: expected {expected}, found {found}")]
-    BlockSourceCount { expected: usize, found: usize },
-    #[error("block {block} has duplicate successor {successor}")]
-    DuplicateSuccessor { block: u32, successor: u32 },
-    #[error("edge kind count mismatch: expected {expected}, found {found}")]
-    EdgeKindCount { expected: usize, found: usize },
-    #[error("block {block} edge {edge} has kinds {kinds:?} its terminator cannot produce")]
-    EdgeKindMismatch {
-        block: u32,
-        edge: usize,
-        kinds: IlEdgeKinds,
-    },
-    #[error(transparent)]
-    Il(#[from] IlError),
-    #[error("block {block} operation range overlaps at operation {operation}")]
-    OverlappingBlockOps { block: u32, operation: usize },
-    #[error("parent spans overlap at destination node {node}")]
-    OverlappingParentSpan { node: usize },
-    #[error("source spans overlap at destination node {node}")]
-    OverlappingSourceSpan { node: usize },
-}
-
-pub trait StructureVerifierError: From<IlError> {
-    fn structure(error: StructureError) -> Self;
-
-    fn from_structure(error: StructureError) -> Self {
-        match error {
-            StructureError::Il(error) => error.into(),
-            error => Self::structure(error),
         }
     }
 }

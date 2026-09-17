@@ -185,7 +185,7 @@ impl SwitchTable {
             &mut writes,
         )?;
         self.entries.flush()?;
-        self.storage.apply_batch(&writes)?;
+        self.storage.write_batch(&writes)?;
         self.entries.publish_insert(id, switch, encoded_size);
         self.allocator
             .publish_transition(&reservations, reservations.len(), releases.len());
@@ -238,7 +238,7 @@ impl SwitchTable {
         self.allocator
             .append_transition(&[], &[id], 0, 1, &mut writes)?;
         self.entries.flush()?;
-        self.storage.apply_batch(&writes)?;
+        self.storage.write_batch(&writes)?;
         self.entries.publish_remove(&id);
         self.allocator.publish_transition(&[], 0, 1);
         self.index.remove(function, branch);

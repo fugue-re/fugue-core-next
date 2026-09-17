@@ -6,14 +6,6 @@ use crate::il::common::{
     ControlFlowIl, IlAnalysis, IlBlock, IlBlockId, IlBlockPredecessors, IlCsr, IlError,
 };
 
-fn push_frontier(frontiers: &mut [Vec<IlBlockId>], block: IlBlockId, frontier: IlBlockId) {
-    let block_frontiers = &mut frontiers[block.index()];
-
-    if !block_frontiers.contains(&frontier) {
-        block_frontiers.push(frontier);
-    }
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IlDominance {
     entry: Option<IlBlockId>,
@@ -129,7 +121,11 @@ impl IlDominance {
         for successor in blocks[block.index()].successors().slice(successors) {
             if self.is_reachable(*successor) && self.immediate_dominator(*successor) != Some(block)
             {
-                push_frontier(frontiers, block, *successor);
+                let block_frontiers = &mut frontiers[block.index()];
+
+                if !block_frontiers.contains(successor) {
+                    block_frontiers.push(*successor);
+                }
             }
         }
     }
@@ -139,7 +135,11 @@ impl IlDominance {
             for index in 0..frontiers[child.index()].len() {
                 let frontier = frontiers[child.index()][index];
                 if self.immediate_dominator(frontier) != Some(block) {
-                    push_frontier(frontiers, block, frontier);
+                    let block_frontiers = &mut frontiers[block.index()];
+
+                    if !block_frontiers.contains(&frontier) {
+                        block_frontiers.push(frontier);
+                    }
                 }
             }
         }

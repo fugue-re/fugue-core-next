@@ -1,13 +1,11 @@
 mod builder;
 mod def_use;
-mod disjoint_set;
 mod format;
 mod ir;
 mod memory;
 mod opcode;
 mod operation;
 mod optimise;
-mod recovery;
 mod storage;
 mod transform;
 mod value;
@@ -22,9 +20,8 @@ pub use memory::MCodeMemoryDomain;
 pub use opcode::MCodeOpcode;
 pub use operation::{MCodeOp, MCodeOpSpec};
 pub(crate) use optimise::MCodeOptimiser;
-pub use recovery::{MCodeCallFacts, MCodeFunctionFacts, MCodeStorageFact};
 pub use storage::MCodeStorageLocation;
-pub use transform::ECodeToMCode;
+pub use transform::{ECodeToMCode, MCodeCallFacts, MCodeFunctionFacts, MCodeStorageFact};
 pub use value::{MCodeBinding, MCodeBlockArg, MCodeValue, MCodeVersion};
 pub use variable::{MCodeVar, MCodeVarId, MCodeVarKind};
 

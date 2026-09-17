@@ -1,6 +1,7 @@
 use rustc_hash::FxHashMap;
 
-use crate::il::mcode::recovery::{MCodeStackModel, MCodeStackObjectId, MCodeVariableModel};
+use crate::il::mcode::transform::stack::{MCodeStackModel, MCodeStackObjectId};
+use crate::il::mcode::transform::variables::MCodeVariableModel;
 use crate::il::mcode::{MCodeVar, MCodeVarId};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -75,7 +76,7 @@ mod test {
     use crate::il::common::{IlError, IlGraph, IlMetadata, IlValueId, RegisterId};
     use crate::il::ecode::{ECodeBuilder, ECodeDomain, ECodeIr, ECodeOpSpec, ECodeOpcode};
     use crate::il::mcode::MCodeVarKind;
-    use crate::il::mcode::recovery::MCodeStackModel;
+    use crate::il::mcode::transform::stack::MCodeStackModel;
     use crate::ir::FunctionId;
 
     const STACK_POINTER: u64 = 0x20;

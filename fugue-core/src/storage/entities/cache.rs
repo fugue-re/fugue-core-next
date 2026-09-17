@@ -17,7 +17,7 @@ use crate::types::BytesOrSlice;
 
 const ENTITY_CACHE_ENTRY_OVERHEAD: u32 = 64;
 const ENTITY_CACHE_ESTIMATED_ENTRY_SIZE: usize = 256;
-const ENTITY_CACHE_MAINTENANCE_BATCH_COUNT: usize = 256;
+const ENTITY_CACHE_MAINTENANCE_BATCH_SIZE: usize = 256;
 
 type EntityLru<K, E> = Cache<K, Cached<E>, ByteWeighter>;
 type PendingRange<'a, K, E> = Vec<(K, Option<CachedRef<'a, E>>)>;
@@ -255,9 +255,9 @@ where
     K: EntityKey,
     E: Entity,
 {
-    pub fn new(storage: EntityStorage, capacity: usize, worker: Arc<WriteBackWorker>) -> Self {
-        let weight_capacity = capacity.max(1) as u64;
-        let estimated_items = (capacity / ENTITY_CACHE_ESTIMATED_ENTRY_SIZE).max(1);
+    pub fn new(storage: EntityStorage, cache_bytes: usize, worker: Arc<WriteBackWorker>) -> Self {
+        let weight_capacity = cache_bytes.max(1) as u64;
+        let estimated_items = (cache_bytes / ENTITY_CACHE_ESTIMATED_ENTRY_SIZE).max(1);
         let entities = Cache::with_weighter(estimated_items, weight_capacity, ByteWeighter);
 
         Self {
@@ -277,7 +277,7 @@ where
             return match pending {
                 WriteBackAction::Insert(bytes) => {
                     let entity = decode_entity(&bytes)?;
-                    Ok(Some(self.admit(
+                    Ok(Some(self.cache(
                         key.clone(),
                         Arc::new(entity),
                         ByteWeighter::entry_weight(bytes.len()),
@@ -287,22 +287,19 @@ where
             };
         }
 
-        let Some((entity, weight)) = self.fetch(key)? else {
+        let Some((entity, weight)) = self.storage.get_as::<K, E, _, _>(key, |bytes| {
+            let entity = decode_entity(bytes)?;
+            Ok((entity, ByteWeighter::entry_weight(bytes.len())))
+        })?
+        else {
             return Ok(None);
         };
 
-        Ok(Some(self.admit(key.clone(), Arc::new(entity), weight)))
+        Ok(Some(self.cache(key.clone(), Arc::new(entity), weight)))
     }
 
     pub fn get(&self, key: &K) -> Option<CachedRef<'_, E>> {
         self.try_get(key).unwrap_or_else(|error| error.into_fatal())
-    }
-
-    fn fetch(&self, key: &K) -> Result<Option<(E, u32)>, EntityStorageError> {
-        self.storage.get_as::<K, E, _, _>(key, |bytes| {
-            let entity = decode_entity(bytes)?;
-            Ok((entity, ByteWeighter::entry_weight(bytes.len())))
-        })
     }
 
     fn merge_pending_range<'a>(
@@ -313,9 +310,16 @@ where
     where
         K: Ord,
     {
-        let entities = self.entities.clone();
         let mut pending = pending.into_iter().peekable();
         let mut buffered = None;
+        let take_backing = |buffered: &mut Option<Result<(K, E), EntityStorageError>>| {
+            buffered.take().map(|result| {
+                result.map(|(key, value)| {
+                    let value = self.cached_ref(&key, value);
+                    (key, value)
+                })
+            })
+        };
 
         iter::from_fn(move || {
             loop {
@@ -325,30 +329,16 @@ where
 
                 match (pending.peek(), buffered.as_ref()) {
                     (None, None) => return None,
-                    (Some(_), None) => {
-                        let (key, value) = pending.next()?;
-                        if let Some(value) = value {
-                            return Some(Ok((key, value)));
-                        }
-                    }
-                    (None, Some(_)) => return Self::take_backing(&entities, &mut buffered),
+                    (Some(_), None) => {}
+                    (None, Some(_)) => return take_backing(&mut buffered),
                     (Some((pending_key, _)), Some(Ok((backing_key, _)))) => {
                         match pending_key.cmp(backing_key) {
-                            Ordering::Less => {
-                                let (key, value) = pending.next()?;
-                                if let Some(value) = value {
-                                    return Some(Ok((key, value)));
-                                }
-                            }
+                            Ordering::Less => {}
                             Ordering::Equal => {
                                 let _ = buffered.take();
-                                let (key, value) = pending.next()?;
-                                if let Some(value) = value {
-                                    return Some(Ok((key, value)));
-                                }
                             }
                             Ordering::Greater => {
-                                return Self::take_backing(&entities, &mut buffered);
+                                return take_backing(&mut buffered);
                             }
                         }
                     }
@@ -359,6 +349,11 @@ where
                         return Some(Err(error));
                     }
                 }
+
+                let (key, value) = pending.next()?;
+                if let Some(value) = value {
+                    return Some(Ok((key, value)));
+                }
             }
         })
     }
@@ -366,10 +361,9 @@ where
     pub fn try_iter(&self) -> Result<EntityIterator<'_, K, CachedRef<'_, E>>, EntityStorageError> {
         self.flush()?;
 
-        let entities = self.entities.clone();
         let iter = self.storage.iter::<K, E>()?.map(move |result| {
             result.map(|(key, value)| {
-                let value = Self::reference_for(&entities, &key, value);
+                let value = self.cached_ref(&key, value);
                 (key, value)
             })
         });
@@ -385,7 +379,11 @@ where
         K: Ord,
     {
         let prefix = EntityKeyPrefix::of::<K, E>();
-        let start_key = Self::range_start_key(start);
+        let start_key = match start {
+            Bound::Included(key) => Bound::Included(E::ID.key_for(key).into()),
+            Bound::Excluded(key) => Bound::Excluded(E::ID.key_for(key).into()),
+            Bound::Unbounded => Bound::<Bytes>::Unbounded,
+        };
         let pending_start = start_key.as_ref().map(|key| key.as_ref());
         let pending = self.worker.pending_range(prefix.as_ref(), pending_start)?;
         let pending = self.decode_pending_range(pending)?;
@@ -402,24 +400,26 @@ where
         K: Ord,
     {
         self.try_iter_range(start)?
-            .take(ENTITY_CACHE_MAINTENANCE_BATCH_COUNT)
+            .take(ENTITY_CACHE_MAINTENANCE_BATCH_SIZE)
             .collect()
     }
 
-    pub fn try_insert(
-        &self,
-        key: K,
-        entity: impl Into<Arc<E>>,
-    ) -> Result<CachedRef<'_, E>, EntityStorageError> {
+    pub fn try_insert(&self, key: K, entity: impl Into<Arc<E>>) -> Result<(), EntityStorageError> {
         let entity = entity.into();
-        let weight = self.stage(&key, entity.as_ref())?;
+        let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(entity.as_ref())
+            .map_err(EntityStorageError::encode)?;
+        let weight = ByteWeighter::entry_weight(encoded.len());
+        let key_bytes = E::ID.key_for(&key);
+        self.worker
+            .enqueue(key_bytes.into(), Some(Bytes::from_owner(encoded)))?;
 
-        Ok(self.admit(key, entity, weight))
+        self.cache(key, entity, weight);
+        Ok(())
     }
 
-    pub fn insert(&self, key: K, entity: impl Into<Arc<E>>) -> CachedRef<'_, E> {
+    pub fn insert(&self, key: K, entity: impl Into<Arc<E>>) {
         self.try_insert(key, entity)
-            .unwrap_or_else(|error| error.into_fatal())
+            .unwrap_or_else(|error| error.into_fatal());
     }
 
     pub fn try_remove(&self, key: &K) -> Result<(), EntityStorageError> {
@@ -450,7 +450,7 @@ where
         self.worker.flush()
     }
 
-    fn admit(&self, key: K, entity: Arc<E>, weight: u32) -> CachedRef<'_, E> {
+    fn cache(&self, key: K, entity: Arc<E>, weight: u32) -> CachedRef<'_, E> {
         self.entities.insert(
             key,
             Cached {
@@ -462,11 +462,10 @@ where
         CachedRef::from_arc(entity)
     }
 
-    fn range_start_key(start: Bound<&K>) -> Bound<Bytes> {
-        match start {
-            Bound::Included(key) => Bound::Included(E::ID.key_for(key).into()),
-            Bound::Excluded(key) => Bound::Excluded(E::ID.key_for(key).into()),
-            Bound::Unbounded => Bound::Unbounded,
+    fn cached_ref<'a>(&self, key: &K, value: E) -> CachedRef<'a, E> {
+        match self.entities.get(key) {
+            Some(cached) => CachedRef::from_arc(cached.value),
+            None => CachedRef::new(value),
         }
     }
 
@@ -482,7 +481,7 @@ where
                 let value = match action {
                     WriteBackAction::Insert(bytes) => {
                         let entity = decode_entity(&bytes)?;
-                        Some(Self::reference_for(&self.entities, &key, entity))
+                        Some(self.cached_ref(&key, entity))
                     }
                     WriteBackAction::Remove => None,
                 };
@@ -491,44 +490,8 @@ where
             .collect()
     }
 
-    fn take_backing<'a>(
-        entities: &EntityLru<K, E>,
-        buffered: &mut Option<Result<(K, E), EntityStorageError>>,
-    ) -> Option<Result<(K, CachedRef<'a, E>), EntityStorageError>> {
-        buffered.take().map(|result| {
-            result.map(|(key, value)| {
-                let value = Self::reference_for(entities, &key, value);
-                (key, value)
-            })
-        })
-    }
-
-    fn reference_for<'a>(entities: &EntityLru<K, E>, key: &K, value: E) -> CachedRef<'a, E> {
-        match entities.get(key) {
-            Some(cached) => CachedRef::from_arc(cached.value),
-            None => CachedRef::new(value),
-        }
-    }
-
-    fn stage(&self, key: &K, entity: &E) -> Result<u32, EntityStorageError> {
-        let encoded =
-            rkyv::to_bytes::<rkyv::rancor::Error>(entity).map_err(EntityStorageError::encode)?;
-        let weight = ByteWeighter::entry_weight(encoded.len());
-
-        let key_bytes = E::ID.key_for(key);
-        self.worker
-            .enqueue(key_bytes.into(), Some(Bytes::from_owner(encoded)))?;
-
-        Ok(weight)
-    }
-
-    pub(crate) fn publish_insert(
-        &self,
-        key: K,
-        entity: impl Into<Arc<E>>,
-        encoded_size: usize,
-    ) -> CachedRef<'_, E> {
-        self.admit(key, entity.into(), ByteWeighter::entry_weight(encoded_size))
+    pub(crate) fn publish_insert(&self, key: K, entity: impl Into<Arc<E>>, encoded_size: usize) {
+        self.cache(key, entity.into(), ByteWeighter::entry_weight(encoded_size));
     }
 
     pub(crate) fn publish_remove(&self, key: &K) {

@@ -18,8 +18,6 @@ use crate::storage::{PERSISTENT, StoragePersistence, TRANSIENT};
 use crate::types::any::Out;
 use crate::types::{AttributeMap, BytesOrSlice};
 
-pub(crate) mod cursor;
-
 pub(crate) mod dummy;
 pub use dummy::DummyEntityStorage;
 
@@ -893,7 +891,7 @@ impl EntityStorage {
         Ok(EntityWriteTransaction::new(writer))
     }
 
-    pub(crate) fn apply_batch(&self, writes: &[EntityWrite]) -> Result<(), EntityStorageError> {
+    pub(crate) fn write_batch(&self, writes: &[EntityWrite]) -> Result<(), EntityStorageError> {
         if writes.is_empty() {
             return Ok(());
         }
@@ -1036,7 +1034,7 @@ mod test {
         )];
 
         let error = storage
-            .apply_batch(&writes)
+            .write_batch(&writes)
             .expect_err("storage without transactions must reject the batch");
 
         assert!(matches!(error, EntityStorageError::Unsupported(_)));
@@ -1058,7 +1056,7 @@ mod test {
         ];
 
         assert!(matches!(
-            storage.apply_batch(&writes),
+            storage.write_batch(&writes),
             Err(EntityStorageError::InvalidKeyFormat)
         ));
         assert!(storage.get::<_, TestEntity>(&address)?.is_none());
@@ -1079,7 +1077,7 @@ mod test {
         ];
 
         assert!(matches!(
-            storage.apply_batch(&writes),
+            storage.write_batch(&writes),
             Err(EntityStorageError::InvalidKeyFormat)
         ));
         assert!(!storage.contains::<_, Switch>(&id)?);

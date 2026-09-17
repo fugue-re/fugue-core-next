@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
+use crate::ir::persistent::cursor_bound;
 use crate::ir::switch::{Switch, SwitchId};
 use crate::ir::{Address, FunctionId, IdSet};
-use crate::storage::entities::cursor::cursor_bound;
 use crate::storage::entities::schema::ENTITY_SWITCH_TABLE_ID;
 use crate::storage::entities::{
     Entity, EntityId, EntityRef, EntityWrite, EntityWriteBatch, ProjectEntity, WriteBackWorker,

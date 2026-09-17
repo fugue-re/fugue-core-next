@@ -514,7 +514,7 @@ mod test {
             EntityWrite::remove(TestEntity::ID.key_for(&second)),
         ];
 
-        storage.apply_batch(&writes)?;
+        storage.write_batch(&writes)?;
         assert_eq!(storage.get(&first)?, Some(TestEntity::new(3)));
         assert_eq!(storage.get::<_, TestEntity>(&second)?, None);
         Ok(())
@@ -583,7 +583,7 @@ mod test {
         ];
 
         assert!(matches!(
-            storage.apply_batch(&writes),
+            storage.write_batch(&writes),
             Err(EntityStorageError::InvalidKeyFormat)
         ));
         assert_eq!(storage.get::<_, TestEntity>(&address)?, None);

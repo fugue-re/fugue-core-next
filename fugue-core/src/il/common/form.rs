@@ -124,7 +124,7 @@ pub struct IlFormId(SmolStr);
 impl IlFormId {
     pub const fn from_static(identifier: &'static str) -> Self {
         if DialectId::check(identifier).is_err() {
-            panic!("form identifier is not a dot-separated lower-case ASCII name");
+            panic!("form identifier is not a dot-separated lower-case name");
         }
         if Self::component_count(identifier) < 2 {
             panic!("form identifier must have at least a dialect and a form component");

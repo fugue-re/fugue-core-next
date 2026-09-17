@@ -17,6 +17,14 @@ const TABLE_INDEX_SCHEMA: u32 = 1;
 const FREE_ID_PREFETCH_BATCH_SIZE: usize = 256;
 const INDEX_REBUILD_BATCH_SIZE: usize = 512;
 
+pub(crate) fn cursor_bound<T>(after: Option<T>) -> Bound<T> {
+    after.map_or(Bound::Unbounded, Bound::Excluded)
+}
+
+pub(crate) fn cursor_bound_or_minimum<T>(after: Option<T>, minimum: T) -> Bound<T> {
+    after.map_or(Bound::Included(minimum), Bound::Excluded)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub(crate) enum PersistentTable {
@@ -92,7 +100,7 @@ impl<'a, T> PersistentIndexRebuilder<'a, T> {
         self.live += 1;
         self.next_index = self.next_index.max(id.index() + 1);
         if self.writes.len() >= INDEX_REBUILD_BATCH_SIZE {
-            self.storage.apply_batch(&self.writes)?;
+            self.storage.write_batch(&self.writes)?;
             self.writes.clear();
         }
         Ok(())
@@ -103,7 +111,7 @@ impl<'a, T> PersistentIndexRebuilder<'a, T> {
         append_writes: impl FnOnce(&mut EntityWriteBatch) -> Result<(), EntityStorageError>,
     ) -> Result<PersistentIdAllocator<T>, EntityStorageError> {
         append_writes(&mut self.writes)?;
-        self.storage.apply_batch(&self.writes)?;
+        self.storage.write_batch(&self.writes)?;
         PersistentIdAllocator::initialise(
             self.storage.clone(),
             self.table,

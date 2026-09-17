@@ -767,7 +767,7 @@ mod test {
         let mut staging = crate::il::storage::IlStaging::default();
         staging.replace(&project.storage, ir)?;
         let writes = staging.prepare()?;
-        project.storage.entities().apply_batch(&writes)?;
+        project.storage.entities().write_batch(&writes)?;
 
         assert!(matches!(
             project.pcode(function),

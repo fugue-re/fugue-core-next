@@ -1,20 +1,6 @@
 use super::span::{IlParentSpan, IlSourceSpan};
 use crate::il::common::IlError;
 
-fn merge_parent_spans(mut spans: Vec<IlParentSpan>) -> Result<Vec<IlParentSpan>, IlError> {
-    spans.sort_unstable_by_key(|span| span.destination().start());
-    let mut merged = Vec::<IlParentSpan>::with_capacity(spans.len());
-    for span in spans {
-        if let Some(previous) = merged.last_mut()
-            && previous.try_merge(span)?
-        {
-            continue;
-        }
-        merged.push(span);
-    }
-    Ok(merged)
-}
-
 #[derive(
     Debug, Copy, Clone, Default, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
 )]
@@ -322,6 +308,20 @@ impl IlIndexRangeMap {
         spans.sort_unstable_by_key(|span| span.destination().start());
         Ok(spans)
     }
+}
+
+fn merge_parent_spans(mut spans: Vec<IlParentSpan>) -> Result<Vec<IlParentSpan>, IlError> {
+    spans.sort_unstable_by_key(|span| span.destination().start());
+    let mut merged = Vec::<IlParentSpan>::with_capacity(spans.len());
+    for span in spans {
+        if let Some(previous) = merged.last_mut()
+            && previous.try_merge(span)?
+        {
+            continue;
+        }
+        merged.push(span);
+    }
+    Ok(merged)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

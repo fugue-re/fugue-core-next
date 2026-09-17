@@ -9,35 +9,8 @@ use crate::il::common::{
 };
 use crate::il::ecode::{ECodeDomain, ECodeIr, ECodeOp, ECodeOpcode};
 use crate::il::mcode::MCodeStorageLocation;
-use crate::ir::FunctionId;
+use crate::il::mcode::transform::facts::{MCodeCallFacts, MCodeFunctionFacts, MCodeStorageFact};
 use crate::lifter::Varnode;
-
-fn normalise_stack_offset(offset: u64, address_bits: u32) -> Result<i64, IlError> {
-    let shift = 64u32
-        .checked_sub(address_bits)
-        .filter(|_| address_bits != 0)
-        .ok_or_else(|| IlError::integer_overflow("stack offset address width"))?;
-    Ok(i64::from_ne_bytes((offset << shift).to_ne_bytes()) >> shift)
-}
-
-fn storage_location(
-    operand: &PrototypeOperand,
-    address_bits: u32,
-    root_of: &impl Fn(&Varnode) -> Result<RegisterId, IlError>,
-) -> Result<MCodeStorageLocation, IlError> {
-    match operand {
-        PrototypeOperand::Register(varnode) => {
-            Ok(MCodeStorageLocation::Register(root_of(varnode)?))
-        }
-        PrototypeOperand::RegisterJoin(high, low) => Ok(MCodeStorageLocation::RegisterPair {
-            high: root_of(high)?,
-            low: root_of(low)?,
-        }),
-        PrototypeOperand::StackRelative(offset) => Ok(MCodeStorageLocation::Stack {
-            offset: normalise_stack_offset(*offset, address_bits)?,
-        }),
-    }
-}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(crate) struct MCodeCallingConventionEntry {
@@ -100,10 +73,29 @@ impl MCodeCallingConvention {
         address_bits: u32,
         root_of: impl Fn(&Varnode) -> Result<RegisterId, IlError>,
     ) -> Result<Self, IlError> {
-        let build = |entry: &PrototypeEntry| {
-            storage_location(entry.operand(), address_bits, &root_of).map(|location| {
-                MCodeCallingConventionEntry::new(location, entry.min_size(), entry.max_size())
-            })
+        let build = |entry: &PrototypeEntry| -> Result<MCodeCallingConventionEntry, IlError> {
+            let location = match entry.operand() {
+                PrototypeOperand::Register(varnode) => {
+                    Ok(MCodeStorageLocation::Register(root_of(varnode)?))
+                }
+                PrototypeOperand::RegisterJoin(high, low) => {
+                    Ok(MCodeStorageLocation::RegisterPair {
+                        high: root_of(high)?,
+                        low: root_of(low)?,
+                    })
+                }
+                PrototypeOperand::StackRelative(offset) => {
+                    let shift = u64::BITS - address_bits;
+                    Ok(MCodeStorageLocation::Stack {
+                        offset: (*offset << shift).cast_signed() >> shift,
+                    })
+                }
+            }?;
+            Ok(MCodeCallingConventionEntry::new(
+                location,
+                entry.min_size(),
+                entry.max_size(),
+            ))
         };
         let inputs = prototype
             .inputs()
@@ -127,264 +119,6 @@ impl MCodeCallingConvention {
 
     pub(crate) fn outputs(&self) -> &[MCodeCallingConventionEntry] {
         &self.outputs
-    }
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct MCodeStorageFact {
-    location: MCodeStorageLocation,
-    width: u32,
-}
-
-impl MCodeStorageFact {
-    pub const fn new(location: MCodeStorageLocation, width: u32) -> Self {
-        Self { location, width }
-    }
-
-    pub const fn location(&self) -> MCodeStorageLocation {
-        self.location
-    }
-
-    pub const fn width(&self) -> u32 {
-        self.width
-    }
-
-    fn validate(&self, registers: &RegisterBank) -> Result<(), IlError> {
-        if self.width == 0 {
-            return Err(IlError::width_mismatch(ECodeIr::FORM));
-        }
-
-        match self.location {
-            MCodeStorageLocation::Register(_) | MCodeStorageLocation::RegisterPair { .. } => {
-                let width = self.location.register_width(registers).ok_or_else(|| {
-                    IlError::missing_component(ECodeIr::FORM, "storage fact register root")
-                })?;
-                if self.width != width {
-                    return Err(IlError::width_mismatch(ECodeIr::FORM));
-                }
-            }
-            MCodeStorageLocation::Stack { offset } => {
-                offset
-                    .checked_add(i64::from(self.width.div_ceil(8)))
-                    .ok_or_else(|| IlError::integer_overflow("stack storage range"))?;
-            }
-        }
-
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MCodeCallFacts {
-    site: IlOpId,
-    inputs: Option<Vec<MCodeStorageFact>>,
-    outputs: Option<Vec<MCodeStorageFact>>,
-}
-
-impl MCodeCallFacts {
-    pub fn new(site: IlOpId) -> Self {
-        Self {
-            site,
-            inputs: None,
-            outputs: None,
-        }
-    }
-
-    pub const fn site(&self) -> IlOpId {
-        self.site
-    }
-
-    pub fn inputs(&self) -> Option<&[MCodeStorageFact]> {
-        self.inputs.as_deref()
-    }
-
-    pub fn outputs(&self) -> Option<&[MCodeStorageFact]> {
-        self.outputs.as_deref()
-    }
-
-    fn stack_storage(&self) -> impl Iterator<Item = MCodeStorageFact> + '_ {
-        self.inputs
-            .iter()
-            .chain(&self.outputs)
-            .flat_map(|facts| facts.iter().copied())
-            .filter(|fact| matches!(fact.location(), MCodeStorageLocation::Stack { .. }))
-    }
-
-    pub fn set_inputs(&mut self, inputs: impl IntoIterator<Item = MCodeStorageFact>) {
-        self.inputs = Some(inputs.into_iter().collect());
-    }
-
-    pub fn set_outputs(&mut self, outputs: impl IntoIterator<Item = MCodeStorageFact>) {
-        self.outputs = Some(outputs.into_iter().collect());
-    }
-
-    pub fn insert_input(&mut self, input: MCodeStorageFact) {
-        self.inputs.get_or_insert_with(Vec::new).push(input);
-    }
-
-    pub fn insert_output(&mut self, output: MCodeStorageFact) {
-        self.outputs.get_or_insert_with(Vec::new).push(output);
-    }
-
-    fn validate(&self, ir: &ECodeIr, registers: &RegisterBank) -> Result<(), IlError> {
-        let operation = ir
-            .ops()
-            .get(self.site.index())
-            .ok_or_else(|| IlError::range_out_of_bounds(self.site.index() + 1, ir.ops().len()))?;
-        let is_tail_call = matches!(
-            operation.opcode(),
-            ECodeOpcode::Branch | ECodeOpcode::BranchIndirect
-        ) && ir
-            .block_for_op(self.site)
-            .and_then(|block| ir.graph().blocks().get(block.index()))
-            .is_some_and(|block| {
-                block.is_exit()
-                    && block.successors().is_empty()
-                    && block.ops().end() == self.site.index() + 1
-            });
-        if !is_tail_call
-            && !matches!(
-                operation.opcode(),
-                ECodeOpcode::Call | ECodeOpcode::CallIndirect
-            )
-        {
-            return Err(IlError::invalid_fact_site(self.site.value()));
-        }
-
-        for fact in self
-            .inputs
-            .iter()
-            .chain(&self.outputs)
-            .flat_map(|facts| facts.iter())
-        {
-            fact.validate(registers)?;
-        }
-
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct MCodeFunctionFacts {
-    function: FunctionId,
-    return_live_outputs: Option<Vec<MCodeStorageFact>>,
-    tail_call_live_outputs: Option<Vec<MCodeStorageFact>>,
-    calls: FxHashMap<IlOpId, MCodeCallFacts>,
-}
-
-impl MCodeFunctionFacts {
-    pub fn new(function: FunctionId) -> Self {
-        Self {
-            function,
-            return_live_outputs: None,
-            tail_call_live_outputs: None,
-            calls: FxHashMap::default(),
-        }
-    }
-
-    pub const fn function(&self) -> FunctionId {
-        self.function
-    }
-
-    pub fn return_live_outputs(&self) -> Option<&[MCodeStorageFact]> {
-        self.return_live_outputs.as_deref()
-    }
-
-    pub fn tail_call_live_outputs(&self) -> Option<&[MCodeStorageFact]> {
-        self.tail_call_live_outputs.as_deref()
-    }
-
-    pub(crate) fn stack_storage(&self) -> impl Iterator<Item = MCodeStorageFact> + '_ {
-        self.calls
-            .values()
-            .flat_map(MCodeCallFacts::stack_storage)
-            .chain(
-                self.return_live_outputs
-                    .iter()
-                    .chain(&self.tail_call_live_outputs)
-                    .flat_map(|facts| facts.iter().copied())
-                    .filter(|fact| matches!(fact.location(), MCodeStorageLocation::Stack { .. })),
-            )
-    }
-
-    pub fn set_return_live_outputs(&mut self, outputs: impl IntoIterator<Item = MCodeStorageFact>) {
-        let mut outputs = outputs.into_iter().collect::<Vec<_>>();
-        outputs.sort_unstable();
-        outputs.dedup();
-        self.return_live_outputs = Some(outputs);
-    }
-
-    pub fn set_tail_call_live_outputs(
-        &mut self,
-        outputs: impl IntoIterator<Item = MCodeStorageFact>,
-    ) {
-        let mut outputs = outputs.into_iter().collect::<Vec<_>>();
-        outputs.sort_unstable();
-        outputs.dedup();
-        self.tail_call_live_outputs = Some(outputs);
-    }
-
-    pub fn call(&self, site: IlOpId) -> Option<&MCodeCallFacts> {
-        self.calls.get(&site)
-    }
-
-    pub fn insert_return_live_output(&mut self, output: MCodeStorageFact) {
-        let outputs = self.return_live_outputs.get_or_insert_with(Vec::new);
-        if let Err(index) = outputs.binary_search(&output) {
-            outputs.insert(index, output);
-        }
-    }
-
-    pub fn insert_tail_call_live_output(&mut self, output: MCodeStorageFact) {
-        let outputs = self.tail_call_live_outputs.get_or_insert_with(Vec::new);
-        if let Err(index) = outputs.binary_search(&output) {
-            outputs.insert(index, output);
-        }
-    }
-
-    pub fn insert_call(&mut self, call: MCodeCallFacts) -> Option<MCodeCallFacts> {
-        self.calls.insert(call.site(), call)
-    }
-
-    pub(crate) fn validate(&self, ir: &ECodeIr, registers: &RegisterBank) -> Result<(), IlError> {
-        if self.function != ir.metadata().function() {
-            return Err(IlError::function_mismatch(
-                ir.metadata().function(),
-                self.function,
-            ));
-        }
-        for outputs in [&self.return_live_outputs, &self.tail_call_live_outputs]
-            .into_iter()
-            .flatten()
-        {
-            if outputs.windows(2).any(|pair| {
-                pair[0].location() == pair[1].location() && pair[0].width() != pair[1].width()
-            }) {
-                return Err(IlError::width_mismatch(ECodeIr::FORM));
-            }
-            for output in outputs {
-                output.validate(registers)?;
-            }
-        }
-        for call in self.calls.values() {
-            call.validate(ir, registers)?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn validate_stack(&self, stack: &MCodeStackModel) -> Result<(), IlError> {
-        if self.stack_storage().any(|fact| {
-            let MCodeStorageLocation::Stack { offset } = fact.location() else {
-                return false;
-            };
-            stack.storage_access(offset, fact.width()).is_none()
-        }) {
-            return Err(IlError::missing_component(
-                ECodeIr::FORM,
-                "stack storage fact",
-            ));
-        }
-        Ok(())
     }
 }
 
@@ -1017,11 +751,24 @@ mod test {
     }
 
     #[test]
-    fn stack_offsets_are_normalised_to_the_target_address_width() {
-        assert_eq!(normalise_stack_offset(0x10, 32), Ok(16));
-        assert_eq!(normalise_stack_offset(0xffff_fff0, 32), Ok(-16));
-        assert_eq!(normalise_stack_offset(0x10, 64), Ok(16));
-        assert_eq!(normalise_stack_offset(0xffff_ffff_ffff_fff0, 64), Ok(-16));
+    fn stack_offsets_are_sign_extended_from_the_target_address_width() {
+        const ENTRIES: &[PrototypeEntry] = &[PrototypeEntry::new(
+            1,
+            8,
+            1,
+            PrototypeOperand::StackRelative(0xffff_fff0),
+        )];
+        let convention = MCodeCallingConvention::from_prototype(
+            &Prototype::new("test", 0, 0).with_inputs(ENTRIES),
+            32,
+            |_| unreachable!(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            convention.inputs()[0].location(),
+            MCodeStorageLocation::Stack { offset: -16 }
+        );
     }
 
     #[test]
@@ -1042,8 +789,8 @@ mod test {
         facts.insert_call(call);
 
         let model = recover_with_facts(&ir, &MCodeCallingConvention::default(), &facts);
-        let call = model.call(site).expect("a recovered call");
-        let output = call.outputs().first().expect("a recovered stack output");
+        let call = model.call(site).expect("a analysed call");
+        let output = call.outputs().first().expect("a analysed stack output");
         let component = output.components().first().expect("one stack component");
 
         assert_eq!(
@@ -1092,7 +839,7 @@ mod test {
         facts.insert_call(call);
 
         let model = recover_with_facts(&ir, &MCodeCallingConvention::default(), &facts);
-        let call = model.call(site).expect("a recovered call");
+        let call = model.call(site).expect("a analysed call");
 
         assert_eq!(
             call.args(),
@@ -1128,7 +875,7 @@ mod test {
         let convention = MCodeCallingConvention::new(vec![register(RDI)], vec![register(RAX)]);
 
         let model = recover_with_facts(&ir, &convention, &facts);
-        let call = model.call(site).expect("a recovered call");
+        let call = model.call(site).expect("a analysed call");
 
         assert!(call.args().is_empty());
         assert!(call.outputs().is_empty());
@@ -1566,7 +1313,7 @@ mod test {
             vec![register(RAX)],
         );
         let model = recover(&ir, &convention);
-        let call = model.call(site).expect("a recovered call");
+        let call = model.call(site).expect("a analysed call");
 
         assert_eq!(
             call.args(),
@@ -1587,7 +1334,7 @@ mod test {
 
         let convention = MCodeCallingConvention::new(vec![register(RDI)], Vec::new());
         let model = recover(&ir, &convention);
-        let call = model.call(site).expect("a recovered call");
+        let call = model.call(site).expect("a analysed call");
 
         assert_eq!(call.args(), &[MCodeCallArg::Value(rdi)]);
     }
@@ -1708,7 +1455,7 @@ mod test {
         let model = recover(&ir, &convention);
 
         assert_eq!(
-            model.call(site).expect("a recovered call").args(),
+            model.call(site).expect("a analysed call").args(),
             &[MCodeCallArg::Value(arg)]
         );
     }
@@ -1723,7 +1470,7 @@ mod test {
         let convention =
             MCodeCallingConvention::new(vec![register(RDI), register(RSI)], Vec::new());
         let model = recover(&ir, &convention);
-        let call = model.call(site).expect("a recovered call");
+        let call = model.call(site).expect("a analysed call");
 
         assert_eq!(call.args(), &[MCodeCallArg::Value(rdi)]);
     }
@@ -1748,7 +1495,7 @@ mod test {
         let result = MCodeAbiModel::new(&ir, &convention, &[], &[], None, &registers, &stack);
 
         assert_eq!(
-            result.expect_err("an incompatible convention input must fail recovery"),
+            result.expect_err("an incompatible convention input must fail analysis"),
             IlError::width_mismatch(ECodeIr::FORM)
         );
     }
@@ -1768,14 +1515,14 @@ mod test {
         assert_eq!(
             model
                 .call(forwarding_call)
-                .expect("a recovered forwarding call")
+                .expect("a analysed forwarding call")
                 .args(),
             &[MCodeCallArg::Value(forwarded)]
         );
         assert!(
             model
                 .call(clobbered_call)
-                .expect("a recovered clobbered call")
+                .expect("a analysed clobbered call")
                 .args()
                 .is_empty()
         );
@@ -1872,7 +1619,7 @@ mod test {
             Vec::new(),
         );
         let model = recover(&ir, &convention);
-        let call = model.call(site).expect("a recovered call");
+        let call = model.call(site).expect("a analysed call");
 
         assert_eq!(call.args(), &[MCodeCallArg::Pair { high, low }]);
     }

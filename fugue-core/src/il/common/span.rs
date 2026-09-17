@@ -24,7 +24,6 @@ fn find_destination_span<T: Copy>(
         .map(|index| spans[index])
 }
 
-/// Maps a destination range of IL nodes back to its source range.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(derive(Debug, PartialEq, Eq))]
 pub struct IlSourceSpan {

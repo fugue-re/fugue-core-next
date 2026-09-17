@@ -427,7 +427,7 @@ impl IlGraphBuilder {
             return Err(IlError::inconsistent_block_sources());
         }
 
-        self.push_block_record(operations, properties)
+        self.try_push_block(operations, properties)
     }
 
     pub fn push_block_with_source(
@@ -443,7 +443,8 @@ impl IlGraphBuilder {
             self.block_sources = Some(Vec::new());
         }
 
-        let block = self.push_block_record(operations, properties)?;
+        let block = self.try_push_block(operations, properties)?;
+
         self.block_sources
             .as_mut()
             .expect("source mode was selected above")
@@ -510,7 +511,7 @@ impl IlGraphBuilder {
         })
     }
 
-    fn push_block_record(
+    fn try_push_block(
         &mut self,
         operations: IlIndexRange,
         properties: IlBlockProperties,

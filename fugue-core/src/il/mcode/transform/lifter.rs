@@ -12,8 +12,8 @@ use crate::il::common::{
     IlIndexRangeMap, IlOpId, IlValueId, RegisterId,
 };
 use crate::il::ecode::{ECodeDomain, ECodeIr, ECodeOp, ECodeOpcode};
-use crate::il::mcode::recovery::{
-    MCodeCallArg, MCodeCallOutputComponent, MCodeExitRequirement, MCodeRecovery,
+use crate::il::mcode::transform::{
+    ECodeToMCodeAnalysis, MCodeCallArg, MCodeCallOutputComponent, MCodeExitRequirement,
 };
 use crate::il::mcode::{
     MCodeBuilder, MCodeIr, MCodeOpSpec, MCodeOpcode, MCodeStorageLocation, MCodeVar, MCodeVarId,
@@ -300,7 +300,7 @@ impl ECodeToMCodeRenameState {
 
 pub(crate) struct ECodeToMCodeLifter<'a, 'b> {
     source: &'a ECodeIr,
-    recovery: &'a MCodeRecovery,
+    analysis: &'a ECodeToMCodeAnalysis,
     builder: MCodeBuilder,
     scratch: &'b mut ECodeToMCodeScratch,
     target_values: Vec<Option<IlValueId>>,
@@ -318,23 +318,23 @@ pub(crate) struct ECodeToMCodeLifter<'a, 'b> {
 impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
     pub(crate) fn new(
         ir: &'a ECodeIr,
-        recovery: &'a MCodeRecovery,
+        analysis: &'a ECodeToMCodeAnalysis,
         mut builder: MCodeBuilder,
         scratch: &'b mut ECodeToMCodeScratch,
     ) -> Result<Self, IlError> {
-        let call_outputs = MCodeCallOutputVariables::new(ir, recovery)?;
-        let mut target_variables = Vec::with_capacity(recovery.variables().variables().len());
-        for index in 0..recovery.variables().variables().len() {
-            let recovered = MCodeVarId::try_from_index(index)?;
-            let representative = call_outputs.representative_for(recovered);
-            let variable = recovery.variables().variables()[representative.index()];
+        let call_outputs = MCodeCallOutputVariables::new(ir, analysis)?;
+        let mut target_variables = Vec::with_capacity(analysis.variables().variables().len());
+        for index in 0..analysis.variables().variables().len() {
+            let analysed = MCodeVarId::try_from_index(index)?;
+            let representative = call_outputs.representative_for(analysed);
+            let variable = analysis.variables().variables()[representative.index()];
             target_variables.push(builder.emitter().intern_variable(variable)?);
         }
-        let variable_widths = MCodeVariableWidths::new(ir, recovery, &target_variables)?;
+        let variable_widths = MCodeVariableWidths::new(ir, analysis, &target_variables)?;
 
         Ok(Self {
             source: ir,
-            recovery,
+            analysis,
             builder,
             scratch,
             target_values: vec![None; ir.values().len()],
@@ -378,7 +378,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
     }
 
     fn target_variable_for_value(&self, value: IlValueId) -> Result<MCodeVarId, IlError> {
-        self.recovery
+        self.analysis
             .variables()
             .variable_for_value(value)
             .map(|variable| self.target_variable(variable))
@@ -390,7 +390,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             self.builder.emitter().intern_memory_domain(domain.space());
         }
         self.builder.set_aliased_variables(
-            self.recovery
+            self.analysis
                 .aliases()
                 .iter()
                 .map(|variable| self.target_variable(variable))
@@ -635,18 +635,18 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         let site = IlOpId::try_from_index(index)?;
         let operation = self.source.ops()[index];
 
-        for &requirement in self.recovery.abi().exit_requirements(site) {
+        for &requirement in self.analysis.abi().exit_requirements(site) {
             let value = match requirement {
                 MCodeExitRequirement::Register(source) => self.target_value(source)?,
                 MCodeExitRequirement::Stack(access) => {
-                    let recovered = self
-                        .recovery
+                    let analysed = self
+                        .analysis
                         .variables()
                         .stack_variable(access.object())
                         .ok_or_else(|| {
                             IlError::missing_component(MCodeIr::FORM, "stack variable")
                         })?;
-                    let variable = self.target_variable(recovered);
+                    let variable = self.target_variable(analysed);
                     match current.stack_value(variable) {
                         Some(value) => value,
                         None => {
@@ -667,17 +667,17 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             }
             ECodeOpcode::Branch | ECodeOpcode::BranchIndirect
                 if self
-                    .recovery
+                    .analysis
                     .abi()
                     .call(site)
                     .is_some_and(|call| call.is_tail_call()) =>
             {
                 self.lift_tail_call(site, operation, current)?;
             }
-            ECodeOpcode::Load if self.recovery.stack().access_for(site).is_some() => {
+            ECodeOpcode::Load if self.analysis.stack().access_for(site).is_some() => {
                 self.lift_stack_load(site, operation, current)?;
             }
-            ECodeOpcode::Store if self.recovery.stack().access_for(site).is_some() => {
+            ECodeOpcode::Store if self.analysis.stack().access_for(site).is_some() => {
                 self.lift_stack_store(site, operation, current)?;
             }
             ECodeOpcode::Return => {
@@ -851,22 +851,22 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         current: &mut ECodeToMCodeRenameState,
     ) -> Result<(), IlError> {
         let access = self
-            .recovery
+            .analysis
             .stack()
             .access_for(site)
             .expect("fixed stack access was checked before translation");
-        let recovered = self
-            .recovery
+        let analysed = self
+            .analysis
             .variables()
             .stack_variable(access.object())
             .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "stack variable"))?;
-        let variable = self.target_variable(recovered);
+        let variable = self.target_variable(analysed);
         let result = operation
             .single_result()
             .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "single operation result"))?;
         let full_width = self.variable_widths.width(variable)?;
 
-        if self.recovery.aliases().contains(recovered) {
+        if self.analysis.aliases().contains(analysed) {
             if !current.contains_stack(variable) {
                 let value = self.push_variable_undefined(variable, full_width)?;
                 current.insert_stack(variable, value);
@@ -924,16 +924,16 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         current: &mut ECodeToMCodeRenameState,
     ) -> Result<(), IlError> {
         let access = self
-            .recovery
+            .analysis
             .stack()
             .access_for(site)
             .expect("fixed stack access was checked before translation");
-        let recovered = self
-            .recovery
+        let analysed = self
+            .analysis
             .variables()
             .stack_variable(access.object())
             .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "stack variable"))?;
-        let variable = self.target_variable(recovered);
+        let variable = self.target_variable(analysed);
         let full_width = self.variable_widths.width(variable)?;
         let source_operands = self.source.op_operands_for(&operation);
         let source_value = source_operands
@@ -954,7 +954,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "address space"))?;
         let field = access.field_offset() != 0 || width != full_width;
 
-        if self.recovery.aliases().contains(recovered) {
+        if self.analysis.aliases().contains(analysed) {
             let opcode = if field {
                 MCodeOpcode::SetVarAliasedField
             } else {
@@ -1050,18 +1050,18 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         else {
             unreachable!();
         };
-        let recovered = self
-            .recovery
+        let analysed = self
+            .analysis
             .variables()
             .stack_variable(access.object())
             .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "stack variable"))?;
-        let variable = self.target_variable(recovered);
+        let variable = self.target_variable(analysed);
         if self.variable_widths.width(variable)? != object_width {
             return Err(IlError::width_mismatch(MCodeIr::FORM));
         }
 
         let field = access.field_offset() != 0 || width != object_width;
-        if self.recovery.aliases().contains(recovered) {
+        if self.analysis.aliases().contains(analysed) {
             let opcode = if field {
                 MCodeOpcode::SetVarAliasedField
             } else {
@@ -1168,18 +1168,18 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             operands.push(self.target_value(destination)?);
         }
         let arg_count = self
-            .recovery
+            .analysis
             .abi()
             .call(site)
             .map_or(0, |call| call.args().len());
         for index in 0..arg_count {
             let arg = self
-                .recovery
+                .analysis
                 .abi()
                 .call(site)
                 .and_then(|call| call.args().get(index))
                 .copied()
-                .expect("the recovered call argument count is stable");
+                .expect("the analysed call argument count is stable");
             operands.push(match arg {
                 MCodeCallArg::Value(value) => self.target_value(value)?,
                 MCodeCallArg::Pair { high, low } => self.push_split(high, low)?,
@@ -1191,7 +1191,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         operands.push(memory);
 
         let widths = iter::once(0).chain(
-            self.recovery
+            self.analysis
                 .abi()
                 .call(site)
                 .into_iter()
@@ -1224,27 +1224,27 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
 
         let mut result_index = results.start() + 1;
         let output_count = self
-            .recovery
+            .analysis
             .abi()
             .call(site)
             .map_or(0, |call| call.outputs().len());
         for output_index in 0..output_count {
             let (location, component_count) = self
-                .recovery
+                .analysis
                 .abi()
                 .call(site)
                 .and_then(|call| call.outputs().get(output_index))
                 .map(|output| (output.location(), output.components().len()))
-                .expect("the recovered call output count is stable");
+                .expect("the analysed call output count is stable");
             for component_index in 0..component_count {
                 let component = self
-                    .recovery
+                    .analysis
                     .abi()
                     .call(site)
                     .and_then(|call| call.outputs().get(output_index))
                     .and_then(|output| output.components().get(component_index))
                     .copied()
-                    .expect("the recovered call output component count is stable");
+                    .expect("the analysed call output component count is stable");
                 let value = IlValueId::try_from_index(result_index)?;
                 self.materialise_call_output_component(
                     site, location, component, value, space, current,
@@ -1293,18 +1293,18 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             operands.push(self.target_value(destination)?);
         }
         let arg_count = self
-            .recovery
+            .analysis
             .abi()
             .call(site)
             .map_or(0, |call| call.args().len());
         for index in 0..arg_count {
             let arg = self
-                .recovery
+                .analysis
                 .abi()
                 .call(site)
                 .and_then(|call| call.args().get(index))
                 .copied()
-                .expect("the recovered tail-call argument count is stable");
+                .expect("the analysed tail-call argument count is stable");
             operands.push(match arg {
                 MCodeCallArg::Value(value) => self.target_value(value)?,
                 MCodeCallArg::Pair { high, low } => self.push_split(high, low)?,
@@ -1365,19 +1365,19 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         current: &mut ECodeToMCodeRenameState,
     ) -> Result<IlValueId, IlError> {
         let access = self
-            .recovery
+            .analysis
             .stack()
             .storage_access(offset, width)
             .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "stack call input"))?;
-        let recovered = self
-            .recovery
+        let analysed = self
+            .analysis
             .variables()
             .stack_variable(access.object())
             .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "stack variable"))?;
-        let variable = self.target_variable(recovered);
+        let variable = self.target_variable(analysed);
         let full_width = self.variable_widths.width(variable)?;
 
-        if self.recovery.aliases().contains(recovered) {
+        if self.analysis.aliases().contains(analysed) {
             if !current.contains_stack(variable) {
                 let value = self.push_variable_undefined(variable, full_width)?;
                 current.insert_stack(variable, value);
@@ -1431,7 +1431,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         }
 
         let next = self
-            .recovery
+            .analysis
             .variables()
             .variables()
             .iter()
@@ -1455,18 +1455,18 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                 IlError::missing_component(MCodeIr::FORM, "single operation result")
             })?;
             if self.source.value_domain(source).is_none()
-                && let Some(access) = self.recovery.stack().address_for(source)
+                && let Some(access) = self.analysis.stack().address_for(source)
             {
-                self.recovery.stack().offset_of(source).ok_or_else(|| {
+                self.analysis.stack().offset_of(source).ok_or_else(|| {
                     IlError::missing_component(MCodeIr::FORM, "stack-derived address")
                 })?;
-                let recovered = self
-                    .recovery
+                let analysed = self
+                    .analysis
                     .variables()
                     .stack_variable(access.object())
                     .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "stack variable"))?;
-                if self.recovery.aliases().contains(recovered) {
-                    let variable = self.target_variable(recovered);
+                if self.analysis.aliases().contains(analysed) {
+                    let variable = self.target_variable(analysed);
                     if !current.contains_stack(variable) {
                         let value = self.push_variable_undefined(
                             variable,
@@ -1636,7 +1636,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
 
         let stack_definitions = MCodeStackDefs::new(
             self.source,
-            self.recovery,
+            self.analysis,
             &self.target_variables,
             &self.operation_blocks,
         )?;

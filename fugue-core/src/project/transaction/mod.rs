@@ -465,7 +465,7 @@ impl ProjectTransaction<'_> {
             if let Some(worker) = self.project.storage.write_back() {
                 worker.flush()?;
             }
-            self.project.storage.entities().apply_batch(&writes)?;
+            self.project.storage.entities().write_batch(&writes)?;
         }
         segment_batch.publish(self.project.storage.segments_mut());
         self.publish_problems(problems);

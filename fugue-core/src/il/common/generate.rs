@@ -1,6 +1,4 @@
-use std::error::Error;
-
-use thiserror::Error as ThisError;
+use thiserror::Error;
 
 use crate::arch::Arch;
 use crate::il::common::{IlArtefact, IlError};
@@ -82,17 +80,20 @@ impl<'a> IlGenerationContext<'a> {
     }
 }
 
-#[derive(Debug, ThisError)]
+#[derive(Debug, Error)]
 pub enum IlGenerationError {
     #[error(transparent)]
     Il(#[from] IlError),
     #[error(transparent)]
-    Producer(Box<dyn Error + Send + Sync>),
+    Producer(anyhow::Error),
 }
 
 impl IlGenerationError {
-    pub fn producer(error: impl Error + Send + Sync + 'static) -> Self {
-        Self::Producer(Box::new(error))
+    pub fn producer<E>(e: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self::Producer(anyhow::Error::new(e))
     }
 }
 

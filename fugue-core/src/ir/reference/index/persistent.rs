@@ -5,10 +5,10 @@ use bytes::Bytes;
 use rustc_hash::FxHashSet;
 
 use super::{InverseReferenceKey, PreparedReferenceIndexRecord, ReferenceEntry};
+use crate::ir::persistent::{cursor_bound, cursor_bound_or_minimum};
 use crate::ir::reference::{Reference, ReferenceKey, ReferenceKind, ReferenceTarget};
 use crate::ir::{Address, IndexMetadata};
 use crate::storage::EntityStorage;
-use crate::storage::entities::cursor::{cursor_bound, cursor_bound_or_minimum};
 use crate::storage::entities::{
     Entity, EntityCache, EntityStorageError, EntityWrite, EntityWriteBatch, ProjectEntity,
     WriteBackWorker,

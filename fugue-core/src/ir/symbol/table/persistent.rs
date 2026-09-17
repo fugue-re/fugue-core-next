@@ -486,7 +486,7 @@ impl SymbolTable {
 
             self.allocator
                 .append_transition(&reservations, &[], batch.len(), 0, &mut writes)?;
-            self.storage.apply_batch(&writes)?;
+            self.storage.write_batch(&writes)?;
             for insertion in batch {
                 self.entries
                     .publish_insert(insertion.id, insertion.entry, insertion.encoded_size);
@@ -560,7 +560,7 @@ impl SymbolTable {
         self.allocator
             .append_transition(&reservations, &[], added, 0, &mut writes)?;
         self.entries.flush()?;
-        self.storage.apply_batch(&writes)?;
+        self.storage.write_batch(&writes)?;
         self.entries.publish_insert(id, entry, encoded_size);
         self.allocator.publish_transition(&reservations, added, 0);
         Ok(())
@@ -671,7 +671,7 @@ impl SymbolTable {
         self.allocator
             .append_transition(&[], &[id], 0, 1, &mut writes)?;
         self.entries.flush()?;
-        self.storage.apply_batch(&writes)?;
+        self.storage.write_batch(&writes)?;
         self.entries.publish_remove(&id);
         self.allocator.publish_transition(&[], 0, 1);
         Ok(true)

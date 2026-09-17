@@ -9,6 +9,9 @@ use rustc_hash::FxHashMap;
 use crate::il::common::IlError;
 use crate::lifter::Language;
 
+static LANGUAGE_RANGES: LazyLock<RwLock<FxHashMap<usize, Arc<[RegisterRange]>>>> =
+    LazyLock::new(|| RwLock::new(FxHashMap::default()));
+
 #[derive(
     Debug,
     Copy,
@@ -71,10 +74,8 @@ pub struct RegisterRange {
 
 impl RegisterRange {
     pub fn new(byte_offset: u64, byte_size: usize) -> Result<Self, IlError> {
-        let byte_size =
-            u64::try_from(byte_size).map_err(|_| IlError::integer_overflow("register range"))?;
         let end = byte_offset
-            .checked_add(byte_size)
+            .checked_add(byte_size as u64)
             .ok_or_else(|| IlError::integer_overflow("register range"))?;
 
         Ok(Self {
@@ -181,59 +182,6 @@ pub struct RegisterBank {
     roots: Arc<[RegisterRange]>,
 }
 
-static LANGUAGE_RANGES: LazyLock<RwLock<FxHashMap<usize, Arc<[RegisterRange]>>>> =
-    LazyLock::new(|| RwLock::new(FxHashMap::default()));
-
-fn normalise_register_ranges(mut roots: Vec<RegisterRange>) -> Arc<[RegisterRange]> {
-    roots.retain(|range| !range.is_empty());
-    roots.sort_unstable_by_key(|range| (range.start, range.end));
-
-    let mut output = 0usize;
-    for input in 0..roots.len() {
-        let range = roots[input];
-        if output != 0 && roots[output - 1].merge(range) {
-            continue;
-        }
-        roots[output] = range;
-        output += 1;
-    }
-    roots.truncate(output);
-    Arc::from(roots)
-}
-
-fn language_register_ranges(language: &'static Language) -> Result<Arc<[RegisterRange]>, IlError> {
-    let key = ptr::from_ref(language).addr();
-    if let Some(ranges) = LANGUAGE_RANGES.read().get(&key) {
-        return Ok(ranges.clone());
-    }
-
-    let ranges = language
-        .registers()
-        .filter(|(_, register)| register.size() != 0)
-        .map(|(_, register)| RegisterRange::new(register.offset(), register.size()))
-        .collect::<Result<Vec<_>, _>>()?;
-    let ranges = normalise_register_ranges(ranges);
-    LANGUAGE_RANGES.write().insert(key, ranges.clone());
-
-    Ok(ranges)
-}
-
-fn preserved_register_roots(slices: impl IntoIterator<Item = RegisterSlice>) -> Vec<RegisterId> {
-    let mut roots = BTreeMap::<RegisterId, PreservedRegisterCoverage>::new();
-    for slice in slices {
-        let start = slice.byte_offset() * 8;
-        let coverage = roots
-            .entry(slice.root())
-            .or_insert_with(|| PreservedRegisterCoverage::new(slice.root_bits()));
-        coverage.insert(start..start + slice.bits());
-    }
-
-    roots
-        .into_iter()
-        .filter_map(|(root, coverage)| coverage.covers_root().then_some(root))
-        .collect()
-}
-
 impl RegisterBank {
     pub fn new(language: &'static Language) -> Result<Self, IlError> {
         Ok(Self {
@@ -328,6 +276,56 @@ impl RegisterBank {
 
         Ok(preserved_register_roots(slices))
     }
+}
+
+fn normalise_register_ranges(mut roots: Vec<RegisterRange>) -> Arc<[RegisterRange]> {
+    roots.retain(|range| !range.is_empty());
+    roots.sort_unstable_by_key(|range| (range.start, range.end));
+
+    let mut output = 0usize;
+    for input in 0..roots.len() {
+        let range = roots[input];
+        if output != 0 && roots[output - 1].merge(range) {
+            continue;
+        }
+        roots[output] = range;
+        output += 1;
+    }
+    roots.truncate(output);
+    Arc::from(roots)
+}
+
+fn language_register_ranges(language: &'static Language) -> Result<Arc<[RegisterRange]>, IlError> {
+    let key = ptr::from_ref(language).addr();
+    if let Some(ranges) = LANGUAGE_RANGES.read().get(&key) {
+        return Ok(ranges.clone());
+    }
+
+    let ranges = language
+        .registers()
+        .filter(|(_, register)| register.size() != 0)
+        .map(|(_, register)| RegisterRange::new(register.offset(), register.size()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let ranges = normalise_register_ranges(ranges);
+    LANGUAGE_RANGES.write().insert(key, ranges.clone());
+
+    Ok(ranges)
+}
+
+fn preserved_register_roots(slices: impl IntoIterator<Item = RegisterSlice>) -> Vec<RegisterId> {
+    let mut roots = BTreeMap::<RegisterId, PreservedRegisterCoverage>::new();
+    for slice in slices {
+        let start = slice.byte_offset() * 8;
+        let coverage = roots
+            .entry(slice.root())
+            .or_insert_with(|| PreservedRegisterCoverage::new(slice.root_bits()));
+        coverage.insert(start..start + slice.bits());
+    }
+
+    roots
+        .into_iter()
+        .filter_map(|(root, coverage)| coverage.covers_root().then_some(root))
+        .collect()
 }
 
 #[cfg(test)]

@@ -1,19 +1,29 @@
-use lifter::ECodeToMCodeLifter;
+use fugue_lifter::runtime::convention::Convention;
 
 use crate::arch::Arch;
 use crate::il::common::{
     IlArtefact, IlError, IlGenerationContext, IlGenerationError, IlGraph, IlMetadata,
-    IlTransformer, IlValueId, RegisterBank,
+    IlTransformer, IlValueId, RegisterBank, RegisterId,
 };
 use crate::il::ecode::ECodeIr;
-use crate::il::mcode::recovery::{
-    MCodeAliasOverride, MCodeAliasOverrides, MCodeRecovery, MCodeRecoveryConfig,
-};
-use crate::il::mcode::{MCodeBuilder, MCodeFunctionFacts, MCodeIr, MCodeOptimiser, MCodeVar};
+use crate::il::mcode::transform::abi::MCodeCallingConvention;
+use crate::il::mcode::transform::lifter::ECodeToMCodeLifter;
+use crate::il::mcode::{MCodeBuilder, MCodeIr, MCodeOptimiser, MCodeStorageLocation, MCodeVar};
+use crate::lifter::Varnode;
 use crate::platform::Platform;
 
+mod abi;
+mod aliases;
+mod analysis;
+mod facts;
 mod lifter;
+mod stack;
 mod variables;
+
+pub(crate) use abi::{MCodeCallArg, MCodeCallOutputComponent, MCodeExitRequirement};
+pub(crate) use aliases::{MCodeAliasOverride, MCodeAliasOverrides};
+pub(crate) use analysis::ECodeToMCodeAnalysis;
+pub use facts::{MCodeCallFacts, MCodeFunctionFacts, MCodeStorageFact};
 
 #[derive(Debug, Default)]
 pub struct ECodeToMCode {
@@ -25,6 +35,107 @@ pub struct ECodeToMCode {
 struct ECodeToMCodeScratch {
     operands: Vec<IlValueId>,
     required_values: Vec<IlValueId>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ECodeToMCodeConfig<'a> {
+    stack_pointer: RegisterId,
+    calling_convention: MCodeCallingConvention,
+    return_live_outputs: Vec<MCodeStorageFact>,
+    tail_call_live_outputs: Vec<MCodeStorageFact>,
+    facts: Option<&'a MCodeFunctionFacts>,
+    alias_overrides: Option<&'a MCodeAliasOverrides>,
+}
+
+impl<'a> ECodeToMCodeConfig<'a> {
+    pub(crate) fn from_convention(
+        registers: &RegisterBank,
+        convention: &Convention,
+        preserved: Vec<RegisterId>,
+    ) -> Result<Self, IlError> {
+        let pointer = convention.stack_pointer();
+        let stack_pointer = registers
+            .root_id(pointer.offset(), pointer.size())
+            .ok_or_else(|| {
+                IlError::missing_component(ECodeIr::FORM, "stack pointer register root")
+            })?;
+        let calling_convention = match convention.default_prototype() {
+            Some(prototype) => MCodeCallingConvention::from_prototype(
+                prototype,
+                registers.language().address_bits(),
+                |varnode: &Varnode| {
+                    registers
+                        .root_id(varnode.offset(), varnode.size())
+                        .ok_or_else(|| {
+                            IlError::missing_component(
+                                ECodeIr::FORM,
+                                "calling-convention register root",
+                            )
+                        })
+                },
+            )?,
+            None => MCodeCallingConvention::default(),
+        };
+        let mut return_live_outputs = Vec::new();
+        let mut tail_call_live_outputs = Vec::new();
+        for register in preserved.into_iter().chain([stack_pointer]) {
+            let width = registers.root_bits(register).ok_or_else(|| {
+                IlError::missing_component(ECodeIr::FORM, "live-output register width")
+            })?;
+            let fact = MCodeStorageFact::new(MCodeStorageLocation::Register(register), width);
+            return_live_outputs.push(fact);
+            tail_call_live_outputs.push(fact);
+        }
+        for output in calling_convention.outputs() {
+            if let Some(fact) = output.resolve_fact(registers)? {
+                return_live_outputs.push(fact);
+            }
+        }
+        return_live_outputs.sort_unstable();
+        return_live_outputs.dedup();
+        tail_call_live_outputs.sort_unstable();
+        tail_call_live_outputs.dedup();
+
+        Ok(Self {
+            stack_pointer,
+            calling_convention,
+            return_live_outputs,
+            tail_call_live_outputs,
+            facts: None,
+            alias_overrides: None,
+        })
+    }
+
+    pub(crate) fn with_alias_overrides<'b>(
+        self,
+        alias_overrides: &'b MCodeAliasOverrides,
+    ) -> ECodeToMCodeConfig<'b>
+    where
+        'a: 'b,
+    {
+        ECodeToMCodeConfig {
+            stack_pointer: self.stack_pointer,
+            calling_convention: self.calling_convention,
+            return_live_outputs: self.return_live_outputs,
+            tail_call_live_outputs: self.tail_call_live_outputs,
+            facts: self.facts,
+            alias_overrides: Some(alias_overrides),
+        }
+    }
+
+    pub(crate) fn with_call_facts<'b>(self, facts: &'b MCodeFunctionFacts) -> ECodeToMCodeConfig<'b>
+    where
+        'a: 'b,
+    {
+        ECodeToMCodeConfig {
+            stack_pointer: self.stack_pointer,
+            calling_convention: self.calling_convention,
+            return_live_outputs: self.return_live_outputs,
+            tail_call_live_outputs: self.tail_call_live_outputs,
+            facts: Some(facts),
+            alias_overrides: self.alias_overrides,
+        }
+    }
 }
 
 impl ECodeToMCode {
@@ -42,19 +153,19 @@ impl ECodeToMCode {
             .or_else(|| language.convention("default"))
             .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "calling convention"))?;
         let preserved = registers.call_preserved_registers(platform.compiler_spec_id())?;
-        let config = MCodeRecoveryConfig::from_convention(&registers, convention, preserved)?;
+        let config = ECodeToMCodeConfig::from_convention(&registers, convention, preserved)?;
         let config = match facts {
             Some(facts) => config.with_call_facts(facts),
             None => config,
         }
         .with_alias_overrides(&self.overrides);
-        let recovery = MCodeRecovery::new(ir, &config, &registers)?;
+        let analysis = ECodeToMCodeAnalysis::new(ir, &config, &registers)?;
 
         self.scratch.required_values.clear();
         let metadata = IlMetadata::new(ir.metadata().function(), ir.metadata().input_revision());
         let builder = MCodeBuilder::new(metadata, IlGraph::default());
         let mut mcode =
-            ECodeToMCodeLifter::new(ir, &recovery, builder, &mut self.scratch)?.lift()?;
+            ECodeToMCodeLifter::new(ir, &analysis, builder, &mut self.scratch)?.lift()?;
         #[cfg(debug_assertions)]
         {
             mcode
@@ -117,7 +228,7 @@ mod test {
         IlIndexRange, IlMetadata, IlOpId, IlSsaDef, IlValueId, RegisterBank, RegisterId,
     };
     use crate::il::ecode::{ECodeBuilder, ECodeDomain, ECodeIr, ECodeOpSpec, ECodeOpcode};
-    use crate::il::mcode::recovery::{MCodeAliasOverride, MCodeAliasOverrides};
+    use crate::il::mcode::transform::{MCodeAliasOverride, MCodeAliasOverrides};
     use crate::il::mcode::{
         MCodeBuilder, MCodeCallFacts, MCodeFunctionFacts, MCodeIr, MCodeOpcode, MCodeOptimiser,
         MCodeStorageFact, MCodeStorageLocation, MCodeVar, MCodeVarKind,
@@ -160,11 +271,11 @@ mod test {
         IlValueId::try_from_index(results.start())
     }
 
-    fn config() -> MCodeRecoveryConfig<'static> {
+    fn config() -> ECodeToMCodeConfig<'static> {
         let language = resolve_language("x86:LE:64").unwrap();
         let registers = RegisterBank::new(language).unwrap();
         let convention = Convention::new("test", Varnode::new(0, RSP, 8));
-        MCodeRecoveryConfig::from_convention(&registers, &convention, Vec::new()).unwrap()
+        ECodeToMCodeConfig::from_convention(&registers, &convention, Vec::new()).unwrap()
     }
 
     fn call_source(function: FunctionId) -> (ECodeIr, IlOpId) {
@@ -226,9 +337,9 @@ mod test {
         let config = config()
             .with_call_facts(&facts)
             .with_alias_overrides(&overrides);
-        let recovery = MCodeRecovery::new(&source, &config, &registers).unwrap();
+        let analysis = ECodeToMCodeAnalysis::new(&source, &config, &registers).unwrap();
 
-        lift_recovered(&source, &recovery)
+        lift_with_analysis(&source, &analysis)
     }
 
     fn lift_stack_return_case(output: MCodeStorageFact, alias: MCodeAliasOverride) -> MCodeIr {
@@ -257,28 +368,28 @@ mod test {
         let config = config()
             .with_call_facts(&facts)
             .with_alias_overrides(&overrides);
-        let recovery = MCodeRecovery::new(&source, &config, &registers).unwrap();
+        let analysis = ECodeToMCodeAnalysis::new(&source, &config, &registers).unwrap();
 
-        lift_recovered(&source, &recovery)
+        lift_with_analysis(&source, &analysis)
     }
 
-    fn transform_with_config(builder: ECodeBuilder, config: &MCodeRecoveryConfig<'_>) -> MCodeIr {
+    fn transform_with_config(builder: ECodeBuilder, config: &ECodeToMCodeConfig<'_>) -> MCodeIr {
         let language = resolve_language("x86:LE:64").unwrap();
         let registers = RegisterBank::new(language).unwrap();
         let source = builder.build().unwrap();
         source.verify().unwrap();
-        let recovery = MCodeRecovery::new(&source, config, &registers).unwrap();
-        lift_recovered(&source, &recovery)
+        let analysis = ECodeToMCodeAnalysis::new(&source, config, &registers).unwrap();
+        lift_with_analysis(&source, &analysis)
     }
 
-    fn lift_recovered(source: &ECodeIr, recovery: &MCodeRecovery) -> MCodeIr {
+    fn lift_with_analysis(source: &ECodeIr, analysis: &ECodeToMCodeAnalysis) -> MCodeIr {
         let metadata = IlMetadata::new(
             source.metadata().function(),
             source.metadata().input_revision(),
         );
         let builder = MCodeBuilder::new(metadata, IlGraph::default());
         let mut scratch = ECodeToMCodeScratch::default();
-        let mut mcode = ECodeToMCodeLifter::new(source, recovery, builder, &mut scratch)
+        let mut mcode = ECodeToMCodeLifter::new(source, analysis, builder, &mut scratch)
             .unwrap()
             .lift()
             .unwrap();
@@ -418,8 +529,8 @@ mod test {
 
         let language = resolve_language("x86:LE:64").unwrap();
         let registers = RegisterBank::new(language).unwrap();
-        let recovery = MCodeRecovery::new(&source, &config(), &registers).unwrap();
-        let mcode = lift_recovered(&source, &recovery);
+        let analysis = ECodeToMCodeAnalysis::new(&source, &config(), &registers).unwrap();
+        let mcode = lift_with_analysis(&source, &analysis);
         let encoded = mcode
             .ops()
             .iter()
@@ -441,7 +552,7 @@ mod test {
         let registers = RegisterBank::new(language).unwrap();
         let convention = language.convention("gcc").unwrap();
         let config =
-            MCodeRecoveryConfig::from_convention(&registers, convention, Vec::new()).unwrap();
+            ECodeToMCodeConfig::from_convention(&registers, convention, Vec::new()).unwrap();
         let metadata = IlMetadata::new(FunctionId::default(), 0);
         let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
         let constant = push_constant(&mut builder, 64, 7);
@@ -727,7 +838,7 @@ mod test {
         let convention =
             Convention::new("pair", Varnode::new(0, RSP, 8)).with_prototypes(&PAIR_PROTOTYPES);
         let config =
-            MCodeRecoveryConfig::from_convention(&registers, &convention, Vec::new()).unwrap();
+            ECodeToMCodeConfig::from_convention(&registers, &convention, Vec::new()).unwrap();
         let metadata = IlMetadata::new(FunctionId::default(), 0);
         let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
         let space = AddressSpaceId::new(0);
@@ -830,7 +941,7 @@ mod test {
         let convention =
             Convention::new("pair", Varnode::new(0, RSP, 8)).with_prototypes(&PAIR_PROTOTYPES);
         let config =
-            MCodeRecoveryConfig::from_convention(&registers, &convention, Vec::new()).unwrap();
+            ECodeToMCodeConfig::from_convention(&registers, &convention, Vec::new()).unwrap();
         let metadata = IlMetadata::new(FunctionId::default(), 0);
         let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
         push_constant(&mut builder, 1, 1);
@@ -876,8 +987,8 @@ mod test {
             vec![IlEdgeKinds::UNCONDITIONAL; BRANCH_COUNT],
         ));
         let source = builder.build_unchecked();
-        let recovery = MCodeRecovery::new(&source, &config, &registers).unwrap();
-        let outputs = MCodeCallOutputVariables::new(&source, &recovery).unwrap();
+        let analysis = ECodeToMCodeAnalysis::new(&source, &config, &registers).unwrap();
+        let outputs = MCodeCallOutputVariables::new(&source, &analysis).unwrap();
         let location = MCodeStorageLocation::Register(RegisterId::new(RAX));
 
         for call in calls {
@@ -925,8 +1036,8 @@ mod test {
         let mut facts = MCodeFunctionFacts::new(source.metadata().function());
         facts.insert_call(call_facts);
         let config = config().with_call_facts(&facts);
-        let recovery = MCodeRecovery::new(&source, &config, &registers).unwrap();
-        let mcode = lift_recovered(&source, &recovery);
+        let analysis = ECodeToMCodeAnalysis::new(&source, &config, &registers).unwrap();
+        let mcode = lift_with_analysis(&source, &analysis);
         let call = mcode
             .ops()
             .iter()
@@ -998,8 +1109,8 @@ mod test {
         let mut facts = MCodeFunctionFacts::new(source.metadata().function());
         facts.insert_call(call);
         let config = config().with_call_facts(&facts);
-        let recovery = MCodeRecovery::new(&source, &config, &registers).unwrap();
-        let mcode = lift_recovered(&source, &recovery);
+        let analysis = ECodeToMCodeAnalysis::new(&source, &config, &registers).unwrap();
+        let mcode = lift_with_analysis(&source, &analysis);
         let call = mcode
             .ops()
             .iter()
@@ -1071,8 +1182,8 @@ mod test {
         let mut facts = MCodeFunctionFacts::new(source.metadata().function());
         facts.insert_call(call);
         let config = config().with_call_facts(&facts);
-        let recovery = MCodeRecovery::new(&source, &config, &registers).unwrap();
-        let mcode = lift_recovered(&source, &recovery);
+        let analysis = ECodeToMCodeAnalysis::new(&source, &config, &registers).unwrap();
+        let mcode = lift_with_analysis(&source, &analysis);
         let call = mcode
             .ops()
             .iter()
@@ -1357,8 +1468,8 @@ mod test {
         ]);
         facts.insert_call(call);
         let config = config().with_call_facts(&facts);
-        let recovery = MCodeRecovery::new(&source, &config, &registers).unwrap();
-        let mcode = lift_recovered(&source, &recovery);
+        let analysis = ECodeToMCodeAnalysis::new(&source, &config, &registers).unwrap();
+        let mcode = lift_with_analysis(&source, &analysis);
         let tail_call = mcode
             .ops()
             .iter()
@@ -1433,8 +1544,8 @@ mod test {
             vec![IlEdgeKinds::COMPUTED],
         ));
         let source = builder.build().unwrap();
-        let recovery = MCodeRecovery::new(&source, &config, &registers).unwrap();
-        let mcode = lift_recovered(&source, &recovery);
+        let analysis = ECodeToMCodeAnalysis::new(&source, &config, &registers).unwrap();
+        let mcode = lift_with_analysis(&source, &analysis);
 
         mcode.verify().unwrap();
         assert!(
@@ -1467,8 +1578,8 @@ mod test {
             .rewriter()
             .replace_with_constant(operation, &constant_value);
         source.verify().unwrap();
-        let recovery = MCodeRecovery::new(&source, &config, &registers).unwrap();
-        let mcode = lift_recovered(&source, &recovery);
+        let analysis = ECodeToMCodeAnalysis::new(&source, &config, &registers).unwrap();
+        let mcode = lift_with_analysis(&source, &analysis);
         let returned = mcode
             .ops()
             .iter()

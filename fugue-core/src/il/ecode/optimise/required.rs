@@ -6,7 +6,7 @@ pub(crate) struct ECodeRequiredDefs {
 }
 
 impl ECodeRequiredDefs {
-    fn new(ir: &ECodeIr) -> Self {
+    pub(crate) fn new(ir: &ECodeIr) -> Self {
         let mut required = Self {
             definitions: IlRequiredDefs::new(ir.block_args().len(), ir.ops().len()),
         };

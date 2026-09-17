@@ -9,13 +9,13 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 use crate::ir::function::FunctionRecord;
+use crate::ir::persistent::cursor_bound;
 use crate::ir::{
     Address, AddressRange, AddressRangeSet, CodeBlock, CodeBlockId, CodeBlockIdsByAddress,
     CodeBlockRecord, CodeBlockTable, Function, FunctionId, FunctionProperties, Id, IdAllocator,
     IdSet, IncompleteFunctionError, PreparedCodeBlockRecord, RawAddress, Reference,
     ReferenceOrigin,
 };
-use crate::storage::entities::cursor::cursor_bound;
 use crate::storage::entities::schema::ENTITY_FUNCTION_TABLE_ID;
 use crate::storage::entities::{
     Entity, EntityId, EntityMut, EntityRef, EntityWrite, EntityWriteBatch, ProjectEntity,

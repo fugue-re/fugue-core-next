@@ -3,9 +3,9 @@ use std::fmt;
 use std::ops::Bound;
 use std::sync::Arc;
 
+use crate::ir::persistent::cursor_bound;
 use crate::ir::problem::{Problem, ProblemId, ProblemKey, ProblemKind, ProblemScope};
 use crate::ir::{Address, AddressRange};
-use crate::storage::entities::cursor::cursor_bound;
 use crate::storage::entities::schema::ENTITY_PROBLEM_TABLE_ID;
 use crate::storage::entities::{
     Entity, EntityId, EntityRef, EntityWrite, EntityWriteBatch, ProjectEntity, WriteBackWorker,

@@ -1,6 +1,7 @@
 mod analysis;
 mod artefact;
 mod constants;
+mod disjoint_set;
 mod dominance;
 mod error;
 mod evaluate;
@@ -18,6 +19,7 @@ pub(crate) mod verify;
 pub use analysis::{IlAnalyser, IlAnalysis};
 pub use artefact::{ControlFlowIl, IlArtefact, IlMetadata, IlSchemaVersion, PersistableIl};
 pub(crate) use constants::IlConstantInterner;
+pub(crate) use disjoint_set::DisjointSet;
 pub use dominance::{
     IlDominance, IlDominanceEvent, IlDominanceEvents, IlDominanceFrontier, IlPhiPlacement,
 };
