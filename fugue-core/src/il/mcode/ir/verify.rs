@@ -6,8 +6,9 @@ use crate::il::common::{
     ControlFlowIl, IlArtefact, IlBlock, IlBlockArgId, IlBlockId, IlEdgeKinds, IlError, IlOpId,
     IlSsaDef, IlValueId, SsaVerifier, SsaVerifyError,
 };
+use crate::il::mcode::analysis::MCodeUses;
 use crate::il::mcode::{
-    MCodeIr, MCodeOp, MCodeOpcode, MCodeUses, MCodeValue, MCodeVarId, MCodeVarKind, MCodeVersion,
+    MCodeIr, MCodeOp, MCodeOpcode, MCodeValue, MCodeVarId, MCodeVarKind, MCodeVersion,
 };
 
 #[derive(Debug, Error, PartialEq, Eq)]

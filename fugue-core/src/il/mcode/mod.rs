@@ -1,5 +1,4 @@
-mod builder;
-mod def_use;
+pub mod analysis;
 mod format;
 mod ir;
 mod memory;
@@ -10,12 +9,9 @@ mod storage;
 mod transform;
 mod value;
 mod variable;
-mod verify;
 
-pub use builder::{MCodeBuilder, MCodeEmitter};
-pub use def_use::{MCodeBlockArgInputs, MCodeUse, MCodeUses};
 pub use format::{MCodeIrDisplay, MCodeSourceDisplay};
-pub use ir::MCodeIr;
+pub use ir::{MCodeBuilder, MCodeEmitter, MCodeIr};
 pub use memory::MCodeMemoryDomain;
 pub use opcode::MCodeOpcode;
 pub use operation::{MCodeOp, MCodeOpSpec};
@@ -27,7 +23,7 @@ pub use variable::{MCodeVar, MCodeVarId, MCodeVarKind};
 
 #[cfg(test)]
 mod test {
-    use super::verify::VerifyError;
+    use super::ir::verify::VerifyError;
     use super::*;
     use crate::il::common::{
         IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlError, IlGraph, IlGraphBuilder,

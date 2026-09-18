@@ -4,7 +4,7 @@ use std::mem::size_of;
 use smallvec::SmallVec;
 use thiserror::Error;
 
-use crate::il::pcode::{RawPCodeFlow, RawPCodeFlows};
+use crate::il::pcode::raw::analysis::{RawPCodeFlow, RawPCodeFlows};
 use crate::ir::{Address, FlowTarget, Id, Location, Reference, ReferenceOrigin, ToRawAddress};
 use crate::lifter::{Language, Op, RawPCodeOp};
 use crate::storage::schema::bitflags::archived_bitflags;

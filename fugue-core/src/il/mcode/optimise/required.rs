@@ -1,5 +1,6 @@
 use crate::il::common::{IlArtefact, IlOpId, IlRequiredDefs, IlSsaDef, IlValueId};
-use crate::il::mcode::{MCodeBlockArgInputs, MCodeIr};
+use crate::il::mcode::MCodeIr;
+use crate::il::mcode::analysis::MCodeBlockArgInputs;
 
 pub(crate) struct MCodeRequiredDefs {
     definitions: IlRequiredDefs,

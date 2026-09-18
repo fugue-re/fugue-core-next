@@ -1,6 +1,7 @@
 use crate::analysis::value::StridedInterval;
 use crate::il::common::{IlAnalysis, IlArtefact, IlCsr, IlValueId};
-use crate::il::ecode::{ECodeBlockArgInputs, ECodeIr, ECodeOpcode, ECodeUses};
+use crate::il::ecode::analysis::{ECodeBlockArgInputs, ECodeUses};
+use crate::il::ecode::{ECodeIr, ECodeOpcode};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ECodeStridedIntervals {

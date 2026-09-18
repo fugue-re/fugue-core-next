@@ -2,7 +2,8 @@ use fugue_bv::BitVec;
 use smallvec::SmallVec;
 
 use crate::il::common::{IlArtefact, IlCsr, IlOpId, IlRewrite, IlValueId};
-use crate::il::ecode::{ECodeBlockArgInputs, ECodeIr, ECodeOpcode, ECodeUses};
+use crate::il::ecode::analysis::{ECodeBlockArgInputs, ECodeUses};
+use crate::il::ecode::{ECodeIr, ECodeOpcode};
 
 pub(crate) struct ECodeConstantFolding;
 

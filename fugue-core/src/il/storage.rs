@@ -345,19 +345,13 @@ impl IlStaging {
 mod test {
     use super::*;
     use crate::il::common::{IlArtefact, IlGraph, IlMetadata};
-    use crate::il::pcode::PCodeIr;
+    use crate::il::pcode::{PCodeBuilder, PCodeIr};
     use crate::storage::{EntityStorage, InMemoryEntityStorage, SegmentStorage};
 
     fn pcode(function: FunctionId, revision: Revision) -> PCodeIr {
-        PCodeIr::new(
-            IlMetadata::new(function, revision),
-            IlGraph::default(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        )
+        PCodeBuilder::new(IlMetadata::new(function, revision), IlGraph::default())
+            .build()
+            .expect("empty PCode is valid")
     }
 
     fn storage() -> StorageContainer {

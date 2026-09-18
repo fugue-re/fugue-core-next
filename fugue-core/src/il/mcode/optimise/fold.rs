@@ -2,7 +2,8 @@ use fugue_bv::BitVec;
 use smallvec::SmallVec;
 
 use crate::il::common::{IlArtefact, IlCsr, IlOpId, IlRewrite, IlValueId};
-use crate::il::mcode::{MCodeBlockArgInputs, MCodeIr, MCodeOpcode, MCodeUses};
+use crate::il::mcode::analysis::{MCodeBlockArgInputs, MCodeUses};
+use crate::il::mcode::{MCodeIr, MCodeOpcode};
 
 pub(crate) struct MCodeConstantFolding;
 

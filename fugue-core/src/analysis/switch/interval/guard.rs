@@ -4,7 +4,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::analysis::switch::{SwitchRecoveryConfig, SwitchResolver};
 use crate::analysis::value::StridedInterval;
 use crate::il::common::{IlBlockId, IlDominance, IlValueId};
-use crate::il::ecode::{ECodeBlockArgInputs, ECodeIr, ECodeOp, ECodeOpcode};
+use crate::il::ecode::analysis::ECodeBlockArgInputs;
+use crate::il::ecode::{ECodeIr, ECodeOp, ECodeOpcode};
 use crate::ir::{Address, AddressRange, AddressWithContext};
 use crate::lifter::ContextSet;
 

@@ -11,10 +11,12 @@ use fugue_core::il::common::{
     IlSourceSpan as CoreIlSourceSpan, IlSsaDef as CoreIlSsaDef, IlValueId as CoreIlValueId,
     PersistableIl,
 };
+use fugue_core::il::ecode::analysis::{
+    ECodeLiveness as CoreECodeLiveness, ECodeUse as CoreECodeUse, ECodeUses as CoreECodeUses,
+};
 use fugue_core::il::ecode::{
     ECodeBlockArg as CoreECodeBlockArg, ECodeDomain as CoreECodeDomain, ECodeIr as CoreECodeIr,
-    ECodeLiveness as CoreECodeLiveness, ECodeMemoryDomain as CoreECodeMemoryDomain,
-    ECodeOp as CoreECodeOp, ECodeUse as CoreECodeUse, ECodeUses as CoreECodeUses,
+    ECodeMemoryDomain as CoreECodeMemoryDomain, ECodeOp as CoreECodeOp,
     ECodeValue as CoreECodeValue,
 };
 use fugue_core::il::mcode::{

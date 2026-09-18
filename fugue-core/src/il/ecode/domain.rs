@@ -22,6 +22,18 @@ pub enum ECodeDomain {
 }
 
 impl ECodeDomain {
+    pub const fn is_memory(&self) -> bool {
+        matches!(self, Self::Memory(_))
+    }
+
+    pub const fn is_flag(&self) -> bool {
+        matches!(self, Self::Flag(_))
+    }
+
+    pub const fn is_register(&self) -> bool {
+        matches!(self, Self::Register(_))
+    }
+
     pub const fn is_register_or_flag(&self) -> bool {
         matches!(self, Self::Flag(_) | Self::Register(_))
     }

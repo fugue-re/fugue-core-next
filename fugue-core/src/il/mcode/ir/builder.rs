@@ -1,42 +1,48 @@
 use fugue_bv::BitVec;
+use rustc_hash::FxHashMap;
 
 use crate::il::common::{
     IlArtefact, IlBlockArgId, IlBlockId, IlConstantInterner, IlError, IlGraph, IlIndexRange,
     IlMetadata, IlOpId, IlParentSpan, IlPool, IlSourceSpan, IlValueId,
 };
-use crate::il::ecode::ir::ECodeIrStorage;
-use crate::il::ecode::{
-    ECodeBlockArg, ECodeDomain, ECodeIr, ECodeMemoryDomain, ECodeOp, ECodeOpSpec, ECodeValue,
+use crate::il::mcode::ir::MCodeIr;
+use crate::il::mcode::{
+    MCodeBlockArg, MCodeMemoryDomain, MCodeOp, MCodeOpSpec, MCodeValue, MCodeVar, MCodeVarId,
+    MCodeVersion,
 };
 use crate::storage::segments::space::AddressSpaceId;
 
 #[derive(Debug)]
-pub struct ECodeBuilder {
+pub struct MCodeBuilder {
     metadata: IlMetadata,
     graph: IlGraph,
     source_spans: Vec<IlSourceSpan>,
     parent_spans: Vec<IlParentSpan>,
-    values: Vec<ECodeValue>,
-    value_domains: Vec<Option<ECodeDomain>>,
-    block_args: Vec<ECodeBlockArg>,
+    variables: Vec<MCodeVar>,
+    variable_ids: FxHashMap<MCodeVar, MCodeVarId>,
+    aliased_variables: Vec<MCodeVarId>,
+    values: Vec<MCodeValue>,
+    block_args: Vec<MCodeBlockArg>,
     edge_args: Vec<IlIndexRange>,
     edge_arg_values: IlPool<IlValueId>,
-    operations: Vec<ECodeOp>,
+    operations: Vec<MCodeOp>,
     value_operands: IlPool<IlValueId>,
-    memory_domains: Vec<ECodeMemoryDomain>,
+    memory_domains: Vec<MCodeMemoryDomain>,
     constant_storage: Vec<u8>,
     constants: IlConstantInterner,
 }
 
-impl ECodeBuilder {
+impl MCodeBuilder {
     pub fn new(metadata: IlMetadata, graph: IlGraph) -> Self {
         Self {
             metadata,
             graph,
             source_spans: Vec::new(),
             parent_spans: Vec::new(),
+            variables: Vec::new(),
+            variable_ids: FxHashMap::default(),
+            aliased_variables: Vec::new(),
             values: Vec::new(),
-            value_domains: Vec::new(),
             block_args: Vec::new(),
             edge_args: Vec::new(),
             edge_arg_values: IlPool::new(),
@@ -79,23 +85,75 @@ impl ECodeBuilder {
         self
     }
 
-    pub fn emitter(&mut self) -> ECodeEmitter<'_> {
-        ECodeEmitter { builder: self }
+    pub fn set_aliased_variables(&mut self, mut aliased_variables: Vec<MCodeVarId>) {
+        aliased_variables.sort_unstable();
+        aliased_variables.dedup();
+        self.aliased_variables = aliased_variables;
+    }
+
+    pub fn with_aliased_variables(mut self, aliased_variables: Vec<MCodeVarId>) -> Self {
+        self.set_aliased_variables(aliased_variables);
+        self
+    }
+
+    pub fn emitter(&mut self) -> MCodeEmitter<'_> {
+        MCodeEmitter { builder: self }
+    }
+
+    fn intern_constant(&mut self, value: &BitVec) -> u64 {
+        self.constants.intern(&mut self.constant_storage, value)
+    }
+
+    fn intern_variable(&mut self, variable: MCodeVar) -> Result<MCodeVarId, IlError> {
+        if let Some(id) = self.variable_ids.get(&variable) {
+            return Ok(*id);
+        }
+        let id = MCodeVarId::try_from_index(self.variables.len())?;
+        self.variables.push(variable);
+        self.variable_ids.insert(variable, id);
+        Ok(id)
+    }
+
+    fn push_result_values(
+        &mut self,
+        widths: impl IntoIterator<Item = u32>,
+    ) -> Result<IlIndexRange, IlError> {
+        let start = self.values.len();
+        let operation = IlOpId::try_from_index(self.operations.len())?;
+        for width in widths {
+            self.values.push(MCodeValue::op_result(width, operation));
+        }
+
+        IlIndexRange::new(start, self.values.len())
     }
 
     fn push_block_arg_value(&mut self, block: IlBlockId, width: u32) -> Result<IlValueId, IlError> {
         let arg = IlBlockArgId::try_from_index(self.block_args.len())?;
         let value = IlValueId::try_from_index(self.values.len())?;
 
-        self.values.push(ECodeValue::block_arg(width, arg));
-        self.value_domains.push(None);
+        self.values.push(MCodeValue::block_arg(width, arg));
         self.block_args
-            .push(ECodeBlockArg::new(block, value, width));
+            .push(MCodeBlockArg::new(block, value, width));
 
         Ok(value)
     }
 
-    fn push_op(&mut self, operation: ECodeOp) -> Result<IlOpId, IlError> {
+    fn bind_value(
+        &mut self,
+        value: IlValueId,
+        variable: MCodeVarId,
+        version: MCodeVersion,
+    ) -> Result<(), IlError> {
+        let value_count = self.values.len();
+        let value = self
+            .values
+            .get_mut(value.index())
+            .ok_or_else(|| IlError::range_out_of_bounds(value.index(), value_count))?;
+        value.set_binding(variable, version);
+        Ok(())
+    }
+
+    fn push_op(&mut self, operation: MCodeOp) -> Result<IlOpId, IlError> {
         let id = IlOpId::try_from_index(self.operations.len())?;
         self.operations.push(operation);
         Ok(id)
@@ -128,31 +186,32 @@ impl ECodeBuilder {
             return;
         }
 
-        self.memory_domains.push(ECodeMemoryDomain::new(space));
+        self.memory_domains.push(MCodeMemoryDomain::new(space));
     }
 
-    pub fn build(self) -> Result<ECodeIr, IlError> {
+    pub fn build(self) -> Result<MCodeIr, IlError> {
         let ir = self.build_unchecked();
 
         if ir.verify().is_err() {
-            return Err(IlError::invalid_artefact(ECodeIr::FORM));
+            return Err(IlError::invalid_artefact(MCodeIr::FORM));
         }
 
         Ok(ir)
     }
 
-    pub(crate) fn build_unchecked(mut self) -> ECodeIr {
+    pub(crate) fn build_unchecked(mut self) -> MCodeIr {
         if self.edge_args.is_empty() && !self.graph.successors().is_empty() {
             self.edge_args = vec![IlIndexRange::EMPTY; self.graph.successors().len()];
         }
 
-        let mut ir = ECodeIr::new(ECodeIrStorage {
+        let mut ir = MCodeIr {
             metadata: self.metadata,
             graph: self.graph,
             source_spans: self.source_spans,
             parent_spans: self.parent_spans,
+            variables: self.variables,
+            aliased_variables: self.aliased_variables,
             values: self.values,
-            value_domains: self.value_domains,
             block_args: self.block_args,
             edge_args: self.edge_args,
             edge_arg_values: self.edge_arg_values.into_values(),
@@ -160,7 +219,7 @@ impl ECodeBuilder {
             value_operands: self.value_operands.into_values(),
             memory_domains: self.memory_domains,
             constant_storage: self.constant_storage,
-        });
+        };
 
         ir.shrink_to_fit();
 
@@ -168,64 +227,41 @@ impl ECodeBuilder {
     }
 }
 
-pub struct ECodeEmitter<'a> {
-    builder: &'a mut ECodeBuilder,
+pub struct MCodeEmitter<'a> {
+    builder: &'a mut MCodeBuilder,
 }
 
-impl ECodeEmitter<'_> {
+impl MCodeEmitter<'_> {
     pub fn op_count(&self) -> usize {
         self.builder.op_count()
     }
 
-    pub fn set_value_domain(
-        &mut self,
-        value: IlValueId,
-        domain: ECodeDomain,
-    ) -> Result<(), IlError> {
-        let value_count = self.builder.value_domains.len();
-        let slot = self
-            .builder
-            .value_domains
-            .get_mut(value.index())
-            .ok_or_else(|| IlError::range_out_of_bounds(value.index(), value_count))?;
-        if slot.is_some() {
-            return Err(IlError::invalid_artefact(ECodeIr::FORM));
-        }
-        *slot = Some(domain);
-        if let ECodeDomain::Memory(space) = domain {
-            self.builder.intern_memory_domain(space);
-        }
-        Ok(())
-    }
-
     pub fn intern_constant(&mut self, value: &BitVec) -> u64 {
-        self.builder
-            .constants
-            .intern(&mut self.builder.constant_storage, value)
+        self.builder.intern_constant(value)
     }
 
     pub fn intern_memory_domain(&mut self, space: AddressSpaceId) {
         self.builder.intern_memory_domain(space);
     }
 
+    pub fn intern_variable(&mut self, variable: MCodeVar) -> Result<MCodeVarId, IlError> {
+        self.builder.intern_variable(variable)
+    }
+
     pub fn emit(
         &mut self,
-        spec: ECodeOpSpec,
+        spec: MCodeOpSpec,
         operands: impl IntoIterator<Item = IlValueId>,
-        result_count: usize,
+        result_widths: impl IntoIterator<Item = u32>,
     ) -> Result<(IlOpId, IlIndexRange), IlError> {
         let operation = IlOpId::try_from_index(self.builder.operations.len())?;
-        let result_start = self.builder.values.len();
-        for _ in 0..result_count {
-            self.builder
-                .values
-                .push(ECodeValue::op_result(spec.width(), operation));
-            self.builder.value_domains.push(None);
-        }
-        let results = IlIndexRange::new(result_start, self.builder.values.len())?;
+        let results = self.builder.push_result_values(result_widths)?;
         let operands = self.builder.push_value_operands(operands)?;
-        let mut record = ECodeOp::new(spec.opcode(), results, operands, spec.width())
-            .with_immediate(spec.immediate());
+        let mut record = MCodeOp::new(spec.opcode(), results, operands, spec.width());
+        if let Some(variable) = spec.variable() {
+            record.set_variable(variable);
+        }
+        record.set_immediate(spec.immediate());
         if let Some(address) = spec.address() {
             record.set_address(address);
         }
@@ -242,6 +278,15 @@ impl ECodeEmitter<'_> {
 
     pub fn emit_block_arg(&mut self, block: IlBlockId, width: u32) -> Result<IlValueId, IlError> {
         self.builder.push_block_arg_value(block, width)
+    }
+
+    pub fn bind_value(
+        &mut self,
+        value: IlValueId,
+        variable: MCodeVarId,
+        version: MCodeVersion,
+    ) -> Result<(), IlError> {
+        self.builder.bind_value(value, variable, version)
     }
 
     pub fn emit_edge_args(

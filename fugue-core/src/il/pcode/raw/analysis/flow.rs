@@ -118,25 +118,3 @@ impl<'a> RawPCodeFlows<'a> {
         }
     }
 }
-
-pub(crate) fn remap_target_position(
-    operations: &[RawPCodeOp],
-    address: Address,
-    target: Location,
-) -> Option<Location> {
-    if target.address() != address {
-        return Some(target);
-    }
-
-    let raw_target = usize::from(target.position());
-    let mut raw_index = 0usize;
-    let mut semantic_index = 0u16;
-
-    while raw_index < raw_target {
-        let operation = operations.get(raw_index)?;
-        raw_index += operation.spill() + 1;
-        semantic_index = semantic_index.checked_add(1)?;
-    }
-
-    (raw_index == raw_target).then(|| Location::new(target.address(), semantic_index))
-}

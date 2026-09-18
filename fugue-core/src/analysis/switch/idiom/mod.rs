@@ -1,6 +1,6 @@
 use fugue_bv::BitVec;
 
-use crate::il::pcode::RawPCodeDefs;
+use crate::il::pcode::raw::analysis::RawPCodeDefs;
 use crate::ir::RawAddress;
 use crate::lifter::{Op, RawPCodeOp, Varnode};
 

@@ -155,7 +155,7 @@ mod test {
     fn lift_test_ecode(source: &PCodeIr) -> Result<ECodeIr, IlError> {
         let arch = Arch::new(resolve_language("x86:LE:64").expect("test language should resolve"));
         let platform = arch.platform();
-        PCodeToECode::default().transform(source, &arch, &platform)
+        PCodeToECode::default().transform(&arch, &platform, source)
     }
 
     fn stage_pcode_with_references(

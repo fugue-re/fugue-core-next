@@ -1,13 +1,13 @@
 use std::mem::{self, size_of};
 
 use fugue_bv::BitVec;
+use verify::{VerifyError, verify};
 
 use crate::il::common::{
     ControlFlowIl, IlArtefact, IlBlockArgId, IlBlockId, IlConstantInterner, IlError, IlGraph,
     IlIndexRange, IlMetadata, IlOpId, IlParentSpan, IlSchemaVersion, IlSourceSpan, IlSsaDef,
     IlValueId, PersistableIl, SsaIl,
 };
-use crate::il::mcode::verify::{VerifyError, verify};
 use crate::il::mcode::{
     MCodeBinding, MCodeBlockArg, MCodeIrDisplay, MCodeMemoryDomain, MCodeOp, MCodeOpcode,
     MCodeSourceDisplay, MCodeValue, MCodeVar, MCodeVarId,
@@ -15,6 +15,11 @@ use crate::il::mcode::{
 use crate::ir::{Address, AddressRange};
 use crate::storage::segments::space::AddressSpaceId;
 use crate::types::EstimateSize;
+
+mod builder;
+pub(crate) mod verify;
+
+pub use builder::{MCodeBuilder, MCodeEmitter};
 
 #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(derive(Debug, PartialEq, Eq))]
@@ -35,59 +40,7 @@ pub struct MCodeIr {
     constant_storage: Vec<u8>,
 }
 
-pub(crate) struct MCodeIrStorage {
-    pub(crate) metadata: IlMetadata,
-    pub(crate) graph: IlGraph,
-    pub(crate) source_spans: Vec<IlSourceSpan>,
-    pub(crate) parent_spans: Vec<IlParentSpan>,
-    pub(crate) variables: Vec<MCodeVar>,
-    pub(crate) aliased_variables: Vec<MCodeVarId>,
-    pub(crate) values: Vec<MCodeValue>,
-    pub(crate) block_args: Vec<MCodeBlockArg>,
-    pub(crate) edge_args: Vec<IlIndexRange>,
-    pub(crate) edge_arg_values: Vec<IlValueId>,
-    pub(crate) operations: Vec<MCodeOp>,
-    pub(crate) value_operands: Vec<IlValueId>,
-    pub(crate) memory_domains: Vec<MCodeMemoryDomain>,
-    pub(crate) constant_storage: Vec<u8>,
-}
-
 impl MCodeIr {
-    pub(crate) fn new(storage: MCodeIrStorage) -> Self {
-        let MCodeIrStorage {
-            metadata,
-            graph,
-            source_spans,
-            parent_spans,
-            variables,
-            aliased_variables,
-            values,
-            block_args,
-            edge_args,
-            edge_arg_values,
-            operations,
-            value_operands,
-            memory_domains,
-            constant_storage,
-        } = storage;
-        Self {
-            metadata,
-            graph,
-            source_spans,
-            parent_spans,
-            variables,
-            aliased_variables,
-            values,
-            block_args,
-            edge_args,
-            edge_arg_values,
-            operations,
-            value_operands,
-            memory_domains,
-            constant_storage,
-        }
-    }
-
     pub const fn metadata(&self) -> &IlMetadata {
         &self.metadata
     }
@@ -253,10 +206,6 @@ impl MCodeIr {
 
     pub(crate) fn take_graph(&mut self) -> IlGraph {
         mem::take(&mut self.graph)
-    }
-
-    pub(crate) fn take_memory_domains(&mut self) -> Vec<MCodeMemoryDomain> {
-        mem::take(&mut self.memory_domains)
     }
 
     pub(crate) fn rewriter(&mut self) -> MCodeRewriter<'_> {

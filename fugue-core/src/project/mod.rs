@@ -741,7 +741,7 @@ impl Project {
 mod test {
     use super::*;
     use crate::il::common::{IlArtefact, IlError, IlGraph, IlMetadata};
-    use crate::il::pcode::PCodeIr;
+    use crate::il::pcode::{PCodeBuilder, PCodeIr};
     use crate::ir::FunctionId;
 
     #[test]
@@ -755,15 +755,11 @@ mod test {
             transaction.commit()?;
         }
 
-        let ir = PCodeIr::new(
+        let ir = PCodeBuilder::new(
             IlMetadata::new(function, stale_revision),
             IlGraph::default(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        );
+        )
+        .build()?;
         let mut staging = crate::il::storage::IlStaging::default();
         staging.replace(&project.storage, ir)?;
         let writes = staging.prepare()?;

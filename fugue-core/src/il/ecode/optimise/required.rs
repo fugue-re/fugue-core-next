@@ -1,15 +1,27 @@
 use crate::il::common::{IlAnalysis, IlArtefact, IlOpId, IlRequiredDefs, IlSsaDef, IlValueId};
-use crate::il::ecode::{ECodeBlockArgInputs, ECodeIr};
+use crate::il::ecode::ECodeIr;
+use crate::il::ecode::analysis::ECodeBlockArgInputs;
 
 pub(crate) struct ECodeRequiredDefs {
     definitions: IlRequiredDefs,
 }
 
 impl ECodeRequiredDefs {
-    pub(crate) fn new(ir: &ECodeIr) -> Self {
+    pub(crate) fn block_arg_is_required(&self, index: usize) -> bool {
+        self.definitions.block_arg_is_required(index)
+    }
+
+    pub(crate) fn op_is_required(&self, index: usize) -> bool {
+        self.definitions.op_is_required(index)
+    }
+}
+
+impl IlAnalysis<ECodeIr> for ECodeRequiredDefs {
+    fn analyse(ir: &ECodeIr) -> Self {
         let mut required = Self {
             definitions: IlRequiredDefs::new(ir.block_args().len(), ir.ops().len()),
         };
+
         let mut worklist = Vec::new();
         for (index, operation) in ir.ops().iter().enumerate() {
             if operation.opcode().has_side_effect() {
@@ -39,6 +51,7 @@ impl ECodeRequiredDefs {
         }
 
         let inputs = ir.analyse::<ECodeBlockArgInputs>();
+
         while let Some(entity) = worklist.pop() {
             match entity {
                 IlSsaDef::Op(operation) => {
@@ -78,19 +91,5 @@ impl ECodeRequiredDefs {
         }
 
         required
-    }
-
-    pub(crate) fn block_arg_is_required(&self, index: usize) -> bool {
-        self.definitions.block_arg_is_required(index)
-    }
-
-    pub(crate) fn op_is_required(&self, index: usize) -> bool {
-        self.definitions.op_is_required(index)
-    }
-}
-
-impl IlAnalysis<ECodeIr> for ECodeRequiredDefs {
-    fn analyse(ir: &ECodeIr) -> Self {
-        Self::new(ir)
     }
 }

@@ -1,19 +1,19 @@
-use graph::{PCodeToECodeGraphMapper, remap_source_spans};
+use graph::PCodeToECodeGraphMapper;
 use lifter::{PCodeToECodeLiftScratch, PCodeToECodeLifter};
-use ssa::{PCodeToECodeSsaLifter, PCodeToECodeSsaScratch};
+use ssa::PCodeToECodeSsaScratch;
 
 use crate::arch::Arch;
 use crate::il::common::{
-    IlArtefact, IlError, IlGenerationContext, IlGenerationError, IlGraph, IlMetadata, IlTransformer,
+    IlArtefact, IlError, IlGenerationContext, IlGenerationError, IlTransformer,
 };
-use crate::il::ecode::{ECodeBuilder, ECodeIr, ECodeOptimiser};
+use crate::il::ecode::{ECodeIr, ECodeOptimiser};
 use crate::il::pcode::PCodeIr;
 use crate::platform::Platform;
 
-mod buffer;
 mod graph;
 mod lifter;
 mod ssa;
+mod state;
 
 #[derive(Debug, Default)]
 pub struct PCodeToECode {
@@ -25,29 +25,18 @@ pub struct PCodeToECode {
 impl PCodeToECode {
     pub fn transform(
         &mut self,
-        source: &PCodeIr,
         arch: &Arch,
         platform: &Platform,
+        source: &PCodeIr,
     ) -> Result<ECodeIr, IlError> {
-        let metadata = IlMetadata::new(
-            source.metadata().function(),
-            source.metadata().input_revision(),
-        );
-        let builder = ECodeBuilder::new(metadata, IlGraph::default());
-        let (buffer, operation_map) =
-            PCodeToECodeLifter::new(source, arch, &mut self.lift_scratch)?.lift(platform)?;
-        let graph = self.graph_mapper.remap(source, &operation_map)?;
-        let parent_spans = operation_map.parent_spans()?;
-        let source_spans = remap_source_spans(source, &operation_map)?;
-
-        let mut ecode = PCodeToECodeSsaLifter::new(
-            buffer,
-            graph,
-            source_spans,
-            parent_spans,
-            builder,
+        let mut ecode = PCodeToECodeLifter::new(
+            arch,
+            platform,
+            source,
+            &mut self.graph_mapper,
+            &mut self.lift_scratch,
             &mut self.ssa_scratch,
-        )
+        )?
         .lift()?;
         ecode.rewrite(ECodeOptimiser);
 
@@ -69,7 +58,7 @@ impl IlTransformer for PCodeToECode {
         source: &Self::Input,
         context: &IlGenerationContext<'_>,
     ) -> Result<Self::Output, IlGenerationError> {
-        let ecode = PCodeToECode::transform(self, source, context.arch(), context.platform())?;
+        let ecode = PCodeToECode::transform(self, context.arch(), context.platform(), source)?;
 
         #[cfg(debug_assertions)]
         if !context.is_speculative() {

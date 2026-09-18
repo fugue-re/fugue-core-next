@@ -1,12 +1,8 @@
 use std::collections::BTreeMap;
 
 use super::required::MCodeRequiredDefs;
-use crate::il::common::{
-    IlBlockArgId, IlConstantInterner, IlCsr, IlIndexMapper, IlIndexRange, IlOpId, IlRewrite,
-    IlSsaDef, IlValueId,
-};
-use crate::il::mcode::ir::MCodeIrStorage;
-use crate::il::mcode::{MCodeBlockArg, MCodeIr, MCodeOpcode, MCodeValue, MCodeVarId, MCodeVersion};
+use crate::il::common::{IlCsr, IlIndexMapper, IlRewrite, IlSsaDef, IlValueId};
+use crate::il::mcode::{MCodeBuilder, MCodeIr, MCodeOpSpec, MCodeOpcode, MCodeVarId, MCodeVersion};
 
 pub(crate) struct MCodeCompaction<'a> {
     required_values: &'a [IlValueId],
@@ -17,10 +13,6 @@ impl IlRewrite<MCodeIr> for MCodeCompaction<'_> {
         let required = MCodeRequiredDefs::new(ir, self.required_values);
         let operation_map =
             IlIndexMapper::from_kept(ir.ops().len(), |index| required.op_is_required(index));
-        let block_arg_map = IlIndexMapper::from_kept(ir.block_args().len(), |index| {
-            required.block_arg_is_required(index)
-        });
-
         let value_kept = ir
             .values()
             .iter()
@@ -79,79 +71,6 @@ impl IlRewrite<MCodeIr> for MCodeCompaction<'_> {
             }
         }
 
-        let values = ir
-            .values()
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| value_kept[*index])
-            .map(|(index, value)| {
-                let definition = match value.definition() {
-                    IlSsaDef::Op(operation) => {
-                        let operation = operation_map.map_index(operation.index());
-                        IlSsaDef::Op(
-                            IlOpId::try_from_index(operation)
-                                .expect("remapped operation id is representable"),
-                        )
-                    }
-                    IlSsaDef::BlockArg(arg) => {
-                        let arg = block_arg_map.map_index(arg.index());
-                        IlSsaDef::BlockArg(
-                            IlBlockArgId::try_from_index(arg)
-                                .expect("remapped block argument id is representable"),
-                        )
-                    }
-                };
-                let mut compacted = MCodeValue::new(value.width(), definition);
-                if let Some(variable) = value.variable() {
-                    compacted.set_binding(remap_variable(variable), new_versions[index]);
-                }
-                compacted
-            })
-            .collect::<Vec<_>>();
-
-        let mut operations = Vec::new();
-        let mut value_operands = Vec::new();
-        for (index, operation) in ir.ops().iter().enumerate() {
-            if !required.op_is_required(index) {
-                continue;
-            }
-            let start = value_operands.len();
-            value_operands.extend(
-                ir.op_operands_for(operation)
-                    .iter()
-                    .copied()
-                    .map(remap_value),
-            );
-            let operands = IlIndexRange::new(start, value_operands.len())
-                .expect("compacted operand range stays ordered");
-            let mut compacted = *operation;
-            compacted.set_results(value_map.map_range(operation.results()));
-            compacted.set_operands(operands);
-            if let Some(variable) = operation.variable() {
-                compacted = compacted.with_variable(remap_variable(variable));
-            }
-            operations.push(compacted);
-        }
-
-        let mut constant_storage = Vec::new();
-        let mut constants = IlConstantInterner::new();
-        for operation in &mut operations {
-            if operation.opcode() != MCodeOpcode::Constant || operation.width() <= 64 {
-                continue;
-            }
-            if let Some(value) = operation.constant(ir.constant_storage()) {
-                let immediate = constants.intern(&mut constant_storage, &value);
-                operation.replace_with_constant(immediate);
-            }
-        }
-
-        let block_args = ir
-            .block_args()
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| required.block_arg_is_required(*index))
-            .map(|(_, arg)| MCodeBlockArg::new(arg.block(), remap_value(arg.value()), arg.width()))
-            .collect::<Vec<_>>();
         let block_arg_kept = IlCsr::from_entries(
             ir.graph().blocks().len(),
             ir.block_args()
@@ -159,21 +78,7 @@ impl IlRewrite<MCodeIr> for MCodeCompaction<'_> {
                 .enumerate()
                 .map(|(index, arg)| (arg.block().index(), required.block_arg_is_required(index))),
         );
-        let mut edge_args = Vec::with_capacity(ir.edge_args().len());
-        let mut edge_arg_values = Vec::new();
-        for (edge, target) in ir.graph().successors().iter().enumerate() {
-            let kept = block_arg_kept.row(target.index());
-            let start = edge_arg_values.len();
-            for (position, &value) in ir.args_for_edge(edge).iter().enumerate() {
-                if kept.get(position).copied().unwrap_or(false) {
-                    edge_arg_values.push(remap_value(value));
-                }
-            }
-            edge_args.push(
-                IlIndexRange::new(start, edge_arg_values.len())
-                    .expect("compacted edge argument range stays ordered"),
-            );
-        }
+        let edge_targets = ir.graph().successors().to_vec();
 
         let source_spans = operation_map
             .remap_source_spans(ir.source_spans())
@@ -187,12 +92,6 @@ impl IlRewrite<MCodeIr> for MCodeCompaction<'_> {
             .remap_op_ranges(&operation_map)
             .expect("graph operation ranges use the compaction source domain");
 
-        let variables = ir
-            .variables()
-            .iter()
-            .enumerate()
-            .filter_map(|(index, variable)| variable_kept[index].then_some(*variable))
-            .collect();
         let aliased_variables = ir
             .aliased_variables()
             .iter()
@@ -201,23 +100,125 @@ impl IlRewrite<MCodeIr> for MCodeCompaction<'_> {
             .map(remap_variable)
             .collect();
         let metadata = *ir.metadata();
-        let memory_domains = ir.take_memory_domains();
-        *ir = MCodeIr::new(MCodeIrStorage {
-            metadata,
-            graph,
-            source_spans,
-            parent_spans,
-            variables,
-            aliased_variables,
-            values,
-            block_args,
-            edge_args,
-            edge_arg_values,
-            operations,
-            value_operands,
-            memory_domains,
-            constant_storage,
-        });
+        let mut builder = MCodeBuilder::new(metadata, graph)
+            .with_source_spans(source_spans)
+            .with_parent_spans(parent_spans)
+            .with_aliased_variables(aliased_variables);
+
+        {
+            let mut emitter = builder.emitter();
+            for (index, variable) in ir.variables().iter().enumerate() {
+                if variable_kept[index] {
+                    emitter
+                        .intern_variable(*variable)
+                        .expect("compacted variable id is representable");
+                }
+            }
+            for domain in ir.memory_domains() {
+                emitter.intern_memory_domain(domain.space());
+            }
+
+            let mut operations = ir
+                .ops()
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| required.op_is_required(*index))
+                .peekable();
+            let mut block_args = ir
+                .block_args()
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| required.block_arg_is_required(*index))
+                .peekable();
+
+            while operations.peek().is_some() || block_args.peek().is_some() {
+                let emit_block_arg = match (operations.peek(), block_args.peek()) {
+                    (Some((_, operation)), Some((_, arg))) => {
+                        arg.value().index() < operation.results().start()
+                    }
+                    (None, Some(_)) => true,
+                    _ => false,
+                };
+
+                if emit_block_arg {
+                    let (_, arg) = block_args.next().expect("block argument remains");
+                    let value = emitter
+                        .emit_block_arg(arg.block(), arg.width())
+                        .expect("compacted block argument is representable");
+                    let original = &ir.values()[arg.value().index()];
+                    if let Some(variable) = original.variable() {
+                        emitter
+                            .bind_value(
+                                value,
+                                remap_variable(variable),
+                                new_versions[arg.value().index()],
+                            )
+                            .expect("compacted block argument binding is valid");
+                    }
+                    continue;
+                }
+
+                let (_, operation) = operations.next().expect("operation remains");
+                let mut spec = MCodeOpSpec::new(operation.opcode(), operation.width())
+                    .with_immediate(operation.immediate());
+                if let Some(variable) = operation.variable() {
+                    spec.set_variable(remap_variable(variable));
+                }
+                if operation.opcode() == MCodeOpcode::Constant
+                    && operation.width() > 64
+                    && let Some(value) = operation.constant(ir.constant_storage())
+                {
+                    spec.set_immediate(emitter.intern_constant(&value));
+                }
+                if let Some(address) = operation.address() {
+                    spec.set_address(address);
+                }
+                if let Some(address_space) = operation.address_space() {
+                    spec.set_address_space(address_space);
+                }
+                let (_, results) = emitter
+                    .emit(
+                        spec,
+                        ir.op_operands_for(operation)
+                            .iter()
+                            .copied()
+                            .map(remap_value),
+                        operation
+                            .results()
+                            .slice(ir.values())
+                            .iter()
+                            .map(|value| value.width()),
+                    )
+                    .expect("compacted operation is representable");
+                for (old, new) in (operation.results().start()..operation.results().end())
+                    .zip(results.start()..results.end())
+                {
+                    let original = &ir.values()[old];
+                    if let Some(variable) = original.variable() {
+                        let value = IlValueId::try_from_index(new)
+                            .expect("compacted value id is representable");
+                        emitter
+                            .bind_value(value, remap_variable(variable), new_versions[old])
+                            .expect("compacted result binding is valid");
+                    }
+                }
+            }
+
+            for (edge, target) in edge_targets.iter().enumerate() {
+                let kept = block_arg_kept.row(target.index());
+                emitter
+                    .emit_edge_args(
+                        ir.args_for_edge(edge)
+                            .iter()
+                            .enumerate()
+                            .filter(|(position, _)| kept.get(*position).copied().unwrap_or(false))
+                            .map(|(_, &value)| remap_value(value)),
+                    )
+                    .expect("compacted edge arguments are representable");
+            }
+        }
+
+        *ir = builder.build_unchecked();
     }
 }
 

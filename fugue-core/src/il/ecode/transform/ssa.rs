@@ -3,7 +3,7 @@ use std::mem;
 
 use rustc_hash::FxHashMap;
 
-use super::buffer::{PCodeToECodeBuffer, PCodeToECodeEffect, PCodeToECodeExprKind};
+use super::state::{ECodeLiftEffect, ECodeLiftExprKind, ECodeLiftState};
 use crate::il::common::{
     FlagId, IlArtefact, IlBlock, IlBlockId, IlDominance, IlDominanceEvent, IlError, IlExprId,
     IlGraph, IlIndexRange, IlIndexRangeMap, IlParentSpan, IlSourceSpan, IlValueId, RegisterId,
@@ -82,7 +82,7 @@ enum ExprVisit {
 }
 
 pub(crate) struct PCodeToECodeSsaLifter<'a> {
-    source: PCodeToECodeBuffer,
+    source: ECodeLiftState,
     graph: IlGraph,
     source_spans: Vec<IlSourceSpan>,
     parent_spans: Vec<IlParentSpan>,
@@ -96,7 +96,7 @@ pub(crate) struct PCodeToECodeSsaLifter<'a> {
     input_domains: Vec<(ECodeDomain, u32)>,
     blocks: Vec<Option<IlBlock>>,
     edge_args: Vec<Vec<IlValueId>>,
-    statement_ranges: IlIndexRangeMap,
+    op_ranges: IlIndexRangeMap,
 }
 
 #[derive(Debug, Default)]
@@ -107,7 +107,7 @@ struct ECodeDomains {
 }
 
 impl ECodeDomains {
-    fn new(source: &PCodeToECodeBuffer, graph: &IlGraph) -> Result<Self, IlError> {
+    fn new(source: &ECodeLiftState, graph: &IlGraph) -> Result<Self, IlError> {
         let mut domains = Self::default();
 
         for (block_index, block) in graph.blocks().iter().enumerate() {
@@ -157,26 +157,26 @@ impl ECodeDomains {
 
         for expression in source.expressions() {
             match expression.kind() {
-                PCodeToECodeExprKind::ReadFlag | PCodeToECodeExprKind::ReadRegister => {
+                ECodeLiftExprKind::ReadFlag | ECodeLiftExprKind::ReadRegister => {
                     let domain = match expression.kind() {
-                        PCodeToECodeExprKind::ReadFlag => {
+                        ECodeLiftExprKind::ReadFlag => {
                             ECodeDomain::Flag(FlagId::new(expression.immediate()))
                         }
-                        PCodeToECodeExprKind::ReadRegister => {
+                        ECodeLiftExprKind::ReadRegister => {
                             ECodeDomain::Register(RegisterId::new(expression.immediate()))
                         }
-                        PCodeToECodeExprKind::Op(_) => unreachable!(),
+                        ECodeLiftExprKind::Op(_) => unreachable!(),
                     };
                     domains.record_width(domain, expression.width())?;
                     domains.reads.insert(domain);
                 }
-                PCodeToECodeExprKind::Op(ECodeOpcode::Load) => {
+                ECodeLiftExprKind::Op(ECodeOpcode::Load) => {
                     let space = expression.address_space().ok_or_else(|| {
                         IlError::missing_component(ECodeIr::FORM, "address space")
                     })?;
                     domains.record_width(ECodeDomain::Memory(space), 0)?;
                 }
-                PCodeToECodeExprKind::Op(_) => {}
+                ECodeLiftExprKind::Op(_) => {}
             }
         }
 
@@ -202,7 +202,7 @@ impl ECodeDomains {
 
 impl<'a> PCodeToECodeSsaLifter<'a> {
     pub(crate) fn new(
-        source: PCodeToECodeBuffer,
+        source: ECodeLiftState,
         graph: IlGraph,
         source_spans: Vec<IlSourceSpan>,
         parent_spans: Vec<IlParentSpan>,
@@ -229,7 +229,7 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
             input_domains: Vec::new(),
             blocks: vec![None; block_count],
             edge_args: vec![Vec::new(); edge_count],
-            statement_ranges: IlIndexRangeMap::unmapped(operation_count),
+            op_ranges: IlIndexRangeMap::unmapped(operation_count),
         }
     }
 
@@ -246,18 +246,14 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
         let mut current = ECodeRenameState::default();
 
         for index in 0..self.source.ops().len() {
-            self.lift_statement_at(index, &mut current)?;
+            self.lift_op_at(index, &mut current)?;
         }
 
         self.builder.set_graph(mem::take(&mut self.graph));
-        self.builder.set_source_spans(
-            self.statement_ranges
-                .remap_source_spans(&self.source_spans)?,
-        );
-        self.builder.set_parent_spans(
-            self.statement_ranges
-                .remap_parent_spans(&self.parent_spans)?,
-        );
+        self.builder
+            .set_source_spans(self.op_ranges.remap_source_spans(&self.source_spans)?);
+        self.builder
+            .set_parent_spans(self.op_ranges.remap_parent_spans(&self.parent_spans)?);
 
         Ok(())
     }
@@ -296,14 +292,10 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
         let graph = mem::take(&mut self.graph)
             .with_op_ranges(blocks.into_iter().map(|block| block.ops()))?;
         self.builder.set_graph(graph);
-        self.builder.set_source_spans(
-            self.statement_ranges
-                .remap_source_spans(&self.source_spans)?,
-        );
-        self.builder.set_parent_spans(
-            self.statement_ranges
-                .remap_parent_spans(&self.parent_spans)?,
-        );
+        self.builder
+            .set_source_spans(self.op_ranges.remap_source_spans(&self.source_spans)?);
+        self.builder
+            .set_parent_spans(self.op_ranges.remap_parent_spans(&self.parent_spans)?);
 
         Ok(())
     }
@@ -360,8 +352,8 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
 
         self.reset_expression_cache();
 
-        for statement_index in source_block.ops().start()..source_block.ops().end() {
-            self.lift_statement_at(statement_index, current)?;
+        for op_index in source_block.ops().start()..source_block.ops().end() {
+            self.lift_op_at(op_index, current)?;
         }
 
         self.lift_edge_args(source_block, current)?;
@@ -425,11 +417,7 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
         Ok(())
     }
 
-    fn lift_statement_at(
-        &mut self,
-        index: usize,
-        current: &mut ECodeRenameState,
-    ) -> Result<(), IlError> {
+    fn lift_op_at(&mut self, index: usize, current: &mut ECodeRenameState) -> Result<(), IlError> {
         let spans = &self.source_spans;
         let span = spans.partition_point(|span| span.destination().start() < index);
         if spans
@@ -439,12 +427,12 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
             self.reset_expression_cache();
         }
         let start = self.builder.emitter().op_count();
-        let statement = self.source.ops()[index];
+        let op = self.source.ops()[index];
 
-        self.lift_statement(&statement, current)?;
+        self.lift_op(&op, current)?;
 
         let end = self.builder.emitter().op_count();
-        self.statement_ranges
+        self.op_ranges
             .set_range(index, IlIndexRange::new(start, end)?)?;
 
         Ok(())
@@ -456,40 +444,40 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
         }
     }
 
-    fn lift_statement(
+    fn lift_op(
         &mut self,
-        statement: &PCodeToECodeEffect,
+        op: &ECodeLiftEffect,
         current: &mut ECodeRenameState,
     ) -> Result<(), IlError> {
-        match statement.opcode() {
+        match op.opcode() {
             ECodeOpcode::WriteRegister | ECodeOpcode::WriteFlag => {
-                let source_expression = statement
+                let source_expression = op
                     .value()
                     .ok_or_else(|| IlError::missing_component(ECodeIr::FORM, "value"))?;
                 let width = self.source.expressions()[source_expression.index()].width();
                 let source = self.lift_expression(source_expression, current)?;
-                let (opcode, domain) = match statement.opcode() {
+                let (opcode, domain) = match op.opcode() {
                     ECodeOpcode::WriteRegister => (
                         ECodeOpcode::WriteRegister,
-                        ECodeDomain::Register(RegisterId::new(statement.immediate())),
+                        ECodeDomain::Register(RegisterId::new(op.immediate())),
                     ),
                     ECodeOpcode::WriteFlag => (
                         ECodeOpcode::WriteFlag,
-                        ECodeDomain::Flag(FlagId::new(statement.immediate())),
+                        ECodeDomain::Flag(FlagId::new(op.immediate())),
                     ),
                     _ => unreachable!(),
                 };
-                let spec = ECodeOpSpec::new(opcode, width).with_immediate(statement.immediate());
+                let spec = ECodeOpSpec::new(opcode, width).with_immediate(op.immediate());
                 let (_, results) = self.builder.emitter().emit(spec, [source], 1)?;
                 let value = IlValueId::try_from_index(results.start())?;
                 self.builder.emitter().set_value_domain(value, domain)?;
                 current.define(domain, value);
             }
             ECodeOpcode::Store => {
-                let address_space = statement
+                let address_space = op
                     .address_space()
                     .ok_or_else(|| IlError::missing_component(ECodeIr::FORM, "address space"))?;
-                self.lift_effect_operands(statement, current)?;
+                self.lift_effect_operands(op, current)?;
                 let memory = self.current_value(ECodeDomain::Memory(address_space), 0, current)?;
 
                 self.scratch.effect_operands.push(memory);
@@ -497,7 +485,7 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
                 let domain = ECodeDomain::Memory(address_space);
                 let spec = ECodeOpSpec::new(ECodeOpcode::Store, 0)
                     .with_address_space(address_space)
-                    .with_immediate(statement.immediate());
+                    .with_immediate(op.immediate());
                 let (_, results) = self.builder.emitter().emit(
                     spec,
                     self.scratch.effect_operands.iter().copied(),
@@ -508,14 +496,14 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
                 current.define(domain, memory);
             }
             opcode => {
-                self.lift_effect_operands(statement, current)?;
-                let mut spec = ECodeOpSpec::new(opcode, 0).with_immediate(statement.immediate());
+                self.lift_effect_operands(op, current)?;
+                let mut spec = ECodeOpSpec::new(opcode, 0).with_immediate(op.immediate());
 
-                if let Some(address) = statement.address() {
+                if let Some(address) = op.address() {
                     spec = spec.with_address(address);
                 }
 
-                if let Some(address_space) = statement.address_space() {
+                if let Some(address_space) = op.address_space() {
                     spec = spec.with_address_space(address_space);
                 }
 
@@ -541,19 +529,19 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
 
     fn lift_effect_operands(
         &mut self,
-        statement: &PCodeToECodeEffect,
+        op: &ECodeLiftEffect,
         current: &mut ECodeRenameState,
     ) -> Result<(), IlError> {
         self.scratch.effect_operands.clear();
 
-        if let Some(value) = statement.value() {
+        if let Some(value) = op.value() {
             let value = self.lift_expression(value, current)?;
             self.scratch.effect_operands.push(value);
         }
 
-        let operand_count = self.source.op_operands_for(statement).len();
+        let operand_count = self.source.op_operands_for(op).len();
         for index in 0..operand_count {
-            let operand = self.source.op_operands_for(statement)[index];
+            let operand = self.source.op_operands_for(op)[index];
             let operand = self.lift_expression(operand, current)?;
             self.scratch.effect_operands.push(operand);
         }
@@ -578,22 +566,22 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
 
                     let expression = self.source.expressions()[expression_id.index()];
                     match expression.kind() {
-                        PCodeToECodeExprKind::ReadFlag | PCodeToECodeExprKind::ReadRegister => {
+                        ECodeLiftExprKind::ReadFlag | ECodeLiftExprKind::ReadRegister => {
                             let domain = match expression.kind() {
-                                PCodeToECodeExprKind::ReadFlag => {
+                                ECodeLiftExprKind::ReadFlag => {
                                     ECodeDomain::Flag(FlagId::new(expression.immediate()))
                                 }
-                                PCodeToECodeExprKind::ReadRegister => {
+                                ECodeLiftExprKind::ReadRegister => {
                                     ECodeDomain::Register(RegisterId::new(expression.immediate()))
                                 }
-                                PCodeToECodeExprKind::Op(_) => unreachable!(),
+                                ECodeLiftExprKind::Op(_) => unreachable!(),
                             };
                             let value = self.current_value(domain, expression.width(), current)?;
                             self.values[expression_id.index()] = Some(value);
                             self.built_expressions.push(expression_id);
                             continue;
                         }
-                        PCodeToECodeExprKind::Op(_) => {}
+                        ECodeLiftExprKind::Op(_) => {}
                     }
 
                     self.scratch
@@ -623,7 +611,7 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
                     .ok_or_else(|| IlError::missing_component(ECodeIr::FORM, "operand"))?;
                 self.scratch.expression_operands.push(operand);
             }
-            if expression.kind() == PCodeToECodeExprKind::Op(ECodeOpcode::Load) {
+            if expression.kind() == ECodeLiftExprKind::Op(ECodeOpcode::Load) {
                 let address_space = expression
                     .address_space()
                     .ok_or_else(|| IlError::missing_component(ECodeIr::FORM, "address space"))?;
@@ -631,7 +619,7 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
                 self.scratch.expression_operands.push(memory);
             }
 
-            let PCodeToECodeExprKind::Op(opcode) = expression.kind() else {
+            let ECodeLiftExprKind::Op(opcode) = expression.kind() else {
                 return Err(IlError::unsupported_opcode(ECodeIr::FORM));
             };
             let mut spec =
@@ -723,62 +711,62 @@ mod test {
         FlagId, IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlGraph, IlMetadata, IlOpId,
         IlParentSpan, IlSourceSpan, RegisterId,
     };
-    use crate::il::ecode::transform::buffer::{
-        PCodeToECodeBuffer, PCodeToECodeEffect, PCodeToECodeExpr, PCodeToECodeExprKind,
+    use crate::il::ecode::transform::state::{
+        ECodeLiftEffect, ECodeLiftExpr, ECodeLiftExprKind, ECodeLiftState,
     };
     use crate::il::ecode::{ECodeOpcode, ECodeOptimiser};
     use crate::ir::{Address, FunctionId};
     use crate::storage::segments::space::AddressSpaceId;
 
-    struct PCodeToECodeBufferFixture {
+    struct ECodeLiftStateFixture {
         metadata: IlMetadata,
         graph: IlGraph,
         source_spans: Vec<IlSourceSpan>,
         parent_spans: Vec<IlParentSpan>,
-        buffer: PCodeToECodeBuffer,
+        state: ECodeLiftState,
     }
 
-    struct PCodeToECodeBufferFixtureBuilder {
-        fixture: PCodeToECodeBufferFixture,
+    struct ECodeLiftStateFixtureBuilder {
+        fixture: ECodeLiftStateFixture,
     }
 
-    impl PCodeToECodeBufferFixtureBuilder {
+    impl ECodeLiftStateFixtureBuilder {
         fn new(metadata: IlMetadata, graph: IlGraph) -> Self {
             Self {
-                fixture: PCodeToECodeBufferFixture {
+                fixture: ECodeLiftStateFixture {
                     metadata,
                     graph,
                     source_spans: Vec::new(),
                     parent_spans: Vec::new(),
-                    buffer: PCodeToECodeBuffer::default(),
+                    state: ECodeLiftState::default(),
                 },
             }
         }
 
-        fn push_expression(&mut self, expression: PCodeToECodeExpr) -> Result<IlExprId, IlError> {
-            self.fixture.buffer.push_expression(expression)
+        fn push_expression(&mut self, expression: ECodeLiftExpr) -> Result<IlExprId, IlError> {
+            self.fixture.state.push_expression(expression)
         }
 
         fn push_expression_operands(
             &mut self,
             operands: impl IntoIterator<Item = IlExprId>,
         ) -> Result<IlIndexRange, IlError> {
-            self.fixture.buffer.push_expression_operands(operands)
+            self.fixture.state.push_expression_operands(operands)
         }
 
-        fn push_statement(&mut self, operation: PCodeToECodeEffect) -> Result<IlOpId, IlError> {
-            self.fixture.buffer.push_op(operation)
+        fn push_op(&mut self, operation: ECodeLiftEffect) -> Result<IlOpId, IlError> {
+            self.fixture.state.push_op(operation)
         }
 
         fn push_effect_operands(
             &mut self,
             operands: impl IntoIterator<Item = IlExprId>,
         ) -> Result<IlIndexRange, IlError> {
-            self.fixture.buffer.push_op_operands(operands)
+            self.fixture.state.push_op_operands(operands)
         }
 
         fn set_call_preserved_registers(&mut self, registers: Vec<RegisterId>) {
-            self.fixture.buffer.set_call_preserved_registers(registers);
+            self.fixture.state.set_call_preserved_registers(registers);
         }
 
         fn set_parent_spans(&mut self, spans: Vec<IlParentSpan>) {
@@ -789,7 +777,7 @@ mod test {
             self.fixture.source_spans = spans;
         }
 
-        fn build(self) -> PCodeToECodeBufferFixture {
+        fn build(self) -> ECodeLiftStateFixture {
             self.fixture
         }
     }
@@ -800,10 +788,10 @@ mod test {
     }
 
     impl ECodeFixtureBuilder {
-        fn build(&mut self, fixture: PCodeToECodeBufferFixture) -> Result<ECodeIr, IlError> {
+        fn build(&mut self, fixture: ECodeLiftStateFixture) -> Result<ECodeIr, IlError> {
             let builder = ECodeBuilder::new(fixture.metadata, IlGraph::default());
             PCodeToECodeSsaLifter::new(
-                fixture.buffer,
+                fixture.state,
                 fixture.graph,
                 fixture.source_spans,
                 fixture.parent_spans,
@@ -813,10 +801,7 @@ mod test {
             .lift()
         }
 
-        fn build_optimised(
-            &mut self,
-            fixture: PCodeToECodeBufferFixture,
-        ) -> Result<ECodeIr, IlError> {
+        fn build_optimised(&mut self, fixture: ECodeLiftStateFixture) -> Result<ECodeIr, IlError> {
             let mut ir = self.build(fixture)?;
             ir.rewrite(ECodeOptimiser);
             Ok(ir)
@@ -826,8 +811,7 @@ mod test {
     #[test]
     fn empty_ecode_constructs_empty_body() {
         let source_metadata = IlMetadata::new(FunctionId::default(), 11);
-        let source =
-            PCodeToECodeBufferFixtureBuilder::new(source_metadata, IlGraph::default()).build();
+        let source = ECodeLiftStateFixtureBuilder::new(source_metadata, IlGraph::default()).build();
         let mut transform = ECodeFixtureBuilder::default();
 
         let ir = transform.build(source).unwrap();
@@ -839,11 +823,10 @@ mod test {
     #[test]
     fn register_read_after_write_uses_current_value() {
         let source_metadata = IlMetadata::new(FunctionId::default(), 11);
-        let mut builder =
-            PCodeToECodeBufferFixtureBuilder::new(source_metadata, IlGraph::default());
+        let mut builder = ECodeLiftStateFixtureBuilder::new(source_metadata, IlGraph::default());
         let value = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::Op(ECodeOpcode::Constant),
                 64,
                 IlIndexRange::EMPTY,
                 0x2a,
@@ -852,8 +835,8 @@ mod test {
             .unwrap();
 
         builder
-            .push_statement(
-                PCodeToECodeEffect::new(
+            .push_op(
+                ECodeLiftEffect::new(
                     ECodeOpcode::WriteRegister,
                     IlIndexRange::EMPTY,
                     Some(value),
@@ -865,8 +848,8 @@ mod test {
             .unwrap();
 
         let read = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::ReadRegister,
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::ReadRegister,
                 64,
                 IlIndexRange::EMPTY,
                 7,
@@ -876,7 +859,7 @@ mod test {
         let operands = builder.push_effect_operands([read]).unwrap();
 
         builder
-            .push_statement(PCodeToECodeEffect::new(
+            .push_op(ECodeLiftEffect::new(
                 ECodeOpcode::Return,
                 operands,
                 None,
@@ -913,12 +896,11 @@ mod test {
     #[test]
     fn call_preserves_only_declared_register_state() {
         let source_metadata = IlMetadata::new(FunctionId::default(), 11);
-        let mut builder =
-            PCodeToECodeBufferFixtureBuilder::new(source_metadata, IlGraph::default());
+        let mut builder = ECodeLiftStateFixtureBuilder::new(source_metadata, IlGraph::default());
         builder.set_call_preserved_registers(vec![RegisterId::new(7)]);
         let preserved = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::Op(ECodeOpcode::Constant),
                 64,
                 IlIndexRange::EMPTY,
                 0x2a,
@@ -926,8 +908,8 @@ mod test {
             ))
             .unwrap();
         builder
-            .push_statement(
-                PCodeToECodeEffect::new(
+            .push_op(
+                ECodeLiftEffect::new(
                     ECodeOpcode::WriteRegister,
                     IlIndexRange::EMPTY,
                     Some(preserved),
@@ -938,8 +920,8 @@ mod test {
             )
             .unwrap();
         let clobbered = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::Op(ECodeOpcode::Constant),
                 64,
                 IlIndexRange::EMPTY,
                 0x2b,
@@ -947,8 +929,8 @@ mod test {
             ))
             .unwrap();
         builder
-            .push_statement(
-                PCodeToECodeEffect::new(
+            .push_op(
+                ECodeLiftEffect::new(
                     ECodeOpcode::WriteRegister,
                     IlIndexRange::EMPTY,
                     Some(clobbered),
@@ -959,7 +941,7 @@ mod test {
             )
             .unwrap();
         builder
-            .push_statement(PCodeToECodeEffect::new(
+            .push_op(ECodeLiftEffect::new(
                 ECodeOpcode::Call,
                 IlIndexRange::EMPTY,
                 None,
@@ -968,8 +950,8 @@ mod test {
             ))
             .unwrap();
         let read_preserved = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::ReadRegister,
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::ReadRegister,
                 64,
                 IlIndexRange::EMPTY,
                 7,
@@ -977,8 +959,8 @@ mod test {
             ))
             .unwrap();
         let read_clobbered = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::ReadRegister,
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::ReadRegister,
                 64,
                 IlIndexRange::EMPTY,
                 8,
@@ -989,7 +971,7 @@ mod test {
             .push_effect_operands([read_preserved, read_clobbered])
             .unwrap();
         builder
-            .push_statement(PCodeToECodeEffect::new(
+            .push_op(ECodeLiftEffect::new(
                 ECodeOpcode::Return,
                 operands,
                 None,
@@ -1020,11 +1002,10 @@ mod test {
     #[test]
     fn insn_wide_expression_is_not_rebuilt_after_register_write() {
         let source_metadata = IlMetadata::new(FunctionId::default(), 11);
-        let mut builder =
-            PCodeToECodeBufferFixtureBuilder::new(source_metadata, IlGraph::default());
+        let mut builder = ECodeLiftStateFixtureBuilder::new(source_metadata, IlGraph::default());
         let register = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::ReadRegister,
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::ReadRegister,
                 64,
                 IlIndexRange::EMPTY,
                 7,
@@ -1032,8 +1013,8 @@ mod test {
             ))
             .unwrap();
         let decrement = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::Op(ECodeOpcode::Constant),
                 64,
                 IlIndexRange::EMPTY,
                 8,
@@ -1044,8 +1025,8 @@ mod test {
             .push_expression_operands([register, decrement])
             .unwrap();
         let address = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::Op(ECodeOpcode::Sub),
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::Op(ECodeOpcode::Sub),
                 64,
                 subtract_operands,
                 0,
@@ -1053,8 +1034,8 @@ mod test {
             ))
             .unwrap();
         builder
-            .push_statement(
-                PCodeToECodeEffect::new(
+            .push_op(
+                ECodeLiftEffect::new(
                     ECodeOpcode::WriteRegister,
                     IlIndexRange::EMPTY,
                     Some(address),
@@ -1066,8 +1047,8 @@ mod test {
             .unwrap();
 
         let value = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::Op(ECodeOpcode::Constant),
                 64,
                 IlIndexRange::EMPTY,
                 0x2a,
@@ -1076,7 +1057,7 @@ mod test {
             .unwrap();
         let store_operands = builder.push_effect_operands([address, value]).unwrap();
         builder
-            .push_statement(PCodeToECodeEffect::new(
+            .push_op(ECodeLiftEffect::new(
                 ECodeOpcode::Store,
                 store_operands,
                 None,
@@ -1113,11 +1094,10 @@ mod test {
     #[test]
     fn register_read_without_write_becomes_undefined() {
         let source_metadata = IlMetadata::new(FunctionId::default(), 11);
-        let mut builder =
-            PCodeToECodeBufferFixtureBuilder::new(source_metadata, IlGraph::default());
+        let mut builder = ECodeLiftStateFixtureBuilder::new(source_metadata, IlGraph::default());
         let read = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::ReadRegister,
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::ReadRegister,
                 32,
                 IlIndexRange::EMPTY,
                 9,
@@ -1127,7 +1107,7 @@ mod test {
         let operands = builder.push_effect_operands([read]).unwrap();
 
         builder
-            .push_statement(PCodeToECodeEffect::new(
+            .push_op(ECodeLiftEffect::new(
                 ECodeOpcode::Return,
                 operands,
                 None,
@@ -1149,11 +1129,10 @@ mod test {
     #[test]
     fn load_preserves_fugue_address_space() {
         let source_metadata = IlMetadata::new(FunctionId::default(), 11);
-        let mut builder =
-            PCodeToECodeBufferFixtureBuilder::new(source_metadata, IlGraph::default());
+        let mut builder = ECodeLiftStateFixtureBuilder::new(source_metadata, IlGraph::default());
         let offset = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::Op(ECodeOpcode::Constant),
                 64,
                 IlIndexRange::EMPTY,
                 0x1000,
@@ -1163,8 +1142,8 @@ mod test {
         let load_operands = builder.push_expression_operands([offset]).unwrap();
         let space = AddressSpaceId::new(3);
         let load = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::Op(ECodeOpcode::Load),
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::Op(ECodeOpcode::Load),
                 8,
                 load_operands,
                 0,
@@ -1174,7 +1153,7 @@ mod test {
         let return_operands = builder.push_effect_operands([load]).unwrap();
 
         builder
-            .push_statement(PCodeToECodeEffect::new(
+            .push_op(ECodeLiftEffect::new(
                 ECodeOpcode::Return,
                 return_operands,
                 None,
@@ -1205,12 +1184,11 @@ mod test {
     #[test]
     fn load_after_store_uses_store_memory_result() {
         let source_metadata = IlMetadata::new(FunctionId::default(), 11);
-        let mut builder =
-            PCodeToECodeBufferFixtureBuilder::new(source_metadata, IlGraph::default());
+        let mut builder = ECodeLiftStateFixtureBuilder::new(source_metadata, IlGraph::default());
         let space = AddressSpaceId::new(3);
         let store_address = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::Op(ECodeOpcode::Constant),
                 64,
                 IlIndexRange::EMPTY,
                 0x1000,
@@ -1218,8 +1196,8 @@ mod test {
             ))
             .unwrap();
         let store_value = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::Op(ECodeOpcode::Constant),
                 32,
                 IlIndexRange::EMPTY,
                 0x2a,
@@ -1231,7 +1209,7 @@ mod test {
             .unwrap();
 
         builder
-            .push_statement(PCodeToECodeEffect::new(
+            .push_op(ECodeLiftEffect::new(
                 ECodeOpcode::Store,
                 store_operands,
                 None,
@@ -1241,8 +1219,8 @@ mod test {
             .unwrap();
 
         let load_address = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::Op(ECodeOpcode::Constant),
                 64,
                 IlIndexRange::EMPTY,
                 0x1000,
@@ -1251,8 +1229,8 @@ mod test {
             .unwrap();
         let load_operands = builder.push_expression_operands([load_address]).unwrap();
         let load = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::Op(ECodeOpcode::Load),
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::Op(ECodeOpcode::Load),
                 32,
                 load_operands,
                 0,
@@ -1262,7 +1240,7 @@ mod test {
         let return_operands = builder.push_effect_operands([load]).unwrap();
 
         builder
-            .push_statement(PCodeToECodeEffect::new(
+            .push_op(ECodeLiftEffect::new(
                 ECodeOpcode::Return,
                 return_operands,
                 None,
@@ -1297,12 +1275,11 @@ mod test {
     #[test]
     fn store_without_load_registers_memory_domain() {
         let source_metadata = IlMetadata::new(FunctionId::default(), 11);
-        let mut builder =
-            PCodeToECodeBufferFixtureBuilder::new(source_metadata, IlGraph::default());
+        let mut builder = ECodeLiftStateFixtureBuilder::new(source_metadata, IlGraph::default());
         let space = AddressSpaceId::new(3);
         let address = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::Op(ECodeOpcode::Constant),
                 64,
                 IlIndexRange::EMPTY,
                 0x1000,
@@ -1310,8 +1287,8 @@ mod test {
             ))
             .unwrap();
         let value = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::Op(ECodeOpcode::Constant),
                 32,
                 IlIndexRange::EMPTY,
                 0x2a,
@@ -1321,7 +1298,7 @@ mod test {
         let operands = builder.push_effect_operands([address, value]).unwrap();
 
         builder
-            .push_statement(PCodeToECodeEffect::new(
+            .push_op(ECodeLiftEffect::new(
                 ECodeOpcode::Store,
                 operands,
                 None,
@@ -1343,11 +1320,10 @@ mod test {
     #[test]
     fn direct_branch_preserves_fugue_address() {
         let source_metadata = IlMetadata::new(FunctionId::default(), 11);
-        let mut builder =
-            PCodeToECodeBufferFixtureBuilder::new(source_metadata, IlGraph::default());
+        let mut builder = ECodeLiftStateFixtureBuilder::new(source_metadata, IlGraph::default());
         let condition = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::Op(ECodeOpcode::Constant),
                 1,
                 IlIndexRange::EMPTY,
                 1,
@@ -1355,8 +1331,8 @@ mod test {
             ))
             .unwrap();
         let target_expression = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::Op(ECodeOpcode::Constant),
                 64,
                 IlIndexRange::EMPTY,
                 0x2000,
@@ -1369,7 +1345,7 @@ mod test {
         let target = Address::new(AddressSpaceId::new(4), 0x2000u64);
 
         builder
-            .push_statement(PCodeToECodeEffect::new(
+            .push_op(ECodeLiftEffect::new(
                 ECodeOpcode::ConditionalBranch,
                 operands,
                 None,
@@ -1418,12 +1394,12 @@ mod test {
 
         let successor_kinds = vec![IlEdgeKinds::UNCONDITIONAL; successors.len()];
         let graph = IlGraph::new(blocks, successors, successor_kinds);
-        let mut builder = PCodeToECodeBufferFixtureBuilder::new(source_metadata, graph);
+        let mut builder = ECodeLiftStateFixtureBuilder::new(source_metadata, graph);
 
         for index in 0..block_count {
             let value = builder
-                .push_expression(PCodeToECodeExpr::new(
-                    PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
+                .push_expression(ECodeLiftExpr::new(
+                    ECodeLiftExprKind::Op(ECodeOpcode::Constant),
                     64,
                     IlIndexRange::EMPTY,
                     index as u64,
@@ -1432,8 +1408,8 @@ mod test {
                 .unwrap();
 
             builder
-                .push_statement(
-                    PCodeToECodeEffect::new(
+                .push_op(
+                    ECodeLiftEffect::new(
                         ECodeOpcode::WriteRegister,
                         IlIndexRange::EMPTY,
                         Some(value),
@@ -1483,12 +1459,12 @@ mod test {
             vec![IlEdgeKinds::FALL_THROUGH, IlEdgeKinds::TAKEN],
         );
         let metadata = IlMetadata::new(FunctionId::default(), 11);
-        let mut builder = PCodeToECodeBufferFixtureBuilder::new(metadata, graph);
+        let mut builder = ECodeLiftStateFixtureBuilder::new(metadata, graph);
 
         for register in 0..DOMAIN_COUNT {
             let value = builder
-                .push_expression(PCodeToECodeExpr::new(
-                    PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
+                .push_expression(ECodeLiftExpr::new(
+                    ECodeLiftExprKind::Op(ECodeOpcode::Constant),
                     64,
                     IlIndexRange::EMPTY,
                     register as u64,
@@ -1496,8 +1472,8 @@ mod test {
                 ))
                 .unwrap();
             builder
-                .push_statement(
-                    PCodeToECodeEffect::new(
+                .push_op(
+                    ECodeLiftEffect::new(
                         ECodeOpcode::WriteRegister,
                         IlIndexRange::EMPTY,
                         Some(value),
@@ -1510,8 +1486,8 @@ mod test {
         }
         for register in 0..DOMAIN_COUNT {
             let value = builder
-                .push_expression(PCodeToECodeExpr::new(
-                    PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
+                .push_expression(ECodeLiftExpr::new(
+                    ECodeLiftExprKind::Op(ECodeOpcode::Constant),
                     64,
                     IlIndexRange::EMPTY,
                     0x1000 + register as u64,
@@ -1519,8 +1495,8 @@ mod test {
                 ))
                 .unwrap();
             builder
-                .push_statement(
-                    PCodeToECodeEffect::new(
+                .push_op(
+                    ECodeLiftEffect::new(
                         ECodeOpcode::WriteRegister,
                         IlIndexRange::EMPTY,
                         Some(value),
@@ -1533,8 +1509,8 @@ mod test {
         }
         let reads = (0..DOMAIN_COUNT)
             .map(|register| {
-                builder.push_expression(PCodeToECodeExpr::new(
-                    PCodeToECodeExprKind::ReadRegister,
+                builder.push_expression(ECodeLiftExpr::new(
+                    ECodeLiftExprKind::ReadRegister,
                     64,
                     IlIndexRange::EMPTY,
                     register as u64,
@@ -1545,7 +1521,7 @@ mod test {
             .unwrap();
         let operands = builder.push_effect_operands(reads).unwrap();
         builder
-            .push_statement(PCodeToECodeEffect::new(
+            .push_op(ECodeLiftEffect::new(
                 ECodeOpcode::Return,
                 operands,
                 None,
@@ -1611,10 +1587,10 @@ mod test {
             successors.clone(),
             vec![IlEdgeKinds::UNCONDITIONAL; successors.len()],
         );
-        let mut builder = PCodeToECodeBufferFixtureBuilder::new(source_metadata, graph);
+        let mut builder = ECodeLiftStateFixtureBuilder::new(source_metadata, graph);
         let left = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::Op(ECodeOpcode::Constant),
                 64,
                 IlIndexRange::EMPTY,
                 1,
@@ -1622,8 +1598,8 @@ mod test {
             ))
             .unwrap();
         let right = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::Op(ECodeOpcode::Constant),
                 64,
                 IlIndexRange::EMPTY,
                 2,
@@ -1631,8 +1607,8 @@ mod test {
             ))
             .unwrap();
         let read = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::ReadRegister,
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::ReadRegister,
                 64,
                 IlIndexRange::EMPTY,
                 7,
@@ -1641,8 +1617,8 @@ mod test {
             .unwrap();
 
         builder
-            .push_statement(
-                PCodeToECodeEffect::new(
+            .push_op(
+                ECodeLiftEffect::new(
                     ECodeOpcode::WriteRegister,
                     IlIndexRange::EMPTY,
                     Some(left),
@@ -1653,8 +1629,8 @@ mod test {
             )
             .unwrap();
         builder
-            .push_statement(
-                PCodeToECodeEffect::new(
+            .push_op(
+                ECodeLiftEffect::new(
                     ECodeOpcode::WriteRegister,
                     IlIndexRange::EMPTY,
                     Some(right),
@@ -1666,7 +1642,7 @@ mod test {
             .unwrap();
         let operands = builder.push_effect_operands([read]).unwrap();
         builder
-            .push_statement(PCodeToECodeEffect::new(
+            .push_op(ECodeLiftEffect::new(
                 ECodeOpcode::Return,
                 operands,
                 None,
@@ -1737,11 +1713,11 @@ mod test {
             successors.clone(),
             vec![IlEdgeKinds::UNCONDITIONAL; successors.len()],
         );
-        let mut builder = PCodeToECodeBufferFixtureBuilder::new(source_metadata, graph);
+        let mut builder = ECodeLiftStateFixtureBuilder::new(source_metadata, graph);
         let space = AddressSpaceId::new(3);
         let store_address = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::Op(ECodeOpcode::Constant),
                 64,
                 IlIndexRange::EMPTY,
                 0x1000,
@@ -1749,8 +1725,8 @@ mod test {
             ))
             .unwrap();
         let store_value = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::Op(ECodeOpcode::Constant),
                 32,
                 IlIndexRange::EMPTY,
                 0x2a,
@@ -1758,8 +1734,8 @@ mod test {
             ))
             .unwrap();
         let load_address = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::Op(ECodeOpcode::Constant),
                 64,
                 IlIndexRange::EMPTY,
                 0x1000,
@@ -1768,8 +1744,8 @@ mod test {
             .unwrap();
         let load_operands = builder.push_expression_operands([load_address]).unwrap();
         let load = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::Op(ECodeOpcode::Load),
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::Op(ECodeOpcode::Load),
                 32,
                 load_operands,
                 0,
@@ -1781,7 +1757,7 @@ mod test {
             .unwrap();
 
         builder
-            .push_statement(PCodeToECodeEffect::new(
+            .push_op(ECodeLiftEffect::new(
                 ECodeOpcode::Store,
                 store_operands,
                 None,
@@ -1793,7 +1769,7 @@ mod test {
         let return_operands = builder.push_effect_operands([load]).unwrap();
 
         builder
-            .push_statement(PCodeToECodeEffect::new(
+            .push_op(ECodeLiftEffect::new(
                 ECodeOpcode::Return,
                 return_operands,
                 None,
@@ -1856,10 +1832,10 @@ mod test {
             vec![loop_header, loop_body, loop_header, exit],
             vec![IlEdgeKinds::UNCONDITIONAL; 4],
         );
-        let mut builder = PCodeToECodeBufferFixtureBuilder::new(source_metadata, graph);
+        let mut builder = ECodeLiftStateFixtureBuilder::new(source_metadata, graph);
         let read = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::ReadRegister,
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::ReadRegister,
                 32,
                 IlIndexRange::EMPTY,
                 9,
@@ -1867,8 +1843,8 @@ mod test {
             ))
             .unwrap();
         let constant = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::Op(ECodeOpcode::Constant),
                 32,
                 IlIndexRange::EMPTY,
                 1,
@@ -1878,7 +1854,7 @@ mod test {
         let return_operands = builder.push_effect_operands([read]).unwrap();
 
         builder
-            .push_statement(PCodeToECodeEffect::new(
+            .push_op(ECodeLiftEffect::new(
                 ECodeOpcode::Return,
                 return_operands,
                 None,
@@ -1887,8 +1863,8 @@ mod test {
             ))
             .unwrap();
         builder
-            .push_statement(
-                PCodeToECodeEffect::new(
+            .push_op(
+                ECodeLiftEffect::new(
                     ECodeOpcode::WriteRegister,
                     IlIndexRange::EMPTY,
                     Some(constant),
@@ -1925,12 +1901,11 @@ mod test {
     #[test]
     fn value_domains_create_distinct_register_and_flag_definitions() {
         let source_metadata = IlMetadata::new(FunctionId::default(), 11);
-        let mut builder =
-            PCodeToECodeBufferFixtureBuilder::new(source_metadata, IlGraph::default());
+        let mut builder = ECodeLiftStateFixtureBuilder::new(source_metadata, IlGraph::default());
 
         let source_value = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::Op(ECodeOpcode::Constant),
                 8,
                 IlIndexRange::EMPTY,
                 0x2a,
@@ -1938,8 +1913,8 @@ mod test {
             ))
             .unwrap();
         builder
-            .push_statement(
-                PCodeToECodeEffect::new(
+            .push_op(
+                ECodeLiftEffect::new(
                     ECodeOpcode::WriteRegister,
                     IlIndexRange::EMPTY,
                     Some(source_value),
@@ -1951,8 +1926,8 @@ mod test {
             .unwrap();
 
         builder
-            .push_statement(
-                PCodeToECodeEffect::new(
+            .push_op(
+                ECodeLiftEffect::new(
                     ECodeOpcode::WriteRegister,
                     IlIndexRange::EMPTY,
                     Some(source_value),
@@ -1963,8 +1938,8 @@ mod test {
             )
             .unwrap();
         builder
-            .push_statement(
-                PCodeToECodeEffect::new(
+            .push_op(
+                ECodeLiftEffect::new(
                     ECodeOpcode::WriteFlag,
                     IlIndexRange::EMPTY,
                     Some(source_value),
@@ -1976,8 +1951,8 @@ mod test {
             .unwrap();
 
         let register_seven = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::ReadRegister,
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::ReadRegister,
                 8,
                 IlIndexRange::EMPTY,
                 7,
@@ -1985,8 +1960,8 @@ mod test {
             ))
             .unwrap();
         let register_eight = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::ReadRegister,
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::ReadRegister,
                 8,
                 IlIndexRange::EMPTY,
                 8,
@@ -1994,8 +1969,8 @@ mod test {
             ))
             .unwrap();
         let flag = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::ReadFlag,
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::ReadFlag,
                 8,
                 IlIndexRange::EMPTY,
                 3,
@@ -2006,7 +1981,7 @@ mod test {
             .push_effect_operands([register_seven, register_eight, flag])
             .unwrap();
         builder
-            .push_statement(PCodeToECodeEffect::new(
+            .push_op(ECodeLiftEffect::new(
                 ECodeOpcode::Return,
                 operands,
                 None,
@@ -2060,12 +2035,11 @@ mod test {
     #[test]
     fn value_domains_survive_compaction_and_rkyv() {
         let source_metadata = IlMetadata::new(FunctionId::default(), 11);
-        let mut builder =
-            PCodeToECodeBufferFixtureBuilder::new(source_metadata, IlGraph::default());
+        let mut builder = ECodeLiftStateFixtureBuilder::new(source_metadata, IlGraph::default());
 
         let written = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::Op(ECodeOpcode::Constant),
                 64,
                 IlIndexRange::EMPTY,
                 0x2a,
@@ -2073,8 +2047,8 @@ mod test {
             ))
             .unwrap();
         builder
-            .push_statement(
-                PCodeToECodeEffect::new(
+            .push_op(
+                ECodeLiftEffect::new(
                     ECodeOpcode::WriteRegister,
                     IlIndexRange::EMPTY,
                     Some(written),
@@ -2086,8 +2060,8 @@ mod test {
             .unwrap();
 
         let read = builder
-            .push_expression(PCodeToECodeExpr::new(
-                PCodeToECodeExprKind::ReadRegister,
+            .push_expression(ECodeLiftExpr::new(
+                ECodeLiftExprKind::ReadRegister,
                 64,
                 IlIndexRange::EMPTY,
                 7,
@@ -2096,7 +2070,7 @@ mod test {
             .unwrap();
         let operands = builder.push_effect_operands([read]).unwrap();
         builder
-            .push_statement(PCodeToECodeEffect::new(
+            .push_op(ECodeLiftEffect::new(
                 ECodeOpcode::Return,
                 operands,
                 None,

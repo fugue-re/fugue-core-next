@@ -1,12 +1,10 @@
-use std::mem::size_of;
-
 use crate::il::common::{IlExprId, IlIndexRange};
 use crate::il::ecode::ECodeOpcode;
 use crate::ir::Address;
 use crate::storage::segments::space::AddressSpaceId;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub(crate) struct PCodeToECodeEffect {
+pub(crate) struct ECodeLiftEffect {
     opcode: ECodeOpcode,
     operands: IlIndexRange,
     value: Option<IlExprId>,
@@ -15,7 +13,7 @@ pub(crate) struct PCodeToECodeEffect {
     address_space: Option<AddressSpaceId>,
 }
 
-impl PCodeToECodeEffect {
+impl ECodeLiftEffect {
     pub(crate) const fn new(
         opcode: ECodeOpcode,
         operands: IlIndexRange,
@@ -66,5 +64,3 @@ impl PCodeToECodeEffect {
         self.address_space
     }
 }
-
-const _: () = assert!(size_of::<PCodeToECodeEffect>() <= 64);

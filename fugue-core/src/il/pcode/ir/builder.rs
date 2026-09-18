@@ -3,9 +3,8 @@ use rustc_hash::FxHashMap;
 use crate::il::common::{
     IlArtefact, IlError, IlGraph, IlIndexRange, IlMetadata, IlOpId, IlPool, IlSourceSpan,
 };
-use crate::il::pcode::{
-    PCodeIr, PCodeLocation, PCodeLocationId, PCodeOp, PCodeOpSpec, PCodeTargetId,
-};
+use crate::il::pcode::ir::PCodeIr;
+use crate::il::pcode::{PCodeLocation, PCodeLocationId, PCodeOp, PCodeOpSpec, PCodeTargetId};
 use crate::ir::Location;
 
 #[derive(Debug)]
@@ -89,15 +88,15 @@ impl PCodeBuilder {
     }
 
     pub fn build(self) -> Result<PCodeIr, IlError> {
-        let mut ir = PCodeIr::new(
-            self.metadata,
-            self.graph,
-            self.source_spans,
-            self.locations,
-            self.operations,
-            self.operands.into_values(),
-            self.targets,
-        );
+        let mut ir = PCodeIr {
+            metadata: self.metadata,
+            graph: self.graph,
+            source_spans: self.source_spans,
+            locations: self.locations,
+            operations: self.operations,
+            operands: self.operands.into_values(),
+            targets: self.targets,
+        };
 
         ir.shrink_to_fit();
 
@@ -143,7 +142,7 @@ impl PCodeEmitter<'_> {
 mod test {
     use super::*;
     use crate::il::common::{IlBlock, IlBlockProperties, IlSourceSpan};
-    use crate::il::pcode::verify::VerifyError;
+    use crate::il::pcode::ir::verify::VerifyError;
     use crate::il::pcode::{PCodeLifterSpaceHandle, PCodeLocationProperties, PCodeOpcode};
     use crate::ir::{Address, FunctionId};
     use crate::storage::segments::space::AddressSpaceId;
@@ -392,20 +391,20 @@ mod test {
     #[test]
     fn pcode_verifier_rejects_out_of_range_source_span() {
         let source = Address::new(AddressSpaceId::new(1), 0x1000u64);
-        let ir = PCodeIr::new(
-            metadata(),
-            IlGraph::default(),
-            vec![IlSourceSpan::new(
+        let ir = PCodeIr {
+            metadata: metadata(),
+            graph: IlGraph::default(),
+            source_spans: vec![IlSourceSpan::new(
                 IlIndexRange::new(0, 1).unwrap(),
                 source,
                 0,
                 1,
             )],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        );
+            locations: Vec::new(),
+            operations: Vec::new(),
+            operands: Vec::new(),
+            targets: Vec::new(),
+        };
 
         assert!(matches!(
             ir.verify(),
@@ -424,15 +423,15 @@ mod test {
             Vec::new(),
             Vec::new(),
         );
-        let ir = PCodeIr::new(
-            metadata(),
+        let ir = PCodeIr {
+            metadata: metadata(),
             graph,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        );
+            source_spans: Vec::new(),
+            locations: Vec::new(),
+            operations: Vec::new(),
+            operands: Vec::new(),
+            targets: Vec::new(),
+        };
 
         assert!(matches!(
             ir.verify(),

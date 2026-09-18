@@ -7,7 +7,8 @@ use crate::analysis::switch::{
 };
 use crate::analysis::value::StridedInterval;
 use crate::il::common::{IlArtefact, IlBlockId, IlDominance, IlValueId};
-use crate::il::ecode::{ECodeBlockArgInputs, ECodeIr, ECodeOpcode, ECodeStridedIntervals};
+use crate::il::ecode::analysis::{ECodeBlockArgInputs, ECodeStridedIntervals};
+use crate::il::ecode::{ECodeIr, ECodeOpcode};
 use crate::ir::{Address, AddressTable, SwitchCase, SwitchModel};
 use crate::lifter::ContextSet;
 

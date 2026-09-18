@@ -1,13 +1,13 @@
 use std::mem::{self, size_of};
 
 use fugue_bv::BitVec;
+use verify::{VerifyError, verify};
 
 use crate::il::common::{
     ControlFlowIl, IlArtefact, IlBlockArgId, IlBlockId, IlConstantInterner, IlGraph, IlIndexRange,
     IlMetadata, IlOpId, IlParentSpan, IlSchemaVersion, IlSourceSpan, IlSsaDef, IlValueId,
     PersistableIl, SsaIl,
 };
-use crate::il::ecode::verify::{VerifyError, verify};
 use crate::il::ecode::{
     ECodeBlockArg, ECodeDomain, ECodeIrDisplay, ECodeMemoryDomain, ECodeOp, ECodeOpcode,
     ECodeSourceDisplay, ECodeValue,
@@ -15,6 +15,11 @@ use crate::il::ecode::{
 use crate::ir::{Address, AddressRange};
 use crate::storage::segments::space::AddressSpaceId;
 use crate::types::EstimateSize;
+
+mod builder;
+mod verify;
+
+pub use builder::{ECodeBuilder, ECodeEmitter};
 
 #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(derive(Debug, PartialEq, Eq))]
@@ -34,56 +39,7 @@ pub struct ECodeIr {
     constant_storage: Vec<u8>,
 }
 
-pub(crate) struct ECodeIrStorage {
-    pub(crate) metadata: IlMetadata,
-    pub(crate) graph: IlGraph,
-    pub(crate) source_spans: Vec<IlSourceSpan>,
-    pub(crate) parent_spans: Vec<IlParentSpan>,
-    pub(crate) values: Vec<ECodeValue>,
-    pub(crate) value_domains: Vec<Option<ECodeDomain>>,
-    pub(crate) block_args: Vec<ECodeBlockArg>,
-    pub(crate) edge_args: Vec<IlIndexRange>,
-    pub(crate) edge_arg_values: Vec<IlValueId>,
-    pub(crate) operations: Vec<ECodeOp>,
-    pub(crate) value_operands: Vec<IlValueId>,
-    pub(crate) memory_domains: Vec<ECodeMemoryDomain>,
-    pub(crate) constant_storage: Vec<u8>,
-}
-
 impl ECodeIr {
-    pub(crate) fn new(storage: ECodeIrStorage) -> Self {
-        let ECodeIrStorage {
-            metadata,
-            graph,
-            source_spans,
-            parent_spans,
-            values,
-            value_domains,
-            block_args,
-            edge_args,
-            edge_arg_values,
-            operations,
-            value_operands,
-            memory_domains,
-            constant_storage,
-        } = storage;
-        Self {
-            metadata,
-            graph,
-            source_spans,
-            parent_spans,
-            values,
-            value_domains,
-            block_args,
-            edge_args,
-            edge_arg_values,
-            operations,
-            value_operands,
-            memory_domains,
-            constant_storage,
-        }
-    }
-
     pub const fn metadata(&self) -> &IlMetadata {
         &self.metadata
     }
@@ -322,10 +278,6 @@ impl ECodeIr {
 
     pub(crate) fn take_graph(&mut self) -> IlGraph {
         mem::take(&mut self.graph)
-    }
-
-    pub(crate) fn take_memory_domains(&mut self) -> Vec<ECodeMemoryDomain> {
-        mem::take(&mut self.memory_domains)
     }
 
     pub(crate) fn rewriter(&mut self) -> ECodeRewriter<'_> {

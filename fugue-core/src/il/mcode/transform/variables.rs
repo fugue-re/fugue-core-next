@@ -6,9 +6,8 @@ use crate::il::common::{
     DisjointSet, FlagId, IlArtefact, IlBlockId, IlCsr, IlDominance, IlDominanceEvent, IlError,
     IlOpId, IlValueId, RegisterId,
 };
-use crate::il::ecode::{
-    ECodeBlockArgInputs, ECodeDomain, ECodeIr, ECodeLiveness, ECodeOp, ECodeOpcode,
-};
+use crate::il::ecode::analysis::{ECodeBlockArgInputs, ECodeLiveness};
+use crate::il::ecode::{ECodeDomain, ECodeIr, ECodeOp, ECodeOpcode};
 use crate::il::mcode::transform::abi::MCodeCallOutputComponent;
 use crate::il::mcode::transform::analysis::ECodeToMCodeAnalysis;
 use crate::il::mcode::transform::stack::{MCodeStackModel, MCodeStackObjectId};

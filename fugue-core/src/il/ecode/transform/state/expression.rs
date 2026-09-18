@@ -1,30 +1,26 @@
-use std::mem::size_of;
-
 use crate::il::common::IlIndexRange;
 use crate::il::ecode::ECodeOpcode;
 use crate::storage::segments::space::AddressSpaceId;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub(crate) enum PCodeToECodeExprKind {
+pub(crate) enum ECodeLiftExprKind {
     Op(ECodeOpcode),
     ReadFlag,
     ReadRegister,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub(crate) struct PCodeToECodeExpr {
-    kind: PCodeToECodeExprKind,
+pub(crate) struct ECodeLiftExpr {
+    kind: ECodeLiftExprKind,
     width: u32,
     operands: IlIndexRange,
     immediate: u64,
     address_space: Option<AddressSpaceId>,
 }
 
-const _: () = assert!(size_of::<PCodeToECodeExpr>() <= 32);
-
-impl PCodeToECodeExpr {
+impl ECodeLiftExpr {
     pub(crate) const fn new(
-        kind: PCodeToECodeExprKind,
+        kind: ECodeLiftExprKind,
         width: u32,
         operands: IlIndexRange,
         immediate: u64,
@@ -39,7 +35,7 @@ impl PCodeToECodeExpr {
         }
     }
 
-    pub(crate) const fn kind(&self) -> PCodeToECodeExprKind {
+    pub(crate) const fn kind(&self) -> ECodeLiftExprKind {
         self.kind
     }
 

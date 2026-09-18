@@ -1,7 +1,8 @@
 use rustc_hash::FxHashMap;
 
 use crate::il::common::{IlArtefact, IlCsr, IlOpId, IlValueId, RegisterId};
-use crate::il::ecode::{ECodeBlockArgInputs, ECodeDomain, ECodeIr, ECodeOpcode, ECodeUses};
+use crate::il::ecode::analysis::{ECodeBlockArgInputs, ECodeUses};
+use crate::il::ecode::{ECodeDomain, ECodeIr, ECodeOpcode};
 use crate::il::mcode::MCodeStorageLocation;
 use crate::il::mcode::transform::facts::MCodeStorageFact;
 

@@ -3,22 +3,22 @@ use crate::il::ecode::ECodeOpcode;
 use crate::ir::Address;
 use crate::storage::segments::space::AddressSpaceId;
 
+mod effect;
 mod expression;
-mod operation;
 
-pub(crate) use expression::{PCodeToECodeExpr, PCodeToECodeExprKind};
-pub(crate) use operation::PCodeToECodeEffect;
+pub(crate) use effect::ECodeLiftEffect;
+pub(crate) use expression::{ECodeLiftExpr, ECodeLiftExprKind};
 
 #[derive(Debug)]
-pub(crate) struct PCodeToECodeBuffer {
+pub(crate) struct ECodeLiftState {
     call_preserved_registers: Vec<RegisterId>,
-    expressions: Vec<PCodeToECodeExpr>,
+    expressions: Vec<ECodeLiftExpr>,
     expression_operands: IlPool<IlExprId>,
-    operations: Vec<PCodeToECodeEffect>,
+    operations: Vec<ECodeLiftEffect>,
     operation_operands: IlPool<IlExprId>,
 }
 
-impl Default for PCodeToECodeBuffer {
+impl Default for ECodeLiftState {
     fn default() -> Self {
         Self {
             call_preserved_registers: Vec::new(),
@@ -30,12 +30,12 @@ impl Default for PCodeToECodeBuffer {
     }
 }
 
-impl PCodeToECodeBuffer {
-    pub(crate) fn expressions(&self) -> &[PCodeToECodeExpr] {
+impl ECodeLiftState {
+    pub(crate) fn expressions(&self) -> &[ECodeLiftExpr] {
         &self.expressions
     }
 
-    pub(crate) fn ops(&self) -> &[PCodeToECodeEffect] {
+    pub(crate) fn ops(&self) -> &[ECodeLiftEffect] {
         &self.operations
     }
 
@@ -43,13 +43,13 @@ impl PCodeToECodeBuffer {
         &self.call_preserved_registers
     }
 
-    pub(crate) fn expression_operands_for(&self, expression: &PCodeToECodeExpr) -> &[IlExprId] {
+    pub(crate) fn expression_operands_for(&self, expression: &ECodeLiftExpr) -> &[IlExprId] {
         expression
             .operands()
             .slice(self.expression_operands.values())
     }
 
-    pub(crate) fn op_operands_for(&self, operation: &PCodeToECodeEffect) -> &[IlExprId] {
+    pub(crate) fn op_operands_for(&self, operation: &ECodeLiftEffect) -> &[IlExprId] {
         operation.operands().slice(self.operation_operands.values())
     }
 
@@ -61,7 +61,7 @@ impl PCodeToECodeBuffer {
 
     pub(crate) fn push_expression(
         &mut self,
-        expression: PCodeToECodeExpr,
+        expression: ECodeLiftExpr,
     ) -> Result<IlExprId, IlError> {
         let id = IlExprId::try_from_index(self.expressions.len())?;
         self.expressions.push(expression);
@@ -75,7 +75,7 @@ impl PCodeToECodeBuffer {
         self.expression_operands.append(operands)
     }
 
-    pub(crate) fn push_op(&mut self, operation: PCodeToECodeEffect) -> Result<IlOpId, IlError> {
+    pub(crate) fn push_op(&mut self, operation: ECodeLiftEffect) -> Result<IlOpId, IlError> {
         let id = IlOpId::try_from_index(self.operations.len())?;
         self.operations.push(operation);
         Ok(id)
@@ -90,11 +90,11 @@ impl PCodeToECodeBuffer {
 
     fn push_nullary(
         &mut self,
-        kind: PCodeToECodeExprKind,
+        kind: ECodeLiftExprKind,
         width: u32,
         immediate: u64,
     ) -> Result<IlExprId, IlError> {
-        self.push_expression(PCodeToECodeExpr::new(
+        self.push_expression(ECodeLiftExpr::new(
             kind,
             width,
             IlIndexRange::EMPTY,
@@ -104,24 +104,16 @@ impl PCodeToECodeBuffer {
     }
 
     pub(crate) fn constant(&mut self, width: u32, value: u64) -> Result<IlExprId, IlError> {
-        self.push_nullary(
-            PCodeToECodeExprKind::Op(ECodeOpcode::Constant),
-            width,
-            value,
-        )
+        self.push_nullary(ECodeLiftExprKind::Op(ECodeOpcode::Constant), width, value)
     }
 
     pub(crate) fn address(&mut self, width: u32, offset: u64) -> Result<IlExprId, IlError> {
-        self.push_nullary(
-            PCodeToECodeExprKind::Op(ECodeOpcode::Address),
-            width,
-            offset,
-        )
+        self.push_nullary(ECodeLiftExprKind::Op(ECodeOpcode::Address), width, offset)
     }
 
     pub(crate) fn undefined(&mut self, width: u32, discriminant: u64) -> Result<IlExprId, IlError> {
         self.push_nullary(
-            PCodeToECodeExprKind::Op(ECodeOpcode::Undefined),
+            ECodeLiftExprKind::Op(ECodeOpcode::Undefined),
             width,
             discriminant,
         )
@@ -132,11 +124,11 @@ impl PCodeToECodeBuffer {
         register: RegisterId,
         width: u32,
     ) -> Result<IlExprId, IlError> {
-        self.push_nullary(PCodeToECodeExprKind::ReadRegister, width, register.value())
+        self.push_nullary(ECodeLiftExprKind::ReadRegister, width, register.value())
     }
 
     pub(crate) fn read_flag(&mut self, flag: FlagId, width: u32) -> Result<IlExprId, IlError> {
-        self.push_nullary(PCodeToECodeExprKind::ReadFlag, width, flag.value())
+        self.push_nullary(ECodeLiftExprKind::ReadFlag, width, flag.value())
     }
 
     pub(crate) fn apply(
@@ -148,8 +140,8 @@ impl PCodeToECodeBuffer {
         address_space: Option<AddressSpaceId>,
     ) -> Result<IlExprId, IlError> {
         let operands = self.push_expression_operands(operands.iter().copied())?;
-        self.push_expression(PCodeToECodeExpr::new(
-            PCodeToECodeExprKind::Op(opcode),
+        self.push_expression(ECodeLiftExpr::new(
+            ECodeLiftExprKind::Op(opcode),
             width,
             operands,
             immediate,
@@ -163,7 +155,7 @@ impl PCodeToECodeBuffer {
         value: IlExprId,
     ) -> Result<(), IlError> {
         self.push_op(
-            PCodeToECodeEffect::new(
+            ECodeLiftEffect::new(
                 ECodeOpcode::WriteRegister,
                 IlIndexRange::EMPTY,
                 Some(value),
@@ -177,7 +169,7 @@ impl PCodeToECodeBuffer {
 
     pub(crate) fn write_flag(&mut self, flag: FlagId, value: IlExprId) -> Result<(), IlError> {
         self.push_op(
-            PCodeToECodeEffect::new(
+            ECodeLiftEffect::new(
                 ECodeOpcode::WriteFlag,
                 IlIndexRange::EMPTY,
                 Some(value),
@@ -195,7 +187,7 @@ impl PCodeToECodeBuffer {
         address_space: Option<AddressSpaceId>,
     ) -> Result<(), IlError> {
         let operands = self.push_op_operands(operands.iter().copied())?;
-        self.push_op(PCodeToECodeEffect::new(
+        self.push_op(ECodeLiftEffect::new(
             ECodeOpcode::Store,
             operands,
             None,
@@ -212,7 +204,7 @@ impl PCodeToECodeBuffer {
         operands: &[IlExprId],
     ) -> Result<(), IlError> {
         let operands = self.push_op_operands(operands.iter().copied())?;
-        self.push_op(PCodeToECodeEffect::new(
+        self.push_op(ECodeLiftEffect::new(
             opcode,
             operands,
             None,
@@ -229,7 +221,7 @@ impl PCodeToECodeBuffer {
         address_space: Option<AddressSpaceId>,
     ) -> Result<(), IlError> {
         let operands = self.push_op_operands(operands.iter().copied())?;
-        self.push_op(PCodeToECodeEffect::new(
+        self.push_op(ECodeLiftEffect::new(
             opcode,
             operands,
             None,
@@ -247,7 +239,7 @@ impl PCodeToECodeBuffer {
     ) -> Result<(), IlError> {
         let operands = self.push_op_operands(operands.iter().copied())?;
         self.push_op(
-            PCodeToECodeEffect::new(ECodeOpcode::Intrinsic, operands, None, None, address_space)
+            ECodeLiftEffect::new(ECodeOpcode::Intrinsic, operands, None, None, address_space)
                 .with_immediate(intrinsic),
         )?;
         Ok(())
@@ -259,7 +251,7 @@ impl PCodeToECodeBuffer {
         address_space: Option<AddressSpaceId>,
     ) -> Result<(), IlError> {
         self.push_op(
-            PCodeToECodeEffect::new(
+            ECodeLiftEffect::new(
                 ECodeOpcode::Trap,
                 IlIndexRange::EMPTY,
                 None,

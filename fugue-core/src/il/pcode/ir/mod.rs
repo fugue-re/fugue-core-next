@@ -1,10 +1,11 @@
 use std::mem::size_of;
 
+use verify::{VerifyError, verify};
+
 use crate::il::common::{
     ControlFlowIl, IlArtefact, IlGraph, IlMetadata, IlOpId, IlSchemaVersion, IlSourceSpan,
     PersistableIl,
 };
-use crate::il::pcode::verify::{VerifyError, verify};
 use crate::il::pcode::{
     PCodeIrDisplay, PCodeLocation, PCodeLocationId, PCodeOp, PCodeOpcode, PCodeSourceDisplay,
     PCodeTargetId,
@@ -14,6 +15,11 @@ use crate::ir::{
     ReferenceProperties,
 };
 use crate::types::EstimateSize;
+
+mod builder;
+mod verify;
+
+pub use builder::{PCodeBuilder, PCodeEmitter};
 
 #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(derive(Debug, PartialEq, Eq))]
@@ -28,26 +34,6 @@ pub struct PCodeIr {
 }
 
 impl PCodeIr {
-    pub(crate) fn new(
-        metadata: IlMetadata,
-        graph: IlGraph,
-        source_spans: Vec<IlSourceSpan>,
-        locations: Vec<PCodeLocation>,
-        operations: Vec<PCodeOp>,
-        operands: Vec<PCodeLocationId>,
-        targets: Vec<Location>,
-    ) -> Self {
-        Self {
-            metadata,
-            graph,
-            source_spans,
-            locations,
-            operations,
-            operands,
-            targets,
-        }
-    }
-
     pub const fn metadata(&self) -> &IlMetadata {
         &self.metadata
     }

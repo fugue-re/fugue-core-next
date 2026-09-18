@@ -11,12 +11,10 @@ use fugue_core::il::common::{
     IlSchemaVersion, IlSourceSpan, IlSsaDef, IlTransformer, IlValueId, PersistableIl, RegisterId,
     SsaIl, SsaVerifier, SsaVerifyError,
 };
-use fugue_core::il::ecode::{
-    ECodeBuilder, ECodeDomain, ECodeIr, ECodeLiveness, ECodeOpSpec, ECodeOpcode,
-};
-use fugue_core::il::mcode::{
-    MCodeBuilder, MCodeOpSpec, MCodeOpcode, MCodeUses, MCodeVar, MCodeVersion,
-};
+use fugue_core::il::ecode::analysis::ECodeLiveness;
+use fugue_core::il::ecode::{ECodeBuilder, ECodeDomain, ECodeIr, ECodeOpSpec, ECodeOpcode};
+use fugue_core::il::mcode::analysis::MCodeUses;
+use fugue_core::il::mcode::{MCodeBuilder, MCodeOpSpec, MCodeOpcode, MCodeVar, MCodeVersion};
 use fugue_core::il::pcode::{
     PCodeBuilder, PCodeIr, PCodeLifterSpaceHandle, PCodeLocation, PCodeLocationProperties,
     PCodeOpSpec, PCodeOpcode,

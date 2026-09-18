@@ -412,7 +412,6 @@ mod test {
         IlError, IlGraph, IlGraphBuilder, IlIndexRange, IlMetadata, IlOpId, IlSsaDef, IlValueId,
         RegisterId,
     };
-    use crate::il::ecode::ir::ECodeIrStorage;
     use crate::il::ecode::optimise::ECodeConstantFolding;
     use crate::il::ecode::{
         ECodeBlockArg, ECodeBuilder, ECodeDomain, ECodeIr, ECodeMemoryDomain, ECodeOp, ECodeOpSpec,
@@ -481,7 +480,7 @@ mod test {
 
         fn build(self, metadata: IlMetadata, graph: IlGraph) -> ECodeIr {
             let value_domains = vec![None; self.values.len()];
-            ECodeIr::new(ECodeIrStorage {
+            ECodeIr {
                 metadata,
                 graph,
                 source_spans: Vec::new(),
@@ -495,7 +494,7 @@ mod test {
                 value_operands: self.value_operands,
                 memory_domains: self.memory_domains,
                 constant_storage: self.constant_storage,
-            })
+            }
         }
     }
 

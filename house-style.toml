@@ -19,6 +19,16 @@ suffixes = ["at", "page"]
 [parameters]
 first = ["AnalysisContext"]
 
+[macros]
+registrations = ["extension::submit"]
+
+[fields]
+private = [
+    "crate::il::pcode::ir",
+    "crate::il::ecode::ir",
+    "crate::il::mcode::ir",
+]
+
 [vocabulary]
 acronyms = ["ecode", "mcode", "pcode"]
 
@@ -56,6 +66,27 @@ prefer = "def"
 roles = ["type"]
 modules = ["crate::il"]
 reason = "IL type names abbreviate definition to Def"
+
+[[vocabulary.term]]
+reject = "body"
+prefer = "construct the IR through its builder"
+roles = ["type"]
+modules = ["crate::il::pcode::ir", "crate::il::ecode::ir", "crate::il::mcode::ir"]
+reason = "IR construction does not use bulk construction carriers"
+
+[[vocabulary.term]]
+reject = "parts"
+prefer = "construct the IR through its builder"
+roles = ["type"]
+modules = ["crate::il::pcode::ir", "crate::il::ecode::ir", "crate::il::mcode::ir"]
+reason = "IR construction does not use bulk construction carriers"
+
+[[vocabulary.term]]
+reject = "storage"
+prefer = "construct the IR through its builder"
+roles = ["type"]
+modules = ["crate::il::pcode::ir", "crate::il::ecode::ir", "crate::il::mcode::ir"]
+reason = "IR construction does not use bulk construction carriers"
 
 [[vocabulary.term]]
 reject = "identifier"
@@ -357,6 +388,27 @@ modules = ["crate::ir::block::table::persistent"]
 reason = "the predicate tests whether a bucket still contains a block outside the removal set"
 
 [[vocabulary.term]]
+reject = "admit"
+prefer = "cache"
+roles = ["function", "method"]
+modules = ["crate::storage::entities::cache"]
+reason = "cache insertion uses cache vocabulary rather than admission terminology"
+
+[[vocabulary.term]]
+reject = "fetch"
+prefer = "get"
+roles = ["function", "method"]
+modules = ["crate::storage::entities::cache"]
+reason = "entity cache lookup uses the established get vocabulary"
+
+[[vocabulary.term]]
+reject = "stage"
+prefer = "insert"
+roles = ["function", "method"]
+modules = ["crate::storage::entities::cache"]
+reason = "write-through cache insertion is not the IR transaction-staging lifecycle"
+
+[[vocabulary.term]]
 reject = "ssa"
 prefer = "omit the redundant SSA marker"
 roles = ["module", "type"]
@@ -382,20 +434,35 @@ additional = [
 ]
 
 [[family]]
-name = "ecode-mcode-builders"
-modules = ["crate::il::ecode::builder", "crate::il::mcode::builder"]
+name = "pcode-ecode-mcode-builders"
+modules = [
+    "crate::il::pcode::ir::builder",
+    "crate::il::ecode::ir::builder",
+    "crate::il::mcode::ir::builder",
+]
 
 [[family]]
 name = "ecode-mcode-def-use"
-modules = ["crate::il::ecode::def_use", "crate::il::mcode::def_use"]
+modules = [
+    "crate::il::ecode::analysis::def_use",
+    "crate::il::mcode::analysis::def_use",
+]
 
 [[family]]
-name = "ecode-mcode-formatting"
-modules = ["crate::il::ecode::format", "crate::il::mcode::format"]
+name = "pcode-ecode-mcode-formatting"
+modules = [
+    "crate::il::pcode::format",
+    "crate::il::ecode::format",
+    "crate::il::mcode::format",
+]
 
 [[family]]
-name = "ecode-mcode-ir"
-modules = ["crate::il::ecode::ir", "crate::il::mcode::ir"]
+name = "pcode-ecode-mcode-ir"
+modules = [
+    "crate::il::pcode::ir",
+    "crate::il::ecode::ir",
+    "crate::il::mcode::ir",
+]
 
 [[family]]
 name = "ecode-mcode-memory"
@@ -406,8 +473,12 @@ name = "ecode-mcode-opcodes"
 modules = ["crate::il::ecode::opcode", "crate::il::mcode::opcode"]
 
 [[family]]
-name = "ecode-mcode-operations"
-modules = ["crate::il::ecode::operation", "crate::il::mcode::operation"]
+name = "pcode-ecode-mcode-operations"
+modules = [
+    "crate::il::pcode::operation",
+    "crate::il::ecode::operation",
+    "crate::il::mcode::operation",
+]
 
 [[family]]
 name = "ecode-mcode-compaction"
@@ -476,8 +547,12 @@ modules = [
 ]
 
 [[family]]
-name = "ecode-mcode-verification"
-modules = ["crate::il::ecode::verify", "crate::il::mcode::verify"]
+name = "pcode-ecode-mcode-verification"
+modules = [
+    "crate::il::pcode::ir::verify",
+    "crate::il::ecode::ir::verify",
+    "crate::il::mcode::ir::verify",
+]
 
 [[exception]]
 rule = "rejected_term"
@@ -487,8 +562,8 @@ reason = "common is the established representation-neutral IL infrastructure mod
 
 [[exception]]
 rule = "accessor_family"
-path = "fugue-core/src/il/mcode/recovery/mod.rs"
-item = "MCodeRecoveryConfig::with_alias_overrides"
+path = "fugue-core/src/il/mcode/transform/mod.rs"
+item = "ECodeToMCodeConfig::with_alias_overrides"
 reason = "the consuming composition operation rebinds the configuration's borrowed-fact lifetime and is not a field accessor"
 
 [[exception]]
@@ -592,7 +667,7 @@ reason = "cohesive one-function transformation owner; splitting it was reviewed 
 
 [[exception]]
 rule = "parameter_clump"
-path = "fugue-core/src/il/ecode/verify/mod.rs"
+path = "fugue-core/src/il/ecode/ir/verify.rs"
 reason = "the verify constructors mirror each other across dialects; the three-parameter shape is the mirrored surface"
 
 [[exception]]
@@ -928,12 +1003,6 @@ rule = "impl_method_order"
 path = "fugue-core/src/storage/mod.rs"
 item = "crate::storage::StorageContainer::contains_entity"
 reason = "contains_entity follows entity so the container retains the storage subsystem's established get-then-contains operation order"
-
-[[exception]]
-rule = "impl_method_order"
-path = "fugue-core/src/storage/entities/cache.rs"
-item = "crate::storage::entities::cache::EntityCache::publish_remove"
-reason = "publish_remove exposes an already committed removal to the cache and is grouped with the cache mutation operations; it is not an accessor"
 
 [[exception]]
 rule = "needless_pass_by_ref_mut"

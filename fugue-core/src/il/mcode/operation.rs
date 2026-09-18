@@ -202,14 +202,6 @@ impl MCodeOp {
         constants.get(start..end)
     }
 
-    pub(crate) fn set_results(&mut self, results: IlIndexRange) {
-        self.results = results;
-    }
-
-    pub(crate) fn set_operands(&mut self, operands: IlIndexRange) {
-        self.operands = operands;
-    }
-
     pub(crate) fn replace(&mut self, opcode: MCodeOpcode, operands: IlIndexRange) {
         self.opcode = opcode;
         self.operands = operands;
@@ -228,10 +220,5 @@ impl MCodeOp {
         }
         let slice = self.constant_bytes(constants)?;
         Some(BitVec::from_le_bytes(slice).cast(self.width))
-    }
-
-    pub(crate) fn replace_with_constant(&mut self, immediate: u64) {
-        self.replace(MCodeOpcode::Constant, IlIndexRange::EMPTY);
-        self.immediate = immediate;
     }
 }

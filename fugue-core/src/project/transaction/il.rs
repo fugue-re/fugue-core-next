@@ -111,7 +111,8 @@ mod test {
         IlArtefact, IlBlock, IlBlockId, IlBlockProperties, IlDominance, IlGraph, IlIndexRange,
         IlMetadata, IlSourceSpan, IlValueId,
     };
-    use crate::il::ecode::{ECodeBuilder, ECodeIr, ECodeLiveness, ECodeUses};
+    use crate::il::ecode::analysis::{ECodeLiveness, ECodeUses};
+    use crate::il::ecode::{ECodeBuilder, ECodeIr};
     use crate::il::mcode::{MCodeBuilder, MCodeIr};
     use crate::il::pcode::{PCodeBuilder, PCodeIr};
     use crate::ir::{Address, FunctionId};

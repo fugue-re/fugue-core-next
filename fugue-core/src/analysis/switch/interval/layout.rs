@@ -5,7 +5,8 @@ use rustc_hash::FxHashSet;
 
 use crate::analysis::switch::SwitchRecoveryConfig;
 use crate::il::common::IlValueId;
-use crate::il::ecode::{ECodeBlockArgInputs, ECodeIr, ECodeOpcode};
+use crate::il::ecode::analysis::ECodeBlockArgInputs;
+use crate::il::ecode::{ECodeIr, ECodeOpcode};
 use crate::ir::RawAddress;
 
 pub(crate) enum SwitchTableLayout {
