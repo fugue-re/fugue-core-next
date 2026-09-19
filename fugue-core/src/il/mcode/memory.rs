@@ -1,5 +1,3 @@
-use std::mem::size_of;
-
 use crate::storage::segments::space::AddressSpaceId;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]

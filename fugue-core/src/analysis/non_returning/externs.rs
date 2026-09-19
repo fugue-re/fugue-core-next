@@ -3,7 +3,7 @@ use crate::engine::{Analyser, AnalyserProvider, AnalysisContext};
 use crate::extension;
 use crate::ir::SymbolProperties;
 use crate::ir::symbol::existing_symbol;
-use crate::platform::non_returning::is_non_returning_extern;
+use crate::platform::analysis::is_non_returning_extern;
 use crate::project::{AnalysisPhase, ChangeKinds, Project};
 
 const NON_RETURNING_EXTERNS_ANALYSER: &str = "non-returning-externs";

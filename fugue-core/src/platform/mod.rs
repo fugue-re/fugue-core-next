@@ -1,6 +1,7 @@
 use std::fmt::{self, Display, Formatter};
 
-pub mod non_returning;
+pub mod analysis;
+
 pub mod posix;
 pub mod windows;
 
