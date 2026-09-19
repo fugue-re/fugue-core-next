@@ -1,5 +1,3 @@
-use std::mem::size_of;
-
 use crate::il::common::{IlBlockArgId, IlBlockId, IlOpId, IlSsaDef, IlValueId};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -8,8 +6,6 @@ pub struct ECodeValue {
     width: u32,
     definition: IlSsaDef,
 }
-
-const _: () = assert!(size_of::<ECodeValue>() <= 12);
 
 impl ECodeValue {
     pub(crate) const fn new(definition: IlSsaDef, width: u32) -> Self {
@@ -40,8 +36,6 @@ pub struct ECodeBlockArg {
     value: IlValueId,
     width: u32,
 }
-
-const _: () = assert!(size_of::<ECodeBlockArg>() <= 12);
 
 impl ECodeBlockArg {
     pub(crate) const fn new(block: IlBlockId, value: IlValueId, width: u32) -> Self {

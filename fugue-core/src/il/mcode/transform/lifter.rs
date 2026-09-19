@@ -422,7 +422,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             self.lift_op_at(index, &mut current)?;
         }
 
-        self.finish_graph(self.source.graph().blocks().iter().map(|block| block.ops()))
+        self.lift_graph(self.source.graph().blocks().iter().map(|block| block.ops()))
     }
 
     fn lift_blocks(&mut self, entry: IlBlockId) -> Result<(), IlError> {
@@ -446,7 +446,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             .into_iter()
             .collect::<Option<Vec<_>>>()
             .expect("every MCode block is constructed before graph replacement");
-        self.finish_graph(blocks.into_iter().map(|block| block.ops()))
+        self.lift_graph(blocks.into_iter().map(|block| block.ops()))
     }
 
     fn lift_block_tree(
@@ -609,7 +609,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         Ok(())
     }
 
-    fn finish_graph(
+    fn lift_graph(
         &mut self,
         operation_ranges: impl ExactSizeIterator<Item = IlIndexRange>,
     ) -> Result<(), IlError> {

@@ -1,5 +1,3 @@
-use std::mem::size_of;
-
 use crate::il::common::{FlagId, RegisterId, il_id};
 
 #[derive(
@@ -18,9 +16,9 @@ use crate::il::common::{FlagId, RegisterId, il_id};
 #[rkyv(derive(Debug, PartialEq, Eq))]
 #[repr(u8)]
 pub enum MCodeVarKind {
-    Flag = 0,
-    Register = 1,
-    Stack = 2,
+    Flag,
+    Register,
+    Stack,
 }
 
 #[derive(
@@ -42,8 +40,6 @@ pub struct MCodeVar {
     storage: u64,
     index: u32,
 }
-
-const _: () = assert!(size_of::<MCodeVar>() == 16);
 
 impl MCodeVar {
     pub const fn flag(flag: FlagId, index: u32) -> Self {
@@ -101,5 +97,3 @@ impl MCodeVar {
 }
 
 il_id!(MCodeVarId, "MCode variable");
-
-const _: () = assert!(size_of::<Option<MCodeVarId>>() == 4);

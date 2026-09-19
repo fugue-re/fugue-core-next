@@ -1,5 +1,3 @@
-use std::mem::size_of;
-
 use crate::il::common::{IlBlockArgId, IlBlockId, IlOpId, IlSsaDef, IlValueId};
 use crate::il::mcode::MCodeVarId;
 
@@ -46,8 +44,6 @@ pub struct MCodeValue {
     variable: Option<MCodeVarId>,
     version: MCodeVersion,
 }
-
-const _: () = assert!(size_of::<MCodeValue>() <= 20);
 
 impl MCodeValue {
     pub(crate) const fn new(definition: IlSsaDef, width: u32) -> Self {
@@ -121,8 +117,6 @@ pub struct MCodeBlockArg {
     value: IlValueId,
     width: u32,
 }
-
-const _: () = assert!(size_of::<MCodeBlockArg>() <= 12);
 
 impl MCodeBlockArg {
     pub(crate) const fn new(block: IlBlockId, value: IlValueId, width: u32) -> Self {

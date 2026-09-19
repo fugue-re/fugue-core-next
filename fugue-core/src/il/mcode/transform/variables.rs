@@ -443,67 +443,57 @@ impl<'a> MCodeCallOutputSolver<'a> {
     }
 
     fn solve(mut self) -> Result<MCodeCallOutputVariables, IlError> {
-        let Some(entry) = self.source.graph().entry_block() else {
-            self.collect_linear_call_outputs()?;
-            return self.finish();
-        };
-        let dominance = IlDominance::from_blocks(
-            self.source.graph().blocks(),
-            self.source.graph().successors(),
-            entry,
-        );
-        let mut built = vec![false; self.source.graph().blocks().len()];
-        let block_args = IlCsr::from_entries(
-            self.source.graph().blocks().len(),
-            self.source
-                .block_args()
-                .iter()
-                .map(|arg| (arg.block().index(), arg.value())),
-        );
-        let mut candidates = MCodeCallOutputCandidates::default();
-        let mut checkpoints = Vec::new();
-        for event in dominance.events_from(entry) {
-            match event {
-                IlDominanceEvent::Enter(block) => {
-                    built[block.index()] = true;
-                    checkpoints.push(candidates.checkpoint());
-                    for &arg in block_args.row(block.index()) {
-                        if let Some(ECodeDomain::Register(root)) = self.source.value_domain(arg) {
-                            let _ = candidates.resolve(root);
+        if let Some(entry) = self.source.graph().entry_block() {
+            let dominance = IlDominance::from_blocks(
+                self.source.graph().blocks(),
+                self.source.graph().successors(),
+                entry,
+            );
+            let mut built = vec![false; self.source.graph().blocks().len()];
+            let block_args = IlCsr::from_entries(
+                self.source.graph().blocks().len(),
+                self.source
+                    .block_args()
+                    .iter()
+                    .map(|arg| (arg.block().index(), arg.value())),
+            );
+            let mut candidates = MCodeCallOutputCandidates::default();
+            let mut checkpoints = Vec::new();
+            for event in dominance.events_from(entry) {
+                match event {
+                    IlDominanceEvent::Enter(block) => {
+                        built[block.index()] = true;
+                        checkpoints.push(candidates.checkpoint());
+                        for &arg in block_args.row(block.index()) {
+                            if let Some(ECodeDomain::Register(root)) = self.source.value_domain(arg)
+                            {
+                                let _ = candidates.resolve(root);
+                            }
                         }
+                        self.collect_block_call_outputs(block, &mut candidates)?;
                     }
-                    self.collect_block_call_outputs(block, &mut candidates)?;
-                }
-                IlDominanceEvent::Exit(_) => {
-                    candidates.rollback(
-                        checkpoints
-                            .pop()
-                            .expect("each dominance exit follows a matching entry"),
-                    );
+                    IlDominanceEvent::Exit(_) => {
+                        candidates.rollback(
+                            checkpoints
+                                .pop()
+                                .expect("each dominance exit follows a matching entry"),
+                        );
+                    }
                 }
             }
-        }
-        for (index, was_built) in built.into_iter().enumerate() {
-            if !was_built {
-                let mut candidates = MCodeCallOutputCandidates::default();
-                self.collect_block_call_outputs(
-                    IlBlockId::try_from_index(index)?,
-                    &mut candidates,
-                )?;
+            for (index, was_built) in built.into_iter().enumerate() {
+                if !was_built {
+                    let mut candidates = MCodeCallOutputCandidates::default();
+                    self.collect_block_call_outputs(
+                        IlBlockId::try_from_index(index)?,
+                        &mut candidates,
+                    )?;
+                }
             }
+        } else {
+            self.collect_linear_call_outputs()?;
         }
-        self.finish()
-    }
 
-    fn collect_linear_call_outputs(&mut self) -> Result<(), IlError> {
-        let mut candidates = MCodeCallOutputCandidates::default();
-        for index in 0..self.source.ops().len() {
-            self.collect_call_output_at(IlOpId::try_from_index(index)?, &mut candidates)?;
-        }
-        Ok(())
-    }
-
-    fn finish(mut self) -> Result<MCodeCallOutputVariables, IlError> {
         let representatives = (0..self.representatives.len())
             .map(|index| MCodeVarId::try_from_index(self.representatives.find(index)))
             .collect::<Result<Vec<_>, _>>()?;
@@ -516,6 +506,14 @@ impl<'a> MCodeCallOutputSolver<'a> {
             representatives,
             outputs,
         })
+    }
+
+    fn collect_linear_call_outputs(&mut self) -> Result<(), IlError> {
+        let mut candidates = MCodeCallOutputCandidates::default();
+        for index in 0..self.source.ops().len() {
+            self.collect_call_output_at(IlOpId::try_from_index(index)?, &mut candidates)?;
+        }
+        Ok(())
     }
 
     fn collect_block_call_outputs(
@@ -627,12 +625,12 @@ mod test {
         MCodeVariableModel::new(ir, &stack)
     }
 
-    struct Function {
+    struct ECodeFunctionBuilder {
         builder: ECodeBuilder,
         operations: usize,
     }
 
-    impl Function {
+    impl ECodeFunctionBuilder {
         fn new() -> Self {
             Self {
                 builder: ECodeBuilder::new(
@@ -682,7 +680,7 @@ mod test {
             id
         }
 
-        fn finish(mut self) -> ECodeIr {
+        fn build(mut self) -> ECodeIr {
             self.builder.set_graph(IlGraph::new(
                 vec![IlBlock::new(
                     IlIndexRange::new(0, self.operations).unwrap(),
@@ -695,7 +693,7 @@ mod test {
             self.builder.build_unchecked()
         }
 
-        fn finish_linear(self) -> ECodeIr {
+        fn build_linear(self) -> ECodeIr {
             self.builder.build_unchecked()
         }
     }
@@ -876,13 +874,13 @@ mod test {
 
     #[test]
     fn an_overlapping_redefinition_is_one_variable() {
-        let mut function = Function::new();
+        let mut function = ECodeFunctionBuilder::new();
         let first_value = function.constant(1);
         let first = function.unary(ECodeOpcode::WriteRegister, first_value, true);
         let second_value = function.constant(2);
         let second = function.unary(ECodeOpcode::WriteRegister, second_value, true);
         function.binary(ECodeOpcode::Add, first, second);
-        let ir = function.finish();
+        let ir = function.build();
 
         let table = table(&ir);
 
@@ -896,13 +894,13 @@ mod test {
 
     #[test]
     fn an_overlapping_linear_redefinition_is_one_variable() {
-        let mut function = Function::new();
+        let mut function = ECodeFunctionBuilder::new();
         let first_value = function.constant(1);
         let first = function.unary(ECodeOpcode::WriteRegister, first_value, true);
         let second_value = function.constant(2);
         let second = function.unary(ECodeOpcode::WriteRegister, second_value, true);
         function.binary(ECodeOpcode::Add, first, second);
-        let ir = function.finish_linear();
+        let ir = function.build_linear();
 
         let table = table(&ir);
 
@@ -914,13 +912,13 @@ mod test {
 
     #[test]
     fn a_partial_update_stays_one_variable() {
-        let mut function = Function::new();
+        let mut function = ECodeFunctionBuilder::new();
         let initial = function.constant(0x1122_3344);
         let whole = function.unary(ECodeOpcode::WriteRegister, initial, true);
         let byte = function.constant(0xff);
         let inserted = function.binary(ECodeOpcode::Insert, whole, byte);
         let updated = function.unary(ECodeOpcode::WriteRegister, inserted, true);
-        let ir = function.finish();
+        let ir = function.build();
 
         let table = table(&ir);
 
@@ -934,14 +932,14 @@ mod test {
 
     #[test]
     fn proven_disjoint_redefinitions_split_into_distinct_variables() {
-        let mut function = Function::new();
+        let mut function = ECodeFunctionBuilder::new();
         let first_value = function.constant(1);
         let first = function.unary(ECodeOpcode::WriteRegister, first_value, true);
         function.unary(ECodeOpcode::Copy, first, false);
         let second_value = function.constant(2);
         let second = function.unary(ECodeOpcode::WriteRegister, second_value, true);
         function.unary(ECodeOpcode::Copy, second, false);
-        let ir = function.finish();
+        let ir = function.build();
 
         let table = table(&ir);
 
@@ -960,7 +958,7 @@ mod test {
 
     #[test]
     fn shared_expression_ancestry_is_coalesced_once() {
-        let mut function = Function::new();
+        let mut function = ECodeFunctionBuilder::new();
         let initial = function.constant(1);
         let initial = function.unary(ECodeOpcode::WriteRegister, initial, true);
         let mut shared = initial;
@@ -971,7 +969,7 @@ mod test {
         for _ in 0..2048 {
             definitions.push(function.unary(ECodeOpcode::WriteRegister, shared, true));
         }
-        let ir = function.finish();
+        let ir = function.build();
 
         let table = table(&ir);
         let expected = table.variable_for_value(initial);

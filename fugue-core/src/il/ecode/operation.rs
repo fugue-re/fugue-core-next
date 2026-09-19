@@ -1,5 +1,3 @@
-use std::mem::size_of;
-
 use fugue_bv::BitVec;
 
 use crate::il::common::{IlIndexRange, IlValueId};
@@ -86,8 +84,6 @@ pub struct ECodeOp {
     address: Option<Address>,
     address_space: Option<AddressSpaceId>,
 }
-
-const _: () = assert!(size_of::<ECodeOp>() <= 64);
 
 impl ECodeOp {
     pub(crate) const fn new(

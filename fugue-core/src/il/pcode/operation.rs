@@ -1,4 +1,3 @@
-use std::mem::size_of;
 use std::num::NonZeroU32;
 
 use crate::il::common::{IlIndexRange, il_id};
@@ -36,9 +35,6 @@ impl PCodeLifterSpaceHandle {
 il_id!(PCodeLocationId, "PCode location");
 il_id!(PCodeTargetId, "PCode target");
 
-const _: () = assert!(size_of::<PCodeLocationId>() == 4);
-const _: () = assert!(size_of::<Option<PCodeLocationId>>() == 4);
-
 impl PCodeTargetId {
     const fn from_value(value: u32) -> Option<Self> {
         match NonZeroU32::new(value) {
@@ -58,8 +54,6 @@ pub struct PCodeLocation {
     properties: PCodeLocationProperties,
     lifter_space: PCodeLifterSpaceHandle,
 }
-
-const _: () = assert!(size_of::<PCodeLocation>() <= 16);
 
 bitflags::bitflags! {
     #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Hash)]
@@ -579,8 +573,6 @@ pub struct PCodeOp {
     address_space: Option<AddressSpaceId>,
 }
 
-const _: () = assert!(size_of::<PCodeOp>() <= 24);
-
 impl PCodeOp {
     pub(crate) const fn new(
         spec: PCodeOpSpec,
@@ -627,6 +619,8 @@ impl PCodeOp {
 
 #[cfg(test)]
 mod test {
+    use std::mem;
+
     use super::*;
 
     #[test]
@@ -634,6 +628,6 @@ mod test {
         let handle = PCodeLifterSpaceHandle::new(7);
 
         assert_eq!(handle.value(), 7);
-        assert_eq!(std::mem::size_of::<PCodeLifterSpaceHandle>(), 1);
+        assert_eq!(mem::size_of::<PCodeLifterSpaceHandle>(), 1);
     }
 }

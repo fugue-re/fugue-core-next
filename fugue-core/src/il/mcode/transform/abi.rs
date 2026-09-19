@@ -793,9 +793,9 @@ mod test {
 
     #[test]
     fn exact_stack_facts_produce_stack_inputs_and_outputs() {
-        let mut function = Function::new();
+        let mut function = ECodeFunctionBuilder::new();
         let site = function.call();
-        let ir = function.finish();
+        let ir = function.build();
         let mut call = MCodeCallFacts::new(site);
         call.insert_input(MCodeStorageFact::new(
             MCodeStorageLocation::Stack { offset: -16 },
@@ -834,11 +834,11 @@ mod test {
 
     #[test]
     fn exact_call_facts_preserve_input_and_output_order() {
-        let mut function = Function::new();
+        let mut function = ECodeFunctionBuilder::new();
         let rdi = function.define(RDI);
         let rax = function.define(RAX);
         let site = function.call();
-        let ir = function.finish();
+        let ir = function.build();
         let mut call = MCodeCallFacts::new(site);
         call.set_inputs([
             MCodeStorageFact::new(MCodeStorageLocation::Register(RegisterId::new(RDI)), 64),
@@ -883,10 +883,10 @@ mod test {
 
     #[test]
     fn known_empty_call_facts_do_not_use_the_convention() {
-        let mut function = Function::new();
+        let mut function = ECodeFunctionBuilder::new();
         function.define(RDI);
         let site = function.call();
-        let ir = function.finish();
+        let ir = function.build();
         let mut call = MCodeCallFacts::new(site);
         call.set_inputs([]);
         call.set_outputs([]);
@@ -903,10 +903,10 @@ mod test {
 
     #[test]
     fn known_empty_function_outputs_do_not_use_the_fallback() {
-        let mut function = Function::new();
+        let mut function = ECodeFunctionBuilder::new();
         let rax = function.define(RAX);
         let site = function.return_();
-        let ir = function.finish();
+        let ir = function.build();
         let output =
             MCodeStorageFact::new(MCodeStorageLocation::Register(RegisterId::new(RAX)), 64);
         let registers = RegisterBank::new(resolve_language("x86:LE:64").unwrap()).unwrap();
@@ -945,11 +945,11 @@ mod test {
 
     #[test]
     fn function_exit_requirements_retain_register_pairs_and_stack_storage() {
-        let mut function = Function::new();
+        let mut function = ECodeFunctionBuilder::new();
         let high = function.define(RDX);
         let low = function.define(RAX);
         let site = function.return_();
-        let ir = function.finish();
+        let ir = function.build();
         let mut facts = MCodeFunctionFacts::new(ir.metadata().function());
         facts.set_return_live_outputs([
             MCodeStorageFact::new(
@@ -993,9 +993,9 @@ mod test {
 
     #[test]
     fn storage_fact_validation_rejects_inconsistent_widths_and_roots() {
-        let mut function = Function::new();
+        let mut function = ECodeFunctionBuilder::new();
         let site = function.call();
-        let ir = function.finish();
+        let ir = function.build();
         let registers = RegisterBank::new(resolve_language("x86:LE:64").unwrap()).unwrap();
         let validate = |fact| {
             let mut call = MCodeCallFacts::new(site);
@@ -1047,8 +1047,8 @@ mod test {
 
     #[test]
     fn conflicting_function_exit_widths_are_rejected() {
-        let function = Function::new();
-        let ir = function.finish();
+        let function = ECodeFunctionBuilder::new();
+        let ir = function.build();
         let registers = RegisterBank::new(resolve_language("x86:LE:64").unwrap()).unwrap();
         let mut facts = MCodeFunctionFacts::new(ir.metadata().function());
         facts.set_return_live_outputs([
@@ -1143,9 +1143,9 @@ mod test {
             facts.validate(ir, &registers)
         };
 
-        let mut direct = Function::new();
+        let mut direct = ECodeFunctionBuilder::new();
         let direct_site = direct.call();
-        let direct = direct.finish();
+        let direct = direct.build();
         assert_eq!(validate(&direct, direct_site), Ok(()));
 
         let metadata = IlMetadata::new(FunctionId::default(), 0);
@@ -1193,12 +1193,12 @@ mod test {
         assert_eq!(validate(&tail, tail_site), Ok(()));
     }
 
-    struct Function {
+    struct ECodeFunctionBuilder {
         builder: ECodeBuilder,
         operations: usize,
     }
 
-    impl Function {
+    impl ECodeFunctionBuilder {
         fn new() -> Self {
             Self {
                 builder: ECodeBuilder::new(
@@ -1269,7 +1269,7 @@ mod test {
             site
         }
 
-        fn finish(mut self) -> ECodeIr {
+        fn build(mut self) -> ECodeIr {
             self.builder.set_graph(IlGraph::new(
                 vec![IlBlock::new(
                     IlIndexRange::new(0, self.operations).unwrap(),
@@ -1282,17 +1282,17 @@ mod test {
             self.builder.build_unchecked()
         }
 
-        fn finish_linear(self) -> ECodeIr {
+        fn build_linear(self) -> ECodeIr {
             self.builder.build_unchecked()
         }
     }
 
     #[test]
     fn a_reaching_register_value_must_match_the_root_width() {
-        let mut function = Function::new();
+        let mut function = ECodeFunctionBuilder::new();
         function.define_width(RDI, 32);
         let site = function.call();
-        let ir = function.finish();
+        let ir = function.build();
         let registers = RegisterBank::new(resolve_language("x86:LE:64").unwrap()).unwrap();
         let mut call = MCodeCallFacts::new(site);
         call.insert_input(MCodeStorageFact::new(
@@ -1322,11 +1322,11 @@ mod test {
 
     #[test]
     fn recovers_register_args_in_convention_order() {
-        let mut function = Function::new();
+        let mut function = ECodeFunctionBuilder::new();
         let rdi = function.define(RDI);
         let rsi = function.define(RSI);
         let site = function.call();
-        let ir = function.finish();
+        let ir = function.build();
 
         let convention = MCodeCallingConvention::new(
             vec![register(RDI), register(RSI), register(RDX)],
@@ -1347,10 +1347,10 @@ mod test {
 
     #[test]
     fn recovers_register_args_in_a_linear_body() {
-        let mut function = Function::new();
+        let mut function = ECodeFunctionBuilder::new();
         let rdi = function.define(RDI);
         let site = function.call();
-        let ir = function.finish_linear();
+        let ir = function.build_linear();
 
         let convention = MCodeCallingConvention::new(vec![register(RDI)], Vec::new());
         let model = recover(&ir, &convention);
@@ -1482,10 +1482,10 @@ mod test {
 
     #[test]
     fn arity_stops_at_the_first_unset_arg_register() {
-        let mut function = Function::new();
+        let mut function = ECodeFunctionBuilder::new();
         let rdi = function.define(RDI);
         let site = function.call();
-        let ir = function.finish();
+        let ir = function.build();
 
         let convention =
             MCodeCallingConvention::new(vec![register(RDI), register(RSI)], Vec::new());
@@ -1497,10 +1497,10 @@ mod test {
 
     #[test]
     fn a_register_outside_the_convention_width_range_is_an_error() {
-        let mut function = Function::new();
+        let mut function = ECodeFunctionBuilder::new();
         function.define(RDI);
         function.call();
-        let ir = function.finish();
+        let ir = function.build();
         let convention = MCodeCallingConvention::new(
             vec![MCodeCallingConventionEntry::new(
                 MCodeStorageLocation::Register(RegisterId::new(RDI)),
@@ -1522,12 +1522,12 @@ mod test {
 
     #[test]
     fn a_forwarded_parameter_counts_but_a_post_clobber_value_does_not() {
-        let mut function = Function::new();
+        let mut function = ECodeFunctionBuilder::new();
         let forwarded = function.live_in(RDI);
         let forwarding_call = function.call();
         function.live_in(RDI);
         let clobbered_call = function.call();
-        let ir = function.finish();
+        let ir = function.build();
 
         let convention = MCodeCallingConvention::new(vec![register(RDI)], Vec::new());
         let model = recover(&ir, &convention);
@@ -1621,11 +1621,11 @@ mod test {
 
     #[test]
     fn recovers_a_register_join_as_a_pair() {
-        let mut function = Function::new();
+        let mut function = ECodeFunctionBuilder::new();
         let high = function.define(RDX);
         let low = function.define(RAX);
         let site = function.call();
-        let ir = function.finish();
+        let ir = function.build();
 
         let convention = MCodeCallingConvention::new(
             vec![MCodeCallingConventionEntry::new(
