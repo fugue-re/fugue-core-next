@@ -8,7 +8,7 @@ use crate::il::common::{
 use crate::il::ecode::ECodeIr;
 use crate::il::mcode::transform::abi::MCodeCallingConvention;
 use crate::il::mcode::transform::lifter::ECodeToMCodeLifter;
-use crate::il::mcode::{MCodeBuilder, MCodeIr, MCodeOptimiser, MCodeStorageLocation, MCodeVar};
+use crate::il::mcode::{MCodeBuilder, MCodeIr, MCodeOptimiser, MCodeVar};
 use crate::lifter::Varnode;
 use crate::platform::Platform;
 
@@ -82,7 +82,7 @@ impl<'a> ECodeToMCodeConfig<'a> {
             let width = registers.root_bits(register).ok_or_else(|| {
                 IlError::missing_component(ECodeIr::FORM, "live-output register width")
             })?;
-            let fact = MCodeStorageFact::new(MCodeStorageLocation::Register(register), width);
+            let fact = MCodeStorageFact::new_register(register, width);
             return_live_outputs.push(fact);
             tail_call_live_outputs.push(fact);
         }
@@ -228,10 +228,11 @@ mod test {
         IlIndexRange, IlMetadata, IlOpId, IlSsaDef, IlValueId, RegisterBank, RegisterId,
     };
     use crate::il::ecode::{ECodeBuilder, ECodeDomain, ECodeIr, ECodeOpSpec, ECodeOpcode};
+    use crate::il::mcode::transform::abi::MCodeStorageLocation;
     use crate::il::mcode::transform::{MCodeAliasOverride, MCodeAliasOverrides};
     use crate::il::mcode::{
         MCodeBuilder, MCodeCallFacts, MCodeFunctionFacts, MCodeIr, MCodeOpcode, MCodeOptimiser,
-        MCodeStorageFact, MCodeStorageLocation, MCodeVar, MCodeVarKind,
+        MCodeStorageFact, MCodeVar, MCodeVarKind,
     };
     use crate::ir::{Address, FunctionId};
     use crate::lifter::{Varnode, resolve_language};

@@ -6,7 +6,6 @@ use fugue_core::il::common::{IlOpId, IlValueId, RegisterBank};
 use fugue_core::il::ecode::{ECodeDomain, ECodeIr, ECodeOpcode};
 use fugue_core::il::mcode::{
     ECodeToMCode, MCodeCallFacts, MCodeFunctionFacts, MCodeIr, MCodeOpcode, MCodeStorageFact,
-    MCodeStorageLocation,
 };
 use fugue_core::loader::Loader;
 use fugue_core::project::Project;
@@ -129,7 +128,7 @@ fn an_external_consumer_can_supply_function_scoped_facts() -> Result<(), Box<dyn
             Some((source, site))
         })
         .ok_or_else(|| io::Error::other("fixture contains no direct ECode call"))?;
-    let storage = MCodeStorageFact::new(MCodeStorageLocation::Stack { offset: -8 }, 64);
+    let storage = MCodeStorageFact::new_stack(-8, 64);
     let mut call = MCodeCallFacts::new(site);
     call.insert_input(storage);
     assert_eq!(call.inputs(), Some(&[storage][..]));

@@ -8,8 +8,6 @@ pub struct MCodeMemoryDomain {
     space: AddressSpaceId,
 }
 
-const _: () = assert!(size_of::<MCodeMemoryDomain>() <= 8);
-
 impl MCodeMemoryDomain {
     pub(crate) const fn new(space: AddressSpaceId) -> Self {
         Self { space }

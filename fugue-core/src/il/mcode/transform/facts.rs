@@ -1,8 +1,8 @@
 use rustc_hash::FxHashMap;
 
-use crate::il::common::{IlArtefact, IlError, IlOpId, RegisterBank};
+use crate::il::common::{IlArtefact, IlError, IlOpId, RegisterBank, RegisterId};
 use crate::il::ecode::{ECodeIr, ECodeOpcode};
-use crate::il::mcode::MCodeStorageLocation;
+use crate::il::mcode::transform::abi::MCodeStorageLocation;
 use crate::il::mcode::transform::stack::MCodeStackModel;
 use crate::ir::FunctionId;
 
@@ -13,16 +13,49 @@ pub struct MCodeStorageFact {
 }
 
 impl MCodeStorageFact {
-    pub const fn new(location: MCodeStorageLocation, width: u32) -> Self {
+    pub(crate) const fn new(location: MCodeStorageLocation, width: u32) -> Self {
         Self { location, width }
     }
 
-    pub const fn location(&self) -> MCodeStorageLocation {
+    pub const fn new_register(register: RegisterId, width: u32) -> Self {
+        Self::new(MCodeStorageLocation::Register(register), width)
+    }
+
+    pub const fn new_register_pair(high: RegisterId, low: RegisterId, width: u32) -> Self {
+        Self::new(MCodeStorageLocation::RegisterPair { high, low }, width)
+    }
+
+    pub const fn new_stack(offset: i64, width: u32) -> Self {
+        Self::new(MCodeStorageLocation::Stack { offset }, width)
+    }
+
+    pub(crate) const fn location(&self) -> MCodeStorageLocation {
         self.location
     }
 
     pub const fn width(&self) -> u32 {
         self.width
+    }
+
+    pub const fn register_id(&self) -> Option<RegisterId> {
+        match self.location {
+            MCodeStorageLocation::Register(register) => Some(register),
+            MCodeStorageLocation::RegisterPair { .. } | MCodeStorageLocation::Stack { .. } => None,
+        }
+    }
+
+    pub const fn register_pair(&self) -> Option<(RegisterId, RegisterId)> {
+        match self.location {
+            MCodeStorageLocation::RegisterPair { high, low } => Some((high, low)),
+            MCodeStorageLocation::Register(_) | MCodeStorageLocation::Stack { .. } => None,
+        }
+    }
+
+    pub const fn stack_offset(&self) -> Option<i64> {
+        match self.location {
+            MCodeStorageLocation::Stack { offset } => Some(offset),
+            MCodeStorageLocation::Register(_) | MCodeStorageLocation::RegisterPair { .. } => None,
+        }
     }
 
     fn validate(&self, registers: &RegisterBank) -> Result<(), IlError> {

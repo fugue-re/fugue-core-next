@@ -87,7 +87,7 @@ impl ECodeBuilder {
         let arg = IlBlockArgId::try_from_index(self.block_args.len())?;
         let value = IlValueId::try_from_index(self.values.len())?;
 
-        self.values.push(ECodeValue::block_arg(width, arg));
+        self.values.push(ECodeValue::block_arg(arg, width));
         self.value_domains.push(None);
         self.block_args
             .push(ECodeBlockArg::new(block, value, width));
@@ -219,7 +219,7 @@ impl ECodeEmitter<'_> {
         for _ in 0..result_count {
             self.builder
                 .values
-                .push(ECodeValue::op_result(spec.width(), operation));
+                .push(ECodeValue::op_result(operation, spec.width()));
             self.builder.value_domains.push(None);
         }
         let results = IlIndexRange::new(result_start, self.builder.values.len())?;

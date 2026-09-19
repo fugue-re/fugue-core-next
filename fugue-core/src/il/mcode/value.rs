@@ -50,7 +50,7 @@ pub struct MCodeValue {
 const _: () = assert!(size_of::<MCodeValue>() <= 20);
 
 impl MCodeValue {
-    pub(crate) const fn new(width: u32, definition: IlSsaDef) -> Self {
+    pub(crate) const fn new(definition: IlSsaDef, width: u32) -> Self {
         Self {
             width,
             definition,
@@ -59,12 +59,12 @@ impl MCodeValue {
         }
     }
 
-    pub const fn op_result(width: u32, operation: IlOpId) -> Self {
-        Self::new(width, IlSsaDef::Op(operation))
+    pub const fn op_result(operation: IlOpId, width: u32) -> Self {
+        Self::new(IlSsaDef::Op(operation), width)
     }
 
-    pub const fn block_arg(width: u32, arg: IlBlockArgId) -> Self {
-        Self::new(width, IlSsaDef::BlockArg(arg))
+    pub const fn block_arg(arg: IlBlockArgId, width: u32) -> Self {
+        Self::new(IlSsaDef::BlockArg(arg), width)
     }
 
     pub(crate) fn set_binding(&mut self, variable: MCodeVarId, version: MCodeVersion) {

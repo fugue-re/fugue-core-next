@@ -463,8 +463,8 @@ impl<'a, 'b> PCodeToECodeLifter<'a, 'b> {
 
         let value = if location.is_constant() {
             match role {
-                LocationRole::Address => self.state.address(location.bits(), location.offset())?,
-                LocationRole::Value => self.state.constant(location.bits(), location.offset())?,
+                LocationRole::Address => self.state.address(location.offset(), location.bits())?,
+                LocationRole::Value => self.state.constant(location.offset(), location.bits())?,
             }
         } else if let Some(flag) = self.flags.get(&location).copied() {
             if let Some(value) = self.flag_values.get(&flag).copied() {
@@ -479,7 +479,7 @@ impl<'a, 'b> PCodeToECodeLifter<'a, 'b> {
             return self.lift_memory_read(&location);
         } else {
             self.state
-                .undefined(location.bits(), u64::from(id.value()))?
+                .undefined(u64::from(id.value()), location.bits())?
         };
 
         self.values.insert(key, value);
@@ -493,7 +493,7 @@ impl<'a, 'b> PCodeToECodeLifter<'a, 'b> {
             .expect("operations are preceded by an instruction span");
         let pointer = self
             .state
-            .address(self.arch.language().address_bits(), location.offset())?;
+            .address(location.offset(), self.arch.language().address_bits())?;
         self.state.apply(
             ECodeOpcode::Load,
             location.bits(),
@@ -513,7 +513,7 @@ impl<'a, 'b> PCodeToECodeLifter<'a, 'b> {
             .expect("operations are preceded by an instruction span");
         let pointer = self
             .state
-            .address(self.arch.language().address_bits(), location.offset())?;
+            .address(location.offset(), self.arch.language().address_bits())?;
         self.state.store(&[pointer, value], Some(space))?;
         self.effects += 1;
 

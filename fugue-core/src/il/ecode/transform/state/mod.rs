@@ -103,15 +103,15 @@ impl ECodeLiftState {
         ))
     }
 
-    pub(crate) fn constant(&mut self, width: u32, value: u64) -> Result<IlExprId, IlError> {
+    pub(crate) fn constant(&mut self, value: u64, width: u32) -> Result<IlExprId, IlError> {
         self.push_nullary(ECodeLiftExprKind::Op(ECodeOpcode::Constant), width, value)
     }
 
-    pub(crate) fn address(&mut self, width: u32, offset: u64) -> Result<IlExprId, IlError> {
+    pub(crate) fn address(&mut self, offset: u64, width: u32) -> Result<IlExprId, IlError> {
         self.push_nullary(ECodeLiftExprKind::Op(ECodeOpcode::Address), width, offset)
     }
 
-    pub(crate) fn undefined(&mut self, width: u32, discriminant: u64) -> Result<IlExprId, IlError> {
+    pub(crate) fn undefined(&mut self, discriminant: u64, width: u32) -> Result<IlExprId, IlError> {
         self.push_nullary(
             ECodeLiftExprKind::Op(ECodeOpcode::Undefined),
             width,

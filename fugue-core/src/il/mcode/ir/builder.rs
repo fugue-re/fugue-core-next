@@ -121,7 +121,7 @@ impl MCodeBuilder {
         let start = self.values.len();
         let operation = IlOpId::try_from_index(self.operations.len())?;
         for width in widths {
-            self.values.push(MCodeValue::op_result(width, operation));
+            self.values.push(MCodeValue::op_result(operation, width));
         }
 
         IlIndexRange::new(start, self.values.len())
@@ -131,7 +131,7 @@ impl MCodeBuilder {
         let arg = IlBlockArgId::try_from_index(self.block_args.len())?;
         let value = IlValueId::try_from_index(self.values.len())?;
 
-        self.values.push(MCodeValue::block_arg(width, arg));
+        self.values.push(MCodeValue::block_arg(arg, width));
         self.block_args
             .push(MCodeBlockArg::new(block, value, width));
 
@@ -199,7 +199,7 @@ impl MCodeBuilder {
         Ok(ir)
     }
 
-    pub(crate) fn build_unchecked(mut self) -> MCodeIr {
+    pub fn build_unchecked(mut self) -> MCodeIr {
         if self.edge_args.is_empty() && !self.graph.successors().is_empty() {
             self.edge_args = vec![IlIndexRange::EMPTY; self.graph.successors().len()];
         }

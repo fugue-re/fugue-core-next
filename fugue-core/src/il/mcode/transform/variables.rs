@@ -8,10 +8,10 @@ use crate::il::common::{
 };
 use crate::il::ecode::analysis::{ECodeBlockArgInputs, ECodeLiveness};
 use crate::il::ecode::{ECodeDomain, ECodeIr, ECodeOp, ECodeOpcode};
-use crate::il::mcode::transform::abi::MCodeCallOutputComponent;
+use crate::il::mcode::transform::abi::{MCodeCallOutputComponent, MCodeStorageLocation};
 use crate::il::mcode::transform::analysis::ECodeToMCodeAnalysis;
 use crate::il::mcode::transform::stack::{MCodeStackModel, MCodeStackObjectId};
-use crate::il::mcode::{MCodeIr, MCodeStorageLocation, MCodeVar, MCodeVarId, MCodeVarKind};
+use crate::il::mcode::{MCodeIr, MCodeVar, MCodeVarId, MCodeVarKind};
 
 fn merge_live_ranges(
     ir: &ECodeIr,

@@ -23,11 +23,6 @@ use crate::types::Revision;
 
 #[derive(Debug, Default)]
 pub struct PCodeCanonicaliser {
-    scratch: PCodeCanonicaliserScratch,
-}
-
-#[derive(Debug, Default)]
-struct PCodeCanonicaliserScratch {
     code_block_ids: Vec<CodeBlockId>,
     block_id_by_code_block: FxHashMap<CodeBlockId, IlBlockId>,
     block_addresses: Vec<Address>,
@@ -35,7 +30,7 @@ struct PCodeCanonicaliserScratch {
     block_successor_kinds: Vec<IlEdgeKinds>,
 }
 
-impl PCodeCanonicaliserScratch {
+impl PCodeCanonicaliser {
     fn collect_edge_kinds(&mut self, flows: impl Iterator<Item = FlowTarget>) {
         let mut by_target = SmallVec::<[(Address, IlEdgeKinds); 4]>::new();
         for flow in flows {
@@ -58,14 +53,12 @@ impl PCodeCanonicaliserScratch {
                     .map_or(IlEdgeKinds::FALL_THROUGH, |(_, kinds)| *kinds)
             }));
     }
-}
 
-impl PCodeCanonicaliser {
     pub fn canonicalise_function(
         &mut self,
         input: PCodeFunctionInput<'_>,
     ) -> Result<PCodeIr, PCodeError> {
-        PCodeFunctionLifter::new(PCodeFunctionSource::Admitted(input), &mut self.scratch).lift()
+        PCodeFunctionLifter::new(PCodeFunctionSource::Admitted(input), self).lift()
     }
 
     pub fn canonicalise_incomplete_function(
@@ -81,7 +74,7 @@ impl PCodeCanonicaliser {
             segments,
             input_revision,
         };
-        PCodeFunctionLifter::new(source, &mut self.scratch).lift()
+        PCodeFunctionLifter::new(source, self).lift()
     }
 }
 
@@ -302,7 +295,7 @@ impl<'a> PCodeAddressContext<'a> {
 
 struct PCodeFunctionLifter<'source, 'scratch> {
     source: Option<PCodeFunctionSource<'source>>,
-    scratch: &'scratch mut PCodeCanonicaliserScratch,
+    canonicaliser: &'scratch mut PCodeCanonicaliser,
     language: &'static Language,
     builder: PCodeBuilder,
     mapping_cache: SegmentMappingCache,
@@ -322,14 +315,14 @@ struct PCodeFunctionLifter<'source, 'scratch> {
 impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
     fn new(
         source: PCodeFunctionSource<'source>,
-        scratch: &'scratch mut PCodeCanonicaliserScratch,
+        canonicaliser: &'scratch mut PCodeCanonicaliser,
     ) -> Self {
         let language = source.language();
         let metadata = source.metadata();
         let segments = source.segments();
         Self {
             source: Some(source),
-            scratch,
+            canonicaliser,
             language,
             builder: PCodeBuilder::new(metadata, IlGraph::default()),
             mapping_cache: SegmentMappingCache::new(),
@@ -352,42 +345,48 @@ impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
             return Err(IlError::missing_artefact(input.function, PCodeIr::FORM).into());
         };
 
-        self.scratch.code_block_ids.clear();
-        self.scratch.block_id_by_code_block.clear();
-        self.scratch.block_addresses.clear();
+        self.canonicaliser.code_block_ids.clear();
+        self.canonicaliser.block_id_by_code_block.clear();
+        self.canonicaliser.block_addresses.clear();
 
         for (_, code_block) in function_body.blocks() {
-            let block_id = IlBlockId::try_from_index(self.scratch.code_block_ids.len())?;
-            self.scratch
+            let block_id = IlBlockId::try_from_index(self.canonicaliser.code_block_ids.len())?;
+            self.canonicaliser
                 .block_id_by_code_block
                 .insert(code_block, block_id);
-            self.scratch.code_block_ids.push(code_block);
+            self.canonicaliser.code_block_ids.push(code_block);
         }
 
-        for &code_block_id in &self.scratch.code_block_ids {
+        for &code_block_id in &self.canonicaliser.code_block_ids {
             let Some(code_block) = input.blocks.get_by_id(code_block_id) else {
                 return Err(IlError::missing_artefact(input.function, PCodeIr::FORM).into());
             };
-            self.scratch.block_addresses.push(code_block.address());
+            self.canonicaliser
+                .block_addresses
+                .push(code_block.address());
         }
 
-        for index in 0..self.scratch.code_block_ids.len() {
-            let code_block_id = self.scratch.code_block_ids[index];
+        for index in 0..self.canonicaliser.code_block_ids.len() {
+            let code_block_id = self.canonicaliser.code_block_ids[index];
             let Some(code_block) = input.blocks.get_by_id(code_block_id) else {
                 return Err(IlError::missing_artefact(input.function, PCodeIr::FORM).into());
             };
 
-            self.scratch.block_successors.clear();
-            self.scratch.block_successors.extend(
+            self.canonicaliser.block_successors.clear();
+            self.canonicaliser.block_successors.extend(
                 function_body
                     .successors(code_block_id)
                     .filter_map(|successor| {
-                        self.scratch.block_id_by_code_block.get(&successor).copied()
+                        self.canonicaliser
+                            .block_id_by_code_block
+                            .get(&successor)
+                            .copied()
                     }),
             );
-            self.scratch.collect_edge_kinds(code_block.flow_targets());
-            let successors = mem::take(&mut self.scratch.block_successors);
-            let successor_kinds = mem::take(&mut self.scratch.block_successor_kinds);
+            self.canonicaliser
+                .collect_edge_kinds(code_block.flow_targets());
+            let successors = mem::take(&mut self.canonicaliser.block_successors);
+            let successor_kinds = mem::take(&mut self.canonicaliser.block_successor_kinds);
             let result = self.lift_block(
                 code_block.address(),
                 code_block.context(),
@@ -396,8 +395,8 @@ impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
                 &successor_kinds,
                 code_block.address() == function_body.entry(),
             );
-            self.scratch.block_successors = successors;
-            self.scratch.block_successor_kinds = successor_kinds;
+            self.canonicaliser.block_successors = successors;
+            self.canonicaliser.block_successor_kinds = successor_kinds;
             result?;
         }
 
@@ -405,22 +404,22 @@ impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
     }
 
     fn lift_speculative(&mut self, function: &IncompleteFunction) -> Result<(), PCodeError> {
-        self.scratch.block_addresses.clear();
-        self.scratch
+        self.canonicaliser.block_addresses.clear();
+        self.canonicaliser
             .block_addresses
             .extend(function.blocks().iter().map(|block| block.address()));
 
         for block in function.blocks() {
-            self.scratch.block_successors.clear();
+            self.canonicaliser.block_successors.clear();
             for successor in block.successors().iter() {
-                self.scratch
+                self.canonicaliser
                     .block_successors
                     .push(IlBlockId::try_from_index(successor.index())?);
             }
-            self.scratch
+            self.canonicaliser
                 .collect_edge_kinds(function.block_flow_targets(block));
-            let successors = mem::take(&mut self.scratch.block_successors);
-            let successor_kinds = mem::take(&mut self.scratch.block_successor_kinds);
+            let successors = mem::take(&mut self.canonicaliser.block_successors);
+            let successor_kinds = mem::take(&mut self.canonicaliser.block_successor_kinds);
             let result = self.lift_block(
                 block.address(),
                 block.context(),
@@ -429,8 +428,8 @@ impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
                 &successor_kinds,
                 block.address() == function.entry(),
             );
-            self.scratch.block_successors = successors;
-            self.scratch.block_successor_kinds = successor_kinds;
+            self.canonicaliser.block_successors = successors;
+            self.canonicaliser.block_successor_kinds = successor_kinds;
             result?;
         }
 

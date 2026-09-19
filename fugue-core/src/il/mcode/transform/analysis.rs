@@ -82,9 +82,8 @@ mod test {
         RegisterId,
     };
     use crate::il::ecode::{ECodeBuilder, ECodeDomain, ECodeOpSpec, ECodeOpcode};
-    use crate::il::mcode::MCodeStorageLocation;
     use crate::il::mcode::transform::abi::{
-        MCodeCallArg, MCodeCallOutputComponent, MCodeCallingConventionEntry,
+        MCodeCallArg, MCodeCallOutputComponent, MCodeCallingConventionEntry, MCodeStorageLocation,
     };
     use crate::ir::{Address, FunctionId};
     use crate::lifter::{Varnode, resolve_language};

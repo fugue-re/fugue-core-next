@@ -504,8 +504,8 @@ mod test {
         let ir = ECodeFixture::default()
             .with_values(
                 vec![ECodeValue::new(
-                    64,
                     IlSsaDef::Op(IlOpId::try_from_index(3).unwrap()),
+                    64,
                 )],
                 Vec::new(),
             )
@@ -765,8 +765,8 @@ mod test {
             ECodeFixture::default()
                 .with_values(
                     vec![ECodeValue::op_result(
-                        128,
                         IlOpId::try_from_index(0).unwrap(),
+                        128,
                     )],
                     Vec::new(),
                 )
@@ -803,8 +803,8 @@ mod test {
         let ir = ECodeFixture::default()
             .with_values(
                 vec![ECodeValue::op_result(
-                    32,
                     IlOpId::try_from_index(1).unwrap(),
+                    32,
                 )],
                 Vec::new(),
             )
@@ -854,8 +854,8 @@ mod test {
         let ir = ECodeFixture::default()
             .with_values(
                 vec![ECodeValue::op_result(
-                    32,
                     IlOpId::try_from_index(0).unwrap(),
+                    32,
                 )],
                 Vec::new(),
             )
@@ -941,8 +941,8 @@ mod test {
         let ir = ECodeFixture::default()
             .with_values(
                 vec![ECodeValue::block_arg(
-                    32,
                     IlBlockArgId::try_from_index(0).unwrap(),
+                    32,
                 )],
                 vec![ECodeBlockArg::new(successor, arg_value, 32)],
             )
@@ -986,8 +986,8 @@ mod test {
         let ir = ECodeFixture::default()
             .with_values(
                 vec![
-                    ECodeValue::op_result(32, IlOpId::try_from_index(0).unwrap()),
-                    ECodeValue::block_arg(32, IlBlockArgId::try_from_index(0).unwrap()),
+                    ECodeValue::op_result(IlOpId::try_from_index(0).unwrap(), 32),
+                    ECodeValue::block_arg(IlBlockArgId::try_from_index(0).unwrap(), 32),
                 ],
                 vec![ECodeBlockArg::new(right, arg_value, 32)],
             )
@@ -1034,8 +1034,8 @@ mod test {
         let ir = ECodeFixture::default()
             .with_values(
                 vec![ECodeValue::op_result(
-                    32,
                     IlOpId::try_from_index(0).unwrap(),
+                    32,
                 )],
                 Vec::new(),
             )

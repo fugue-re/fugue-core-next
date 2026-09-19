@@ -12,12 +12,12 @@ use crate::il::common::{
     IlIndexRangeMap, IlOpId, IlValueId, RegisterId,
 };
 use crate::il::ecode::{ECodeDomain, ECodeIr, ECodeOp, ECodeOpcode};
+use crate::il::mcode::transform::abi::MCodeStorageLocation;
 use crate::il::mcode::transform::{
     ECodeToMCodeAnalysis, MCodeCallArg, MCodeCallOutputComponent, MCodeExitRequirement,
 };
 use crate::il::mcode::{
-    MCodeBuilder, MCodeIr, MCodeOpSpec, MCodeOpcode, MCodeStorageLocation, MCodeVar, MCodeVarId,
-    MCodeVersion,
+    MCodeBuilder, MCodeIr, MCodeOpSpec, MCodeOpcode, MCodeVar, MCodeVarId, MCodeVersion,
 };
 use crate::storage::segments::space::AddressSpaceId;
 

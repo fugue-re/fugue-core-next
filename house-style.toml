@@ -17,6 +17,20 @@ prefixes = ["get"]
 suffixes = ["at", "page"]
 
 [parameters]
+before = [
+    ["arg", "width"],
+    ["block", "width"],
+    ["definition", "width"],
+    ["discriminant", "width"],
+    ["high", "width"],
+    ["location", "width"],
+    ["low", "width"],
+    ["offset", "width"],
+    ["opcode", "width"],
+    ["operation", "width"],
+    ["register", "width"],
+    ["value", "width"],
+]
 first = ["AnalysisContext"]
 
 [macros]
