@@ -218,7 +218,7 @@ impl Constructor {
     /// # Safety
     ///
     /// Called from generated code which ensures validity of arguments and state.
-    pub(crate) unsafe fn format_mnemonic<W: fmt::Write>(
+    pub unsafe fn format_mnemonic<W: fmt::Write>(
         &self,
         language: &'static Language,
         state: &mut LiftingContextState<'_>,
@@ -233,7 +233,7 @@ impl Constructor {
     /// # Safety
     ///
     /// Called from generated code which ensures validity of arguments and state.
-    pub(crate) unsafe fn format_body<W: fmt::Write>(
+    pub unsafe fn format_body<W: fmt::Write>(
         &self,
         language: &'static Language,
         state: &mut LiftingContextState<'_>,
@@ -248,7 +248,7 @@ impl Constructor {
     /// # Safety
     ///
     /// Called from generated code which ensures validity of arguments and state.
-    pub(crate) unsafe fn format<W: fmt::Write>(
+    pub unsafe fn format<W: fmt::Write>(
         &self,
         language: &'static Language,
         state: &mut LiftingContextState<'_>,

@@ -27,7 +27,7 @@ pub(crate) enum InstructionSection {
     Operand,
 }
 
-pub(crate) enum InstructionFormatError {
+pub enum InstructionFormatError {
     Formatting(fmt::Error),
     Unresolved,
 }

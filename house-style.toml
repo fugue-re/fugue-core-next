@@ -145,6 +145,13 @@ modules = ["crate"]
 reason = "project-owned completion identifiers use finish consistently"
 
 [[vocabulary.term]]
+reject = "finish"
+prefer = "use build for builders and the phase-specific verb elsewhere"
+roles = ["function", "method"]
+modules = ["crate::il::pcode", "crate::il::ecode", "crate::il::mcode"]
+reason = "IL construction, lifting, transformation and analysis use their domain verbs"
+
+[[vocabulary.term]]
 reject = "wave"
 prefer = "describe the concrete recovery state"
 roles = ["field", "function", "local", "method", "module", "type", "variant"]
