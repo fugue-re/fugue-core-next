@@ -29,7 +29,13 @@ where
 
         match reloc_type {
             R_ARM_RELATIVE => {
-                let value = self.base.offset().wrapping_add_signed(reloc.addend());
+                let implicit = if reloc.has_implicit_addend() {
+                    bytes.read_value::<u32>(offset).unwrap_or_default()
+                } else {
+                    0
+                };
+                let addend = reloc.addend().wrapping_add(i64::from(implicit));
+                let value = self.base.offset().wrapping_add_signed(addend);
 
                 if value > u32::MAX as u64 {
                     tracing::warn!("relocation {reloc_type:#x} at {offset:#x} overflow");

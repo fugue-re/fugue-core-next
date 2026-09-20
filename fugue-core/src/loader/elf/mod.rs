@@ -2183,7 +2183,9 @@ mod test {
         R_ARM_JUMP_SLOT, R_ARM_RELATIVE, R_MIPS_64, R_MIPS_REL32, R_PPC_JMP_SLOT, R_PPC_RELATIVE,
         R_PPC64_RELATIVE, R_RISCV_CALL_PLT, R_RISCV_RELATIVE,
     };
-    use object::{Object, ObjectSection, ObjectSymbol, RelocationFlags, RelocationTarget};
+    use object::{
+        Object, ObjectSection, ObjectSegment, ObjectSymbol, RelocationFlags, RelocationTarget,
+    };
     use rustc_hash::FxHashMap;
 
     use super::{
@@ -2529,7 +2531,31 @@ mod test {
                         return None;
                     };
 
-                    (r_type == R_ARM_RELATIVE).then_some((offset, reloc.addend()))
+                    if r_type != R_ARM_RELATIVE {
+                        return None;
+                    }
+
+                    let implicit = if reloc.has_implicit_addend() {
+                        file.segments()
+                            .find_map(|segment| {
+                                let offset = offset.checked_sub(segment.address())?;
+                                let start = usize::try_from(offset).ok()?;
+                                let end = start.checked_add(size_of::<u32>())?;
+                                let bytes: [u8; 4] =
+                                    segment.data().ok()?.get(start..end)?.try_into().ok()?;
+                                Some(if file.is_little_endian() {
+                                    u32::from_le_bytes(bytes)
+                                } else {
+                                    u32::from_be_bytes(bytes)
+                                })
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        0
+                    };
+                    let addend = reloc.addend().wrapping_add(i64::from(implicit));
+
+                    Some((offset, addend))
                 })
             })()
         )
