@@ -1,3 +1,11 @@
+use crate::analysis::function::recovery::analysis::FunctionDiscoveryContext;
+use crate::analysis::function::recovery::{FunctionRecovery, FunctionRecoveryExtension};
+use crate::analysis::{AnalysisError, AnalysisPass};
+use crate::engine::AnalysisContext;
+use crate::project::Project;
+
+const LINEAR_SWEEP_ANALYSER: &str = "linear-sweep";
+
 const DEFAULT_MIN_ZERO_FILL_BYTES: usize = 16;
 const DEFAULT_MAX_TRIAL_INSNS: usize = 16;
 const DEFAULT_MIN_POST_BOUNDARY_INSNS: usize = 4;
@@ -14,6 +22,8 @@ pub struct LinearSweepConfig {
     min_call_target_insns: usize,
     call_target_corroboration_insns: usize,
 }
+
+struct FunctionRecoveryLinearSweep;
 
 impl Default for LinearSweepConfig {
     fn default() -> Self {
@@ -109,5 +119,30 @@ impl LinearSweepConfig {
     pub fn with_call_target_corroboration_insns(mut self, count: usize) -> Self {
         self.set_call_target_corroboration_insns(count);
         self
+    }
+}
+
+impl AnalysisPass<FunctionDiscoveryContext> for FunctionRecoveryLinearSweep {
+    fn analyse_with(
+        &mut self,
+        _: &mut AnalysisContext<'_, '_>,
+        _: &mut FunctionDiscoveryContext,
+    ) -> Result<(), AnalysisError> {
+        Ok(())
+    }
+}
+
+#[fugue_core::extension]
+impl FunctionRecoveryExtension {
+    const NAME: &str = "linear-sweep";
+
+    fn configure(_: &Project, recovery: &mut FunctionRecovery) -> Result<(), AnalysisError> {
+        if recovery.config().linear_sweep().is_none() {
+            return Ok(());
+        }
+
+        recovery.add_candidate_discovery_pass(LINEAR_SWEEP_ANALYSER, FunctionRecoveryLinearSweep);
+
+        Ok(())
     }
 }

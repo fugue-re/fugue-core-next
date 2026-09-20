@@ -1060,6 +1060,11 @@ reason = "the test helper implements the fallible AnalysisPass callback contract
 
 [[exception]]
 rule = "unnecessary_wraps"
+path = "fugue-core/src/analysis/function/recovery/linear_sweep.rs"
+reason = "the extension configure function must match the fallible FunctionRecoveryExtension callback contract"
+
+[[exception]]
+rule = "unnecessary_wraps"
 path = "fugue-core/src/analysis/non_returning/mod.rs"
 reason = "the extension configure function must match the fallible FunctionRecoveryExtension callback contract"
 
