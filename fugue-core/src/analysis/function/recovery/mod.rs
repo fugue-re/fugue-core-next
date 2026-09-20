@@ -20,6 +20,9 @@ mod executor;
 pub(crate) mod hooks;
 pub use hooks::{FunctionCommitContext, FunctionCommitPolicy};
 
+mod linear_sweep;
+pub use linear_sweep::LinearSweepConfig;
+
 pub(crate) mod patterns;
 pub use patterns::{FunctionRecoveryPatternMatcher, FunctionRecoveryPatternMatcherError};
 
@@ -185,6 +188,9 @@ pub struct FunctionRecoveryConfig {
     // to track the coverage of a function based on block bounds or by the minimum and maximum
     // addresses of the function's blocks.
     fine_grained_block_coverage: bool,
+    // This configuration controls whether and how to scan unclaimed executable ranges for
+    // additional function candidates.
+    linear_sweep: Option<LinearSweepConfig>,
     // This flag controls whether to identify non-returning functions during recovery, and to
     // suppress the fall-through of calls that target them.
     non_returning_analysis: bool,
@@ -203,6 +209,7 @@ impl Default for FunctionRecoveryConfig {
         FunctionRecoveryConfig {
             commit_pending_functions: true,
             fine_grained_block_coverage: false,
+            linear_sweep: None,
             max_function_blocks: MAX_FUNCTION_BLOCK_COUNT,
             max_function_insns: MAX_FUNCTION_INSN_COUNT,
             max_block_insns: MAX_BLOCK_INSN_COUNT,
@@ -320,6 +327,19 @@ impl FunctionRecoveryConfig {
 
     pub fn with_fine_grained_block_coverage(mut self, enabled: bool) -> Self {
         self.set_fine_grained_block_coverage(enabled);
+        self
+    }
+
+    pub fn linear_sweep(&self) -> Option<&LinearSweepConfig> {
+        self.linear_sweep.as_ref()
+    }
+
+    pub fn set_linear_sweep(&mut self, config: impl Into<Option<LinearSweepConfig>>) {
+        self.linear_sweep = config.into();
+    }
+
+    pub fn with_linear_sweep(mut self, config: impl Into<Option<LinearSweepConfig>>) -> Self {
+        self.set_linear_sweep(config);
         self
     }
 
