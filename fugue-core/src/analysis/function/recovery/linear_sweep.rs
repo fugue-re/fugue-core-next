@@ -47,6 +47,8 @@ struct FunctionRecoveryLinearSweep {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LinearSweepEvidence {
+    CallTarget,
+    CorroboratedCallTarget,
     EntryMarker,
     PostBoundary,
 }
@@ -55,6 +57,11 @@ enum LinearSweepPrefix {
     Data(usize),
     Padding(usize),
     Unknown { entry_marker: bool },
+}
+
+enum LinearSweepScan {
+    BoundaryDiscovery { after_non_code: bool },
+    CallTargetHarvesting { consecutive_insns: usize },
 }
 
 impl Default for LinearSweepConfig {
@@ -157,7 +164,8 @@ impl LinearSweepConfig {
 impl LinearSweepEvidence {
     fn confidence(&self) -> Confidence {
         match self {
-            Self::EntryMarker => Confidence::somewhat_certain(),
+            Self::CallTarget => Confidence::somewhat_uncertain(),
+            Self::CorroboratedCallTarget | Self::EntryMarker => Confidence::somewhat_certain(),
             Self::PostBoundary => Confidence::uncertain(),
         }
     }
@@ -166,6 +174,7 @@ impl LinearSweepEvidence {
         match self {
             Self::EntryMarker => config.min_entry_marker_insns(),
             Self::PostBoundary => config.min_post_boundary_insns(),
+            Self::CallTarget | Self::CorroboratedCallTarget => config.min_call_target_insns(),
         }
     }
 }
@@ -265,7 +274,10 @@ impl FunctionRecoveryLinearSweep {
         let mut ranges = discovery.unclaimed_ranges(space_id);
 
         while let Some(range) = ranges.next() {
-            self.scan_range(project, range);
+            let mut scan = LinearSweepScan::BoundaryDiscovery {
+                after_non_code: false,
+            };
+            self.scan_range(project, range, &mut scan);
             for candidate in self.candidates.drain(..) {
                 if ranges.is_avoided(candidate.address()) {
                     continue;
@@ -279,12 +291,16 @@ impl FunctionRecoveryLinearSweep {
         emitted
     }
 
-    fn scan_range(&mut self, project: &ProjectView<'_>, range: AddressRange) {
+    fn scan_range(
+        &mut self,
+        project: &ProjectView<'_>,
+        range: AddressRange,
+        scan: &mut LinearSweepScan,
+    ) {
         let arch = project.arch();
         let alignment = project.language().address_alignment().max(1);
         let segments = project.segments();
         let mut cursor = range.start().align(alignment);
-        let mut after_non_code = false;
 
         while cursor <= range.end() {
             let address = Address::new(range.space(), cursor);
@@ -316,36 +332,10 @@ impl FunctionRecoveryLinearSweep {
                 let remaining = &bytes[offset..];
                 let prefix = self.classify(arch, &view, address, remaining, self.use_mapping_hints);
 
-                let step = match prefix {
-                    LinearSweepPrefix::Data(size) | LinearSweepPrefix::Padding(size) => {
-                        after_non_code = true;
-                        size
-                    }
-                    LinearSweepPrefix::Unknown { entry_marker } => {
-                        let evidence = entry_marker
-                            .then_some(LinearSweepEvidence::EntryMarker)
-                            .or_else(|| {
-                                after_non_code.then_some(LinearSweepEvidence::PostBoundary)
-                            });
-                        after_non_code = false;
-
-                        if let Some(evidence) = evidence
-                            && let Some(candidate) =
-                                self.validate_candidate(project, address, evidence)
-                        {
-                            self.candidates.push(candidate);
-                        }
-
-                        self.scan_resolver
-                            .resolve(address, remaining)
-                            .ok()
-                            .map(|resolved| resolved.as_ref().size())
-                            .filter(|size| *size != 0 && *size <= remaining.len())
-                            .unwrap_or(alignment)
-                    }
-                }
-                .max(1)
-                .min(remaining.len());
+                let step = self
+                    .scan_step(project, range.space(), address, remaining, prefix, scan)
+                    .max(1)
+                    .min(remaining.len());
 
                 offset += step;
             }
@@ -355,6 +345,162 @@ impl FunctionRecoveryLinearSweep {
             };
             cursor = next.align(alignment);
         }
+    }
+
+    fn harvest_space(
+        &mut self,
+        project: &ProjectView<'_>,
+        discovery: &mut FunctionDiscoveryContext,
+        space_id: AddressSpaceId,
+    ) -> usize {
+        {
+            let ranges = discovery.unclaimed_ranges(space_id);
+            for range in ranges {
+                let mut scan = LinearSweepScan::CallTargetHarvesting {
+                    consecutive_insns: 0,
+                };
+                self.scan_range(project, range, &mut scan);
+            }
+        }
+
+        let mut candidates = mem::take(&mut self.candidates);
+        let mut emitted = 0usize;
+        for candidate in candidates.drain(..) {
+            if discovery.covered().contains(candidate.address())
+                || discovery.avoids().contains(candidate.address())
+            {
+                continue;
+            }
+            tracing::debug!(
+                "adding harvested linear sweep candidate at {}",
+                candidate.address(),
+            );
+            discovery.add_candidate(candidate);
+            emitted += 1;
+        }
+        self.candidates = candidates;
+        emitted
+    }
+
+    fn scan_step(
+        &mut self,
+        project: &ProjectView<'_>,
+        space_id: AddressSpaceId,
+        address: Address,
+        bytes: &[u8],
+        prefix: LinearSweepPrefix,
+        scan: &mut LinearSweepScan,
+    ) -> usize {
+        match scan {
+            LinearSweepScan::BoundaryDiscovery { after_non_code } => {
+                self.discover_boundary(project, address, bytes, prefix, after_non_code)
+            }
+            LinearSweepScan::CallTargetHarvesting { consecutive_insns } => self
+                .harvest_call_target(project, space_id, address, bytes, prefix, consecutive_insns),
+        }
+    }
+
+    fn discover_boundary(
+        &mut self,
+        project: &ProjectView<'_>,
+        address: Address,
+        bytes: &[u8],
+        prefix: LinearSweepPrefix,
+        after_non_code: &mut bool,
+    ) -> usize {
+        let alignment = project.language().address_alignment().max(1);
+        match prefix {
+            LinearSweepPrefix::Data(size) | LinearSweepPrefix::Padding(size) => {
+                *after_non_code = true;
+                size
+            }
+            LinearSweepPrefix::Unknown { entry_marker } => {
+                let evidence = entry_marker
+                    .then_some(LinearSweepEvidence::EntryMarker)
+                    .or_else(|| after_non_code.then_some(LinearSweepEvidence::PostBoundary));
+                *after_non_code = false;
+
+                if let Some(evidence) = evidence
+                    && let Some(candidate) = self.validate_candidate(project, address, evidence)
+                {
+                    self.candidates.push(candidate);
+                }
+
+                self.scan_resolver
+                    .resolve(address, bytes)
+                    .ok()
+                    .map(|resolved| resolved.as_ref().size())
+                    .filter(|size| *size != 0 && *size <= bytes.len())
+                    .unwrap_or(alignment)
+            }
+        }
+    }
+
+    fn harvest_call_target(
+        &mut self,
+        project: &ProjectView<'_>,
+        space_id: AddressSpaceId,
+        address: Address,
+        bytes: &[u8],
+        prefix: LinearSweepPrefix,
+        consecutive_insns: &mut usize,
+    ) -> usize {
+        let arch = project.arch();
+        let alignment = project.language().address_alignment().max(1);
+        let LinearSweepPrefix::Unknown { entry_marker } = prefix else {
+            *consecutive_insns = 0;
+            return match prefix {
+                LinearSweepPrefix::Data(size) | LinearSweepPrefix::Padding(size) => size,
+                LinearSweepPrefix::Unknown { .. } => unreachable!("prefix was matched above"),
+            };
+        };
+        let Ok(resolved) = self.scan_resolver.resolve(address, bytes) else {
+            *consecutive_insns = 0;
+            return alignment;
+        };
+        let insn = resolved.as_ref();
+        if insn.size() == 0 || insn.size() > bytes.len() || insn.is_invalid() || insn.is_nonsense()
+        {
+            *consecutive_insns = 0;
+            return alignment;
+        }
+        let properties = arch.classify_bytes(&bytes[..insn.size()]);
+        if properties.is_nonsense() || properties.is_padding() {
+            *consecutive_insns = 0;
+            return insn.size();
+        }
+
+        *consecutive_insns += 1;
+
+        if entry_marker
+            && let Some(candidate) =
+                self.validate_candidate(project, address, LinearSweepEvidence::EntryMarker)
+        {
+            self.candidates.push(candidate);
+        }
+
+        if !insn.is_indirect()
+            && let Some(target) = insn.call_target()
+            && let Some((canonical, _)) = arch.canonicalise_address(target.raw_address())
+        {
+            let target = Address::new(target.space(), canonical);
+            if target.space() == space_id {
+                let evidence =
+                    if *consecutive_insns >= self.config.call_target_corroboration_insns() {
+                        LinearSweepEvidence::CorroboratedCallTarget
+                    } else {
+                        LinearSweepEvidence::CallTarget
+                    };
+                if let Some(candidate) = self.validate_candidate(project, target, evidence) {
+                    self.candidates.push(candidate);
+                }
+            }
+        }
+
+        if !insn.has_fall_through() {
+            *consecutive_insns = 0;
+        }
+        insn.size()
     }
 
     fn validate_candidate(
@@ -544,8 +690,15 @@ impl AnalysisPass<FunctionDiscoveryContext> for FunctionRecoveryLinearSweep {
             .extend(project.segments().spaces().map(|space| space.id()));
 
         let spaces = mem::take(&mut self.spaces);
-        for space_id in spaces.iter().copied() {
-            self.scan_space(project, discovery, space_id);
+        let emitted = spaces
+            .iter()
+            .copied()
+            .map(|space_id| self.scan_space(project, discovery, space_id))
+            .sum::<usize>();
+        if emitted == 0 {
+            for space_id in spaces.iter().copied() {
+                self.harvest_space(project, discovery, space_id);
+            }
         }
         self.spaces = spaces;
 
