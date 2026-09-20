@@ -130,8 +130,13 @@ impl ProjectTransaction<'_> {
             provenance,
             flags,
         )?;
-        self.changes
-            .push(ChangeRecord::SegmentMappingChanged { mapping: id });
+        let ranges = self
+            .segment_staging
+            .mapping_placements(self.project.storage.segments(), id)?;
+        self.changes.push(ChangeRecord::SegmentMappingChanged {
+            mapping: id,
+            ranges,
+        });
 
         Ok(())
     }

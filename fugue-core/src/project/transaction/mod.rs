@@ -49,7 +49,7 @@ impl StagedChangeKey {
             ChangeRecord::SegmentMapped { mapping, range } => {
                 Some(Self::SegmentMapped(*mapping, *range))
             }
-            ChangeRecord::SegmentMappingChanged { mapping } => {
+            ChangeRecord::SegmentMappingChanged { mapping, .. } => {
                 Some(Self::SegmentMappingChanged(*mapping))
             }
             ChangeRecord::SegmentMappingCreated { mapping } => {

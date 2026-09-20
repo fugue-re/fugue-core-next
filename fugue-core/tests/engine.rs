@@ -2279,7 +2279,13 @@ fn test_engine_mapping_edits_materialise_changes() -> Result<(), Box<dyn Error>>
         metadata
             .records()
             .contains(&ChangeRecord::SegmentMappingChanged {
-                mapping: created_id
+                mapping: created_id,
+                ranges: [AddressRange::point(Address::new(
+                    extra_space,
+                    created_start.raw_address(),
+                ))]
+                .into_iter()
+                .collect(),
             })
     );
 

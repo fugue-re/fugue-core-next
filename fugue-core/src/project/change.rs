@@ -259,6 +259,7 @@ pub enum ChangeRecord {
     },
     SegmentMappingChanged {
         mapping: SegmentMappingId,
+        ranges: SmallVec<[AddressRange; 4]>,
     },
     SegmentMappingCreated {
         mapping: SegmentMappingId,
@@ -349,6 +350,7 @@ impl ChangeRecord {
             Self::BytesWritten { range }
             | Self::SegmentMapped { range, .. }
             | Self::SegmentUnmapped { range, .. } => [*range].into_iter().collect(),
+            Self::SegmentMappingChanged { ranges, .. } => ranges.clone(),
             Self::FunctionAdded { coverage, .. }
             | Self::FunctionChanged { coverage, .. }
             | Self::FunctionRemoved { coverage, .. } => coverage.ranges().collect(),
@@ -376,7 +378,6 @@ impl ChangeRecord {
             Self::Resynchronise { .. }
             | Self::LiftedMaterialised { .. }
             | Self::LiftedRemoved { .. }
-            | Self::SegmentMappingChanged { .. }
             | Self::SegmentMappingCreated { .. }
             | Self::SpaceCreated { .. } => SmallVec::new(),
         }

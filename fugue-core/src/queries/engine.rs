@@ -736,6 +736,13 @@ mod test {
             changed,
             [ChangeRecord::SegmentMappingChanged {
                 mapping: SegmentMappingId::new(0),
+                ranges: [AddressRange::new(
+                    AddressSpaceId::from(0u8),
+                    RawAddress::from(0x1000u64),
+                    RawAddress::from(0x1fffu64),
+                )]
+                .into_iter()
+                .collect(),
             }],
         ));
         assert!(reader.changed_since(created, ChangeKinds::SEGMENT_MAPPING_CHANGED, &region)?);
