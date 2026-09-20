@@ -1,15 +1,14 @@
-use std::mem;
-
 use crate::analysis::function::recovery::analysis::FunctionDiscoveryContext;
 use crate::analysis::function::recovery::{FunctionRecovery, FunctionRecoveryExtension};
 use crate::analysis::{AnalysisError, AnalysisPass};
 use crate::arch::Arch;
 use crate::engine::{AnalysisContext, ProjectView};
-use crate::ir::{Address, AddressRange, AddressWithContext};
-use crate::lifter::{ContextSet, InsnResolver, LiftingContext};
+use crate::ir::{Address, AddressRange, AddressWithContext, Insn};
+use crate::lifter::{ContextSet, InsnResolver, InsnResolverError, LiftingContext};
 use crate::project::Project;
 use crate::storage::{
     AddressSpaceId, SegmentMappingCache, SegmentMappingProvenance, SegmentMappingView,
+    SegmentStorage,
 };
 use crate::types::Confidence;
 
@@ -20,7 +19,7 @@ const DEFAULT_MAX_TRIAL_INSNS: usize = 16;
 const DEFAULT_MIN_POST_BOUNDARY_INSNS: usize = 4;
 const DEFAULT_MIN_ENTRY_MARKER_INSNS: usize = 2;
 const DEFAULT_MIN_CALL_TARGET_INSNS: usize = 2;
-const DEFAULT_CALL_TARGET_CORROBORATION_INSNS: usize = 8;
+const DEFAULT_MIN_CALL_SITE_INSNS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LinearSweepConfig {
@@ -29,39 +28,40 @@ pub struct LinearSweepConfig {
     min_post_boundary_insns: usize,
     min_entry_marker_insns: usize,
     min_call_target_insns: usize,
-    call_target_corroboration_insns: usize,
+    min_call_site_insns: usize,
 }
 
 struct FunctionRecoveryLinearSweep {
     candidates: Vec<AddressWithContext>,
     config: LinearSweepConfig,
-    scan_context: LiftingContext,
-    scan_mappings: SegmentMappingCache,
-    scan_resolver: InsnResolver,
-    spaces: Vec<AddressSpaceId>,
     use_mapping_hints: bool,
-    validation_context: LiftingContext,
-    validation_mappings: SegmentMappingCache,
-    validation_resolver: InsnResolver,
+    scan: LinearSweepResolver,
+    validation: LinearSweepResolver,
+}
+
+struct LinearSweepResolver {
+    initial_context: LiftingContext,
+    mapping_cache: SegmentMappingCache,
+    resolver: InsnResolver,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LinearSweepEvidence {
     CallTarget,
-    CorroboratedCallTarget,
     EntryMarker,
+    EstablishedCallSite,
     PostBoundary,
 }
 
-enum LinearSweepPrefix {
+enum LinearSweepProperties {
     Data(usize),
     Padding(usize),
     Unknown { entry_marker: bool },
 }
 
 enum LinearSweepScan {
-    BoundaryDiscovery { after_non_code: bool },
-    CallTargetHarvesting { consecutive_insns: usize },
+    Boundaries { after_non_code: bool },
+    CallTargets { consecutive_insns: usize },
 }
 
 impl Default for LinearSweepConfig {
@@ -72,7 +72,7 @@ impl Default for LinearSweepConfig {
             min_post_boundary_insns: DEFAULT_MIN_POST_BOUNDARY_INSNS,
             min_entry_marker_insns: DEFAULT_MIN_ENTRY_MARKER_INSNS,
             min_call_target_insns: DEFAULT_MIN_CALL_TARGET_INSNS,
-            call_target_corroboration_insns: DEFAULT_CALL_TARGET_CORROBORATION_INSNS,
+            min_call_site_insns: DEFAULT_MIN_CALL_SITE_INSNS,
         }
     }
 }
@@ -147,16 +147,16 @@ impl LinearSweepConfig {
         self
     }
 
-    pub fn call_target_corroboration_insns(&self) -> usize {
-        self.call_target_corroboration_insns
+    pub fn min_call_site_insns(&self) -> usize {
+        self.min_call_site_insns
     }
 
-    pub fn set_call_target_corroboration_insns(&mut self, count: usize) {
-        self.call_target_corroboration_insns = count.max(1);
+    pub fn set_min_call_site_insns(&mut self, count: usize) {
+        self.min_call_site_insns = count.max(1);
     }
 
-    pub fn with_call_target_corroboration_insns(mut self, count: usize) -> Self {
-        self.set_call_target_corroboration_insns(count);
+    pub fn with_min_call_site_insns(mut self, count: usize) -> Self {
+        self.set_min_call_site_insns(count);
         self
     }
 }
@@ -165,7 +165,7 @@ impl LinearSweepEvidence {
     fn confidence(&self) -> Confidence {
         match self {
             Self::CallTarget => Confidence::somewhat_uncertain(),
-            Self::CorroboratedCallTarget | Self::EntryMarker => Confidence::somewhat_certain(),
+            Self::EntryMarker | Self::EstablishedCallSite => Confidence::somewhat_certain(),
             Self::PostBoundary => Confidence::uncertain(),
         }
     }
@@ -174,29 +174,74 @@ impl LinearSweepEvidence {
         match self {
             Self::EntryMarker => config.min_entry_marker_insns(),
             Self::PostBoundary => config.min_post_boundary_insns(),
-            Self::CallTarget | Self::CorroboratedCallTarget => config.min_call_target_insns(),
+            Self::CallTarget | Self::EstablishedCallSite => config.min_call_target_insns(),
+        }
+    }
+}
+
+impl LinearSweepResolver {
+    fn new(arch: &Arch) -> Self {
+        let resolver = InsnResolver::new(arch);
+        let initial_context = resolver.context().clone();
+
+        Self {
+            initial_context,
+            mapping_cache: SegmentMappingCache::new(),
+            resolver,
+        }
+    }
+
+    fn context(&self) -> &LiftingContext {
+        self.resolver.context()
+    }
+
+    fn reset_context(&mut self) {
+        self.resolver
+            .context_mut()
+            .clone_from(&self.initial_context);
+    }
+
+    fn apply_context(&mut self, address: Address, context: &ContextSet) {
+        context.apply(address, self.resolver.context_mut());
+    }
+
+    fn resolve(&mut self, address: Address, bytes: &[u8]) -> Result<Insn, InsnResolverError> {
+        self.resolver
+            .resolve(address, bytes)
+            .map(|resolved| resolved.into_insn())
+    }
+
+    fn view_containing<'a>(
+        &mut self,
+        segments: &'a SegmentStorage,
+        address: Address,
+    ) -> Option<SegmentMappingView<'a>> {
+        self.mapping_cache.view_containing(segments, address)
+    }
+}
+
+impl LinearSweepScan {
+    fn new_boundaries() -> Self {
+        Self::Boundaries {
+            after_non_code: false,
+        }
+    }
+
+    fn new_call_targets() -> Self {
+        Self::CallTargets {
+            consecutive_insns: 0,
         }
     }
 }
 
 impl FunctionRecoveryLinearSweep {
     fn new(arch: &Arch, config: LinearSweepConfig, use_mapping_hints: bool) -> Self {
-        let scan_resolver = InsnResolver::new(arch);
-        let scan_context = scan_resolver.context().clone();
-        let validation_resolver = InsnResolver::new(arch);
-        let validation_context = validation_resolver.context().clone();
-
         Self {
             candidates: Vec::new(),
             config,
-            scan_context,
-            scan_mappings: SegmentMappingCache::new(),
-            scan_resolver,
-            spaces: Vec::new(),
+            scan: LinearSweepResolver::new(arch),
             use_mapping_hints,
-            validation_context,
-            validation_mappings: SegmentMappingCache::new(),
-            validation_resolver,
+            validation: LinearSweepResolver::new(arch),
         }
     }
 
@@ -206,9 +251,8 @@ impl FunctionRecoveryLinearSweep {
         view: &SegmentMappingView<'_>,
         address: Address,
         bytes: &[u8],
-        use_mapping_hints: bool,
-    ) -> LinearSweepPrefix {
-        if use_mapping_hints
+    ) -> LinearSweepProperties {
+        if self.use_mapping_hints
             && let Some(hint) = view
                 .mapping_hints()
                 .take_while(|(hint_address, _)| *hint_address <= address)
@@ -237,46 +281,41 @@ impl FunctionRecoveryLinearSweep {
                             .unwrap_or(usize::MAX)
                         },
                     );
-                return LinearSweepPrefix::Data(size.max(1));
+                return LinearSweepProperties::Data(size.max(1));
             }
 
             if let Some(context) = hint.context() {
-                context.apply(address, self.scan_resolver.context_mut());
+                self.scan.apply_context(address, context);
             }
         }
 
-        let (size, properties) = arch.classify_contiguous_bytes(
-            address.raw_address(),
-            self.scan_resolver.context(),
-            bytes,
-        );
-        if size != 0 && size <= bytes.len() && properties.is_padding() {
-            return LinearSweepPrefix::Padding(size);
+        let (size, insn_properties) =
+            arch.classify_contiguous_bytes(address.raw_address(), self.scan.context(), bytes);
+        if size != 0 && size <= bytes.len() && insn_properties.is_padding() {
+            return LinearSweepProperties::Padding(size);
         }
 
         let zero_fill = bytes.iter().take_while(|byte| **byte == 0).count();
         if zero_fill >= self.config.min_zero_fill_bytes() {
-            return LinearSweepPrefix::Data(zero_fill);
+            return LinearSweepProperties::Data(zero_fill);
         }
 
-        LinearSweepPrefix::Unknown {
-            entry_marker: size != 0 && size <= bytes.len() && properties.is_entry_insn(),
+        LinearSweepProperties::Unknown {
+            entry_marker: size != 0 && size <= bytes.len() && insn_properties.is_entry_insn(),
         }
     }
 
-    fn scan_space(
+    fn scan_boundaries(
         &mut self,
         project: &ProjectView<'_>,
-        discovery: &mut FunctionDiscoveryContext,
         space_id: AddressSpaceId,
+        discovery: &mut FunctionDiscoveryContext,
     ) -> usize {
-        let mut emitted = 0usize;
+        let mut found = 0usize;
         let mut ranges = discovery.unclaimed_ranges(space_id);
 
         while let Some(range) = ranges.next() {
-            let mut scan = LinearSweepScan::BoundaryDiscovery {
-                after_non_code: false,
-            };
+            let mut scan = LinearSweepScan::new_boundaries();
             self.scan_range(project, range, &mut scan);
             for candidate in self.candidates.drain(..) {
                 if ranges.is_avoided(candidate.address()) {
@@ -284,11 +323,11 @@ impl FunctionRecoveryLinearSweep {
                 }
                 tracing::debug!("adding linear sweep candidate at {}", candidate.address(),);
                 ranges.add_candidate(candidate);
-                emitted += 1;
+                found += 1;
             }
         }
 
-        emitted
+        found
     }
 
     fn scan_range(
@@ -304,7 +343,7 @@ impl FunctionRecoveryLinearSweep {
 
         while cursor <= range.end() {
             let address = Address::new(range.space(), cursor);
-            let Some(view) = self.scan_mappings.view_containing(segments, address) else {
+            let Some(view) = self.scan.view_containing(segments, address) else {
                 break;
             };
             let region_end = view.last().raw_address().min(range.end());
@@ -322,20 +361,32 @@ impl FunctionRecoveryLinearSweep {
                 break;
             }
 
-            self.scan_resolver
-                .context_mut()
-                .clone_from(&self.scan_context);
+            self.scan.reset_context();
 
             let mut offset = 0usize;
             while offset < bytes.len() {
                 let address = Address::new(range.space(), cursor + offset);
                 let remaining = &bytes[offset..];
-                let prefix = self.classify(arch, &view, address, remaining, self.use_mapping_hints);
-
-                let step = self
-                    .scan_step(project, range.space(), address, remaining, prefix, scan)
-                    .max(1)
-                    .min(remaining.len());
+                let properties = self.classify(arch, &view, address, remaining);
+                let step = match scan {
+                    LinearSweepScan::Boundaries { after_non_code } => self.scan_boundary_candidate(
+                        project,
+                        address,
+                        remaining,
+                        properties,
+                        after_non_code,
+                    ),
+                    LinearSweepScan::CallTargets { consecutive_insns } => self
+                        .scan_call_target_candidate(
+                            project,
+                            address,
+                            remaining,
+                            properties,
+                            consecutive_insns,
+                        ),
+                }
+                .max(1)
+                .min(remaining.len());
 
                 offset += step;
             }
@@ -347,74 +398,46 @@ impl FunctionRecoveryLinearSweep {
         }
     }
 
-    fn harvest_space(
+    fn scan_call_targets(
         &mut self,
         project: &ProjectView<'_>,
-        discovery: &mut FunctionDiscoveryContext,
         space_id: AddressSpaceId,
-    ) -> usize {
+        discovery: &mut FunctionDiscoveryContext,
+    ) {
         {
             let ranges = discovery.unclaimed_ranges(space_id);
             for range in ranges {
-                let mut scan = LinearSweepScan::CallTargetHarvesting {
-                    consecutive_insns: 0,
-                };
+                let mut scan = LinearSweepScan::new_call_targets();
                 self.scan_range(project, range, &mut scan);
             }
         }
 
-        let mut candidates = mem::take(&mut self.candidates);
-        let mut emitted = 0usize;
-        for candidate in candidates.drain(..) {
+        for candidate in self.candidates.drain(..) {
             if discovery.covered().contains(candidate.address())
                 || discovery.avoids().contains(candidate.address())
             {
                 continue;
             }
-            tracing::debug!(
-                "adding harvested linear sweep candidate at {}",
-                candidate.address(),
-            );
+            tracing::debug!("adding linear sweep candidate at {}", candidate.address(),);
             discovery.add_candidate(candidate);
-            emitted += 1;
-        }
-        self.candidates = candidates;
-        emitted
-    }
-
-    fn scan_step(
-        &mut self,
-        project: &ProjectView<'_>,
-        space_id: AddressSpaceId,
-        address: Address,
-        bytes: &[u8],
-        prefix: LinearSweepPrefix,
-        scan: &mut LinearSweepScan,
-    ) -> usize {
-        match scan {
-            LinearSweepScan::BoundaryDiscovery { after_non_code } => {
-                self.discover_boundary(project, address, bytes, prefix, after_non_code)
-            }
-            LinearSweepScan::CallTargetHarvesting { consecutive_insns } => self
-                .harvest_call_target(project, space_id, address, bytes, prefix, consecutive_insns),
         }
     }
 
-    fn discover_boundary(
+    fn scan_boundary_candidate(
         &mut self,
         project: &ProjectView<'_>,
         address: Address,
         bytes: &[u8],
-        prefix: LinearSweepPrefix,
+        properties: LinearSweepProperties,
         after_non_code: &mut bool,
     ) -> usize {
         let alignment = project.language().address_alignment().max(1);
-        match prefix {
-            LinearSweepPrefix::Data(size) | LinearSweepPrefix::Padding(size) => {
+        match properties {
+            LinearSweepProperties::Data(size) | LinearSweepProperties::Padding(size) => {
                 *after_non_code = true;
                 size
             }
-            LinearSweepPrefix::Unknown { entry_marker } => {
+            LinearSweepProperties::Unknown { entry_marker } => {
                 let evidence = entry_marker
                     .then_some(LinearSweepEvidence::EntryMarker)
                     .or_else(|| after_non_code.then_some(LinearSweepEvidence::PostBoundary));
@@ -426,44 +449,46 @@ impl FunctionRecoveryLinearSweep {
                     self.candidates.push(candidate);
                 }
 
-                self.scan_resolver
+                self.scan
                     .resolve(address, bytes)
                     .ok()
-                    .map(|resolved| resolved.as_ref().size())
+                    .map(|insn| insn.size())
                     .filter(|size| *size != 0 && *size <= bytes.len())
                     .unwrap_or(alignment)
             }
         }
     }
 
-    fn harvest_call_target(
+    fn scan_call_target_candidate(
         &mut self,
         project: &ProjectView<'_>,
-        space_id: AddressSpaceId,
         address: Address,
         bytes: &[u8],
-        prefix: LinearSweepPrefix,
+        properties: LinearSweepProperties,
         consecutive_insns: &mut usize,
     ) -> usize {
         let arch = project.arch();
         let alignment = project.language().address_alignment().max(1);
-        let LinearSweepPrefix::Unknown { entry_marker } = prefix else {
+        let LinearSweepProperties::Unknown { entry_marker } = properties else {
             *consecutive_insns = 0;
-            return match prefix {
-                LinearSweepPrefix::Data(size) | LinearSweepPrefix::Padding(size) => size,
-                LinearSweepPrefix::Unknown { .. } => unreachable!("prefix was matched above"),
+            return match properties {
+                LinearSweepProperties::Data(size) | LinearSweepProperties::Padding(size) => size,
+                LinearSweepProperties::Unknown { .. } => {
+                    unreachable!("properties were matched above")
+                }
             };
         };
-        let Ok(resolved) = self.scan_resolver.resolve(address, bytes) else {
+        let Ok(insn) = self.scan.resolve(address, bytes) else {
             *consecutive_insns = 0;
             return alignment;
         };
-        let insn = resolved.as_ref();
+
         if insn.size() == 0 || insn.size() > bytes.len() || insn.is_invalid() || insn.is_nonsense()
         {
             *consecutive_insns = 0;
             return alignment;
         }
+
         let properties = arch.classify_bytes(&bytes[..insn.size()]);
         if properties.is_nonsense() || properties.is_padding() {
             *consecutive_insns = 0;
@@ -484,13 +509,12 @@ impl FunctionRecoveryLinearSweep {
             && let Some((canonical, _)) = arch.canonicalise_address(target.raw_address())
         {
             let target = Address::new(target.space(), canonical);
-            if target.space() == space_id {
-                let evidence =
-                    if *consecutive_insns >= self.config.call_target_corroboration_insns() {
-                        LinearSweepEvidence::CorroboratedCallTarget
-                    } else {
-                        LinearSweepEvidence::CallTarget
-                    };
+            if target.space() == address.space() {
+                let evidence = if *consecutive_insns >= self.config.min_call_site_insns() {
+                    LinearSweepEvidence::EstablishedCallSite
+                } else {
+                    LinearSweepEvidence::CallTarget
+                };
                 if let Some(candidate) = self.validate_candidate(project, target, evidence) {
                     self.candidates.push(candidate);
                 }
@@ -549,26 +573,20 @@ impl FunctionRecoveryLinearSweep {
     ) -> Option<(Address, ContextSet)> {
         let arch = project.arch();
         let segments = project.segments();
-        let use_mapping_hints = self.use_mapping_hints;
-
-        self.validation_resolver
-            .context_mut()
-            .clone_from(&self.validation_context);
-        context.apply(address, self.validation_resolver.context_mut());
-        let (canonical, derived) = arch
-            .canonicalise_address_with(address.raw_address(), self.validation_resolver.context())?;
+        self.validation.reset_context();
+        self.validation.apply_context(address, &context);
+        let (canonical, derived) =
+            arch.canonicalise_address_with(address.raw_address(), self.validation.context())?;
         let address = Address::new(address.space(), canonical);
         context.merge(&derived);
-        context.apply(address, self.validation_resolver.context_mut());
+        self.validation.apply_context(address, &context);
 
-        let view = self
-            .validation_mappings
-            .view_containing(segments, address)?;
+        let view = self.validation.view_containing(segments, address)?;
         if !view.properties().is_executable() {
             return None;
         }
 
-        if use_mapping_hints
+        if self.use_mapping_hints
             && let Some(hint) = view
                 .mapping_hints()
                 .take_while(|(hint_address, _)| *hint_address <= address)
@@ -580,7 +598,7 @@ impl FunctionRecoveryLinearSweep {
             }
             if let Some(hinted) = hint.context() {
                 context.merge(hinted);
-                context.apply(address, self.validation_resolver.context_mut());
+                self.validation.apply_context(address, &context);
             }
         }
 
@@ -591,10 +609,12 @@ impl FunctionRecoveryLinearSweep {
         let bytes_size = view.range().remaining_from(address)?;
         let bytes_size = usize::try_from(bytes_size).unwrap_or(usize::MAX);
         let bytes = &all_bytes[..all_bytes.len().min(bytes_size)];
+
         let mut mapping_hints = view
             .mapping_hints()
             .filter(|(hint_address, _)| *hint_address > address)
             .peekable();
+
         let mut offset = 0usize;
         let mut resolved_insns = 0usize;
         let mut terminated = false;
@@ -602,7 +622,7 @@ impl FunctionRecoveryLinearSweep {
         while resolved_insns < self.config.max_trial_insns() && offset < bytes.len() {
             let insn_address = address + offset;
 
-            if use_mapping_hints
+            if self.use_mapping_hints
                 && let Some((hint_address, hint)) = mapping_hints.peek().copied()
                 && hint_address == insn_address
             {
@@ -610,16 +630,15 @@ impl FunctionRecoveryLinearSweep {
                     break;
                 }
                 if let Some(hinted) = hint.context() {
-                    hinted.apply(insn_address, self.validation_resolver.context_mut());
+                    self.validation.apply_context(insn_address, hinted);
                 }
                 mapping_hints.next();
             }
 
-            let resolved = self
-                .validation_resolver
+            let insn = self
+                .validation
                 .resolve(insn_address, &bytes[offset..])
                 .ok()?;
-            let insn = resolved.as_ref();
             if insn.size() == 0
                 || insn.size() > bytes.len() - offset
                 || insn.is_invalid()
@@ -634,7 +653,7 @@ impl FunctionRecoveryLinearSweep {
                 break;
             }
 
-            if use_mapping_hints
+            if self.use_mapping_hints
                 && mapping_hints.peek().is_some_and(|(hint_address, hint)| {
                     hint.is_data() && *hint_address < insn.next_address()
                 })
@@ -653,7 +672,7 @@ impl FunctionRecoveryLinearSweep {
                         return true;
                     };
                     let target_address = Address::new(target_address.space(), canonical);
-                    self.validation_mappings
+                    self.validation
                         .view_containing(segments, target_address)
                         .is_none_or(|view| {
                             !view.properties().is_executable()
@@ -685,22 +704,16 @@ impl AnalysisPass<FunctionDiscoveryContext> for FunctionRecoveryLinearSweep {
         discovery: &mut FunctionDiscoveryContext,
     ) -> Result<(), AnalysisError> {
         let project = &context.project;
-        self.spaces.clear();
-        self.spaces
-            .extend(project.segments().spaces().map(|space| space.id()));
-
-        let spaces = mem::take(&mut self.spaces);
-        let emitted = spaces
-            .iter()
-            .copied()
-            .map(|space_id| self.scan_space(project, discovery, space_id))
+        let found = project
+            .segments()
+            .spaces()
+            .map(|space| self.scan_boundaries(project, space.id(), discovery))
             .sum::<usize>();
-        if emitted == 0 {
-            for space_id in spaces.iter().copied() {
-                self.harvest_space(project, discovery, space_id);
+        if found == 0 {
+            for space in project.segments().spaces() {
+                self.scan_call_targets(project, space.id(), discovery);
             }
         }
-        self.spaces = spaces;
 
         Ok(())
     }

@@ -134,8 +134,8 @@ impl FunctionRecoveryPatternMatcher {
     fn match_patterns_in_space(
         &self,
         project: &ProjectView<'_>,
-        state: &mut FunctionDiscoveryContext,
         space_id: AddressSpaceId,
+        state: &mut FunctionDiscoveryContext,
     ) {
         let segments = project.segments();
         let mut ranges = state.unclaimed_ranges(space_id);
@@ -209,7 +209,7 @@ impl AnalysisPass<FunctionDiscoveryContext> for FunctionRecoveryPatternMatcher {
         let spaces = segments.spaces();
 
         for space in spaces.map(|s| s.id()) {
-            self.match_patterns_in_space(project, state, space);
+            self.match_patterns_in_space(project, space, state);
         }
 
         Ok(())
