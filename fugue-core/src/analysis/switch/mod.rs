@@ -238,6 +238,13 @@ impl AnalysisPass<StructuredFunctionContext> for SwitchRecovery {
                         .contains(SwitchProperties::GUARD_FOUND)
                         && !recovered.is_guarded()))
             {
+                for case in existing.cases() {
+                    state.context_mut().add_local_target_with_context(
+                        site,
+                        case.target().clone(),
+                        FlowKind::SwitchBranch,
+                    );
+                }
                 continue;
             }
 
