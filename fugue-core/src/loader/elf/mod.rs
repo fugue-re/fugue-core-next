@@ -2179,6 +2179,7 @@ mod test {
     use std::collections::BTreeSet;
 
     use fallible_iterator::FallibleIterator;
+    use fugue_bytes::{BE, ByteCast, LE};
     use object::elf::{
         R_ARM_JUMP_SLOT, R_ARM_RELATIVE, R_MIPS_64, R_MIPS_REL32, R_PPC_JMP_SLOT, R_PPC_RELATIVE,
         R_PPC64_RELATIVE, R_RISCV_CALL_PLT, R_RISCV_RELATIVE,
@@ -2538,15 +2539,12 @@ mod test {
                     let implicit = if reloc.has_implicit_addend() {
                         file.segments()
                             .find_map(|segment| {
-                                let offset = offset.checked_sub(segment.address())?;
-                                let start = usize::try_from(offset).ok()?;
-                                let end = start.checked_add(size_of::<u32>())?;
-                                let bytes: [u8; 4] =
-                                    segment.data().ok()?.get(start..end)?.try_into().ok()?;
+                                let bytes =
+                                    segment.data_range(offset, u32::SIZEOF as u64).ok()??;
                                 Some(if file.is_little_endian() {
-                                    u32::from_le_bytes(bytes)
+                                    u32::read_bytes::<LE>(bytes)
                                 } else {
-                                    u32::from_be_bytes(bytes)
+                                    u32::read_bytes::<BE>(bytes)
                                 })
                             })
                             .unwrap_or_default()
