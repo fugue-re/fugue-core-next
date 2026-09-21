@@ -1,4 +1,4 @@
-use std::any::{TypeId, type_name};
+use std::any::{Any, TypeId, type_name};
 use std::cmp::Ordering;
 use std::fmt::{self, Display, Formatter};
 use std::mem;
@@ -290,8 +290,38 @@ impl Display for Priority {
     }
 }
 
+#[derive(Clone, Default)]
+struct AnalysisConfigStore {
+    entries: FxHashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+}
+
+impl fmt::Debug for AnalysisConfigStore {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AnalysisConfigStore")
+            .field("entries", &self.entries.len())
+            .finish()
+    }
+}
+
+impl AnalysisConfigStore {
+    fn get<T>(&self) -> Option<&T>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.entries.get(&TypeId::of::<T>())?.downcast_ref()
+    }
+
+    fn set<T>(&mut self, config: T)
+    where
+        T: Send + Sync + 'static,
+    {
+        self.entries.insert(TypeId::of::<T>(), Arc::new(config));
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AnalysisEngineConfig {
+    analysis_configs: AnalysisConfigStore,
     analyser_names: FxHashMap<SmolStr, bool>,
     analyser_types: FxHashMap<TypeId, AnalyserTypeSelection>,
     analysers_enabled: bool,
@@ -310,6 +340,7 @@ struct AnalyserTypeSelection {
 impl Default for AnalysisEngineConfig {
     fn default() -> Self {
         Self {
+            analysis_configs: AnalysisConfigStore::default(),
             analyser_names: FxHashMap::default(),
             analyser_types: FxHashMap::default(),
             analysers_enabled: true,
@@ -322,6 +353,28 @@ impl Default for AnalysisEngineConfig {
 }
 
 impl AnalysisEngineConfig {
+    pub fn analysis_config<T>(&self) -> Option<&T>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.analysis_configs.get()
+    }
+
+    pub fn set_analysis_config<T>(&mut self, config: T)
+    where
+        T: Send + Sync + 'static,
+    {
+        self.analysis_configs.set(config);
+    }
+
+    pub fn with_analysis_config<T>(mut self, config: T) -> Self
+    where
+        T: Send + Sync + 'static,
+    {
+        self.set_analysis_config(config);
+        self
+    }
+
     pub fn channel_capacity(&self) -> usize {
         self.channel_capacity
     }
@@ -543,7 +596,8 @@ pub trait Analyser: Send {
     }
 }
 
-type AnalyserBuildFn = fn(&Project) -> Result<Box<dyn Analyser>, AnalysisError>;
+type AnalyserBuildFn =
+    fn(&Project, &AnalysisEngineConfig) -> Result<Box<dyn Analyser>, AnalysisError>;
 
 pub struct AnalyserProvider {
     build: AnalyserBuildFn,
@@ -579,12 +633,17 @@ impl AnalyserProvider {
         self.type_id
     }
 
-    pub fn create(&self, project: &Project) -> Result<Box<dyn Analyser>, AnalysisError> {
-        (self.build)(project)
+    pub fn create(
+        &self,
+        project: &Project,
+        config: &AnalysisEngineConfig,
+    ) -> Result<Box<dyn Analyser>, AnalysisError> {
+        (self.build)(project, config)
     }
 
     fn build_il_analyser<A: IlAnalyser>(
         project: &Project,
+        _config: &AnalysisEngineConfig,
     ) -> Result<Box<dyn Analyser>, AnalysisError> {
         Ok(Box::new(scheduler::IlAnalyserAdapter::new(A::build(
             project,

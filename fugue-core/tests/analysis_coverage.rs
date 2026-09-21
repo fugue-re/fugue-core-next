@@ -9,7 +9,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(feature = "sqlite")]
 use fugue_core::analysis::AnalysisError;
 #[cfg(feature = "sqlite")]
-use fugue_core::engine::{Analyser, AnalyserProvider, AnalysisContext, AnalysisEngine};
+use fugue_core::engine::{
+    Analyser, AnalyserProvider, AnalysisContext, AnalysisEngine, AnalysisEngineConfig,
+};
 #[cfg(feature = "sqlite")]
 use fugue_core::extension;
 #[cfg(feature = "sqlite")]
@@ -100,12 +102,18 @@ impl Analyser for CoverageAnalyser {
 }
 
 #[cfg(feature = "sqlite")]
-fn build_new_coverage_analyser(_project: &Project) -> Result<Box<dyn Analyser>, AnalysisError> {
+fn build_new_coverage_analyser(
+    _project: &Project,
+    _config: &AnalysisEngineConfig,
+) -> Result<Box<dyn Analyser>, AnalysisError> {
     Ok(Box::new(CoverageAnalyser::new(NEW_ANALYSER_NAME)))
 }
 
 #[cfg(feature = "sqlite")]
-fn build_old_coverage_analyser(_project: &Project) -> Result<Box<dyn Analyser>, AnalysisError> {
+fn build_old_coverage_analyser(
+    _project: &Project,
+    _config: &AnalysisEngineConfig,
+) -> Result<Box<dyn Analyser>, AnalysisError> {
     Ok(Box::new(CoverageAnalyser::new(OLD_ANALYSER_NAME)))
 }
 

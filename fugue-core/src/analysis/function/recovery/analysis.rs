@@ -18,7 +18,8 @@ use crate::analysis::function::recovery::{
 };
 use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
 use crate::engine::{
-    Analyser, AnalyserProvider, AnalysisContext, Priority, ProjectUpdates, ProjectView,
+    Analyser, AnalyserProvider, AnalysisContext, AnalysisEngineConfig, Priority, ProjectUpdates,
+    ProjectView,
 };
 use crate::extension::{self, Registration};
 use crate::ir::{
@@ -1368,8 +1369,15 @@ impl FunctionRecovery {
         Ok(())
     }
 
-    pub fn new_analyser(project: &Project) -> Result<Box<dyn Analyser>, AnalysisError> {
-        let mut recovery = Self::new();
+    pub fn new_analyser(
+        project: &Project,
+        config: &AnalysisEngineConfig,
+    ) -> Result<Box<dyn Analyser>, AnalysisError> {
+        let recovery_config = config
+            .analysis_config::<FunctionRecoveryConfig>()
+            .copied()
+            .unwrap_or_default();
+        let mut recovery = Self::new_with(recovery_config);
         let mut extensions = extension::iter::<FunctionRecoveryExtension>().collect::<Vec<_>>();
         extensions.sort_unstable_by_key(|extension| (extension.priority(), extension.name()));
 

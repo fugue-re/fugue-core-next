@@ -264,7 +264,7 @@ impl Worker {
             if !config.analyser_enabled(provider) {
                 continue;
             }
-            let analyser = provider.create(&project_read)?;
+            let analyser = provider.create(&project_read, &config)?;
             if analyser.can_analyse(&project_read) {
                 let id = AnalyserId::new(analysers.len());
                 analysers.push(ScheduledAnalyser::new(id, analyser, provider.il_input()));

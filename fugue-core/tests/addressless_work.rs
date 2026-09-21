@@ -2,7 +2,9 @@ use std::error::Error;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use fugue_core::analysis::AnalysisError;
-use fugue_core::engine::{Analyser, AnalyserProvider, AnalysisContext, AnalysisEngine};
+use fugue_core::engine::{
+    Analyser, AnalyserProvider, AnalysisContext, AnalysisEngine, AnalysisEngineConfig,
+};
 use fugue_core::extension;
 use fugue_core::loader::Loader;
 use fugue_core::project::{ChangeKinds, Project};
@@ -45,7 +47,10 @@ impl Analyser for AddresslessAnalyser {
     }
 }
 
-fn build_addressless_analyser(_project: &Project) -> Result<Box<dyn Analyser>, AnalysisError> {
+fn build_addressless_analyser(
+    _project: &Project,
+    _config: &AnalysisEngineConfig,
+) -> Result<Box<dyn Analyser>, AnalysisError> {
     Ok(Box::new(AddresslessAnalyser))
 }
 

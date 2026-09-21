@@ -15,7 +15,7 @@ use fugue_core::analysis::function::{FunctionRecovery, FunctionRecoveryExtension
 use fugue_core::analysis::switch::SwitchRecovery;
 use fugue_core::arch::Arch;
 use fugue_core::engine::{
-    Analyser, AnalyserProvider, AnalysisContext, AnalysisEngine, EngineError,
+    Analyser, AnalyserProvider, AnalysisContext, AnalysisEngine, AnalysisEngineConfig, EngineError,
     MappingMetadataUpdate, Priority, ProjectUpdates, ProjectView, Subscription,
 };
 use fugue_core::extension;
@@ -614,31 +614,52 @@ impl Analyser for LoaderProjectionAnalyser {
     }
 }
 
-fn build_error_analyser(_project: &Project) -> Result<Box<dyn Analyser>, AnalysisError> {
+fn build_error_analyser(
+    _project: &Project,
+    _config: &AnalysisEngineConfig,
+) -> Result<Box<dyn Analyser>, AnalysisError> {
     Ok(Box::new(FailingTestAnalyser::new("error-test")))
 }
 
-fn build_mutating_error_analyser(_project: &Project) -> Result<Box<dyn Analyser>, AnalysisError> {
+fn build_mutating_error_analyser(
+    _project: &Project,
+    _config: &AnalysisEngineConfig,
+) -> Result<Box<dyn Analyser>, AnalysisError> {
     Ok(Box::new(FailingTestAnalyser::new("mutating-error")))
 }
 
-fn build_panicking_analyser(_project: &Project) -> Result<Box<dyn Analyser>, AnalysisError> {
+fn build_panicking_analyser(
+    _project: &Project,
+    _config: &AnalysisEngineConfig,
+) -> Result<Box<dyn Analyser>, AnalysisError> {
     Ok(Box::new(PanickingTestAnalyser))
 }
 
-fn build_completion_analyser(_project: &Project) -> Result<Box<dyn Analyser>, AnalysisError> {
+fn build_completion_analyser(
+    _project: &Project,
+    _config: &AnalysisEngineConfig,
+) -> Result<Box<dyn Analyser>, AnalysisError> {
     Ok(Box::new(CompletionTestAnalyser::new()))
 }
 
-fn build_completion_panic_analyser(_project: &Project) -> Result<Box<dyn Analyser>, AnalysisError> {
+fn build_completion_panic_analyser(
+    _project: &Project,
+    _config: &AnalysisEngineConfig,
+) -> Result<Box<dyn Analyser>, AnalysisError> {
     Ok(Box::new(PanickingCompletionTestAnalyser))
 }
 
-fn build_derived_symbol_analyser(_project: &Project) -> Result<Box<dyn Analyser>, AnalysisError> {
+fn build_derived_symbol_analyser(
+    _project: &Project,
+    _config: &AnalysisEngineConfig,
+) -> Result<Box<dyn Analyser>, AnalysisError> {
     Ok(Box::new(DerivedSymbolAnalyser::new()))
 }
 
-fn build_storm_analyser(_project: &Project) -> Result<Box<dyn Analyser>, AnalysisError> {
+fn build_storm_analyser(
+    _project: &Project,
+    _config: &AnalysisEngineConfig,
+) -> Result<Box<dyn Analyser>, AnalysisError> {
     Ok(Box::new(StormTestAnalyser))
 }
 
@@ -732,7 +753,7 @@ extension::submit! {
 }
 
 extension::submit! {
-    AnalyserProvider::new::<LoaderProjectionAnalyser>("loader-projection", |_| {
+    AnalyserProvider::new::<LoaderProjectionAnalyser>("loader-projection", |_, _| {
         Ok(Box::new(LoaderProjectionAnalyser))
     })
 }

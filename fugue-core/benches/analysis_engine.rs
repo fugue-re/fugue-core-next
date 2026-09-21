@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use fugue_core::analysis::function::{FunctionRecoveryConfig, LinearSweepConfig};
 use fugue_core::analysis::non_returning::NonReturningExterns;
 #[cfg(feature = "sqlite")]
 use fugue_core::attributes;
@@ -673,6 +674,35 @@ fn bench_initial_analysis(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn 
     let reader = engine.query_reader()?;
     black_box(reader.revision()?);
     results.push(result);
+
+    let project = load_project()?;
+    let config = AnalysisEngineConfig::default().with_analysis_config(
+        FunctionRecoveryConfig::default().with_linear_sweep(LinearSweepConfig::new()),
+    );
+    let (boundaries, engine) = measure("initial_analysis_linear_sweep_boundaries", || {
+        let engine = AnalysisEngine::with_config(project, config)?;
+        engine.analyse()?;
+        Ok((engine, 1))
+    })?;
+    black_box(engine.query_reader()?.revision()?);
+    results.push(boundaries);
+
+    let project = load_project()?;
+    let sweep = LinearSweepConfig::new();
+    let minimum_insns = sweep.max_trial_insns() + 1;
+    let sweep = sweep
+        .with_min_post_boundary_insns(minimum_insns)
+        .with_min_entry_marker_insns(minimum_insns);
+    let config = AnalysisEngineConfig::default()
+        .with_analysis_config(FunctionRecoveryConfig::default().with_linear_sweep(sweep));
+    let (call_targets, engine) = measure("initial_analysis_linear_sweep_call_targets", || {
+        let engine = AnalysisEngine::with_config(project, config)?;
+        engine.analyse()?;
+        Ok((engine, 1))
+    })?;
+    black_box(engine.query_reader()?.revision()?);
+    results.push(call_targets);
+
     Ok(())
 }
 

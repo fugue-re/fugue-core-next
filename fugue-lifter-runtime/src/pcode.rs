@@ -8,7 +8,7 @@ use crate::calculate_mask;
 use crate::constructor::Constructor;
 use crate::context::{ContextBitRange, ContextDatabase, TrackedSet};
 use crate::format::{InstructionFormatError, InstructionWriter};
-use crate::input::{FixedHandle, INVALID_HANDLE, ParserInput, ParserInputs};
+use crate::input::{FixedHandle, ParserInput, ParserInputs, INVALID_HANDLE};
 use crate::language::{Language, LanguageData, LanguageFormatter};
 use crate::operand::Operands;
 use crate::template::construct_tpl;
@@ -65,6 +65,14 @@ impl LiftingContext {
 
     pub fn language(&self) -> &'static Language {
         self.language
+    }
+
+    pub fn reset(&mut self) {
+        for input in &mut self.inputs {
+            *input = ParserInput::empty();
+        }
+        self.lifting_context = PCodeBuilderContext::new(self.lifting_context.unique_mask);
+        self.parsing_context.clear();
     }
 
     #[inline(always)]
@@ -739,7 +747,11 @@ impl Varnode {
 
     #[inline]
     pub const fn valid(&self) -> Option<&Varnode> {
-        if self.is_invalid() { None } else { Some(self) }
+        if self.is_invalid() {
+            None
+        } else {
+            Some(self)
+        }
     }
 
     #[inline]

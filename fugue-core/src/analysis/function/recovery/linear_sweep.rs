@@ -1,3 +1,5 @@
+use arrayvec::ArrayVec;
+
 use crate::analysis::function::recovery::analysis::FunctionDiscoveryContext;
 use crate::analysis::function::recovery::{FunctionRecovery, FunctionRecoveryExtension};
 use crate::analysis::{AnalysisError, AnalysisPass};
@@ -40,7 +42,6 @@ struct FunctionRecoveryLinearSweep {
 }
 
 struct LinearSweepResolver {
-    initial_context: LiftingContext,
     mapping_cache: SegmentMappingCache,
     resolver: InsnResolver,
 }
@@ -181,13 +182,9 @@ impl LinearSweepEvidence {
 
 impl LinearSweepResolver {
     fn new(arch: &Arch) -> Self {
-        let resolver = InsnResolver::new(arch);
-        let initial_context = resolver.context().clone();
-
         Self {
-            initial_context,
             mapping_cache: SegmentMappingCache::new(),
-            resolver,
+            resolver: InsnResolver::new(arch),
         }
     }
 
@@ -196,9 +193,7 @@ impl LinearSweepResolver {
     }
 
     fn reset_context(&mut self) {
-        self.resolver
-            .context_mut()
-            .clone_from(&self.initial_context);
+        self.resolver.context_mut().reset();
     }
 
     fn apply_context(&mut self, address: Address, context: &ContextSet) {
@@ -536,7 +531,7 @@ impl FunctionRecoveryLinearSweep {
         let arch = project.arch();
         let (canonical, derived) = arch.canonicalise_address(address.raw_address())?;
         let address = Address::new(address.space(), canonical);
-        let mut contexts = Vec::with_capacity(3);
+        let mut contexts = ArrayVec::<ContextSet, 3>::new();
         contexts.push(derived);
 
         if let Some(previous) = address.raw_address().checked_sub(1usize)

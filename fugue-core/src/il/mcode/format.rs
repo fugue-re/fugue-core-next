@@ -300,6 +300,16 @@ impl fmt::Display for MCodeOpDisplay<'_> {
 
         write!(f, "@o{index} ")?;
         self.write_results(f)?;
+
+        if self.operation.opcode() == MCodeOpcode::SetVar {
+            let operand = self
+                .ir
+                .op_operands_for(self.operation)
+                .first()
+                .ok_or(fmt::Error)?;
+            return write!(f, "{}", MCodeValueDisplay::new(self.ir, *operand));
+        }
+
         write!(f, "{opcode}")?;
         self.write_metadata(f)?;
         self.write_operands(f)

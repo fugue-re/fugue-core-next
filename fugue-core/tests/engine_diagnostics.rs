@@ -3,7 +3,9 @@ use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use fugue_core::analysis::AnalysisError;
-use fugue_core::engine::{Analyser, AnalyserProvider, AnalysisContext, AnalysisEngine};
+use fugue_core::engine::{
+    Analyser, AnalyserProvider, AnalysisContext, AnalysisEngine, AnalysisEngineConfig,
+};
 use fugue_core::extension;
 use fugue_core::ir::{Address, AddressRange, AddressRangeSet, ProblemKind, ProblemScope};
 use fugue_core::loader::Loader;
@@ -47,6 +49,7 @@ impl Analyser for RejectingCollapseAnalyser {
 
 fn build_rejecting_collapse_analyser(
     _project: &Project,
+    _config: &AnalysisEngineConfig,
 ) -> Result<Box<dyn Analyser>, AnalysisError> {
     Ok(Box::new(RejectingCollapseAnalyser))
 }

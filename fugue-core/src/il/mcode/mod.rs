@@ -152,7 +152,7 @@ mod test {
         assert!(
             ir.display()
                 .to_string()
-                .contains("reg[16]#1:bits<64> = mcode.set_var")
+                .contains("reg[16]#1:bits<64> = %v0")
         );
         let binding = ir.binding(bound).expect("bound value");
         assert_eq!(binding.variable(), variable);

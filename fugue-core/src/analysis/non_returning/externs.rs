@@ -60,7 +60,7 @@ impl Analyser for NonReturningExterns {
 }
 
 extension::submit! {
-    AnalyserProvider::new::<NonReturningExterns>(NON_RETURNING_EXTERNS_ANALYSER, |_project| {
+    AnalyserProvider::new::<NonReturningExterns>(NON_RETURNING_EXTERNS_ANALYSER, |_project, _config| {
         Ok(Box::new(NonReturningExterns))
     })
 }

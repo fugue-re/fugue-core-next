@@ -59,7 +59,7 @@ struct UnregisteredAnalyser;
 extension::submit! {
     AnalyserProvider::new::<SelectionAnalyser>(
         FIRST_SELECTION_ANALYSER,
-        |_project| {
+        |_project, _config| {
             Ok(Box::new(SelectionAnalyser {
                 name: FIRST_SELECTION_ANALYSER,
                 runs: &FIRST_SELECTION_RUNS,
@@ -71,7 +71,7 @@ extension::submit! {
 extension::submit! {
     AnalyserProvider::new::<SelectionAnalyser>(
         SECOND_SELECTION_ANALYSER,
-        |_project| {
+        |_project, _config| {
             Ok(Box::new(SelectionAnalyser {
                 name: SECOND_SELECTION_ANALYSER,
                 runs: &SECOND_SELECTION_RUNS,
