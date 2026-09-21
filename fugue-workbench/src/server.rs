@@ -17,7 +17,7 @@ use fugue_core::il::ecode::ECodeIr;
 use fugue_core::il::mcode::MCodeIr;
 use fugue_core::il::pcode::PCodeIr;
 use fugue_core::il::registry::IlRegistry;
-use fugue_core::ir::Address;
+use fugue_core::ir::{Address, CodeBlock};
 use fugue_core::lifter::Lifter;
 use fugue_core::queries::QueryReader;
 use fugue_core::storage::SegmentStorage;
@@ -101,6 +101,57 @@ fn renderable_form(form: &IlFormId) -> bool {
     *form == <PCodeIr as IlArtefact>::FORM
         || *form == <ECodeIr as IlArtefact>::FORM
         || *form == <MCodeIr as IlArtefact>::FORM
+}
+
+fn decode_instruction(
+    segments: &SegmentStorage,
+    lifter: &mut Lifter,
+    address: Address,
+    available: usize,
+) -> Option<(ListingLine, usize)> {
+    let mut buffer = [0u8; MAX_INSTRUCTION_BYTES];
+    let read = segments
+        .read_bytes(address, &mut buffer[..available.min(MAX_INSTRUCTION_BYTES)])
+        .unwrap_or(0);
+    if read == 0 {
+        return None;
+    }
+
+    let bytes = &buffer[..read];
+    let mut mnemonic = String::new();
+    let mut operands = String::new();
+    match lifter.disassemble_parts(address, bytes, &mut mnemonic, &mut operands) {
+        Some(size) if size > 0 => {
+            let size = size.min(read);
+            Some((
+                ListingLine::decoded(address, &bytes[..size], mnemonic, operands),
+                size,
+            ))
+        }
+        _ => Some((ListingLine::undecoded(address, bytes[0]), 1)),
+    }
+}
+
+fn decode_block(
+    segments: &SegmentStorage,
+    lifter: &mut Lifter,
+    block: &CodeBlock,
+) -> Vec<(Address, ListingLine)> {
+    block.context().apply(block.address(), lifter.context_mut());
+
+    let mut lines = Vec::new();
+    let mut offset = 0;
+    while offset < block.size() {
+        let address = block.address() + offset;
+        let Some((line, size)) =
+            decode_instruction(segments, lifter, address, block.size() - offset)
+        else {
+            break;
+        };
+        lines.push((address, line));
+        offset += size;
+    }
+    lines
 }
 
 struct Snapshot<'a> {
@@ -202,31 +253,29 @@ impl<'a> Snapshot<'a> {
     }
 
     fn listing(&self, entry: Address) -> Result<Vec<ListingLine>, WorkbenchError> {
-        let function = self
+        let function_id = self
             .reader
             .function_at(entry)?
             .ok_or_else(|| WorkbenchError::no_function(format!("{:#x}", entry.offset())))?;
-        let ecode = self
-            .reader
-            .ecode(function)?
-            .ok_or_else(|| WorkbenchError::no_function(format!("{:#x}", entry.offset())))?;
 
         let project = self.reader.project()?;
+        let function = project
+            .functions()
+            .get_by_id(function_id)
+            .ok_or_else(|| WorkbenchError::no_function(format!("{:#x}", entry.offset())))?;
         let segments = project.segments();
         let mut lifter = project.lifter();
+        let mut lines = Vec::new();
 
-        let mut addresses = ecode
-            .source_spans()
-            .iter()
-            .map(IlSourceSpan::address)
-            .collect::<Vec<_>>();
-        addresses.sort_by_key(Address::offset);
-        addresses.dedup();
+        for (_, id) in function.blocks() {
+            if let Some(block) = project.blocks().get_by_id(id) {
+                lines.extend(decode_block(segments, &mut lifter, &block));
+            }
+        }
+        lines.sort_by_key(|(address, _)| *address);
+        lines.dedup_by_key(|(address, _)| *address);
 
-        Ok(addresses
-            .into_iter()
-            .filter_map(|address| Self::decode_instruction(segments, &mut lifter, address))
-            .collect())
+        Ok(lines.into_iter().map(|(_, line)| line).collect())
     }
 
     fn il(&self, entry: Address, form: &str) -> Result<IlResponse, WorkbenchError> {
@@ -264,40 +313,67 @@ impl<'a> Snapshot<'a> {
     }
 
     fn cfg(&self, entry: Address) -> Result<CfgResponse, WorkbenchError> {
-        let function = self
+        let function_id = self
             .reader
             .function_at(entry)?
             .ok_or_else(|| WorkbenchError::no_function(format!("{:#x}", entry.offset())))?;
         let ecode = self
             .reader
-            .ecode(function)?
+            .ecode(function_id)?
             .ok_or_else(|| WorkbenchError::no_function(format!("{:#x}", entry.offset())))?;
 
         let project = self.reader.project()?;
+        let function = project
+            .functions()
+            .get_by_id(function_id)
+            .ok_or_else(|| WorkbenchError::no_function(format!("{:#x}", entry.offset())))?;
         let segments = project.segments();
         let mut lifter = project.lifter();
 
         let graph = ecode.graph();
         let spans = ecode.source_spans();
+        let function_blocks = project.blocks();
         let mut blocks = Vec::with_capacity(graph.blocks().len());
         let mut edges = Vec::new();
 
         for (index, block) in graph.blocks().iter().enumerate() {
             let id = IlBlockId::try_from_index(index).expect("block index within graph");
-            let block_entry = graph.block_source(id).unwrap_or(entry);
+            let block_source = graph.block_source(id);
+            let block_entry = block_source.unwrap_or(entry);
 
-            let mut addresses = spans
-                .iter()
-                .filter(|span| Self::ranges_overlap(span.destination(), block.ops()))
-                .map(IlSourceSpan::address)
-                .collect::<Vec<_>>();
-            addresses.sort_by_key(Address::offset);
-            addresses.dedup();
-
-            let lines = addresses
-                .into_iter()
-                .filter_map(|address| Self::decode_instruction(segments, &mut lifter, address))
-                .collect();
+            let lines = block_source
+                .and_then(|source| {
+                    function
+                        .blocks_at(source)
+                        .find_map(|id| function_blocks.get_by_id(id))
+                })
+                .map(|block| {
+                    decode_block(segments, &mut lifter, &block)
+                        .into_iter()
+                        .map(|(_, line)| line)
+                        .collect()
+                })
+                .unwrap_or_else(|| {
+                    let mut addresses = spans
+                        .iter()
+                        .filter(|span| Self::ranges_overlap(span.destination(), block.ops()))
+                        .map(IlSourceSpan::address)
+                        .collect::<Vec<_>>();
+                    addresses.sort_by_key(Address::offset);
+                    addresses.dedup();
+                    addresses
+                        .into_iter()
+                        .filter_map(|address| {
+                            decode_instruction(
+                                segments,
+                                &mut lifter,
+                                address,
+                                MAX_INSTRUCTION_BYTES,
+                            )
+                            .map(|(line, _)| line)
+                        })
+                        .collect()
+                });
 
             blocks.push(CfgBlock {
                 id: id.value(),
@@ -328,31 +404,6 @@ impl<'a> Snapshot<'a> {
 
     fn ranges_overlap(left: IlIndexRange, right: IlIndexRange) -> bool {
         left.start() < right.end() && right.start() < left.end()
-    }
-
-    fn decode_instruction(
-        segments: &SegmentStorage,
-        lifter: &mut Lifter,
-        address: Address,
-    ) -> Option<ListingLine> {
-        let mut buffer = [0u8; MAX_INSTRUCTION_BYTES];
-        let read = segments.read_bytes(address, &mut buffer).unwrap_or(0);
-        if read == 0 {
-            return None;
-        }
-
-        let bytes = &buffer[..read];
-        let mut mnemonic = String::new();
-        let mut operands = String::new();
-        match lifter.disassemble_parts(address, bytes, &mut mnemonic, &mut operands) {
-            Some(size) if size > 0 => Some(ListingLine::decoded(
-                address,
-                &bytes[..size.min(read)],
-                mnemonic,
-                operands,
-            )),
-            _ => Some(ListingLine::undecoded(address, bytes[0])),
-        }
     }
 }
 

@@ -454,6 +454,15 @@ impl IlRenderer {
         if !results.is_empty() {
             out.push(punct(" = "));
         }
+
+        let operands = ir.op_operands_for(operation);
+        if operation.opcode() == MCodeOpcode::SetVar {
+            if let Some(operand) = operands.first() {
+                out.push(self.mcode_value(ir, *operand));
+            }
+            return;
+        }
+
         out.push(opcode(operation.opcode().mnemonic()));
 
         match operation.opcode() {
@@ -498,7 +507,7 @@ impl IlRenderer {
             out.push(punct(" "));
             out.push(self.mcode_variable(ir, variable, None, operation.width()));
         }
-        for operand in ir.op_operands_for(operation) {
+        for operand in operands {
             out.push(punct(" "));
             out.push(self.mcode_value(ir, *operand));
         }

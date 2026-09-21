@@ -173,11 +173,11 @@ export function CfgPanel() {
   const onWheel = (event: React.WheelEvent) => {
     event.preventDefault();
     const factor = event.deltaY < 0 ? 1.12 : 0.89;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const px = event.clientX - rect.left;
+    const py = event.clientY - rect.top;
     setView((prev) => {
       const k = Math.min(2.4, Math.max(0.2, prev.k * factor));
-      const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
-      const px = event.clientX - rect.left;
-      const py = event.clientY - rect.top;
       return {
         k,
         x: px - ((px - prev.x) * k) / prev.k,

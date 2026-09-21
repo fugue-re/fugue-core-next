@@ -4,7 +4,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use fugue_core::engine::{AnalysisEngine, EngineError};
+use fugue_core::analysis::function::recovery::FunctionRecoveryConfig;
+use fugue_core::engine::{AnalysisEngine, AnalysisEngineConfig, EngineError};
 use fugue_core::ir::{
     Address, IncompleteFunction, SymbolEntry, SymbolIndex, SymbolProperties, SymbolTableSelector,
     symbol,
@@ -55,7 +56,9 @@ impl Session {
         project: Project,
         changes: broadcast::Sender<ChangeEvent>,
     ) -> Result<Self, WorkbenchError> {
-        let engine = Arc::new(AnalysisEngine::new(project)?);
+        let recovery = FunctionRecoveryConfig::default().with_non_returning_analysis(true);
+        let config = AnalysisEngineConfig::default().with_analysis_config(recovery);
+        let engine = Arc::new(AnalysisEngine::with_config(project, config)?);
         let reader = engine.query_reader()?;
         let subscription = engine.subscribe().build()?;
         let shutdown = Arc::new(AtomicBool::new(false));
