@@ -315,6 +315,18 @@ impl Function {
         })
     }
 
+    pub fn thunk_target(&self, blocks: &CodeBlockTable) -> Option<Address> {
+        if !self.is_thunk() || self.blocks.len() != 1 {
+            return None;
+        }
+        let mut targets = self
+            .flow_targets(blocks)
+            .filter(|target| !target.kind().is_fall_through());
+        let target = targets.next()?;
+        (targets.next().is_none() && target.kind() == FlowKind::TailCallBranch)
+            .then_some(target.to())
+    }
+
     pub fn clear_name(&mut self) {
         self.name = None;
     }
@@ -539,7 +551,7 @@ impl Function {
     }
 
     pub(crate) fn classify_flow_target(&self, mut target: FlowTarget) -> FlowTarget {
-        if target.kind() == FlowKind::Branch
+        if matches!(target.kind(), FlowKind::Branch | FlowKind::IBranch)
             && self.tail_call_sites.binary_search(&target.from()).is_ok()
         {
             target = FlowTarget::new(target.from(), target.to(), FlowKind::TailCallBranch);

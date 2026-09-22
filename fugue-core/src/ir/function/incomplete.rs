@@ -541,6 +541,21 @@ impl IncompleteFunction {
         self.properties.contains(FunctionProperties::EXTERNAL)
     }
 
+    pub fn thunk_target(&self) -> Option<Address> {
+        let [block] = self.blocks.as_slice() else {
+            return None;
+        };
+        let mut targets = self
+            .block_flow_targets(block)
+            .filter(|target| !target.kind().is_fall_through());
+        let target = targets.next()?;
+        let tail_call_site = self.tail_call_sites.binary_search(&target.from()).is_ok();
+        (targets.next().is_none()
+            && matches!(target.kind(), FlowKind::Branch | FlowKind::IBranch)
+            && (tail_call_site || target.kind() == FlowKind::IBranch))
+            .then_some(target.to())
+    }
+
     pub fn sibling_successor_from_incoming(
         &self,
         block: IncompleteCodeBlockId,
@@ -764,7 +779,19 @@ impl IncompleteFunction {
         })
     }
 
-    pub(crate) fn normalise(self) -> Result<FunctionRecord, IncompleteFunctionError> {
+    pub(crate) fn normalise(mut self) -> Result<FunctionRecord, IncompleteFunctionError> {
+        if self.thunk_target().is_some() {
+            let site = self.blocks[0]
+                .insn_ids()
+                .last()
+                .and_then(|&id| self.insn(id))
+                .expect("identified thunk must have a terminal instruction")
+                .address();
+            if let Err(index) = self.tail_call_sites.binary_search(&site) {
+                self.tail_call_sites.insert(index, site);
+            }
+            self.mark_thunk();
+        }
         for block in &self.blocks {
             if block.is_empty() {
                 return Err(IncompleteFunctionError::invalid_block_size(block.address()));
@@ -815,7 +842,7 @@ impl IncompleteFunction {
                 None => pending_coverage = Some(block_range),
             }
             for mut target in normalised.flow_targets() {
-                if target.kind() == FlowKind::Branch
+                if matches!(target.kind(), FlowKind::Branch | FlowKind::IBranch)
                     && self.tail_call_sites.binary_search(&target.from()).is_ok()
                 {
                     target = FlowTarget::new(target.from(), target.to(), FlowKind::TailCallBranch);

@@ -64,6 +64,7 @@ impl FlowKind {
                     Self::Branch
                 }
             }
+            InterBlkIndirect(_) => Self::IBranch,
             InterSub(_) => Self::Call,
             InterSubIndirect(_) => Self::ICall,
             InterRet(_, _) => Self::Return,

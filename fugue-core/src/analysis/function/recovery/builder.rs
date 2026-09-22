@@ -688,15 +688,16 @@ impl FunctionBuilderContext {
                 match resolver.resolve(address, bytes) {
                     Ok(resolved) => {
                         let insn = resolved.as_ref();
-                        let indirect = (insn.is_call() && insn.is_indirect())
-                            .then(|| {
-                                resolved.resolve_indirect_target(|address, bytes| {
-                                    self.mapping_cache
-                                        .read_bytes_exact(segments, address, bytes)
-                                        .is_ok()
-                                })
+                        let indirect_target = (insn.is_indirect()
+                            && (insn.is_branch() || insn.is_call()))
+                        .then(|| {
+                            resolved.resolve_indirect_target(|address, bytes| {
+                                self.mapping_cache
+                                    .read_bytes_exact(segments, address, bytes)
+                                    .is_ok()
                             })
-                            .flatten();
+                        })
+                        .flatten();
                         let insn_id = entry.insert(resolved.into_insn());
                         let num_insns = f.insns().len();
                         let max_insns = config.max_function_insns();
@@ -705,10 +706,10 @@ impl FunctionBuilderContext {
                                 self.entry, num_insns, max_insns,
                             ));
                         }
-                        if let Some(target) = indirect {
+                        if let Some(target) = indirect_target {
                             f.insn_mut(insn_id)
                                 .expect("inserted instruction must exist")
-                                .set_call_target(target);
+                                .set_indirect_target(target);
                         }
 
                         let insn = f.insn(insn_id).expect("inserted instruction must exist");
@@ -934,6 +935,12 @@ impl FunctionBuilderContext {
             self.structure_blocks(&mut incomplete, analysis.config)?;
 
             let num_local_targets = self.local_targets.len();
+            incomplete.set_tail_call_sites(
+                self.local_targets
+                    .iter()
+                    .filter(|target| target.kind() == FlowKind::TailCallBranch)
+                    .map(|target| target.from()),
+            );
 
             let mut structured = StructuredFunctionContext {
                 config: *analysis.config,
@@ -961,12 +968,6 @@ impl FunctionBuilderContext {
             }
         }
 
-        incomplete.set_tail_call_sites(
-            self.local_targets
-                .iter()
-                .filter(|target| target.kind() == FlowKind::TailCallBranch)
-                .map(|target| target.from()),
-        );
         self.insn_index = incomplete.recycle_insn_index();
 
         Ok(incomplete)
@@ -1069,6 +1070,13 @@ impl<'p> FunctionCandidateState<'p> {
             return;
         };
 
+        self.function.set_tail_call_sites(
+            self.context
+                .local_targets
+                .iter()
+                .filter(|target| target.kind() == FlowKind::TailCallBranch)
+                .map(|target| target.from()),
+        );
         let mut structured = StructuredFunctionContext {
             config: *config,
             context: mem::take(&mut self.context),
@@ -1097,13 +1105,6 @@ impl<'p> FunctionCandidateState<'p> {
 
     pub(crate) fn finish(mut self) -> FunctionCandidateOutcome {
         if matches!(self.phase, FunctionCandidatePhase::Finished) {
-            self.function.set_tail_call_sites(
-                self.context
-                    .local_targets
-                    .iter()
-                    .filter(|target| target.kind() == FlowKind::TailCallBranch)
-                    .map(|target| target.from()),
-            );
             self.context.insn_index = self.function.recycle_insn_index();
         }
         let result = match self.phase {

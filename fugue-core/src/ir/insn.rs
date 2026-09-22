@@ -63,7 +63,7 @@ impl Insn {
 
     pub(crate) fn from_indirect_branch(address: Address, size: usize) -> Result<Self, InsnError> {
         let mut targets = SmallVec::new();
-        targets.push((0, InsnTarget::Unresolved));
+        targets.push((0, InsnTarget::InterBlkIndirect(None)));
         Self::from_flow_targets(address, size, targets)
     }
 
@@ -134,7 +134,7 @@ impl Insn {
                         InsnTarget::InterBlk(location.address())
                     }
                 }
-                RawPCodeFlow::Branch(None) => InsnTarget::Unresolved,
+                RawPCodeFlow::Branch(None) => InsnTarget::InterBlkIndirect(None),
                 RawPCodeFlow::Call(Some(location)) => {
                     if location.position() != 0 {
                         InsnTarget::IntraIns(location, false)
@@ -230,10 +230,16 @@ impl Insn {
         })
     }
 
-    pub fn set_call_target(&mut self, target: Address) {
+    pub fn set_indirect_target(&mut self, target: Address) {
         for (_, existing) in self.targets.iter_mut() {
-            if matches!(existing, InsnTarget::InterSubIndirect(None)) {
-                *existing = InsnTarget::InterSubIndirect(Some(target));
+            match existing {
+                InsnTarget::InterBlkIndirect(None) => {
+                    *existing = InsnTarget::InterBlkIndirect(Some(target));
+                }
+                InsnTarget::InterSubIndirect(None) => {
+                    *existing = InsnTarget::InterSubIndirect(Some(target));
+                }
+                _ => (),
             }
         }
 
@@ -505,7 +511,7 @@ impl InsnProperties {
             match target {
                 InsnTarget::IntraBlk(_, true) => prop |= Self::FALL_THROUGH,
                 InsnTarget::IntraBlk(_, false) | InsnTarget::InterBlk(_) => prop |= Self::BRANCH,
-                InsnTarget::Unresolved => prop |= Self::BRANCH | Self::INDIRECT,
+                InsnTarget::InterBlkIndirect(_) => prop |= Self::BRANCH | Self::INDIRECT,
                 InsnTarget::InterSub(_) => prop |= Self::CALL,
                 InsnTarget::InterSubIndirect(_) => prop |= Self::CALL | Self::INDIRECT,
                 InsnTarget::InterRet(Some(_), _) => prop |= Self::RETURN,
@@ -560,13 +566,13 @@ impl InsnTargetKind {
 )]
 pub enum InsnTarget {
     InterBlk(Address),
+    InterBlkIndirect(Option<Address>),
     InterRet(Option<Address>, bool),
     InterSub(Address),
     InterSubIndirect(Option<Address>),
     IntraBlk(Location, bool),
     IntraIns(Location, bool),
     Intrinsic,
-    Unresolved,
 }
 
 impl InsnTarget {
@@ -581,7 +587,7 @@ impl InsnTarget {
     pub fn is_indirect(&self) -> bool {
         matches!(
             self,
-            Self::InterSubIndirect(_) | Self::InterRet(None, _) | Self::Unresolved
+            Self::InterBlkIndirect(_) | Self::InterSubIndirect(_) | Self::InterRet(None, _)
         )
     }
 
@@ -597,13 +603,14 @@ impl InsnTarget {
         match self {
             Self::IntraIns(location, _) | Self::IntraBlk(location, _) => Some(location.address()),
             Self::InterBlk(address)
+            | Self::InterBlkIndirect(Some(address))
             | Self::InterSub(address)
             | Self::InterSubIndirect(Some(address))
             | Self::InterRet(Some(address), _) => Some(*address),
-            Self::InterSubIndirect(None)
+            Self::InterBlkIndirect(None)
+            | Self::InterSubIndirect(None)
             | Self::InterRet(None, _)
-            | Self::Intrinsic
-            | Self::Unresolved => None,
+            | Self::Intrinsic => None,
         }
     }
 
@@ -613,7 +620,7 @@ impl InsnTarget {
 
         match *self {
             IntraBlk(taken, _) if taken.position() == 0 => Some((Local, taken.address())),
-            InterBlk(taken) => Some((Local, taken)),
+            InterBlk(taken) | InterBlkIndirect(Some(taken)) => Some((Local, taken)),
             InterSub(taken) | InterSubIndirect(Some(taken)) | InterRet(Some(taken), _) => {
                 Some((Global, taken))
             }
@@ -628,6 +635,10 @@ impl fmt::Display for InsnTarget {
             Self::IntraIns(loc, _) => write!(f, "intra-instruction flow to {loc}"),
             Self::IntraBlk(loc, _) => write!(f, "intra-block flow to {loc}"),
             Self::InterBlk(tgt) => write!(f, "inter-block flow to {tgt}"),
+            Self::InterBlkIndirect(None) => write!(f, "unresolved indirect inter-block flow"),
+            Self::InterBlkIndirect(Some(tgt)) => {
+                write!(f, "indirect inter-block flow to {tgt}")
+            }
             Self::InterSub(tgt) => write!(f, "inter-sub-routine flow to {tgt}"),
             Self::InterSubIndirect(None) => {
                 write!(f, "unresolved indirect inter-sub-routine flow")
@@ -642,7 +653,6 @@ impl fmt::Display for InsnTarget {
                 write!(f, "inter-sub-routine flow to {tgt} via return")
             }
             Self::Intrinsic => write!(f, "intrinsic flow"),
-            Self::Unresolved => write!(f, "unresolved"),
         }
     }
 }
@@ -653,12 +663,12 @@ mod test {
     use crate::ir::FlowKind;
 
     #[test]
-    fn set_call_target_preserves_indirect_classification() -> Result<(), InsnError> {
+    fn set_indirect_target_preserves_indirect_classification() -> Result<(), InsnError> {
         let address = Address::from(0x1000u64);
         let target = Address::from(0x2000u64);
         let mut insn = Insn::from_indirect_call(address, 4)?;
 
-        insn.set_call_target(target);
+        insn.set_indirect_target(target);
 
         assert!(insn.is_indirect());
         assert_eq!(insn.call_target(), Some(target));
