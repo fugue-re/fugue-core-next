@@ -1,26 +1,26 @@
 import { type ReactNode, useState } from "react";
-import type { IlToken } from "../bindings/IlToken";
+import type { CodeToken } from "../bindings/CodeToken";
 import type { Address } from "../bindings/Address";
 
-export function IlTokens({
+export function CodeTokens({
   tokens,
   onNavigate,
 }: {
-  tokens: IlToken[];
-  onNavigate?: (address: Address) => void;
+  tokens: CodeToken[];
+  onNavigate?: (address: Address, origin?: { x: number; y: number }) => void;
 }): ReactNode {
   return tokens.map((token, index) => {
     const navigable = token.nav !== null && onNavigate !== undefined;
     return (
       <span
         key={index}
-        className={`il-t-${token.kind}${navigable ? " nav" : ""}`}
+        className={`code-t-${token.kind}${navigable ? " nav" : ""}`}
         title={token.title ?? undefined}
         onClick={
           navigable
             ? (event) => {
-                event.stopPropagation();
-                onNavigate!(token.nav!);
+              event.stopPropagation();
+                onNavigate!(token.nav!, { x: event.clientX, y: event.clientY });
               }
             : undefined
         }
@@ -94,35 +94,4 @@ export function Dock({ tabs, initial }: { tabs: DockTab[]; initial?: string }) {
       <div className="pane-body">{current?.content}</div>
     </div>
   );
-}
-
-const OPERAND_PATTERN = /(0x[0-9a-fA-F]+|[A-Z][A-Z0-9]*|[[\]{}(),.:+*-]|\s+|[^\s]+?)/g;
-
-export function tokeniseOperands(text: string): ReactNode[] {
-  const matches = text.match(OPERAND_PATTERN);
-  if (!matches) return [text];
-  return matches.map((token, index) => {
-    if (/^0x[0-9a-fA-F]+$/.test(token)) {
-      return (
-        <span key={index} className="t-imm">
-          {token}
-        </span>
-      );
-    }
-    if (/^[A-Z][A-Z0-9]*$/.test(token)) {
-      return (
-        <span key={index} className="t-reg">
-          {token}
-        </span>
-      );
-    }
-    if (/^[[\]{}(),.:+*-]$/.test(token)) {
-      return (
-        <span key={index} className="t-punct">
-          {token}
-        </span>
-      );
-    }
-    return <span key={index}>{token}</span>;
-  });
 }

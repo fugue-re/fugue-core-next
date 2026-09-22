@@ -3,8 +3,9 @@ import { api } from "../api";
 import { useSelection } from "../store";
 import { useCommands } from "../commands";
 import { useMutations } from "../mutations";
+import { useAddressNavigation } from "../navigation";
 import { VirtualList } from "../components/VirtualList";
-import { QueryState, Placeholder, tokeniseOperands } from "../components/common";
+import { CodeTokens, QueryState, Placeholder } from "../components/common";
 import { formatAddress } from "../format";
 import type { ListingLine } from "../bindings/ListingLine";
 
@@ -17,6 +18,7 @@ export function ListingPanel() {
   const openMenu = useCommands((state) => state.openMenu);
   const openPrompt = useCommands((state) => state.openPrompt);
   const mutations = useMutations();
+  const navigate = useAddressNavigation();
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["listing", entry],
@@ -81,7 +83,9 @@ export function ListingPanel() {
               <span className="l-addr">{line.address.split(":").pop()}</span>
               <span className="l-bytes">{line.bytes}</span>
               <span className="l-mnem">{line.mnemonic}</span>
-              <span className="l-ops">{tokeniseOperands(line.operands)}</span>
+              <span className="l-ops">
+                <CodeTokens tokens={line.operands} onNavigate={navigate} />
+              </span>
             </div>
           );
         }}

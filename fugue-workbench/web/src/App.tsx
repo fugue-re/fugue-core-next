@@ -1,4 +1,4 @@
-import { Suspense, lazy, useRef } from "react";
+import { Suspense, lazy, useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import { api, useLiveChanges, type LiveState } from "./api";
@@ -32,12 +32,32 @@ function TopBar({ live }: { live: LiveState }) {
   const revision = live.revision || Number(meta.data?.revision ?? 0);
   const open = useOpenBinary();
   const fileRef = useRef<HTMLInputElement>(null);
+  const previousLocations = useSelection((state) => state.previousLocations);
+  const nextLocations = useSelection((state) => state.nextLocations);
+  const navigateBack = useSelection((state) => state.navigateBack);
+  const navigateForward = useSelection((state) => state.navigateForward);
 
   return (
     <div className="topbar">
       <div className="brand">
         <span className="mark">fugue</span>
         <span className="sub">workbench</span>
+      </div>
+      <div className="navigation-history">
+        <button
+          disabled={previousLocations.length === 0}
+          title="Back · Alt+Left"
+          onClick={navigateBack}
+        >
+          ←
+        </button>
+        <button
+          disabled={nextLocations.length === 0}
+          title="Forward · Alt+Right"
+          onClick={navigateForward}
+        >
+          →
+        </button>
       </div>
       <div className="topbar-facts">
         <div className="fact">
@@ -98,6 +118,24 @@ export function App() {
   const live = useLiveChanges();
   const meta = useQuery({ queryKey: ["meta"], queryFn: api.meta });
   const showOpen = !meta.isLoading && !meta.data;
+  const navigateBack = useSelection((state) => state.navigateBack);
+  const navigateForward = useSelection((state) => state.navigateForward);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!event.altKey) return;
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        navigateBack();
+      } else if (event.key === "ArrowRight") {
+        event.preventDefault();
+        navigateForward();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [navigateBack, navigateForward]);
+
   return (
     <div className="app">
       <TopBar live={live} />

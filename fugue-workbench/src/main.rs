@@ -9,8 +9,8 @@ use ts_rs::TS;
 
 use crate::bindings::{
     AddressRequest, CfgResponse, ChangeEvent, FormInfo, FunctionRow, IlResponse, ListingLine,
-    MetaResponse, MetricsResponse, MutationResponse, PatchRequest, ProblemRow, RenameRequest,
-    SegmentRow, SwitchRow, SymbolRow, XrefRow,
+    MetaResponse, MetricsResponse, MutationResponse, NavigationTarget, PatchRequest, ProblemRow,
+    RenameRequest, SegmentRow, SwitchRow, SymbolRow, XrefRow,
 };
 use crate::server::AppState;
 use crate::session::Session;
@@ -102,6 +102,7 @@ fn export_bindings(args: &ArgMatches) -> Result<()> {
     XrefRow::export_all_to(out)?;
     IlResponse::export_all_to(out)?;
     CfgResponse::export_all_to(out)?;
+    NavigationTarget::export_all_to(out)?;
     MetricsResponse::export_all_to(out)?;
     MutationResponse::export_all_to(out)?;
     RenameRequest::export_all_to(out)?;

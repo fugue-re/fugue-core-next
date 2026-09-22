@@ -156,6 +156,29 @@ body {
   margin-left: -2px;
 }
 
+.navigation-history {
+  display: flex;
+  gap: 4px;
+}
+.navigation-history button {
+  width: 27px;
+  height: 27px;
+  border: 1px solid var(--hair-2);
+  border-radius: 5px;
+  background: var(--panel-2);
+  color: var(--text-2);
+  cursor: pointer;
+}
+.navigation-history button:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent-edge);
+}
+.navigation-history button:disabled {
+  color: var(--text-3);
+  cursor: default;
+  opacity: 0.45;
+}
+
 .topbar-facts {
   display: flex;
   gap: 24px;
@@ -515,19 +538,6 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.t-reg {
-  color: var(--tok-register);
-}
-.t-imm {
-  color: var(--tok-immediate);
-}
-.t-addr {
-  color: var(--tok-address);
-}
-.t-punct {
-  color: var(--tok-punct);
-}
-
 .il-toolbar {
   flex: 0 0 auto;
   display: flex;
@@ -596,47 +606,49 @@ body {
   white-space: pre;
 }
 
-.il-t-opcode {
+.code-t-opcode {
   color: var(--tok-mnemonic);
 }
-.il-t-keyword {
+.code-t-keyword {
   color: var(--accent);
   font-weight: 600;
 }
-.il-t-register {
+.code-t-register {
   color: var(--tok-register);
 }
-.il-t-flag {
+.code-t-flag {
   color: #c8a6d8;
 }
-.il-t-number {
+.code-t-number {
   color: var(--tok-immediate);
 }
-.il-t-address {
+.code-t-address {
   color: var(--tok-address);
 }
-.il-t-space {
+.code-t-space {
   color: #7ba6a0;
 }
-.il-t-value {
+.code-t-value {
   color: #b0b094;
   font-style: italic;
 }
-.il-t-punctuation {
+.code-t-punctuation {
   color: var(--tok-punct);
 }
-.il-t-meta {
+.code-t-meta {
   color: var(--text-3);
 }
-.il-t-text {
+.code-t-text {
   color: var(--text-2);
 }
 
-.il-text .nav {
+.il-text .nav,
+.l-ops .nav {
   cursor: pointer;
   border-radius: 2px;
 }
-.il-text .nav:hover {
+.il-text .nav:hover,
+.l-ops .nav:hover {
   color: var(--link);
   background: var(--link-soft);
   text-decoration: underline;
@@ -651,6 +663,14 @@ body {
     radial-gradient(80% 60% at 50% 0%, rgba(140, 208, 211, 0.045), transparent 62%),
     var(--bg);
   cursor: grab;
+}
+.cfg-edge.navigable,
+.cfg-instruction.navigable {
+  cursor: pointer;
+}
+.cfg-instruction.navigable:hover {
+  fill: var(--link);
+  text-decoration: underline;
 }
 .cfg-wrap:active {
   cursor: grabbing;

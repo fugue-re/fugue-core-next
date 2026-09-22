@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
-import { useSelection } from "../store";
+import { useAddressNavigation } from "../navigation";
 import { VirtualList } from "../components/VirtualList";
 import { QueryState } from "../components/common";
 import { formatAddress } from "../format";
@@ -12,7 +12,7 @@ function permission(segment: SegmentRow): string {
 
 export function SegmentsPanel() {
   const { data, isLoading, error } = useQuery({ queryKey: ["segments"], queryFn: api.segments });
-  const setCursor = useSelection((state) => state.setCursor);
+  const navigate = useAddressNavigation();
   const rows = data ?? [];
 
   return (
@@ -26,7 +26,7 @@ export function SegmentsPanel() {
         items={rows}
         rowHeight={24}
         row={(segment: SegmentRow) => (
-          <div className="vrow" onClick={() => setCursor(segment.start)}>
+          <div className="vrow" onClick={() => navigate(segment.start)}>
             <span className="addr">{formatAddress(segment.start)}</span>
             <span className="name" style={{ color: "var(--tok-punct)" }}>
               {permission(segment)}

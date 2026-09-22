@@ -2,8 +2,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import ELK from "elkjs/lib/elk.bundled.js";
 import { api } from "../api";
+import { useAddressNavigation } from "../navigation";
 import { useSelection } from "../store";
 import { Placeholder, Loading } from "../components/common";
+import type { Address } from "../bindings/Address";
 import type { CfgResponse } from "../bindings/CfgResponse";
 import type { CfgBlock } from "../bindings/CfgBlock";
 
@@ -30,6 +32,7 @@ interface LaidOutNode {
 
 interface LaidOutEdge {
   points: Point[];
+  target: Address | null;
   taken: boolean;
   fallThrough: boolean;
   computed: boolean;
@@ -45,7 +48,10 @@ interface Layout {
 function blockText(block: CfgBlock): string[] {
   return block.lines
     .slice(0, MAX_NODE_LINES)
-    .map((line) => `${line.address.split(":").pop()}  ${line.mnemonic} ${line.operands}`.trim());
+    .map((line) => {
+      const operands = line.operands.map((token) => token.text).join("");
+      return `${line.address.split(":").pop()}  ${line.mnemonic} ${operands}`.trim();
+    });
 }
 
 function nodeSize(block: CfgBlock): { width: number; height: number } {
@@ -99,6 +105,7 @@ async function layout(cfg: CfgResponse): Promise<Layout> {
       : [];
     return {
       points,
+      target: byId.get(String(cfg.edges[index].to))?.entry ?? null,
       taken: cfg.edges[index].taken,
       fallThrough: cfg.edges[index].fall_through,
       computed: cfg.edges[index].computed,
@@ -118,6 +125,7 @@ export function CfgPanel() {
   const entry = useSelection((state) => state.functionEntry);
   const cursor = useSelection((state) => state.cursor);
   const setCursor = useSelection((state) => state.setCursor);
+  const navigate = useAddressNavigation();
 
   const { data, isLoading } = useQuery({
     queryKey: ["cfg", entry],
@@ -206,17 +214,31 @@ export function CfgPanel() {
           </marker>
         </defs>
         <g transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
-          {result.edges.map((edge, index) => (
-            <polyline
-              key={index}
-              points={edge.points.map((point) => `${point.x},${point.y}`).join(" ")}
-              fill="none"
-              stroke={edgeColour(edge)}
-              strokeWidth={1.2}
-              strokeDasharray={edge.computed ? "4 3" : undefined}
-              markerEnd="url(#arrow)"
-            />
-          ))}
+          {result.edges.map((edge, index) => {
+            const points = edge.points.map((point) => `${point.x},${point.y}`).join(" ");
+            const target = edge.target;
+            return (
+              <g
+                key={index}
+                className={target ? "cfg-edge navigable" : "cfg-edge"}
+                onClick={(event) => {
+                  if (!target) return;
+                  event.stopPropagation();
+                  navigate(target, { x: event.clientX, y: event.clientY });
+                }}
+              >
+                <polyline points={points} fill="none" stroke="transparent" strokeWidth={10} />
+                <polyline
+                  points={points}
+                  fill="none"
+                  stroke={edgeColour(edge)}
+                  strokeWidth={1.2}
+                  strokeDasharray={edge.computed ? "4 3" : undefined}
+                  markerEnd="url(#arrow)"
+                />
+              </g>
+            );
+          })}
           {result.nodes.map((node) => {
             const texts = blockText(node.block);
             const overflow = node.block.lines.length - texts.length;
@@ -242,16 +264,25 @@ export function CfgPanel() {
                   {node.block.entry.split(":").pop()}
                   {isEntry ? "  ⏻ entry" : ""}
                 </text>
-                {texts.map((text, line) => (
-                  <text
-                    key={line}
-                    x={9}
-                    y={HEADER_HEIGHT + 12 + line * LINE_HEIGHT}
-                    fill="var(--text)"
-                  >
-                    {text.length > 74 ? text.slice(0, 73) + "…" : text}
-                  </text>
-                ))}
+                {texts.map((text, line) => {
+                  const target = node.block.lines[line].operands.find((token) => token.nav)?.nav;
+                  return (
+                    <text
+                      key={line}
+                      x={9}
+                      y={HEADER_HEIGHT + 12 + line * LINE_HEIGHT}
+                      fill="var(--text)"
+                      className={target ? "cfg-instruction navigable" : "cfg-instruction"}
+                      onClick={(event) => {
+                        if (!target) return;
+                        event.stopPropagation();
+                        navigate(target, { x: event.clientX, y: event.clientY });
+                      }}
+                    >
+                      {text.length > 74 ? text.slice(0, 73) + "…" : text}
+                    </text>
+                  );
+                })}
                 {overflow > 0 && (
                   <text
                     x={9}

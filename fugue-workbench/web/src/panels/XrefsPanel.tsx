@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
+import { useAddressNavigation } from "../navigation";
 import { useSelection } from "../store";
 import { Placeholder } from "../components/common";
 import type { XrefRow } from "../bindings/XrefRow";
@@ -13,7 +14,7 @@ function kind(xref: XrefRow): string {
 
 export function XrefsPanel() {
   const cursor = useSelection((state) => state.cursor);
-  const setCursor = useSelection((state) => state.setCursor);
+  const navigate = useAddressNavigation();
 
   const incoming = useQuery({
     queryKey: ["xrefs", "to", cursor],
@@ -36,7 +37,11 @@ export function XrefsPanel() {
         {label} <span style={{ color: "var(--text-2)" }}>{rows.length}</span>
       </div>
       {rows.map((xref, index) => (
-        <div className="vrow" key={index} onClick={() => setCursor(other(xref))}>
+        <div
+          className="vrow"
+          key={index}
+          onClick={(event) => navigate(other(xref), { x: event.clientX, y: event.clientY })}
+        >
           <span className="addr">{other(xref).split(":").pop()}</span>
           <span className="name" style={{ color: "var(--text-2)" }}>
             {other(xref)}

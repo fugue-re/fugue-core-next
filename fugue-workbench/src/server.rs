@@ -19,6 +19,8 @@ use fugue_core::il::pcode::PCodeIr;
 use fugue_core::il::registry::IlRegistry;
 use fugue_core::ir::{Address, CodeBlock};
 use fugue_core::lifter::Lifter;
+use fugue_core::lifter::operand::{OperandPiece, Operands};
+use fugue_core::project::Project;
 use fugue_core::queries::QueryReader;
 use fugue_core::storage::SegmentStorage;
 use rustc_hash::FxHashMap;
@@ -29,9 +31,10 @@ use tokio::sync::broadcast::error::RecvError;
 use tower_http::trace::TraceLayer;
 
 use crate::bindings::{
-    self, AddressRequest, CfgBlock, CfgEdge, CfgResponse, ChangeEvent, DEFAULT_SPACE, FormInfo,
-    FunctionRow, IlResponse, ListingLine, MetaResponse, MetricsResponse, MutationResponse,
-    PatchRequest, ProblemRow, RenameRequest, SegmentRow, SwitchRow, SymbolRow, XrefRow,
+    self, AddressRequest, CfgBlock, CfgEdge, CfgResponse, ChangeEvent, CodeToken, CodeTokenKind,
+    DEFAULT_SPACE, FormInfo, FunctionRow, IlResponse, ListingLine, MetaResponse, MetricsResponse,
+    MutationResponse, NavigationTarget, PatchRequest, ProblemRow, RenameRequest, SegmentRow,
+    SwitchRow, SymbolRow, XrefRow,
 };
 use crate::error::WorkbenchError;
 use crate::il_render::IlRenderer;
@@ -103,55 +106,120 @@ fn renderable_form(form: &IlFormId) -> bool {
         || *form == <MCodeIr as IlArtefact>::FORM
 }
 
-fn decode_instruction(
-    segments: &SegmentStorage,
-    lifter: &mut Lifter,
-    address: Address,
-    available: usize,
-) -> Option<(ListingLine, usize)> {
-    let mut buffer = [0u8; MAX_INSTRUCTION_BYTES];
-    let read = segments
-        .read_bytes(address, &mut buffer[..available.min(MAX_INSTRUCTION_BYTES)])
-        .unwrap_or(0);
-    if read == 0 {
-        return None;
-    }
-
-    let bytes = &buffer[..read];
-    let mut mnemonic = String::new();
-    let mut operands = String::new();
-    match lifter.disassemble_parts(address, bytes, &mut mnemonic, &mut operands) {
-        Some(size) if size > 0 => {
-            let size = size.min(read);
-            Some((
-                ListingLine::decoded(address, &bytes[..size], mnemonic, operands),
-                size,
-            ))
-        }
-        _ => Some((ListingLine::undecoded(address, bytes[0]), 1)),
-    }
+struct ListingRenderer<'a> {
+    buffer: [u8; MAX_INSTRUCTION_BYTES],
+    lifter: Lifter,
+    names: FxHashMap<Address, String>,
+    operands: Operands,
+    segments: &'a SegmentStorage,
 }
 
-fn decode_block(
-    segments: &SegmentStorage,
-    lifter: &mut Lifter,
-    block: &CodeBlock,
-) -> Vec<(Address, ListingLine)> {
-    block.context().apply(block.address(), lifter.context_mut());
-
-    let mut lines = Vec::new();
-    let mut offset = 0;
-    while offset < block.size() {
-        let address = block.address() + offset;
-        let Some((line, size)) =
-            decode_instruction(segments, lifter, address, block.size() - offset)
-        else {
-            break;
-        };
-        lines.push((address, line));
-        offset += size;
+impl<'a> ListingRenderer<'a> {
+    fn new(project: &'a Project, names: FxHashMap<Address, String>) -> Self {
+        Self {
+            buffer: [0; MAX_INSTRUCTION_BYTES],
+            lifter: project.lifter(),
+            names,
+            operands: Operands::new(),
+            segments: project.segments(),
+        }
     }
-    lines
+
+    fn decode_instruction(
+        &mut self,
+        address: Address,
+        available: usize,
+    ) -> Option<(ListingLine, usize)> {
+        let read = self
+            .segments
+            .read_bytes(
+                address,
+                &mut self.buffer[..available.min(MAX_INSTRUCTION_BYTES)],
+            )
+            .unwrap_or(0);
+        if read == 0 {
+            return None;
+        }
+
+        self.operands.clear();
+        let bytes = &self.buffer[..read];
+        match self
+            .lifter
+            .operands_into(address, bytes, &mut self.operands)
+        {
+            Some(size) if size > 0 => {
+                let size = size.min(read);
+                let mnemonic = self.operands.mnemonic().to_owned();
+                let operands = self.render_operands(address);
+                Some((
+                    ListingLine::decoded(address, &bytes[..size], mnemonic, operands),
+                    size,
+                ))
+            }
+            _ => Some((ListingLine::undecoded(address, bytes[0]), 1)),
+        }
+    }
+
+    fn decode_block(&mut self, block: &CodeBlock) -> Vec<(Address, ListingLine)> {
+        block
+            .context()
+            .apply(block.address(), self.lifter.context_mut());
+
+        let mut lines = Vec::new();
+        let mut offset = 0;
+        while offset < block.size() {
+            let address = block.address() + offset;
+            let Some((line, size)) = self.decode_instruction(address, block.size() - offset) else {
+                break;
+            };
+            lines.push((address, line));
+            offset += size;
+        }
+        lines
+    }
+
+    fn render_operands(&self, source: Address) -> Vec<CodeToken> {
+        let mut tokens = Vec::new();
+        for (index, operand) in self.operands.iter().enumerate() {
+            if let Some(separator) = self
+                .operands
+                .separator(index)
+                .filter(|separator| !separator.is_empty())
+            {
+                tokens.push(CodeToken::new(CodeTokenKind::Punctuation, separator));
+            }
+            for piece in operand.pieces() {
+                let token = match piece {
+                    OperandPiece::Address(offset) => {
+                        let address = Address::new(source.space(), *offset);
+                        match self.names.get(&address) {
+                            Some(name) => CodeToken::new(CodeTokenKind::Address, name)
+                                .with_nav(address)
+                                .with_title(address.to_string()),
+                            None => CodeToken::new(CodeTokenKind::Address, format!("{offset:#x}"))
+                                .with_nav(address),
+                        }
+                    }
+                    OperandPiece::Register(register) => {
+                        CodeToken::new(CodeTokenKind::Register, register.name())
+                    }
+                    OperandPiece::Scalar(scalar) => {
+                        CodeToken::new(CodeTokenKind::Number, scalar.to_string())
+                    }
+                    OperandPiece::Text(text) => CodeToken::new(CodeTokenKind::Text, *text),
+                };
+                tokens.push(token);
+            }
+        }
+        if let Some(separator) = self
+            .operands
+            .separator(self.operands.len())
+            .filter(|separator| !separator.is_empty())
+        {
+            tokens.push(CodeToken::new(CodeTokenKind::Punctuation, separator));
+        }
+        tokens
+    }
 }
 
 struct Snapshot<'a> {
@@ -176,13 +244,7 @@ impl<'a> Snapshot<'a> {
     }
 
     fn functions(&self) -> Result<Vec<FunctionRow>, WorkbenchError> {
-        let mut names = FxHashMap::default();
-        for entry in self.reader.symbols() {
-            let entry = entry?;
-            names
-                .entry(entry.address())
-                .or_insert_with(|| entry.symbol().to_string());
-        }
+        let names = self.symbol_names()?;
 
         let project = self.reader.project()?;
         let mut rows = project
@@ -198,6 +260,65 @@ impl<'a> Snapshot<'a> {
             .collect::<Vec<_>>();
         rows.sort_by_key(|(offset, _)| *offset);
         Ok(rows.into_iter().map(|(_, row)| row).collect())
+    }
+
+    fn navigation(&self, address: Address) -> Result<NavigationTarget, WorkbenchError> {
+        let names = self.symbol_names()?;
+        let project = self.reader.project()?;
+        let mut ids = project
+            .functions()
+            .functions_containing(project.blocks(), address);
+        if let Some(function) = project.functions().get_by_address(address)
+            && let Err(index) = ids.binary_search(&function.id())
+        {
+            ids.insert(index, function.id());
+        }
+
+        let functions = ids
+            .iter()
+            .filter_map(|id| project.functions().get_by_id(*id))
+            .map(|function| {
+                let mut row = FunctionRow::from_function(&function);
+                if row.name.is_none() {
+                    row.name = names.get(&function.entry()).cloned();
+                }
+                row
+            })
+            .collect();
+
+        Ok(NavigationTarget {
+            address: bindings::Address::from(address),
+            functions,
+        })
+    }
+
+    fn symbol_names(&self) -> Result<FxHashMap<Address, String>, WorkbenchError> {
+        let mut names = FxHashMap::default();
+        let project = self.reader.project()?;
+        for function in project.functions().iter() {
+            if let Some(name) = function.name() {
+                names.insert(function.entry(), name.to_string());
+            }
+        }
+        for entry in self.reader.symbols() {
+            let entry = entry?;
+            names
+                .entry(entry.address())
+                .or_insert_with(|| entry.symbol().to_string());
+        }
+        let aliases = project
+            .functions()
+            .iter()
+            .filter_map(|function| {
+                let target = function.thunk_target(project.blocks())?;
+                let name = names.get(&target)?.clone();
+                Some((function.entry(), name))
+            })
+            .collect::<Vec<_>>();
+        for (address, name) in aliases {
+            names.entry(address).or_insert(name);
+        }
+        Ok(names)
     }
 
     fn symbols(&self) -> Result<Vec<SymbolRow>, WorkbenchError> {
@@ -258,18 +379,18 @@ impl<'a> Snapshot<'a> {
             .function_at(entry)?
             .ok_or_else(|| WorkbenchError::no_function(format!("{:#x}", entry.offset())))?;
 
+        let names = self.symbol_names()?;
         let project = self.reader.project()?;
         let function = project
             .functions()
             .get_by_id(function_id)
             .ok_or_else(|| WorkbenchError::no_function(format!("{:#x}", entry.offset())))?;
-        let segments = project.segments();
-        let mut lifter = project.lifter();
+        let mut renderer = ListingRenderer::new(&project, names);
         let mut lines = Vec::new();
 
         for (_, id) in function.blocks() {
             if let Some(block) = project.blocks().get_by_id(id) {
-                lines.extend(decode_block(segments, &mut lifter, &block));
+                lines.extend(renderer.decode_block(&block));
             }
         }
         lines.sort_by_key(|(address, _)| *address);
@@ -322,13 +443,13 @@ impl<'a> Snapshot<'a> {
             .ecode(function_id)?
             .ok_or_else(|| WorkbenchError::no_function(format!("{:#x}", entry.offset())))?;
 
+        let names = self.symbol_names()?;
         let project = self.reader.project()?;
         let function = project
             .functions()
             .get_by_id(function_id)
             .ok_or_else(|| WorkbenchError::no_function(format!("{:#x}", entry.offset())))?;
-        let segments = project.segments();
-        let mut lifter = project.lifter();
+        let mut renderer = ListingRenderer::new(&project, names);
 
         let graph = ecode.graph();
         let spans = ecode.source_spans();
@@ -348,7 +469,8 @@ impl<'a> Snapshot<'a> {
                         .find_map(|id| function_blocks.get_by_id(id))
                 })
                 .map(|block| {
-                    decode_block(segments, &mut lifter, &block)
+                    renderer
+                        .decode_block(&block)
                         .into_iter()
                         .map(|(_, line)| line)
                         .collect()
@@ -364,13 +486,9 @@ impl<'a> Snapshot<'a> {
                     addresses
                         .into_iter()
                         .filter_map(|address| {
-                            decode_instruction(
-                                segments,
-                                &mut lifter,
-                                address,
-                                MAX_INSTRUCTION_BYTES,
-                            )
-                            .map(|(line, _)| line)
+                            renderer
+                                .decode_instruction(address, MAX_INSTRUCTION_BYTES)
+                                .map(|(line, _)| line)
                         })
                         .collect()
                 });
@@ -422,6 +540,17 @@ async fn meta(session: CurrentSession) -> Result<Json<MetaResponse>, WorkbenchEr
 async fn functions(session: CurrentSession) -> Result<Json<Vec<FunctionRow>>, WorkbenchError> {
     session
         .read(|reader| Snapshot::new(reader).functions())
+        .await
+        .map(Json)
+}
+
+async fn navigation(
+    session: CurrentSession,
+    Path(address): Path<String>,
+) -> Result<Json<NavigationTarget>, WorkbenchError> {
+    let address = bindings::Address::decode(&address)?;
+    session
+        .read(move |reader| Snapshot::new(reader).navigation(address))
         .await
         .map(Json)
 }
@@ -668,6 +797,7 @@ pub async fn serve(state: AppState, address: SocketAddr) -> AnyResult<()> {
         .route("/api/open", post(open))
         .route("/api/meta", get(meta))
         .route("/api/functions", get(functions))
+        .route("/api/navigation/{address}", get(navigation))
         .route("/api/symbols", get(symbols))
         .route("/api/problems", get(problems))
         .route("/api/switches", get(switches))

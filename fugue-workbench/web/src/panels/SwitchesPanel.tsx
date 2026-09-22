@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
-import { useSelection } from "../store";
+import { useAddressNavigation } from "../navigation";
 import { VirtualList } from "../components/VirtualList";
 import { QueryState } from "../components/common";
 import { formatAddress } from "../format";
@@ -8,7 +8,7 @@ import type { SwitchRow } from "../bindings/SwitchRow";
 
 export function SwitchesPanel() {
   const { data, isLoading, error } = useQuery({ queryKey: ["switches"], queryFn: api.switches });
-  const setCursor = useSelection((state) => state.setCursor);
+  const navigate = useAddressNavigation();
   const rows = data ?? [];
 
   return (
@@ -17,7 +17,7 @@ export function SwitchesPanel() {
         items={rows}
         rowHeight={24}
         row={(row: SwitchRow) => (
-          <div className="vrow" onClick={() => setCursor(row.branch)}>
+          <div className="vrow" onClick={() => navigate(row.branch)}>
             <span className="addr">{formatAddress(row.branch)}</span>
             <span className="name" style={{ color: "var(--text-2)" }}>
               {row.cases} case{row.cases === 1 ? "" : "s"}

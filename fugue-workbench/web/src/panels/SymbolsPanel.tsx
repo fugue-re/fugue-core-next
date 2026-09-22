@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
-import { useSelection } from "../store";
+import { useAddressNavigation } from "../navigation";
 import { VirtualList } from "../components/VirtualList";
 import { QueryState } from "../components/common";
 import { formatAddress } from "../format";
@@ -9,7 +9,7 @@ import type { SymbolRow } from "../bindings/SymbolRow";
 
 export function SymbolsPanel() {
   const { data, isLoading, error } = useQuery({ queryKey: ["symbols"], queryFn: api.symbols });
-  const setCursor = useSelection((state) => state.setCursor);
+  const navigate = useAddressNavigation();
   const [filter, setFilter] = useState("");
 
   const rows = useMemo(() => {
@@ -41,7 +41,7 @@ export function SymbolsPanel() {
             items={rows}
             rowHeight={24}
             row={(sym: SymbolRow) => (
-              <div className="vrow" onClick={() => setCursor(sym.address)}>
+              <div className="vrow" onClick={() => navigate(sym.address)}>
                 <span className="addr">{formatAddress(sym.address)}</span>
                 <span className="name">{sym.name}</span>
                 <span className="flags">

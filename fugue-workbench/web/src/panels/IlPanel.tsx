@@ -1,12 +1,11 @@
 import { useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
+import { useAddressNavigation } from "../navigation";
 import { useSelection } from "../store";
-import { QueryState, Placeholder, IlTokens } from "../components/common";
+import { QueryState, Placeholder, CodeTokens } from "../components/common";
 import { formatAddress } from "../format";
 import type { FormInfo } from "../bindings/FormInfo";
-import type { FunctionRow } from "../bindings/FunctionRow";
-import type { Address } from "../bindings/Address";
 
 function formLabel(id: string): string {
   return id.replace(/^fugue\./, "").replace(/\./g, "·").toUpperCase();
@@ -20,24 +19,14 @@ export function IlPanel() {
   const setIlForm = useSelection((state) => state.setIlForm);
   const setCursor = useSelection((state) => state.setCursor);
   const setHover = useSelection((state) => state.setHover);
-  const selectFunction = useSelection((state) => state.selectFunction);
+  const navigate = useAddressNavigation();
 
   const forms = useQuery({ queryKey: ["forms"], queryFn: api.forms });
-  const functions = useQuery({ queryKey: ["functions"], queryFn: api.functions });
   const il = useQuery({
     queryKey: ["il", entry, ilForm],
     queryFn: () => api.il(entry!, ilForm),
     enabled: entry !== null,
   });
-
-  const navigate = (address: Address) => {
-    const target = (functions.data ?? []).find((fn: FunctionRow) => fn.entry === address);
-    if (target) {
-      selectFunction(target.entry, target.name);
-    } else {
-      setCursor(address);
-    }
-  };
 
   const activeRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -85,7 +74,7 @@ export function IlPanel() {
                   >
                     <span className="il-addr">{lead ? formatAddress(line.address) : ""}</span>
                     <span className="il-text">
-                      <IlTokens tokens={line.tokens} onNavigate={navigate} />
+                      <CodeTokens tokens={line.tokens} onNavigate={navigate} />
                     </span>
                   </div>
                 );

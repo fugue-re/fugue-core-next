@@ -10,6 +10,7 @@ import type { ListingLine } from "./bindings/ListingLine";
 import type { MetaResponse } from "./bindings/MetaResponse";
 import type { MetricsResponse } from "./bindings/MetricsResponse";
 import type { MutationResponse } from "./bindings/MutationResponse";
+import type { NavigationTarget } from "./bindings/NavigationTarget";
 import type { ProblemRow } from "./bindings/ProblemRow";
 import type { SegmentRow } from "./bindings/SegmentRow";
 import type { SwitchRow } from "./bindings/SwitchRow";
@@ -41,6 +42,8 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
 export const api = {
   meta: () => fetchJson<MetaResponse>("/api/meta"),
   functions: () => fetchJson<FunctionRow[]>("/api/functions"),
+  navigation: (address: Address) =>
+    fetchJson<NavigationTarget>(`/api/navigation/${encodeURIComponent(address)}`),
   symbols: () => fetchJson<SymbolRow[]>("/api/symbols"),
   problems: () => fetchJson<ProblemRow[]>("/api/problems"),
   switches: () => fetchJson<SwitchRow[]>("/api/switches"),

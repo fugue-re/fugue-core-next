@@ -94,6 +94,13 @@ impl FunctionRow {
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
+pub struct NavigationTarget {
+    pub(crate) address: Address,
+    pub(crate) functions: Vec<FunctionRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct SymbolRow {
     pub(crate) address: Address,
     pub(crate) name: String,
@@ -182,13 +189,18 @@ pub struct ListingLine {
     pub(crate) address: Address,
     pub(crate) bytes: String,
     pub(crate) mnemonic: String,
-    pub(crate) operands: String,
+    pub(crate) operands: Vec<CodeToken>,
     pub(crate) size: u32,
     pub(crate) decoded: bool,
 }
 
 impl ListingLine {
-    pub fn decoded(address: CoreAddress, bytes: &[u8], mnemonic: String, operands: String) -> Self {
+    pub fn decoded(
+        address: CoreAddress,
+        bytes: &[u8],
+        mnemonic: String,
+        operands: Vec<CodeToken>,
+    ) -> Self {
         Self {
             address: Address::from(address),
             bytes: hex_string(bytes),
@@ -204,7 +216,10 @@ impl ListingLine {
             address: Address::from(address),
             bytes: hex_string(&[byte]),
             mnemonic: "db".to_owned(),
-            operands: format!("{byte:#04x}"),
+            operands: vec![CodeToken::new(
+                CodeTokenKind::Number,
+                format!("{byte:#04x}"),
+            )],
             size: 1,
             decoded: false,
         }
@@ -265,7 +280,7 @@ impl FormInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "kebab-case")]
-pub enum IlTokenKind {
+pub enum CodeTokenKind {
     Address,
     Flag,
     Keyword,
@@ -281,15 +296,15 @@ pub enum IlTokenKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
-pub struct IlToken {
-    pub(crate) kind: IlTokenKind,
+pub struct CodeToken {
+    pub(crate) kind: CodeTokenKind,
     pub(crate) text: String,
     pub(crate) nav: Option<Address>,
     pub(crate) title: Option<String>,
 }
 
-impl IlToken {
-    pub fn new(kind: IlTokenKind, text: impl Into<String>) -> Self {
+impl CodeToken {
+    pub fn new(kind: CodeTokenKind, text: impl Into<String>) -> Self {
         Self {
             kind,
             text: text.into(),
@@ -321,7 +336,7 @@ impl IlToken {
 #[ts(export)]
 pub struct IlLine {
     pub(crate) address: Address,
-    pub(crate) tokens: Vec<IlToken>,
+    pub(crate) tokens: Vec<CodeToken>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

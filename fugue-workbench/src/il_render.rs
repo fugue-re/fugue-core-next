@@ -10,7 +10,7 @@ use fugue_core::lifter::{Lifter, Varnode};
 use fugue_core::storage::{AddressSpaceId, DEFAULT_SPACE_ID};
 use rustc_hash::FxHashMap;
 
-use crate::bindings::{Address as BindingAddress, IlLine, IlToken, IlTokenKind};
+use crate::bindings::{Address as BindingAddress, CodeToken, CodeTokenKind, IlLine};
 
 pub struct IlRenderer {
     lifter: Lifter,
@@ -25,24 +25,24 @@ fn ordered_addresses(spans: &[IlSourceSpan]) -> Vec<Address> {
     addresses
 }
 
-fn opcode(mnemonic: &str) -> IlToken {
-    IlToken::new(IlTokenKind::Opcode, mnemonic)
+fn opcode(mnemonic: &str) -> CodeToken {
+    CodeToken::new(CodeTokenKind::Opcode, mnemonic)
 }
 
-fn punct(text: &str) -> IlToken {
-    IlToken::new(IlTokenKind::Punctuation, text)
+fn punct(text: &str) -> CodeToken {
+    CodeToken::new(CodeTokenKind::Punctuation, text)
 }
 
-fn number(value: u64) -> IlToken {
-    IlToken::new(IlTokenKind::Number, format!("{value:#x}"))
+fn number(value: u64) -> CodeToken {
+    CodeToken::new(CodeTokenKind::Number, format!("{value:#x}"))
 }
 
 fn space_label(index: usize) -> String {
     format!("mem<{index}>")
 }
 
-fn offset_meta(immediate: u64) -> IlToken {
-    IlToken::new(IlTokenKind::Meta, format!("@{immediate}")).with_title("bit offset")
+fn offset_meta(immediate: u64) -> CodeToken {
+    CodeToken::new(CodeTokenKind::Meta, format!("@{immediate}")).with_title("bit offset")
 }
 
 impl IlRenderer {
@@ -67,40 +67,40 @@ impl IlRenderer {
         }
     }
 
-    fn register(&self, offset: u64, bytes: u32) -> IlToken {
+    fn register(&self, offset: u64, bytes: u32) -> CodeToken {
         let name = u16::try_from(bytes.max(1)).ok().and_then(|bytes| {
             let varnode = Varnode::new(self.register_space, offset, bytes);
             self.lifter.register_name(&varnode)
         });
         match name {
-            Some(name) => IlToken::new(IlTokenKind::Register, name),
-            None => IlToken::new(IlTokenKind::Register, format!("reg[{offset:#x}]"))
+            Some(name) => CodeToken::new(CodeTokenKind::Register, name),
+            None => CodeToken::new(CodeTokenKind::Register, format!("reg[{offset:#x}]"))
                 .with_title(format!("register offset {offset:#x}, {bytes} bytes")),
         }
     }
 
-    fn flag(&self, offset: u64) -> IlToken {
+    fn flag(&self, offset: u64) -> CodeToken {
         match self.flags.get(&offset) {
-            Some(name) => IlToken::new(IlTokenKind::Flag, *name),
-            None => IlToken::new(IlTokenKind::Flag, format!("flag[{offset:#x}]")),
+            Some(name) => CodeToken::new(CodeTokenKind::Flag, *name),
+            None => CodeToken::new(CodeTokenKind::Flag, format!("flag[{offset:#x}]")),
         }
     }
 
-    fn intrinsic_meta(&self, id: u64) -> IlToken {
+    fn intrinsic_meta(&self, id: u64) -> CodeToken {
         let label = u16::try_from(id)
             .ok()
             .and_then(|id| self.lifter.user_op_by_id(id))
             .map(str::to_owned)
             .unwrap_or_else(|| id.to_string());
-        IlToken::new(IlTokenKind::Meta, format!("<{label}>"))
+        CodeToken::new(CodeTokenKind::Meta, format!("<{label}>"))
     }
 
-    fn space(&self, space: AddressSpaceId) -> IlToken {
-        IlToken::new(IlTokenKind::Space, space_label(space.index()))
+    fn space(&self, space: AddressSpaceId) -> CodeToken {
+        CodeToken::new(CodeTokenKind::Space, space_label(space.index()))
     }
 
-    fn address_token(&self, offset: u64) -> IlToken {
-        IlToken::new(IlTokenKind::Address, format!("{offset:#x}"))
+    fn address_token(&self, offset: u64) -> CodeToken {
+        CodeToken::new(CodeTokenKind::Address, format!("{offset:#x}"))
             .with_nav(Address::new(DEFAULT_SPACE_ID, offset))
     }
 
@@ -123,7 +123,7 @@ impl IlRenderer {
         lines
     }
 
-    fn pcode_operation(&self, ir: &PCodeIr, operation: &PCodeOp, out: &mut Vec<IlToken>) {
+    fn pcode_operation(&self, ir: &PCodeIr, operation: &PCodeOp, out: &mut Vec<CodeToken>) {
         if let Some(output) = operation.output() {
             self.pcode_location(ir, output, out);
             out.push(punct(" = "));
@@ -145,8 +145,8 @@ impl IlRenderer {
         {
             out.push(punct(" -> "));
             out.push(
-                IlToken::new(
-                    IlTokenKind::Address,
+                CodeToken::new(
+                    CodeTokenKind::Address,
                     format!("{:#x}", target.address().offset()),
                 )
                 .with_nav(target.address()),
@@ -154,9 +154,9 @@ impl IlRenderer {
         }
     }
 
-    fn pcode_location(&self, ir: &PCodeIr, id: PCodeLocationId, out: &mut Vec<IlToken>) {
+    fn pcode_location(&self, ir: &PCodeIr, id: PCodeLocationId, out: &mut Vec<CodeToken>) {
         let Some(location) = ir.location(id) else {
-            out.push(IlToken::new(IlTokenKind::Meta, "?"));
+            out.push(CodeToken::new(CodeTokenKind::Meta, "?"));
             return;
         };
         let bytes = location.size();
@@ -166,7 +166,7 @@ impl IlRenderer {
             out.push(self.register(location.offset(), u32::from(bytes)));
         } else if location.is_unique() {
             out.push(
-                IlToken::new(IlTokenKind::Value, format!("u{:x}", location.offset()))
+                CodeToken::new(CodeTokenKind::Value, format!("u{:x}", location.offset()))
                     .with_title(format!("unique temporary, {bytes} bytes")),
             );
         } else {
@@ -174,7 +174,7 @@ impl IlRenderer {
                 .lifter
                 .space_name(location.lifter_space().value())
                 .unwrap_or("mem");
-            out.push(IlToken::new(IlTokenKind::Space, name.to_owned()));
+            out.push(CodeToken::new(CodeTokenKind::Space, name.to_owned()));
             out.push(punct("["));
             out.push(number(location.offset()));
             out.push(punct("]"));
@@ -196,8 +196,8 @@ impl IlRenderer {
         lines
     }
 
-    fn ecode_value(&self, ir: &ECodeIr, id: IlValueId) -> IlToken {
-        let token = IlToken::new(IlTokenKind::Value, format!("%v{}", id.index()));
+    fn ecode_value(&self, ir: &ECodeIr, id: IlValueId) -> CodeToken {
+        let token = CodeToken::new(CodeTokenKind::Value, format!("%v{}", id.index()));
         match ir.values().get(id.index()) {
             Some(value) if value.width() == 0 => token.with_title(self.memory_state_title(ir, id)),
             Some(value) => token.with_title(self.bound_value_title(ir, id, value.width())),
@@ -242,7 +242,7 @@ impl IlRenderer {
         }
     }
 
-    fn undefined_origin(&self, ir: &ECodeIr, operation: &ECodeOp) -> IlToken {
+    fn undefined_origin(&self, ir: &ECodeIr, operation: &ECodeOp) -> CodeToken {
         let domain = IlValueId::try_from_index(operation.results().start())
             .ok()
             .and_then(|value| ir.value_domain(value));
@@ -250,7 +250,7 @@ impl IlRenderer {
         self.undefined_domain(domain, operation.width())
     }
 
-    fn undefined_domain(&self, domain: Option<ECodeDomain>, width: u32) -> IlToken {
+    fn undefined_domain(&self, domain: Option<ECodeDomain>, width: u32) -> CodeToken {
         match domain {
             Some(ECodeDomain::Memory(space)) => {
                 self.space(space).with_title("initial memory state")
@@ -261,11 +261,11 @@ impl IlRenderer {
             Some(ECodeDomain::Register(register)) => self
                 .register(register.value(), width.div_ceil(8))
                 .with_title("undefined initial value"),
-            None => IlToken::new(IlTokenKind::Meta, "origin<?>"),
+            None => CodeToken::new(CodeTokenKind::Meta, "origin<?>"),
         }
     }
 
-    fn ecode_operation(&self, ir: &ECodeIr, operation: &ECodeOp, out: &mut Vec<IlToken>) {
+    fn ecode_operation(&self, ir: &ECodeIr, operation: &ECodeOp, out: &mut Vec<CodeToken>) {
         let results = operation.results();
         for index in results.start()..results.end() {
             if let Ok(id) = IlValueId::try_from_index(index) {
@@ -329,7 +329,7 @@ impl IlRenderer {
         if let Some(address) = operation.address() {
             out.push(punct(" -> "));
             out.push(
-                IlToken::new(IlTokenKind::Address, format!("{:#x}", address.offset()))
+                CodeToken::new(CodeTokenKind::Address, format!("{:#x}", address.offset()))
                     .with_nav(address),
             );
         }
@@ -350,12 +350,12 @@ impl IlRenderer {
         lines
     }
 
-    fn mcode_value(&self, ir: &MCodeIr, id: IlValueId) -> IlToken {
+    fn mcode_value(&self, ir: &MCodeIr, id: IlValueId) -> CodeToken {
         let Some(value) = ir.values().get(id.index()) else {
-            return IlToken::new(IlTokenKind::Meta, "?");
+            return CodeToken::new(CodeTokenKind::Meta, "?");
         };
         let Some(binding) = ir.binding(id) else {
-            let token = IlToken::new(IlTokenKind::Value, format!("%v{}", id.index()));
+            let token = CodeToken::new(CodeTokenKind::Value, format!("%v{}", id.index()));
             return if value.width() == 0 {
                 token.with_title(self.mcode_memory_state_title(ir, id))
             } else {
@@ -376,12 +376,12 @@ impl IlRenderer {
         id: MCodeVarId,
         version: Option<u32>,
         width: u32,
-    ) -> IlToken {
+    ) -> CodeToken {
         let Some(variable) = ir.variable(id) else {
             let version = version
                 .map(|version| format!("#{version}"))
                 .unwrap_or_default();
-            return IlToken::new(IlTokenKind::Meta, format!("var<?>{version}"));
+            return CodeToken::new(CodeTokenKind::Meta, format!("var<?>{version}"));
         };
         let lifetime = (variable.index() != 0).then(|| format!("_{}", variable.index()));
         let version = version
@@ -417,8 +417,8 @@ impl IlRenderer {
                     .stack_offset()
                     .expect("stack variable has stack storage");
                 let lifetime = lifetime.unwrap_or_default();
-                IlToken::new(
-                    IlTokenKind::Value,
+                CodeToken::new(
+                    CodeTokenKind::Value,
                     format!("stack[{storage:#x}]{lifetime}{version}"),
                 )
                 .with_title(format!("stack storage {storage:#x}, {width} bits"))
@@ -441,7 +441,7 @@ impl IlRenderer {
         }
     }
 
-    fn mcode_operation(&self, ir: &MCodeIr, operation: &MCodeOp, out: &mut Vec<IlToken>) {
+    fn mcode_operation(&self, ir: &MCodeIr, operation: &MCodeOp, out: &mut Vec<CodeToken>) {
         let results = operation.results();
         for index in results.start()..results.end() {
             if let Ok(id) = IlValueId::try_from_index(index) {
@@ -472,7 +472,10 @@ impl IlRenderer {
                     .and_then(|value| ir.constant_value(value))
                 {
                     out.push(punct(" "));
-                    out.push(IlToken::new(IlTokenKind::Number, format!("0x{value:x}")));
+                    out.push(CodeToken::new(
+                        CodeTokenKind::Number,
+                        format!("0x{value:x}"),
+                    ));
                 }
             }
             MCodeOpcode::Constant => {
@@ -518,7 +521,7 @@ impl IlRenderer {
         if let Some(address) = operation.address() {
             out.push(punct(" -> "));
             out.push(
-                IlToken::new(IlTokenKind::Address, format!("{:#x}", address.offset()))
+                CodeToken::new(CodeTokenKind::Address, format!("{:#x}", address.offset()))
                     .with_nav(address),
             );
         }
@@ -557,8 +560,8 @@ mod test {
         let register =
             renderer.undefined_domain(Some(ECodeDomain::Register(RegisterId::new(offset))), 8);
 
-        assert_eq!(flag.kind, IlTokenKind::Flag);
-        assert_eq!(register.kind, IlTokenKind::Register);
+        assert_eq!(flag.kind, CodeTokenKind::Flag);
+        assert_eq!(register.kind, CodeTokenKind::Register);
     }
 
     #[test]
@@ -574,7 +577,7 @@ mod test {
         let register =
             renderer.undefined_domain(Some(ECodeDomain::Register(RegisterId::new(offset))), 9);
 
-        assert_eq!(register.kind, IlTokenKind::Register);
+        assert_eq!(register.kind, CodeTokenKind::Register);
         assert_eq!(register.text, expected);
     }
 }
