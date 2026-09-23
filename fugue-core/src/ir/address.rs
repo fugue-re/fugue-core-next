@@ -683,9 +683,12 @@ impl RawAddressRangeSet {
         inserted
     }
 
-    pub fn insert_range(&mut self, range: impl Into<RangeInclusive<RawAddress>>) {
-        let range = range.into();
-        self.0.insert(range.start().offset()..=range.end().offset());
+    pub fn insert_range<A>(&mut self, range: impl Into<RangeInclusive<A>>)
+    where
+        A: Into<RawAddress>,
+    {
+        let (start, end) = range.into().into_inner();
+        self.0.insert(start.into().offset()..=end.into().offset());
     }
 
     pub fn intersects_range(&self, range: impl Into<RangeInclusive<RawAddress>>) -> bool {
@@ -694,10 +697,6 @@ impl RawAddressRangeSet {
         let end = range.end().offset();
 
         start <= end && self.0.overlaps(&(start..=end))
-    }
-
-    pub fn insert_meta_range(&mut self, range: RangeInclusive<Address>) {
-        self.0.insert(range.start().offset()..=range.end().offset());
     }
 
     pub fn difference(&self, other: &Self) -> Self {
@@ -911,10 +910,7 @@ impl AddressRangeSet {
 
     pub fn insert_meta_range(&mut self, range: RangeInclusive<Address>) {
         let space = range.start().space();
-        self.spaces
-            .entry(space)
-            .or_default()
-            .insert_meta_range(range);
+        self.spaces.entry(space).or_default().insert_range(range);
     }
 
     pub fn remove_range(&mut self, range: AddressRange) {

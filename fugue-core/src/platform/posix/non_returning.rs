@@ -1,8 +1,8 @@
 use std::sync::LazyLock;
 
-use crate::ir::symbol::{symbol, SymbolSet};
-use crate::platform::analysis::NonReturningExternSet;
+use crate::ir::symbol::{SymbolSet, symbol};
 use crate::platform::OperatingSystem;
+use crate::platform::analysis::NonReturningExternSet;
 
 static POSIX_NON_RETURNING: LazyLock<SymbolSet> = LazyLock::new(|| {
     [
