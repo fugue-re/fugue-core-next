@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::env;
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -38,6 +39,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut lifted = 0usize;
         let mut operations = 0usize;
         let mut values = 0usize;
+        let mut data_references = 0usize;
+        let mut seen = BTreeSet::new();
         for function in functions.iter().copied() {
             let Some(ecode) = reader.ecode(function)? else {
                 continue;
@@ -47,14 +50,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             values += ecode.values().len();
             let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(ecode.as_ref())?;
             digest.update(bytes.as_slice());
-        }
-
-        let mut data_references = 0usize;
-        let mut seen = std::collections::BTreeSet::new();
-        for function in functions.iter().copied() {
-            let Some(ecode) = reader.ecode(function)? else {
-                continue;
-            };
             for span in ecode.source_spans() {
                 if !seen.insert(span.address()) {
                     continue;
