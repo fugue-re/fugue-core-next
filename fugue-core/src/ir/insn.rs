@@ -1,15 +1,28 @@
 use std::fmt;
+use std::mem::size_of;
 
-use fugue_lifter::{Language, Op, PCodeOp};
 use smallvec::SmallVec;
+use thiserror::Error;
 
-use crate::ir::{Address, Id, Location, ToRawAddress};
-use crate::lifter::{Lifter, LifterError};
+use crate::il::pcode::raw::analysis::{RawPCodeFlow, RawPCodeFlows};
+use crate::ir::{Address, FlowTarget, Id, Location, Reference, ReferenceOrigin, ToRawAddress};
+use crate::lifter::{Language, Op, RawPCodeOp};
+use crate::storage::schema::bitflags::archived_bitflags;
+use crate::types::EstimateSize;
 
 pub type InsnId = Id<Insn>;
 
-// TODO: review the choice of Vec
-pub type InsnList = Vec<Insn>;
+#[derive(Debug, Error)]
+pub enum InsnError {
+    #[error("instruction size {size} exceeds retained limit")]
+    InsnTooLarge { size: usize },
+}
+
+impl InsnError {
+    pub const fn insn_too_large(size: usize) -> Self {
+        Self::InsnTooLarge { size }
+    }
+}
 
 #[derive(
     Debug,
@@ -26,87 +39,154 @@ pub type InsnList = Vec<Insn>;
 pub struct Insn {
     address: Address,
     properties: InsnProperties,
-    operations: Vec<PCodeOp>,
-    targets: SmallVec<[(u16, InsnTarget); 2]>,
-    length: u8,
+    targets: SmallVec<[(u16, InsnTarget); 1]>,
+    size: u8,
 }
 
 impl Insn {
-    pub(crate) fn from_lifted(
+    pub(crate) fn from_direct_branch(
+        address: Address,
+        size: usize,
+        target: Address,
+        conditional: bool,
+    ) -> Result<Self, InsnError> {
+        Self::from_direct_flow(address, size, InsnTarget::InterBlk(target), conditional)
+    }
+
+    pub(crate) fn from_direct_call(
+        address: Address,
+        size: usize,
+        target: Address,
+    ) -> Result<Self, InsnError> {
+        Self::from_direct_flow(address, size, InsnTarget::InterSub(target), true)
+    }
+
+    pub(crate) fn from_indirect_branch(address: Address, size: usize) -> Result<Self, InsnError> {
+        let mut targets = SmallVec::new();
+        targets.push((0, InsnTarget::InterBlkIndirect(None)));
+        Self::from_flow_targets(address, size, targets)
+    }
+
+    pub(crate) fn from_indirect_call(address: Address, size: usize) -> Result<Self, InsnError> {
+        Self::from_direct_flow(address, size, InsnTarget::InterSubIndirect(None), true)
+    }
+
+    pub(crate) fn from_return(address: Address, size: usize) -> Result<Self, InsnError> {
+        let mut targets = SmallVec::new();
+        targets.push((0, InsnTarget::InterRet(None, true)));
+        Self::from_flow_targets(address, size, targets)
+    }
+
+    fn from_direct_flow(
+        address: Address,
+        size: usize,
+        target: InsnTarget,
+        fall_through: bool,
+    ) -> Result<Self, InsnError> {
+        let mut targets = SmallVec::new();
+        targets.push((0, target));
+        if fall_through {
+            targets.push((
+                0,
+                InsnTarget::IntraBlk(Location::new(address + size, 0), true),
+            ));
+        }
+        Self::from_flow_targets(address, size, targets)
+    }
+
+    fn from_flow_targets(
+        address: Address,
+        size: usize,
+        targets: SmallVec<[(u16, InsnTarget); 1]>,
+    ) -> Result<Self, InsnError> {
+        let properties = InsnProperties::from_targets(&targets) | InsnProperties::FLOW_RESOLVED;
+
+        Ok(Self {
+            address,
+            properties,
+            targets,
+            size: size
+                .try_into()
+                .map_err(|_| InsnError::insn_too_large(size))?,
+        })
+    }
+
+    pub(crate) fn from_resolved_flow(
         language: &'static Language,
         address: Address,
-        length: usize,
-        operations: Vec<PCodeOp>,
-    ) -> Self {
-        let naddress = address + length;
+        size: usize,
+        operations: &[RawPCodeOp],
+    ) -> Result<Self, InsnError> {
+        let operation_count = operations.len() as u16;
+        let next_address = address + size;
+        let is_local = |location: &Location| location.address() == address;
+        let is_fall_through = |location: &Location| location.address() == next_address;
 
-        let targets = InsnTarget::from_lifted(language, address, naddress, &operations);
-
+        let mut targets = SmallVec::new();
+        for (index, flow) in RawPCodeFlows::new(language, address, size, operations).iter() {
+            let target = match flow {
+                RawPCodeFlow::Branch(Some(location)) => {
+                    if is_local(&location) {
+                        InsnTarget::IntraIns(location, false)
+                    } else if is_fall_through(&location) {
+                        InsnTarget::IntraBlk(location, false)
+                    } else {
+                        InsnTarget::InterBlk(location.address())
+                    }
+                }
+                RawPCodeFlow::Branch(None) => InsnTarget::InterBlkIndirect(None),
+                RawPCodeFlow::Call(Some(location)) => {
+                    if location.position() != 0 {
+                        InsnTarget::IntraIns(location, false)
+                    } else {
+                        InsnTarget::InterSub(location.address())
+                    }
+                }
+                RawPCodeFlow::Call(None) => InsnTarget::InterSubIndirect(None),
+                RawPCodeFlow::FallThrough(location) => {
+                    if is_local(&location) {
+                        InsnTarget::IntraIns(location, true)
+                    } else {
+                        InsnTarget::IntraBlk(location, true)
+                    }
+                }
+                RawPCodeFlow::Intrinsic => InsnTarget::Intrinsic,
+                RawPCodeFlow::Return(return_address) => {
+                    InsnTarget::InterRet(return_address, index + 1 == operation_count)
+                }
+            };
+            targets.push((index, target));
+        }
         let mut properties = InsnProperties::from_targets(&targets);
         if operations.is_empty() {
             properties |= InsnProperties::NOP;
         }
 
-        properties |= InsnProperties::LIFTED;
+        properties |= InsnProperties::FLOW_RESOLVED;
 
-        Self {
+        Ok(Self {
             address,
             properties,
-            operations,
             targets,
-            length: length
+            size: size
                 .try_into()
-                .expect("instruction length must not exceed 255 bytes"),
-        }
+                .map_err(|_| InsnError::insn_too_large(size))?,
+        })
     }
 
     pub(crate) fn from_disassembly(
         address: Address,
-        length: usize,
+        size: usize,
         properties: InsnProperties,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, InsnError> {
+        Ok(Self {
             address,
             properties,
-            operations: Vec::new(),
             targets: SmallVec::new(),
-            length: length
+            size: size
                 .try_into()
-                .expect("instruction length must not exceed 255 bytes"),
-        }
-    }
-
-    pub fn ensure_lifted(&mut self, lifter: &mut Lifter, bytes: &[u8]) -> Result<(), LifterError> {
-        if self.is_lifted() {
-            return Ok(());
-        }
-
-        self.operations.clear();
-        self.targets.clear();
-
-        let length = lifter.lift_into(self.address.address(), bytes, &mut self.operations)?;
-
-        self.length = length
-            .try_into()
-            .expect("instruction length must not exceed 255 bytes");
-
-        let naddress = self.next_address();
-
-        InsnTarget::from_lifted_into(
-            lifter.language(),
-            self.address,
-            naddress,
-            &self.operations,
-            &mut self.targets,
-        );
-
-        self.properties = InsnProperties::from_targets(&self.targets) | InsnProperties::LIFTED;
-
-        if self.operations.is_empty() {
-            self.properties |= InsnProperties::NOP;
-        }
-
-        Ok(())
+                .map_err(|_| InsnError::insn_too_large(size))?,
+        })
     }
 
     pub fn address(&self) -> Address {
@@ -114,11 +194,178 @@ impl Insn {
     }
 
     pub fn next_address(&self) -> Address {
-        self.address + self.length as usize
+        self.address + self.size as usize
     }
 
     pub fn properties(&self) -> InsnProperties {
         self.properties
+    }
+
+    pub fn size(&self) -> usize {
+        self.size as _
+    }
+
+    pub fn iter_targets<'a>(
+        &'a self,
+    ) -> impl Iterator<Item = (&'a InsnTarget, InsnTargetKind, Address)> + 'a {
+        self.targets
+            .iter()
+            .filter_map(|(_, target)| target.resolved().map(|(kind, to)| (target, kind, to)))
+    }
+
+    pub fn flow_targets(&self) -> impl Iterator<Item = FlowTarget> + '_ {
+        self.iter_targets()
+            .filter_map(move |(target, _, to)| FlowTarget::from_insn_target(self, target, to))
+    }
+
+    pub fn flow_references(&self) -> impl Iterator<Item = Reference> + '_ {
+        self.flow_targets().filter_map(|target| {
+            if !target.kind().is_global() {
+                return None;
+            }
+            Some(
+                Reference::from_flow(target.from(), target.to(), target.kind())
+                    .with_origin(ReferenceOrigin::Derived),
+            )
+        })
+    }
+
+    pub fn set_indirect_target(&mut self, target: Address) {
+        for (_, existing) in self.targets.iter_mut() {
+            match existing {
+                InsnTarget::InterBlkIndirect(None) => {
+                    *existing = InsnTarget::InterBlkIndirect(Some(target));
+                }
+                InsnTarget::InterSubIndirect(None) => {
+                    *existing = InsnTarget::InterSubIndirect(Some(target));
+                }
+                _ => (),
+            }
+        }
+
+        self.properties = InsnProperties::from_targets(&self.targets)
+            | (self.properties & !InsnProperties::FLOW & !InsnProperties::FALL_THROUGH);
+    }
+
+    pub fn call_target(&self) -> Option<Address> {
+        self.flow_targets()
+            .find_map(|target| target.kind().is_call().then_some(target.to()))
+    }
+
+    pub fn is_taken(&self) -> bool {
+        self.properties().intersects(InsnProperties::TAKEN)
+    }
+
+    pub fn is_nonsense(&self) -> bool {
+        self.properties().intersects(InsnProperties::NONSENSE)
+    }
+
+    pub fn is_nop(&self) -> bool {
+        self.properties().intersects(InsnProperties::NOP)
+    }
+
+    pub fn is_trap(&self) -> bool {
+        self.properties().intersects(InsnProperties::TRAP)
+    }
+
+    pub fn is_invalid(&self) -> bool {
+        self.properties().intersects(InsnProperties::INVALID)
+    }
+
+    pub fn is_halt(&self) -> bool {
+        self.properties().intersects(InsnProperties::HALT)
+    }
+
+    pub fn is_branch(&self) -> bool {
+        self.properties().intersects(InsnProperties::BRANCH)
+    }
+
+    pub fn is_call(&self) -> bool {
+        self.properties().intersects(InsnProperties::CALL)
+    }
+
+    pub fn is_return(&self) -> bool {
+        self.properties().intersects(InsnProperties::RETURN)
+    }
+
+    pub fn is_indirect(&self) -> bool {
+        self.properties().intersects(InsnProperties::INDIRECT)
+    }
+
+    pub fn is_branch_dest(&self) -> bool {
+        self.properties().intersects(InsnProperties::BRANCH_DEST)
+    }
+
+    pub fn is_call_dest(&self) -> bool {
+        self.properties().intersects(InsnProperties::CALL_DEST)
+    }
+
+    pub fn is_flow(&self) -> bool {
+        self.properties().intersects(InsnProperties::FLOW)
+    }
+
+    pub fn has_fall_through(&self) -> bool {
+        self.properties().contains(InsnProperties::FALL_THROUGH)
+    }
+
+    pub fn has_resolved_flow(&self) -> bool {
+        self.properties().intersects(InsnProperties::FLOW_RESOLVED)
+    }
+
+    pub fn needs_flow_resolution(&self) -> bool {
+        self.properties()
+            .intersects(InsnProperties::NEEDS_FLOW_RESOLUTION)
+    }
+
+    pub(crate) fn indirect_target_pointer(
+        &self,
+        language: &'static Language,
+        operations: &[RawPCodeOp],
+    ) -> Option<Address> {
+        let (position, target) = operations
+            .iter()
+            .enumerate()
+            .find_map(|(index, operation)| {
+                if !matches!(operation.op(), Op::IBranch | Op::ICall) {
+                    return None;
+                }
+                operation.inputs().first().map(|target| (index, *target))
+            })?;
+
+        if let Some(target) = target.to_address(language) {
+            return Some(Address::new(self.address().space(), target));
+        }
+
+        let definition = operations[..position]
+            .iter()
+            .rev()
+            .find(|operation| operation.output() == Some(&target))?;
+
+        if !matches!(definition.op(), Op::Copy) {
+            return None;
+        }
+
+        definition
+            .inputs()
+            .first()
+            .and_then(|source| source.to_address(language))
+            .map(|source| Address::new(self.address().space(), source))
+    }
+
+    pub(crate) fn resolve_flow(
+        &mut self,
+        language: &'static Language,
+        size: usize,
+        operations: &[RawPCodeOp],
+    ) -> Result<(), InsnError> {
+        *self = Self::from_resolved_flow(language, self.address, size, operations)?;
+        Ok(())
+    }
+
+    pub fn remove_fall_through(&mut self) {
+        self.targets.retain(|(_, target)| !target.is_fall_through());
+        self.properties = InsnProperties::from_targets(&self.targets)
+            | (self.properties & !InsnProperties::FLOW & !InsnProperties::FALL_THROUGH);
     }
 
     pub fn mark_branch_dest(&mut self) {
@@ -177,133 +424,33 @@ impl Insn {
         self.properties.remove(InsnProperties::INVALID);
     }
 
-    pub fn mark_lifted(&mut self) {
-        self.properties |= InsnProperties::LIFTED;
+    pub fn mark_flow_resolved(&mut self) {
+        self.properties |= InsnProperties::FLOW_RESOLVED;
     }
 
-    pub fn mark_needs_lifting(&mut self) {
-        self.properties |= InsnProperties::NEEDS_LIFTING;
-    }
-
-    pub fn is_taken(&self) -> bool {
-        self.properties().intersects(InsnProperties::TAKEN)
-    }
-
-    pub fn is_nonsense(&self) -> bool {
-        self.properties().intersects(InsnProperties::NONSENSE)
-    }
-
-    pub fn is_nop(&self) -> bool {
-        self.properties().intersects(InsnProperties::NOP)
-    }
-
-    pub fn is_trap(&self) -> bool {
-        self.properties().intersects(InsnProperties::TRAP)
-    }
-
-    pub fn is_invalid(&self) -> bool {
-        self.properties().intersects(InsnProperties::INVALID)
-    }
-
-    pub fn is_halt(&self) -> bool {
-        self.properties().intersects(InsnProperties::HALT)
-    }
-
-    pub fn is_branch(&self) -> bool {
-        self.properties().intersects(InsnProperties::BRANCH)
-    }
-
-    pub fn is_call(&self) -> bool {
-        self.properties().intersects(InsnProperties::CALL)
-    }
-
-    pub fn is_return(&self) -> bool {
-        self.properties().intersects(InsnProperties::RETURN)
-    }
-
-    pub fn is_indirect(&self) -> bool {
-        self.properties().intersects(InsnProperties::INDIRECT)
-    }
-
-    pub fn is_branch_dest(&self) -> bool {
-        self.properties().intersects(InsnProperties::BRANCH_DEST)
-    }
-
-    pub fn is_call_dest(&self) -> bool {
-        self.properties().intersects(InsnProperties::CALL_DEST)
-    }
-
-    pub fn is_flow(&self) -> bool {
-        self.properties().intersects(InsnProperties::FLOW)
-    }
-
-    pub fn has_fall(&self) -> bool {
-        self.properties().contains(InsnProperties::FALL)
-    }
-
-    pub fn is_lifted(&self) -> bool {
-        self.properties().intersects(InsnProperties::LIFTED)
-    }
-
-    pub fn needs_lifting(&self) -> bool {
-        self.properties().intersects(InsnProperties::NEEDS_LIFTING)
-    }
-
-    pub fn len(&self) -> usize {
-        self.length as _
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.length == 0
-    }
-
-    pub fn iter_targets<'a>(
-        &'a self,
-    ) -> impl Iterator<Item = (&'a InsnTarget, InsnTargetKind, Address)> + 'a {
-        use InsnTarget::*;
-        use InsnTargetKind::*;
-
-        self.targets.iter().filter_map(|(_, target)| match *target {
-            IntraBlk(taken, _) if taken.position() == 0 => Some((target, Local, taken.address())),
-            InterBlk(taken) => Some((target, Local, taken)),
-            InterSub(Some(taken)) | InterRet(Some(taken), _) => Some((target, Global, taken)),
-            _ => None,
-        })
-    }
-
-    pub fn display(&self, language: &'static Language) -> InsnFormatter {
-        InsnFormatter::new(self, language)
+    pub fn mark_needs_flow_resolution(&mut self) {
+        self.properties |= InsnProperties::NEEDS_FLOW_RESOLUTION;
     }
 }
 
-pub struct InsnFormatter<'a> {
-    lifted: &'a Insn,
-    language: &'static Language,
-}
-
-impl<'a> InsnFormatter<'a> {
-    pub fn new(lifted: &'a Insn, language: &'static Language) -> Self {
-        Self { lifted, language }
-    }
-}
-
-impl fmt::Display for InsnFormatter<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let lifted = self.lifted;
-        let language = self.language;
-
-        if !lifted.is_lifted() {
-            return write!(f, "<not lifted; length: {}>", lifted.len());
+impl EstimateSize for Insn {
+    fn estimate_size(&self) -> usize {
+        let mut size = size_of::<Self>();
+        if self.targets.spilled() {
+            size = size.saturating_add(
+                self.targets
+                    .capacity()
+                    .saturating_mul(size_of::<(u16, InsnTarget)>()),
+            );
         }
-
-        language.display(&lifted.operations).fmt(f)
+        size
     }
 }
 
 bitflags::bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct InsnProperties: u16 {
-        const FALL          = 0b0000_0000_0000_0001;
+        const FALL_THROUGH          = 0b0000_0000_0000_0001;
         const BRANCH        = 0b0000_0000_0000_0010;
         const CALL          = 0b0000_0000_0000_0100;
         const RETURN        = 0b0000_0000_0000_1000;
@@ -315,8 +462,8 @@ bitflags::bitflags! {
 
         // 1. instruction's address referenced as an immediate
         //    on the rhs of an assignment
-        // 2. the instruction is a fall from padding
-        // 3. the instruction is an implicit fall target of two
+        // 2. the instruction is a fall-through from padding
+        // 3. the instruction is an implicit fall-through target of two
         //    or more overlapping blocks
         const MAYBE_TAKEN   = 0b0000_0000_1000_0000;
 
@@ -335,11 +482,9 @@ bitflags::bitflags! {
         // instruction is a halt (e.g., HLT)
         const HALT          = 0b0001_0000_0000_0000;
 
-        // instruction has been lifted
-        const LIFTED        = 0b0010_0000_0000_0000;
+        const FLOW_RESOLVED = 0b0010_0000_0000_0000;
 
-        // instruction needs to be lifted
-        const NEEDS_LIFTING = 0b0100_0000_0000_0000;
+        const NEEDS_FLOW_RESOLUTION = 0b0100_0000_0000_0000;
 
         const UNVIABLE      = Self::TRAP.bits() | Self::INVALID.bits();
 
@@ -352,49 +497,11 @@ bitflags::bitflags! {
 
 impl Default for InsnProperties {
     fn default() -> Self {
-        Self::FALL
+        Self::FALL_THROUGH
     }
 }
 
-#[repr(transparent)]
-pub struct ArchivedInsnProperties(rkyv::primitive::ArchivedU16);
-unsafe impl rkyv::Portable for ArchivedInsnProperties {}
-unsafe impl rkyv::traits::NoUndef for ArchivedInsnProperties {}
-
-unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C>
-    for ArchivedInsnProperties
-where
-    rkyv::primitive::ArchivedU16: rkyv::bytecheck::CheckBytes<C>,
-{
-    unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
-        unsafe { rkyv::primitive::ArchivedU16::check_bytes(value.cast(), context) }
-    }
-}
-
-impl rkyv::Archive for InsnProperties {
-    type Archived = ArchivedInsnProperties;
-    type Resolver = ();
-
-    fn resolve(&self, _: Self::Resolver, out: rkyv::Place<Self::Archived>) {
-        out.write(ArchivedInsnProperties(
-            rkyv::primitive::ArchivedU16::from_native(self.bits()),
-        ));
-    }
-}
-
-impl<S: rkyv::rancor::Fallible + ?Sized> rkyv::Serialize<S> for InsnProperties {
-    fn serialize(&self, _serializer: &mut S) -> Result<Self::Resolver, S::Error> {
-        Ok(())
-    }
-}
-
-impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<InsnProperties, D>
-    for ArchivedInsnProperties
-{
-    fn deserialize(&self, _deserializer: &mut D) -> Result<InsnProperties, D::Error> {
-        Ok(InsnProperties::from_bits_truncate(self.0.to_native()))
-    }
-}
+archived_bitflags!(InsnProperties, ArchivedInsnProperties, u16);
 
 impl InsnProperties {
     pub(crate) fn from_targets(targets: &[(u16, InsnTarget)]) -> Self {
@@ -402,12 +509,13 @@ impl InsnProperties {
 
         for (_, target) in targets.iter() {
             match target {
-                InsnTarget::IntraBlk(_, true) => prop |= Self::FALL,
-                InsnTarget::IntraBlk(_, false)
-                | InsnTarget::InterBlk(_)
-                | InsnTarget::Unresolved => prop |= Self::BRANCH,
+                InsnTarget::IntraBlk(_, true) => prop |= Self::FALL_THROUGH,
+                InsnTarget::IntraBlk(_, false) | InsnTarget::InterBlk(_) => prop |= Self::BRANCH,
+                InsnTarget::InterBlkIndirect(_) => prop |= Self::BRANCH | Self::INDIRECT,
                 InsnTarget::InterSub(_) => prop |= Self::CALL,
-                InsnTarget::InterRet(_, _) => prop |= Self::RETURN,
+                InsnTarget::InterSubIndirect(_) => prop |= Self::CALL | Self::INDIRECT,
+                InsnTarget::InterRet(Some(_), _) => prop |= Self::RETURN,
+                InsnTarget::InterRet(None, _) => prop |= Self::RETURN | Self::INDIRECT,
                 _ => (),
             }
         }
@@ -430,8 +538,8 @@ impl InsnProperties {
     rkyv::Deserialize,
 )]
 pub enum InsnTargetKind {
-    Local,
     Global,
+    Local,
 }
 
 impl InsnTargetKind {
@@ -457,133 +565,66 @@ impl InsnTargetKind {
     rkyv::Deserialize,
 )]
 pub enum InsnTarget {
-    IntraIns(Location, bool),
-    IntraBlk(Location, bool),
     InterBlk(Address),
-    InterSub(Option<Address>),
+    InterBlkIndirect(Option<Address>),
     InterRet(Option<Address>, bool),
+    InterSub(Address),
+    InterSubIndirect(Option<Address>),
+    IntraBlk(Location, bool),
+    IntraIns(Location, bool),
     Intrinsic,
-    Unresolved,
 }
 
 impl InsnTarget {
-    pub(crate) fn from_lifted(
-        language: &'static Language,
-        address: Address,
-        naddress: Address,
-        opns: &[PCodeOp],
-    ) -> SmallVec<[(u16, Self); 2]> {
-        let mut targets = SmallVec::new();
-        Self::from_lifted_into(language, address, naddress, opns, &mut targets);
-        targets
+    pub fn is_call(&self) -> bool {
+        matches!(self, Self::InterSub(_) | Self::InterSubIndirect(_))
     }
 
-    fn from_lifted_into(
-        language: &'static Language,
-        address: Address,
-        naddress: Address,
-        opns: &[PCodeOp],
-        targets: &mut SmallVec<[(u16, Self); 2]>,
-    ) {
-        let op_count = opns.len() as u16;
+    pub fn is_fall_through(&self) -> bool {
+        matches!(self, Self::IntraIns(_, true) | Self::IntraBlk(_, true))
+    }
 
-        let is_local = |loc: &Location| -> bool { loc.address() == address };
-        let is_fall = |loc: &Location| -> bool { loc.address() == naddress };
+    pub fn is_indirect(&self) -> bool {
+        matches!(
+            self,
+            Self::InterBlkIndirect(_) | Self::InterSubIndirect(_) | Self::InterRet(None, _)
+        )
+    }
 
-        let nlocation = |i: u16| -> Location {
-            if i >= op_count {
-                Location::new(naddress, i - op_count)
-            } else {
-                Location::new(address, i)
-            }
-        };
+    pub fn is_intrinsic(&self) -> bool {
+        matches!(self, Self::Intrinsic)
+    }
 
-        let ncall = |i: u16, loc: Option<Location>, targets: &mut SmallVec<[(u16, Self); 2]>| {
-            let Some(loc) = loc else {
-                targets.push((i, Self::InterSub(None)));
-                return;
-            };
+    pub fn is_return(&self) -> bool {
+        matches!(self, Self::InterRet(..))
+    }
 
-            if loc.position() != 0 {
-                targets.push((i, Self::IntraIns(loc, false)));
-            } else {
-                targets.push((i, Self::InterSub(Some(loc.address()))));
-            }
-        };
-
-        let nbranch = |i: u16, loc: Option<Location>, targets: &mut SmallVec<[(u16, Self); 2]>| {
-            let Some(loc) = loc else {
-                targets.push((i, Self::Unresolved));
-                return;
-            };
-
-            if is_local(&loc) {
-                targets.push((i, Self::IntraIns(loc, false)));
-            } else if is_fall(&loc) {
-                targets.push((i, Self::IntraBlk(loc, false)));
-            } else {
-                targets.push((i, Self::InterBlk(loc.address())));
-            }
-        };
-
-        let nfall = |i: u16, fall: Location, targets: &mut SmallVec<[(u16, Self); 2]>| {
-            targets.push((
-                i,
-                if is_local(&fall) {
-                    Self::IntraIns(fall, true)
-                } else {
-                    Self::IntraBlk(fall, true)
-                },
-            ));
-        };
-
-        if op_count == 0 {
-            nfall(0, nlocation(1), targets);
-            return;
+    pub fn address(&self) -> Option<Address> {
+        match self {
+            Self::IntraIns(location, _) | Self::IntraBlk(location, _) => Some(location.address()),
+            Self::InterBlk(address)
+            | Self::InterBlkIndirect(Some(address))
+            | Self::InterSub(address)
+            | Self::InterSubIndirect(Some(address))
+            | Self::InterRet(Some(address), _) => Some(*address),
+            Self::InterBlkIndirect(None)
+            | Self::InterSubIndirect(None)
+            | Self::InterRet(None, _)
+            | Self::Intrinsic => None,
         }
+    }
 
-        for (i, stmt) in opns.iter().enumerate() {
-            let i = i as u16;
-            let next = nlocation(i + 1);
-            let inputs = stmt.inputs();
-            match stmt.op() {
-                Op::Branch => {
-                    let locn = Location::absolute_from(language, address, inputs[0], i);
-                    nbranch(i, locn, targets);
-                }
-                Op::CBranch => {
-                    let locn = Location::absolute_from(language, address, inputs[0], i);
-                    nbranch(i, locn, targets);
-                    nfall(i, next, targets);
-                }
-                Op::IBranch => {
-                    nbranch(i, None, targets);
-                }
-                Op::Call => {
-                    let locn = Location::absolute_from(language, address, inputs[0], i);
-                    ncall(i, locn, targets);
-                    nfall(i, next, targets);
-                }
-                Op::ICall => {
-                    ncall(i, None, targets);
-                    nfall(i, next, targets);
-                }
-                Op::Return => {
-                    let ret_addr = inputs[0]
-                        .to_address(language)
-                        .map(|a| Address::new(address.space(), a));
-                    targets.push((i, Self::InterRet(ret_addr, i + 1 == op_count)));
-                }
-                Op::UserOp(_, _) => {
-                    targets.push((i, Self::Intrinsic));
-                    nfall(i, next, targets);
-                }
-                _ => {
-                    if i + 1 == op_count {
-                        nfall(i, next, targets);
-                    }
-                }
+    fn resolved(&self) -> Option<(InsnTargetKind, Address)> {
+        use InsnTarget::*;
+        use InsnTargetKind::*;
+
+        match *self {
+            IntraBlk(taken, _) if taken.position() == 0 => Some((Local, taken.address())),
+            InterBlk(taken) | InterBlkIndirect(Some(taken)) => Some((Local, taken)),
+            InterSub(taken) | InterSubIndirect(Some(taken)) | InterRet(Some(taken), _) => {
+                Some((Global, taken))
             }
+            _ => None,
         }
     }
 }
@@ -594,8 +635,17 @@ impl fmt::Display for InsnTarget {
             Self::IntraIns(loc, _) => write!(f, "intra-instruction flow to {loc}"),
             Self::IntraBlk(loc, _) => write!(f, "intra-block flow to {loc}"),
             Self::InterBlk(tgt) => write!(f, "inter-block flow to {tgt}"),
-            Self::InterSub(None) => write!(f, "unresolved inter-sub-routine flow"),
-            Self::InterSub(Some(tgt)) => write!(f, "inter-sub-routine flow to {tgt}"),
+            Self::InterBlkIndirect(None) => write!(f, "unresolved indirect inter-block flow"),
+            Self::InterBlkIndirect(Some(tgt)) => {
+                write!(f, "indirect inter-block flow to {tgt}")
+            }
+            Self::InterSub(tgt) => write!(f, "inter-sub-routine flow to {tgt}"),
+            Self::InterSubIndirect(None) => {
+                write!(f, "unresolved indirect inter-sub-routine flow")
+            }
+            Self::InterSubIndirect(Some(tgt)) => {
+                write!(f, "indirect inter-sub-routine flow to {tgt}")
+            }
             Self::InterRet(None, _last) => {
                 write!(f, "unresolved inter-sub-routine flow via return")
             }
@@ -603,7 +653,33 @@ impl fmt::Display for InsnTarget {
                 write!(f, "inter-sub-routine flow to {tgt} via return")
             }
             Self::Intrinsic => write!(f, "intrinsic flow"),
-            Self::Unresolved => write!(f, "unresolved"),
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::ir::FlowKind;
+
+    #[test]
+    fn set_indirect_target_preserves_indirect_classification() -> Result<(), InsnError> {
+        let address = Address::from(0x1000u64);
+        let target = Address::from(0x2000u64);
+        let mut insn = Insn::from_indirect_call(address, 4)?;
+
+        insn.set_indirect_target(target);
+
+        assert!(insn.is_indirect());
+        assert_eq!(insn.call_target(), Some(target));
+        assert_eq!(
+            insn.flow_targets()
+                .find(|flow| flow.kind().is_call())
+                .expect("resolved indirect call must retain its call flow")
+                .kind(),
+            FlowKind::ICall
+        );
+
+        Ok(())
     }
 }

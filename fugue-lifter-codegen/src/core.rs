@@ -1,11 +1,15 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use fugue_sleigh_language::construct::{ConstTpl, ConstructTpl, HandleTpl, OpTpl, VarnodeTpl};
+use fugue_sleigh_language::convention::{
+    Prototype, PrototypeEntry, PrototypeOperand, ReturnAddress,
+};
 use fugue_sleigh_language::pattern::PatternExpression;
 use fugue_sleigh_language::symbol::sub_table::{
     Context, DecisionPair, DisjointPattern, PatternBlock,
 };
 use fugue_sleigh_language::symbol::{Constructor, DecisionNode, Symbol};
+use fugue_sleigh_language::varnode::VarnodeData;
 use fugue_sleigh_language::Language;
 use indexmap::IndexMap;
 use proc_macro2::{Ident, Span, TokenStream};
@@ -32,14 +36,12 @@ pub(crate) struct Tables<'a> {
     operand_filters: Vec<TokenStream>,
     pattern_ops: Vec<TokenStream>,
     symbols: Vec<TokenStream>,
-
     // NOTE: we could attempt to dedup. these templates
     const_tpls: IndexMap<&'a ConstTpl, TokenStream>,
     construct_tpls: IndexMap<&'a ConstructTpl, TokenStream>,
     handle_tpls: IndexMap<&'a HandleTpl, TokenStream>,
     op_tpls: IndexMap<&'a OpTpl, TokenStream>,
     varnode_tpls: IndexMap<&'a VarnodeTpl, TokenStream>,
-
     ctor_id_mapping: BTreeMap<(usize, usize, usize), usize>, // (id, scope, ctor) -> ctor
     operand_filter_id_mapping: BTreeMap<usize, usize>,       // sym -> filter
     // FIXME: (id, scope) is not needed--id should be unique across scopes
@@ -130,12 +132,30 @@ impl<'a> LifterGenerator<'a> {
         primary_variant: LanguageVariant,
         extra_variants: impl IntoIterator<Item = LanguageVariant>,
     ) -> Result<Self, LifterGeneratorError> {
+        let extra_variants = extra_variants.into_iter().collect::<Vec<_>>();
+
+        for variant in std::iter::once(&primary_variant).chain(extra_variants.iter()) {
+            for truncated in &variant.truncated_spaces {
+                if !language
+                    .spaces()
+                    .iter()
+                    .any(|spc| spc.name() == truncated.space())
+                {
+                    return Err(LifterGeneratorError::language_with(format!(
+                        "variant `{}` truncates unknown space `{}`",
+                        variant.name,
+                        truncated.space(),
+                    )));
+                }
+            }
+        }
+
         let mut slf = Self {
             context_variables: Vec::new(),
             language,
             tables: Tables::default(),
             primary_variant,
-            extra_variants: extra_variants.into_iter().collect(),
+            extra_variants,
         };
 
         slf.build()?;
@@ -803,24 +823,81 @@ impl<'a> ToTokens for LifterGenerator<'a> {
         let register_space_id = self.language.spaces().register_space_id().index() as u8;
         let unique_space_id = self.language.spaces().unique_space_id().index() as u8;
 
-        let address_size = default_space.address_size();
-        let address_bits = address_size as u32 * 8;
-        let max_address = default_space.highest_offset();
+        #[derive(PartialEq)]
+        struct VariantBounds {
+            address_size: usize,
+            address_bits: u32,
+            address_upper_bound: u64,
+            space_bounds: Vec<u64>,
+        }
+
+        let bounds_for = |variant: &LanguageVariant| {
+            let mut space_bounds = self
+                .language
+                .spaces()
+                .iter()
+                .map(|spc| spc.highest_offset())
+                .collect::<Vec<u64>>();
+            for truncated in &variant.truncated_spaces {
+                let index = self
+                    .language
+                    .spaces()
+                    .iter()
+                    .position(|spc| spc.name() == truncated.space())
+                    .expect("truncated space is validated on construction");
+                space_bounds[index] = space_bounds[index].min(truncated.upper_bound());
+            }
+
+            let truncated_default = variant
+                .truncated_spaces
+                .iter()
+                .find(|truncated| truncated.space() == default_space.name());
+
+            let (address_size, address_bits, address_upper_bound) = match truncated_default {
+                Some(truncated) => (
+                    truncated.size() as usize,
+                    truncated.address_bits(),
+                    truncated.upper_bound().min(default_space.highest_offset()),
+                ),
+                None => (
+                    default_space.address_size(),
+                    default_space.address_size() as u32 * 8,
+                    default_space.highest_offset(),
+                ),
+            };
+
+            VariantBounds {
+                address_size,
+                address_bits,
+                address_upper_bound,
+                space_bounds,
+            }
+        };
+
+        let primary_bounds = bounds_for(&self.primary_variant);
+
+        let address_size = primary_bounds.address_size;
+        let address_bits = primary_bounds.address_bits;
+        let max_address = primary_bounds.address_upper_bound;
 
         let register_space_size = self.language.register_space_size();
         let unique_space_size = self.language.unique_space_size();
 
         let mut userops = Vec::new();
         let mut userop_to_names = Vec::new();
+        let mut userop_idents = BTreeSet::new();
 
         for (i, op) in self.language.user_ops().iter().enumerate() {
             let id = i as u16;
             let name = op.as_str();
 
-            let upper_snake_name = Ident::new(
-                &heck::AsShoutySnakeCase(name).to_string(),
-                Span::call_site(),
-            );
+            let mut ident = heck::AsShoutySnakeCase(name).to_string();
+            if !userop_idents.insert(ident.clone()) {
+                ident = format!("{ident}_{id}");
+                userop_idents.insert(ident.clone());
+            }
+
+            let upper_snake_name = Ident::new(&ident, Span::call_site());
 
             userops.push(quote! {
                 pub const #upper_snake_name: u16 = #id;
@@ -832,45 +909,51 @@ impl<'a> ToTokens for LifterGenerator<'a> {
 
         let space_word_sizes = self.language.spaces().iter().map(|spc| spc.word_size());
 
-        let space_upper_bounds = self
-            .language
-            .spaces()
-            .iter()
-            .map(|spc| spc.highest_offset());
+        let space_upper_bounds = primary_bounds.space_bounds.iter();
 
         let n_spaces = self.language.spaces().len();
 
-        let space_kinds = self.language.spaces().iter().enumerate().map(|(i, spc)| {
-            let id = spc.id();
-            if id.is_constant() {
-                quote! { fugue_lifter_runtime::space::AddressSpaceKind::Constant }
-            } else if id.is_unique() {
-                quote! { fugue_lifter_runtime::space::AddressSpaceKind::Unique }
-            } else if (i as u8) == default_space_id {
-                quote! { fugue_lifter_runtime::space::AddressSpaceKind::Default }
-            } else {
-                quote! { fugue_lifter_runtime::space::AddressSpaceKind::Other }
-            }
-        });
-
-        let spaces = self
+        let space_kinds = self
             .language
             .spaces()
             .iter()
-            .zip(space_kinds)
-            .map(|(spc, kind)| {
-                let name = spc.name();
-                let word_size = spc.word_size();
-                let upper_bound = spc.highest_offset();
-                quote! {
-                    fugue_lifter_runtime::space::AddressSpace::new(
-                        #name,
-                        #word_size,
-                        #upper_bound,
-                        #kind,
-                    )
+            .enumerate()
+            .map(|(i, spc)| {
+                let id = spc.id();
+                if id.is_constant() {
+                    quote! { fugue_lifter_runtime::space::AddressSpaceKind::Constant }
+                } else if id.is_unique() {
+                    quote! { fugue_lifter_runtime::space::AddressSpaceKind::Unique }
+                } else if (i as u8) == default_space_id {
+                    quote! { fugue_lifter_runtime::space::AddressSpaceKind::Default }
+                } else {
+                    quote! { fugue_lifter_runtime::space::AddressSpaceKind::Other }
                 }
-            });
+            })
+            .collect::<Vec<_>>();
+
+        let space_literals = |bounds: &VariantBounds| {
+            self.language
+                .spaces()
+                .iter()
+                .zip(bounds.space_bounds.iter())
+                .zip(space_kinds.iter())
+                .map(|((spc, upper_bound), kind)| {
+                    let name = spc.name();
+                    let word_size = spc.word_size();
+                    quote! {
+                        fugue_lifter_runtime::space::AddressSpace::new(
+                            #name,
+                            #word_size,
+                            #upper_bound,
+                            #kind,
+                        )
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let spaces = space_literals(&primary_bounds);
 
         let space_names = self.language.spaces().iter().map(|spc| {
             let name = spc.name();
@@ -946,6 +1029,159 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 (#nm, #ident)
             }
         });
+        let mut compiler_ids = self
+            .language
+            .compiler_conventions()
+            .keys()
+            .collect::<Vec<_>>();
+        compiler_ids.sort_unstable();
+
+        let varnode_tokens = |varnode: &VarnodeData| {
+            let space =
+                u8::try_from(varnode.space().index()).expect("address-space identifier fits in u8");
+            let offset = varnode.offset();
+            let size = u16::try_from(varnode.size()).expect("register size fits in u16");
+            quote! {
+                fugue_lifter_runtime::pcode::Varnode::new(#space, #offset, #size)
+            }
+        };
+
+        let operand_tokens = |operand: &PrototypeOperand| match operand {
+            PrototypeOperand::Register { varnode, .. } => {
+                let varnode = varnode_tokens(varnode);
+                quote! {
+                    fugue_lifter_runtime::convention::PrototypeOperand::Register(#varnode)
+                }
+            }
+            PrototypeOperand::RegisterJoin {
+                first_varnode,
+                second_varnode,
+                ..
+            } => {
+                let first = varnode_tokens(first_varnode);
+                let second = varnode_tokens(second_varnode);
+                quote! {
+                    fugue_lifter_runtime::convention::PrototypeOperand::RegisterJoin(#first, #second)
+                }
+            }
+            PrototypeOperand::StackRelative(offset) => quote! {
+                fugue_lifter_runtime::convention::PrototypeOperand::StackRelative(#offset)
+            },
+        };
+
+        let entry_tokens = |entry: &PrototypeEntry| {
+            let min_size = entry.min_size();
+            let max_size = entry.max_size();
+            let alignment = entry.alignment();
+            let operand = operand_tokens(entry.operand());
+            let mut tokens = quote! {
+                fugue_lifter_runtime::convention::PrototypeEntry::new(#min_size, #max_size, #alignment, #operand)
+            };
+            if let Some(meta_type) = entry.meta_type() {
+                tokens = quote! { #tokens.with_meta_type(#meta_type) };
+            }
+            if let Some(extension) = entry.extension() {
+                tokens = quote! { #tokens.with_extension(#extension) };
+            }
+            tokens
+        };
+
+        let prototype_tokens = |prototype: &Prototype| {
+            let name = prototype.name();
+            let extra_pop = prototype.extra_pop();
+            let stack_shift = prototype.stack_shift();
+            let inputs = prototype
+                .inputs()
+                .iter()
+                .map(&entry_tokens)
+                .collect::<Vec<_>>();
+            let outputs = prototype
+                .outputs()
+                .iter()
+                .map(&entry_tokens)
+                .collect::<Vec<_>>();
+            let unaffected = prototype
+                .unaffected()
+                .iter()
+                .map(&operand_tokens)
+                .collect::<Vec<_>>();
+            let killed_by_call = prototype
+                .killed_by_call()
+                .iter()
+                .map(&operand_tokens)
+                .collect::<Vec<_>>();
+            let likely_trashed = prototype
+                .likely_trashed()
+                .iter()
+                .map(&operand_tokens)
+                .collect::<Vec<_>>();
+            quote! {
+                fugue_lifter_runtime::convention::Prototype::new(#name, #extra_pop, #stack_shift)
+                    .with_inputs(&[#(#inputs,)*])
+                    .with_outputs(&[#(#outputs,)*])
+                    .with_unaffected(&[#(#unaffected,)*])
+                    .with_killed_by_call(&[#(#killed_by_call,)*])
+                    .with_likely_trashed(&[#(#likely_trashed,)*])
+            }
+        };
+
+        let conventions = compiler_ids
+            .iter()
+            .map(|compiler| {
+                let convention = self
+                    .language
+                    .compiler_conventions()
+                    .get(*compiler)
+                    .expect("compiler convention comes from the language");
+                let name = convention.name();
+                let stack_pointer = varnode_tokens(convention.stack_pointer().varnode());
+                let prototypes = convention
+                    .prototypes()
+                    .map(&prototype_tokens)
+                    .collect::<Vec<_>>();
+                let mut tokens = quote! {
+                    fugue_lifter_runtime::convention::Convention::new(#name, #stack_pointer)
+                };
+                if let Some(return_address) = convention.return_address() {
+                    let return_address = match return_address {
+                        ReturnAddress::Register { varnode, .. } => {
+                            let varnode = varnode_tokens(varnode);
+                            quote! {
+                                fugue_lifter_runtime::convention::ReturnAddress::Register(#varnode)
+                            }
+                        }
+                        ReturnAddress::StackRelative { offset, size } => quote! {
+                            fugue_lifter_runtime::convention::ReturnAddress::StackRelative {
+                                offset: #offset,
+                                size: #size,
+                            }
+                        },
+                    };
+                    tokens = quote! { #tokens.with_return_address(#return_address) };
+                }
+                quote! {
+                    (#compiler, #tokens.with_prototypes(&[#(#prototypes,)*]))
+                }
+            })
+            .collect::<Vec<_>>();
+        let n_conventions = conventions.len();
+
+        let call_preserved_registers = compiler_ids
+            .into_iter()
+            .map(|compiler| {
+                let registers = self
+                    .language
+                    .call_preserved_registers(compiler)
+                    .expect("compiler convention comes from the language")
+                    .into_iter()
+                    .map(|varnode| varnode_tokens(&varnode))
+                    .collect::<Vec<_>>();
+                quote! {
+                    (#compiler, &[#(#registers,)*])
+                }
+            })
+            .collect::<Vec<_>>();
+        let n_call_preserved_registers = call_preserved_registers.len();
 
         let language_id = self.language.architecture().to_string();
         let processor = self.language.architecture().processor();
@@ -990,6 +1226,7 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                     const PROCESSOR: &'static str = #processor;
                     const LITTLE_ENDIAN: bool = #little_endian;
                     const VARIANT: &'static str = #primary_variant_str;
+                    const BITS: u32 = #arch_bits;
 
                     const ADDRESS_ALIGNMENT: usize = ADDRESS_ALIGNMENT;
                     const ADDRESS_BITS: u32 = ADDRESS_BITS;
@@ -1015,6 +1252,8 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                     const SPACE_NAMES: &'static [&'static str] = &space::SPACES;
                     const CONTEXT_VARS: &'static [(&'static str, fugue_lifter_runtime::context::ContextBitRange)] = &context::CONTEXT_VARIABLES;
                     const CONTEXT_DEFAULTS: &'static [(&'static str, u32)] = &CONTEXT_DEFAULTS;
+                    const CALL_PRESERVED_REGISTERS: &'static [(&'static str, &'static [fugue_lifter_runtime::pcode::Varnode])] = &CALL_PRESERVED_REGISTERS;
+                    const CONVENTIONS: &'static [(&'static str, fugue_lifter_runtime::convention::Convention)] = &CONVENTIONS;
 
                     const DATA: &'static fugue_lifter_runtime::language::LanguageData = &LANGUAGE_DATA;
                 }
@@ -1026,9 +1265,11 @@ impl<'a> ToTokens for LifterGenerator<'a> {
             for variant in std::iter::once(&self.primary_variant).chain(self.extra_variants.iter())
             {
                 let variant_name = variant.name.clone();
-                let upper = variant_name.to_ascii_uppercase();
+                let upper = variant_name
+                    .to_ascii_uppercase()
+                    .replace(|c: char| !c.is_ascii_alphanumeric(), "_");
                 let defaults_static =
-                    Ident::new(&format!("{upper}_CONTEXT_DEFAULTS"), Span::call_site());
+                    Ident::new(&format!("CONTEXT_DEFAULTS_{upper}"), Span::call_site());
                 let language_static = Ident::new(&format!("LANGUAGE_{upper}"), Span::call_site());
                 let marker_struct = Ident::new(&format!("L{upper}"), Span::call_site());
                 let language_id_lit = format!(
@@ -1040,11 +1281,79 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                     .iter()
                     .map(|(name, value)| quote! { (#name, #value) });
                 let n_defaults = variant.context_defaults.len();
+
+                let bounds = bounds_for(variant);
+
+                let (address_consts, space_bounds_ref, data_ref) = if bounds == primary_bounds {
+                    (
+                        quote! {
+                            const ADDRESS_BITS: u32 = ADDRESS_BITS;
+                            const ADDRESS_SIZE: usize = ADDRESS_SIZE;
+                            const ADDRESS_UPPER_BOUND: u64 = ADDRESS_UPPER_BOUND;
+                        },
+                        quote! { SPACE_UPPER_BOUND },
+                        quote! { LANGUAGE_DATA },
+                    )
+                } else {
+                    let space_bounds_static =
+                        Ident::new(&format!("SPACE_UPPER_BOUND_{upper}"), Span::call_site());
+                    let spaces_static = Ident::new(&format!("SPACES_{upper}"), Span::call_site());
+                    let data_static =
+                        Ident::new(&format!("LANGUAGE_DATA_{upper}"), Span::call_site());
+
+                    let variant_address_size = bounds.address_size;
+                    let variant_address_bits = bounds.address_bits;
+                    let variant_address_upper_bound = bounds.address_upper_bound;
+                    let variant_space_bounds = bounds.space_bounds.iter();
+                    let variant_spaces = space_literals(&bounds);
+
+                    blocks.push(quote! {
+                        static #space_bounds_static: [u64; #n_spaces] = [
+                            #(#variant_space_bounds),*
+                        ];
+
+                        static #spaces_static: [fugue_lifter_runtime::space::AddressSpace; #n_spaces] = [
+                            #(#variant_spaces,)*
+                        ];
+
+                        static #data_static: fugue_lifter_runtime::language::LanguageData =
+                            fugue_lifter_runtime::language::LanguageData {
+                                root_dtree: #root_dtree,
+                                address_size: #variant_address_size,
+                                constant_space: CONSTANT_SPACE,
+                                default_space: DEFAULT_SPACE,
+                                unique_space: UNIQUE_SPACE,
+                                constructors: CONSTRUCTORS,
+                                decision_trees: DECISION_TREES,
+                                operand_filters: OPERAND_FILTERS,
+                                pattern_expressions: PATTERN_EXPRESSIONS,
+                                spaces: &#spaces_static,
+                                symbols: SYMBOLS,
+                                const_templates: CONST_TEMPLATES,
+                                construct_templates: CONSTRUCT_TEMPLATES,
+                                handle_templates: HANDLE_TEMPLATES,
+                                op_templates: OP_TEMPLATES,
+                                varnode_templates: VARNODE_TEMPLATES,
+                            };
+                    });
+
+                    (
+                        quote! {
+                            const ADDRESS_BITS: u32 = #variant_address_bits;
+                            const ADDRESS_SIZE: usize = #variant_address_size;
+                            const ADDRESS_UPPER_BOUND: u64 = #variant_address_upper_bound;
+                        },
+                        quote! { #space_bounds_static },
+                        quote! { #data_static },
+                    )
+                };
+
                 blocks.push(quote! {
                     static #defaults_static: [(&'static str, u32); #n_defaults] = [
                         #(#defaults_lit),*
                     ];
 
+                    #[allow(non_camel_case_types)]
                     struct #marker_struct;
                     impl fugue_lifter_runtime::language::LanguageImpl for #marker_struct {
                         const ID: &'static str = #language_id_lit;
@@ -1052,11 +1361,10 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                         const PROCESSOR: &'static str = #processor;
                         const LITTLE_ENDIAN: bool = #little_endian;
                         const VARIANT: &'static str = #variant_name;
+                        const BITS: u32 = #arch_bits;
 
                         const ADDRESS_ALIGNMENT: usize = ADDRESS_ALIGNMENT;
-                        const ADDRESS_BITS: u32 = ADDRESS_BITS;
-                        const ADDRESS_SIZE: usize = ADDRESS_SIZE;
-                        const ADDRESS_UPPER_BOUND: u64 = ADDRESS_UPPER_BOUND;
+                        #address_consts
 
                         const CONSTANT_SPACE: u8 = CONSTANT_SPACE;
                         const DEFAULT_SPACE: u8 = DEFAULT_SPACE;
@@ -1069,7 +1377,7 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                         const UNIQUE_SPACE_SIZE: usize = UNIQUE_SPACE_SIZE;
 
                         const SPACE_WORD_SIZES: &'static [usize] = &SPACE_WORD_SIZE;
-                        const SPACE_UPPER_BOUNDS: &'static [u64] = &SPACE_UPPER_BOUND;
+                        const SPACE_UPPER_BOUNDS: &'static [u64] = &#space_bounds_ref;
 
                         const REGISTERS: &'static [(&'static str, fugue_lifter_runtime::pcode::Varnode)] = &register::REGISTERS_BY_NAME;
                         const REGISTER_RANGES: &'static [(u64, u16, &'static str)] = &register::REGISTERS;
@@ -1077,8 +1385,10 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                         const SPACE_NAMES: &'static [&'static str] = &space::SPACES;
                         const CONTEXT_VARS: &'static [(&'static str, fugue_lifter_runtime::context::ContextBitRange)] = &context::CONTEXT_VARIABLES;
                         const CONTEXT_DEFAULTS: &'static [(&'static str, u32)] = &#defaults_static;
+                        const CALL_PRESERVED_REGISTERS: &'static [(&'static str, &'static [fugue_lifter_runtime::pcode::Varnode])] = &CALL_PRESERVED_REGISTERS;
+                        const CONVENTIONS: &'static [(&'static str, fugue_lifter_runtime::convention::Convention)] = &CONVENTIONS;
 
-                        const DATA: &'static fugue_lifter_runtime::language::LanguageData = &LANGUAGE_DATA;
+                        const DATA: &'static fugue_lifter_runtime::language::LanguageData = &#data_ref;
                     }
                     pub static #language_static: fugue_lifter_runtime::language::Language =
                         fugue_lifter_runtime::language::Language::new::<#marker_struct>();
@@ -1189,6 +1499,14 @@ impl<'a> ToTokens for LifterGenerator<'a> {
 
             static SPACES: [fugue_lifter_runtime::space::AddressSpace; #n_spaces] = [
                 #(#spaces,)*
+            ];
+
+            static CALL_PRESERVED_REGISTERS: [(&str, &[fugue_lifter_runtime::pcode::Varnode]); #n_call_preserved_registers] = [
+                #(#call_preserved_registers,)*
+            ];
+
+            static CONVENTIONS: [(&str, fugue_lifter_runtime::convention::Convention); #n_conventions] = [
+                #(#conventions,)*
             ];
 
             pub static LANGUAGE_DATA: fugue_lifter_runtime::language::LanguageData =

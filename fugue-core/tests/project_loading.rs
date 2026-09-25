@@ -1,0 +1,21 @@
+use fugue_core::project::Project;
+
+#[test]
+#[ignore = "requires local language data and binary fixtures"]
+fn project() -> Result<(), Box<dyn std::error::Error>> {
+    let project = Project::from_file_transient("tests/ls.elf")?;
+
+    let mut bytes = [0u8; 32];
+    project.segments().read_bytes(0x4000u32, &mut bytes)?;
+
+    assert_eq!(
+        &bytes,
+        &[
+            0xF3, 0x0F, 0x1E, 0xFA, 0x48, 0x83, 0xEC, 0x08, 0x48, 0x8B, 0x05, 0xB9, 0xEF, 0x01,
+            0x00, 0x48, 0x85, 0xC0, 0x74, 0x02, 0xFF, 0xD0, 0x48, 0x83, 0xC4, 0x08, 0xC3, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+        ]
+    );
+
+    Ok(())
+}

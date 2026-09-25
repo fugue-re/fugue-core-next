@@ -215,22 +215,22 @@ impl<O: ByteOrder> PCodeState<u8, O> {
         let address = if size == POINTER_64_SIZE {
             self.with_operand_values(operand, |values| {
                 buf[..size].copy_from_slice(values);
-                u64::from_bytes::<O>(values)
+                u64::read_bytes::<O>(values)
             })
         } else if size == POINTER_32_SIZE {
             self.with_operand_values(operand, |values| {
                 buf[..size].copy_from_slice(values);
-                u32::from_bytes::<O>(values) as u64
+                u32::read_bytes::<O>(values) as u64
             })
         } else if size == POINTER_16_SIZE {
             self.with_operand_values(operand, |values| {
                 buf[..size].copy_from_slice(values);
-                u16::from_bytes::<O>(values) as u64
+                u16::read_bytes::<O>(values) as u64
             })
         } else if size == POINTER_8_SIZE {
             self.with_operand_values(operand, |values| {
                 buf[..size].copy_from_slice(values);
-                u8::from_bytes::<O>(values) as u64
+                u8::read_bytes::<O>(values) as u64
             })
         } else {
             return Err(Error::UnsupportedAddressSize(size));
@@ -262,19 +262,19 @@ impl<O: ByteOrder> PCodeState<u8, O> {
 
         if size == POINTER_64_SIZE {
             self.with_operand_values_mut(operand, |values| {
-                u64::from(address).into_bytes::<O>(values)
+                u64::from(address).write_bytes::<O>(values)
             })
         } else if size == POINTER_32_SIZE {
             self.with_operand_values_mut(operand, |values| {
-                u32::from(address).into_bytes::<O>(values)
+                u32::from(address).write_bytes::<O>(values)
             })
         } else if size == POINTER_16_SIZE {
             self.with_operand_values_mut(operand, |values| {
-                u16::from(address).into_bytes::<O>(values)
+                u16::from(address).write_bytes::<O>(values)
             })
         } else if size == POINTER_8_SIZE {
             self.with_operand_values_mut(operand, |values| {
-                u8::from(address).into_bytes::<O>(values)
+                u8::from(address).write_bytes::<O>(values)
             })
         } else {
             return Err(Error::UnsupportedAddressSize(size));

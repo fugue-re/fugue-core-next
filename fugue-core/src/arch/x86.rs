@@ -1,35 +1,51 @@
 #[cfg(feature = "static-lifters")]
 pub use fugue_lifter::x86::*;
+use memchr::arch::all::is_prefix;
 use yaxpeax_arch::*;
 use yaxpeax_x86::protected_mode::{DecodeError, InstDecoder, Instruction, Opcode};
 
 use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
-use crate::arch::{Arch, Flag};
-use crate::il::pcode::Varnode;
-use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties};
-use crate::lifter::dynamic::LanguageSource;
+use crate::arch::{Arch, BytesProperties, ExternalThunkTemplate, Flag};
+use crate::ir::{Address, Insn, InsnProperties, RawAddress};
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
-    Disassembler, DisassemblerError, Language, LanguageError, LanguageId, LanguageLoader, Lifter,
-    LiftingContext,
+    Disassembler, DisassemblerError, Language, LanguageError, LanguageId, LanguageLoader,
+    LanguageSource, Lifter, LiftingContext, Varnode,
 };
 
-const NONSENSE: &[&[u8]] = &[&[0x00u8, 0x00u8], &[0x00u8], &[0xf0u8]];
+const ENTRY_INSNS: &[&[u8]] = &[&[0xf3, 0x0f, 0x1e, 0xfa], &[0xf3, 0x0f, 0x1e, 0xfb]];
+const NONSENSE: &[&[u8]] = &[&[0x00, 0x00], &[0x00], &[0xf0]];
+const NOP_INSNS: &[&[u8]] = &[
+    &[0x66, 0x2e, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
+    &[0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
+    &[0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
+    &[0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00],
+    &[0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00],
+    &[0x0f, 0x1f, 0x44, 0x00, 0x00],
+    &[0x0f, 0x1f, 0x40, 0x00],
+    &[0x66, 0x66, 0x90],
+    &[0x0f, 0x1f, 0x00],
+    &[0x66, 0x90],
+    &[0x90],
+];
+const PADDING: &[&[u8]] = &[&[0xcc]];
 
 #[derive(Clone)]
 struct ArchData {
-    flags: Vec<Flag>,
-    gprs: Vec<Varnode>,
+    flags: [Flag; 7],
+    gprs: [Varnode; 8],
     frame_pointer: Option<Varnode>,
     swi_op: Option<u16>,
-    invalid_instruction_op: Option<u16>,
+    invalid_insn_op: Option<u16>,
 }
 
 impl ArchData {
     fn new(language: &'static Language) -> Self {
         let reg = |name| language.register_by_name(name);
-        let flag = |name, ctor: fn(Varnode) -> Flag| reg(name).map(ctor);
+        let flag = |name: &'static str, ctor: fn(Varnode) -> Flag| {
+            ctor(reg(name).unwrap_or_else(|| panic!("x86 language must define flag `{name}`")))
+        };
 
         let flags = [
             flag("AF", Flag::a),
@@ -39,22 +55,18 @@ impl ArchData {
             flag("PF", Flag::p),
             flag("SF", Flag::n),
             flag("ZF", Flag::z),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
+        ];
 
-        let gprs = ["EAX", "EBX", "ECX", "EDX", "ESI", "EDI", "EBP", "ESP"]
-            .into_iter()
-            .filter_map(reg)
-            .collect();
+        let gprs = ["EAX", "EBX", "ECX", "EDX", "ESI", "EDI", "EBP", "ESP"].map(|name| {
+            reg(name).unwrap_or_else(|| panic!("x86 language must define register `{name}`"))
+        });
 
         Self {
             flags,
             gprs,
             frame_pointer: reg("EBP"),
             swi_op: language.user_op_by_name("swi"),
-            invalid_instruction_op: language.user_op_by_name("invalidInstructionException"),
+            invalid_insn_op: language.user_op_by_name("invalidInstructionException"),
         }
     }
 }
@@ -74,8 +86,8 @@ impl ArchT for X86 {
         Lifter::new(self.language)
     }
 
-    fn external_function_template(&self) -> ExternFunctionTemplate {
-        ExternFunctionTemplate::new([0xc3])
+    fn external_thunk_template(&self) -> ExternalThunkTemplate {
+        ExternalThunkTemplate::new([0xc3])
     }
 
     fn flags(&self) -> &[Flag] {
@@ -90,18 +102,121 @@ impl ArchT for X86 {
         &self.data.gprs
     }
 
-    fn is_nonsense_pattern(&self, bytes: &[u8]) -> bool {
-        NONSENSE.contains(&bytes)
+    fn classify_bytes(&self, bytes: &[u8]) -> BytesProperties {
+        let mut size = 0usize;
+        let mut properties = BytesProperties::empty();
+
+        while let Some(remaining) = bytes.get(size..) {
+            let matched = ENTRY_INSNS
+                .iter()
+                .copied()
+                .find(|pattern| is_prefix(remaining, pattern))
+                .map(|pattern| (pattern, BytesProperties::ENTRY_INSN))
+                .or_else(|| {
+                    NONSENSE
+                        .iter()
+                        .copied()
+                        .find(|pattern| is_prefix(remaining, pattern))
+                        .map(|pattern| (pattern, BytesProperties::NONSENSE))
+                })
+                .or_else(|| {
+                    NOP_INSNS
+                        .iter()
+                        .copied()
+                        .find(|pattern| is_prefix(remaining, pattern))
+                        .map(|pattern| (pattern, BytesProperties::NOP_INSN))
+                })
+                .or_else(|| {
+                    PADDING
+                        .iter()
+                        .copied()
+                        .find(|pattern| is_prefix(remaining, pattern))
+                        .map(|pattern| (pattern, BytesProperties::PADDING))
+                });
+            let Some((pattern, next_properties)) = matched else {
+                break;
+            };
+            if !properties.is_empty()
+                && properties != next_properties
+                && !(properties.is_alignment() && next_properties.is_alignment())
+            {
+                break;
+            }
+
+            properties |= next_properties;
+            size += pattern.len();
+        }
+
+        if size != 0 && size == bytes.len() {
+            properties
+        } else {
+            BytesProperties::empty()
+        }
     }
 
-    fn is_skip_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
-        (self.data.swi_op == Some(op) && args.first().copied() == Some(Varnode::constant(0x3, 8)))
-            || self.data.invalid_instruction_op == Some(op)
+    fn classify_contiguous_bytes(
+        &self,
+        _address: RawAddress,
+        _context: &LiftingContext,
+        bytes: &[u8],
+    ) -> (usize, BytesProperties) {
+        let mut size = 0usize;
+        let mut properties = BytesProperties::empty();
+
+        while let Some(remaining) = bytes.get(size..) {
+            let matched = ENTRY_INSNS
+                .iter()
+                .copied()
+                .find(|pattern| is_prefix(remaining, pattern))
+                .map(|pattern| (pattern, BytesProperties::ENTRY_INSN))
+                .or_else(|| {
+                    NONSENSE
+                        .iter()
+                        .copied()
+                        .find(|pattern| is_prefix(remaining, pattern))
+                        .map(|pattern| (pattern, BytesProperties::NONSENSE))
+                })
+                .or_else(|| {
+                    NOP_INSNS
+                        .iter()
+                        .copied()
+                        .find(|pattern| is_prefix(remaining, pattern))
+                        .map(|pattern| (pattern, BytesProperties::NOP_INSN))
+                })
+                .or_else(|| {
+                    PADDING
+                        .iter()
+                        .copied()
+                        .find(|pattern| is_prefix(remaining, pattern))
+                        .map(|pattern| (pattern, BytesProperties::PADDING))
+                });
+            let Some((pattern, next_properties)) = matched else {
+                break;
+            };
+            if !properties.is_empty()
+                && properties != next_properties
+                && !(properties.is_alignment() && next_properties.is_alignment())
+            {
+                break;
+            }
+
+            properties |= next_properties;
+            size += pattern.len();
+        }
+
+        (size, properties)
     }
 
-    fn is_trap_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
-        (self.data.swi_op == Some(op) && args.first().copied() == Some(Varnode::constant(0x3, 8)))
-            || self.data.invalid_instruction_op == Some(op)
+    fn is_skip_intrinsic(&self, user_op: u16, args: &[Varnode]) -> bool {
+        (self.data.swi_op == Some(user_op)
+            && args.first().copied() == Some(Varnode::constant(0x3, 8)))
+            || self.data.invalid_insn_op == Some(user_op)
+    }
+
+    fn is_trap_intrinsic(&self, user_op: u16, args: &[Varnode]) -> bool {
+        (self.data.swi_op == Some(user_op)
+            && args.first().copied() == Some(Varnode::constant(0x3, 8)))
+            || self.data.invalid_insn_op == Some(user_op)
     }
 
     fn language(&self) -> &'static Language {
@@ -144,7 +259,7 @@ impl X86 {
             _ => {}
         }
         let lid = LanguageId::new_with("x86", false, 32, variant);
-        Ok(loader.load(&lid)?)
+        loader.load(&lid)
     }
 }
 
@@ -194,7 +309,7 @@ impl X86Disassembler {
         })
     }
 
-    fn should_lift(&self, insn: &Instruction) -> bool {
+    fn should_lift(insn: &Instruction) -> bool {
         matches!(
             insn.opcode(),
             Opcode::JO
@@ -235,27 +350,99 @@ impl DisassemblerT for X86Disassembler {
         bytes: &[u8],
         _context: &mut LiftingContext,
     ) -> Result<Insn, DisassemblerError> {
-        let mut reader = yaxpeax_arch::U8Reader::new(bytes);
+        let mut reader = U8Reader::new(bytes);
         let insn = match self.decoder.decode(&mut reader) {
             Ok(insn) => {
                 let size = insn.len().to_const() as usize;
                 Insn::from_disassembly(
                     address,
                     size,
-                    if self.should_lift(&insn) {
-                        InsnProperties::NEEDS_LIFTING
+                    if Self::should_lift(&insn) {
+                        InsnProperties::NEEDS_FLOW_RESOLUTION
                     } else {
-                        InsnProperties::FALL
+                        InsnProperties::FALL_THROUGH
                     },
-                )
+                )?
             }
             Err(DecodeError::IncompleteDecoder) => {
-                Insn::from_disassembly(address, 0, InsnProperties::NEEDS_LIFTING)
+                Insn::from_disassembly(address, 0, InsnProperties::NEEDS_FLOW_RESOLUTION)?
             }
             Err(e) => {
                 return Err(DisassemblerError::disassembler(e));
             }
         };
         Ok(insn)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::X86;
+    use crate::arch::BytesProperties;
+    use crate::ir::RawAddress;
+
+    #[test]
+    fn test_byte_patterns_are_classified() {
+        let language = X86::resolve_default_variant().expect("x86 language");
+        let arch = X86::new(language);
+        let lifter = arch.lifter();
+
+        for entry in [
+            [0xf3u8, 0x0f, 0x1e, 0xfa].as_slice(),
+            &[0xf3, 0x0f, 0x1e, 0xfb],
+        ] {
+            let properties = arch.classify_bytes(entry);
+            assert!(properties.is_entry_insn());
+            assert!(!properties.is_alignment());
+        }
+
+        for nop in [
+            [0x90u8].as_slice(),
+            &[0x66, 0x90],
+            &[0x0f, 0x1f, 0x00],
+            &[0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
+            &[0x66, 0x2e, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
+        ] {
+            let properties = arch.classify_bytes(nop);
+            assert!(properties.is_nop_insn(), "{nop:02x?} should be a NOP");
+            assert!(properties.is_alignment());
+            assert!(!properties.is_padding());
+        }
+
+        let padding = arch.classify_bytes(&[0xcc]);
+        assert!(padding.is_padding());
+        assert!(padding.is_alignment());
+        assert!(!padding.is_nop_insn());
+
+        for nonsense in [[0x00u8].as_slice(), &[0x00, 0x00], &[0xf0]] {
+            assert!(arch.classify_bytes(nonsense).is_nonsense());
+        }
+
+        assert_eq!(
+            arch.classify_contiguous_bytes(
+                RawAddress::from(0u64),
+                lifter.context(),
+                &[0x90, 0x66, 0x90, 0x55],
+            ),
+            (3, BytesProperties::NOP_INSN)
+        );
+        assert_eq!(
+            arch.classify_contiguous_bytes(
+                RawAddress::from(0u64),
+                lifter.context(),
+                &[0x90, 0xcc, 0x55],
+            ),
+            (2, BytesProperties::ALIGNMENT)
+        );
+        assert_eq!(
+            arch.classify_contiguous_bytes(
+                RawAddress::from(0u64),
+                lifter.context(),
+                &[0x00, 0x00, 0xf0, 0x90],
+            ),
+            (3, BytesProperties::NONSENSE)
+        );
+        assert!(arch.classify_bytes(&[0x55, 0x48, 0x89, 0xe5]).is_empty());
+        assert!(arch.classify_bytes(&[]).is_empty());
     }
 }

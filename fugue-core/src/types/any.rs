@@ -60,7 +60,7 @@ impl Any {
     // This is unsafe -- caller is responsible that T is the correct type.
     pub(crate) unsafe fn take<T>(mut self) -> T {
         if self.type_id != typeid::of::<T>() {
-            self.invalid_cast_to();
+            panic!("invalid cast");
         }
 
         if is_small::<T>() {
@@ -75,10 +75,6 @@ impl Any {
             *box_t
         }
     }
-
-    fn invalid_cast_to(&self) -> ! {
-        panic!("invalid cast");
-    }
 }
 
 impl Drop for Any {
@@ -87,7 +83,7 @@ impl Drop for Any {
     }
 }
 
-pub struct Out(Any);
+pub(crate) struct Out(Any);
 
 impl Out {
     pub(crate) unsafe fn new<T>(t: T) -> Self {

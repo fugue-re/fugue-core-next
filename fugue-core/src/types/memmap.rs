@@ -69,6 +69,14 @@ impl<'a> BytesOrMapping<'a> {
         Ok(BytesOrMapping::MappingMut(map))
     }
 
+    pub fn as_mut(&mut self) -> Option<&mut [u8]> {
+        match self {
+            Self::MappingMut(mapping) => Some(&mut mapping[..]),
+            Self::Bytes(Cow::Owned(bytes)) => Some(bytes.as_mut_slice()),
+            Self::Bytes(Cow::Borrowed(_)) | Self::Mapping(_) => None,
+        }
+    }
+
     pub fn into_copy_on_write(self) -> Result<Self, io::Error> {
         match self {
             Self::Mapping(FileMapping { file, .. }) => {
@@ -79,14 +87,6 @@ impl<'a> BytesOrMapping<'a> {
                 Ok(BytesOrMapping::Bytes(Cow::Owned(bytes.to_vec())))
             }
             owned @ (Self::Bytes(Cow::Owned(_)) | Self::MappingMut(_)) => Ok(owned),
-        }
-    }
-
-    pub fn as_mut(&mut self) -> Option<&mut [u8]> {
-        match self {
-            Self::MappingMut(mapping) => Some(&mut mapping[..]),
-            Self::Bytes(Cow::Owned(bytes)) => Some(bytes.as_mut_slice()),
-            Self::Bytes(Cow::Borrowed(_)) | Self::Mapping(_) => None,
         }
     }
 

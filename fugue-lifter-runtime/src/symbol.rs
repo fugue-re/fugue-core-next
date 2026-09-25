@@ -1,8 +1,9 @@
 use std::fmt;
 
+use crate::format::{InstructionFormatError, InstructionSection, InstructionWriter};
 use crate::input::FixedHandle;
-use crate::language::LanguageData;
-use crate::operand::{OperandValue, Operands};
+use crate::language::{Language, LanguageData};
+use crate::operand::OperandPiece;
 use crate::pattern::PatternExpression;
 use crate::pcode::LiftingContextState;
 
@@ -136,39 +137,49 @@ impl Symbol {
         }
     }
 
-    /// # Safety
-    ///
-    /// Called from generated code which ensures validity of arguments and state.
-    pub unsafe fn operands(
+    pub(crate) unsafe fn operand_pieces<O: InstructionWriter + ?Sized>(
         &self,
-        data: &'static LanguageData,
+        language: &'static Language,
         state: &mut LiftingContextState<'_>,
-        operands: &mut Operands,
-    ) {
+        output: &mut O,
+        section: InstructionSection,
+    ) -> Result<(), InstructionFormatError> {
         unsafe {
+            let data = language.data();
             match self {
                 Self::Varnode {
                     name,
                     space,
                     offset,
-                    ..
+                    size,
                 } => {
-                    operands.push(OperandValue::from_varnode(data, name, *space, *offset));
+                    section.write(
+                        output,
+                        OperandPiece::from_varnode(language, name, *space, *offset, *size),
+                        None,
+                    )?;
                 }
                 Self::Name {
                     pattern_value,
                     symbol_table,
+                } => {
+                    let (index, resolved) = pattern_value
+                        .resolve_with_range(data, state)
+                        .ok_or(InstructionFormatError::Unresolved)?;
+                    if let Some(name) = symbol_table.get(index as usize).copied().flatten() {
+                        section.write(output, OperandPiece::Text(name), resolved)?;
+                    }
                 }
-                | Self::VarnodeList {
+                Self::VarnodeList {
                     pattern_value,
                     symbol_table,
                     ..
                 } => {
-                    let (index, range) = pattern_value
+                    let (index, resolved) = pattern_value
                         .resolve_with_range(data, state)
-                        .expect("resolved");
+                        .ok_or(InstructionFormatError::Unresolved)?;
                     if let Some(name) = symbol_table.get(index as usize).copied().flatten() {
-                        operands.push_with(name, range);
+                        section.write(output, OperandPiece::register(language, name), resolved)?;
                     }
                 }
                 Self::VarnodeListFilled {
@@ -176,45 +187,67 @@ impl Symbol {
                     symbol_table,
                     ..
                 } => {
-                    let (index, range) = pattern_value
+                    let (index, resolved) = pattern_value
                         .resolve_with_range(data, state)
-                        .expect("resolved");
+                        .ok_or(InstructionFormatError::Unresolved)?;
                     if let Some(name) = symbol_table.get(index as usize).copied() {
-                        operands.push_with(name, range);
+                        section.write(output, OperandPiece::register(language, name), resolved)?;
                     }
                 }
                 Self::ValueMap {
                     pattern_value,
                     value_table,
                 } => {
-                    let (index, range) = pattern_value
+                    let (index, resolved) = pattern_value
                         .resolve_with_range(data, state)
-                        .expect("resolved");
+                        .ok_or(InstructionFormatError::Unresolved)?;
                     if let Some(value) = value_table.get(index as usize).copied().flatten() {
-                        operands.push_with(value, range);
+                        let signed = pattern_value.has_signed_terms(data);
+                        section.write(
+                            output,
+                            OperandPiece::scalar(value, resolved.as_ref(), signed),
+                            resolved,
+                        )?;
                     }
                 }
                 Self::ValueMapFilled {
                     pattern_value,
                     value_table,
                 } => {
-                    let (index, range) = pattern_value
+                    let (index, resolved) = pattern_value
                         .resolve_with_range(data, state)
-                        .expect("resolved");
-                    let value = *value_table.get(index as usize).expect("resolved");
-                    operands.push_with(value, range);
+                        .ok_or(InstructionFormatError::Unresolved)?;
+                    let value = value_table
+                        .get(index as usize)
+                        .copied()
+                        .ok_or(InstructionFormatError::Unresolved)?;
+                    let signed = pattern_value.has_signed_terms(data);
+                    section.write(
+                        output,
+                        OperandPiece::scalar(value, resolved.as_ref(), signed),
+                        resolved,
+                    )?;
                 }
                 Self::Start { .. } => {
-                    operands.push(state.address());
+                    section.write(output, OperandPiece::Address(state.address()), None)?;
                 }
                 Self::End { .. } => {
-                    operands.push(state.next_address());
+                    section.write(output, OperandPiece::Address(state.next_address()), None)?;
                 }
                 Self::Next2 { .. } => {
-                    operands.push(state.next2_address().expect("resolved"));
+                    section.write(
+                        output,
+                        OperandPiece::Address(
+                            state
+                                .next2_address()
+                                .ok_or(InstructionFormatError::Unresolved)?,
+                        ),
+                        None,
+                    )?;
                 }
                 what => unreachable!("this state should not be reachable: {what:?}"),
             }
+            Ok(())
         }
     }
 

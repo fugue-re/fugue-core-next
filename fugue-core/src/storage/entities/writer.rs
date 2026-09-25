@@ -1,3 +1,4 @@
+use std::ops::Bound;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread::{Builder, JoinHandle};
@@ -34,6 +35,7 @@ enum Message {
     Write(Bytes),
 }
 
+#[derive(Clone)]
 pub enum WriteBackAction {
     Insert(Bytes),
     Remove,
@@ -101,11 +103,46 @@ impl WriteBackWorker {
             .map_err(|_| EntityStorageError::backing_with("write-back worker stopped"))
     }
 
-    pub fn pending(&self, key: &Bytes) -> Option<WriteBackAction> {
+    pub fn pending(&self, key: &[u8]) -> Option<WriteBackAction> {
         self.pending.get(key).map(|entry| match &entry.value {
             Some(bytes) => WriteBackAction::Insert(bytes.clone()),
             None => WriteBackAction::Remove,
         })
+    }
+
+    pub(crate) fn pending_range(
+        &self,
+        prefix: &[u8],
+        start: Bound<&[u8]>,
+    ) -> Result<Vec<(Bytes, WriteBackAction)>, EntityStorageError> {
+        self.poison_check()?;
+
+        let mut entries = self
+            .pending
+            .iter()
+            .filter_map(|entry| {
+                let key = entry.key();
+                if !key.starts_with(prefix) || !Self::includes_start(key, start) {
+                    return None;
+                }
+
+                let action = match &entry.value {
+                    Some(bytes) => WriteBackAction::Insert(bytes.clone()),
+                    None => WriteBackAction::Remove,
+                };
+                Some((key.clone(), action))
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(entries)
+    }
+
+    fn includes_start(key: &[u8], start: Bound<&[u8]>) -> bool {
+        match start {
+            Bound::Included(start) => key >= start,
+            Bound::Excluded(start) => key > start,
+            Bound::Unbounded => true,
+        }
     }
 
     pub fn flush(&self) -> Result<(), EntityStorageError> {
@@ -123,9 +160,7 @@ impl WriteBackWorker {
 
     pub fn poison_check(&self) -> Result<(), EntityStorageError> {
         match self.poison.get() {
-            Some(message) => Err(EntityStorageError::backing_with(format!(
-                "write-back worker poisoned: {message}"
-            ))),
+            Some(message) => Err(EntityStorageError::write_back_poisoned(message.clone())),
             None => Ok(()),
         }
     }
@@ -224,8 +259,9 @@ impl Worker {
                 "write-back commit of {} entries failed, poisoning worker: {error}",
                 snapshot.len()
             );
-            let _ = self.poison.set(error.to_string());
-            return Err(error);
+            let message = error.to_string();
+            let _ = self.poison.set(message.clone());
+            return Err(EntityStorageError::write_back_poisoned(message));
         }
 
         for write in snapshot {
@@ -237,9 +273,9 @@ impl Worker {
     }
 
     fn write_batch(&self, snapshot: &[PendingWrite]) -> Result<(), EntityStorageError> {
-        let writer = match self.backing.transactional_writer() {
+        let mut writer = match self.backing.write_transaction() {
             Ok(writer) => writer,
-            Err(EntityStorageError::Unsupported(_)) => return self.write_batch_buffered(snapshot),
+            Err(EntityStorageError::Unsupported(_)) => return self.write_batch_direct(snapshot),
             Err(error) => return Err(error),
         };
 
@@ -255,21 +291,13 @@ impl Worker {
         writer.commit()
     }
 
-    fn write_batch_buffered(&self, snapshot: &[PendingWrite]) -> Result<(), EntityStorageError> {
-        let mut inserter = self.backing.bulk_inserter()?;
+    fn write_batch_direct(&self, snapshot: &[PendingWrite]) -> Result<(), EntityStorageError> {
         for write in snapshot {
-            if let Some(bytes) = &write.value {
-                inserter.insert(
-                    BytesOrSlice::from(write.key.as_ref()),
-                    BytesOrSlice::from(bytes.as_ref()),
-                )?;
-            }
-        }
-        inserter.commit()?;
-
-        for write in snapshot {
-            if write.value.is_none() {
-                self.backing.remove(write.key.as_ref())?;
+            match &write.value {
+                Some(bytes) => self
+                    .backing
+                    .insert(write.key.as_ref(), BytesOrSlice::from(bytes.as_ref()))?,
+                None => self.backing.remove(write.key.as_ref())?,
             }
         }
 

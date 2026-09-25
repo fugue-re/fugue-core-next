@@ -1,0 +1,947 @@
+use std::sync::Arc;
+
+use smallvec::SmallVec;
+
+use crate::ir::{
+    Address, AddressRangeSet, FunctionId, FunctionProperties, IncompleteFunction, ProblemKind,
+    Reference, ReferenceKey, ReferenceKind, ReferenceOrigin, ReferenceProvenance, Switch,
+    SymbolEntry, SymbolId, SymbolIndex, SymbolProperties,
+};
+use crate::project::{ChangeSet, ProjectError, ProjectTransaction};
+use crate::storage::segments::mapping::{
+    SegmentMappingFlags, SegmentMappingId, SegmentMappingKind, SegmentMappingProvenance,
+};
+use crate::storage::segments::space::AddressSpaceId;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ByteWrite {
+    address: Address,
+    bytes: Arc<[u8]>,
+}
+
+impl ByteWrite {
+    fn new(address: impl Into<Address>, bytes: impl Into<Arc<[u8]>>) -> Self {
+        Self {
+            address: address.into(),
+            bytes: bytes.into(),
+        }
+    }
+
+    fn address(&self) -> Address {
+        self.address
+    }
+
+    fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FunctionAddition {
+    function: IncompleteFunction,
+}
+
+impl FunctionAddition {
+    fn new(function: IncompleteFunction) -> Self {
+        Self { function }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FunctionPropertiesUpdate {
+    entry: Address,
+    properties: FunctionProperties,
+}
+
+impl FunctionPropertiesUpdate {
+    fn new(entry: impl Into<Address>, properties: FunctionProperties) -> Self {
+        Self {
+            entry: entry.into(),
+            properties,
+        }
+    }
+
+    fn entry(&self) -> Address {
+        self.entry
+    }
+
+    fn properties(&self) -> FunctionProperties {
+        self.properties
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SymbolAddition {
+    index: SymbolIndex,
+    entry: SymbolEntry,
+}
+
+impl SymbolAddition {
+    fn new(index: SymbolIndex, entry: SymbolEntry) -> Self {
+        Self { index, entry }
+    }
+
+    fn into_parts(self) -> (SymbolIndex, SymbolEntry) {
+        (self.index, self.entry)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SwitchAddition {
+    asserted: bool,
+    switch: Switch,
+}
+
+impl SwitchAddition {
+    fn new(switch: Switch) -> Self {
+        Self {
+            asserted: true,
+            switch,
+        }
+    }
+
+    fn derived(switch: Switch) -> Self {
+        Self {
+            asserted: false,
+            switch,
+        }
+    }
+
+    fn into_parts(self) -> (Switch, bool) {
+        (self.switch, self.asserted)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProblemAddition {
+    address: Address,
+    kind: ProblemKind,
+}
+
+impl ProblemAddition {
+    fn new(address: impl Into<Address>, kind: ProblemKind) -> Self {
+        Self {
+            address: address.into(),
+            kind,
+        }
+    }
+
+    fn address(&self) -> Address {
+        self.address
+    }
+
+    fn kind(&self) -> ProblemKind {
+        self.kind
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FunctionRemovalTarget {
+    Address(Address),
+    Id(FunctionId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FunctionRemoval {
+    origin: ReferenceOrigin,
+    target: FunctionRemovalTarget,
+}
+
+impl FunctionRemoval {
+    fn new(entry: impl Into<Address>) -> Self {
+        Self {
+            origin: ReferenceOrigin::Derived,
+            target: FunctionRemovalTarget::Address(entry.into()),
+        }
+    }
+
+    fn by_id(id: FunctionId) -> Self {
+        Self {
+            origin: ReferenceOrigin::Derived,
+            target: FunctionRemovalTarget::Id(id),
+        }
+    }
+
+    fn asserted(mut self) -> Self {
+        self.origin = ReferenceOrigin::Asserted;
+        self
+    }
+
+    fn apply(self, transaction: &mut ProjectTransaction<'_>) -> Result<(), ProjectError> {
+        match self.target {
+            FunctionRemovalTarget::Address(entry) => {
+                transaction.remove_function(entry, self.origin)?;
+            }
+            FunctionRemovalTarget::Id(id) => {
+                transaction.remove_function_by_id(id, self.origin)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SymbolRemoval {
+    index: SymbolIndex,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SymbolPropertiesUpdate {
+    id: SymbolId,
+    properties: SymbolProperties,
+}
+
+impl SymbolPropertiesUpdate {
+    fn new(id: SymbolId, properties: SymbolProperties) -> Self {
+        Self { id, properties }
+    }
+
+    fn id(&self) -> SymbolId {
+        self.id
+    }
+
+    fn properties(&self) -> SymbolProperties {
+        self.properties
+    }
+}
+
+impl SymbolRemoval {
+    fn new(index: SymbolIndex) -> Self {
+        Self { index }
+    }
+
+    fn index(&self) -> SymbolIndex {
+        self.index
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReferenceRemoval {
+    key: ReferenceKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DerivedReferenceReplacement {
+    coverage: AddressRangeSet,
+    kind: ReferenceKind,
+    provenance: ReferenceProvenance,
+    references: Vec<Reference>,
+}
+
+impl DerivedReferenceReplacement {
+    fn new(
+        coverage: AddressRangeSet,
+        kind: ReferenceKind,
+        provenance: ReferenceProvenance,
+        references: Vec<Reference>,
+    ) -> Self {
+        Self {
+            coverage,
+            kind,
+            provenance,
+            references,
+        }
+    }
+
+    fn apply(self, transaction: &mut ProjectTransaction<'_>) -> Result<(), ProjectError> {
+        transaction.replace_derived_references(
+            self.coverage,
+            self.kind,
+            self.provenance,
+            self.references,
+        )?;
+        Ok(())
+    }
+}
+
+impl ReferenceRemoval {
+    fn new(key: ReferenceKey) -> Self {
+        Self { key }
+    }
+
+    fn key(&self) -> ReferenceKey {
+        self.key
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MappingPlacementMode {
+    Bottom,
+    Default,
+    Top,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MappingPlacement {
+    mapping: SegmentMappingId,
+    mode: MappingPlacementMode,
+    space: AddressSpaceId,
+}
+
+impl MappingPlacement {
+    fn new(space: AddressSpaceId, mapping: SegmentMappingId, mode: MappingPlacementMode) -> Self {
+        Self {
+            mapping,
+            mode,
+            space,
+        }
+    }
+
+    fn mapping(&self) -> SegmentMappingId {
+        self.mapping
+    }
+
+    fn mode(&self) -> MappingPlacementMode {
+        self.mode
+    }
+
+    fn space(&self) -> AddressSpaceId {
+        self.space
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MappingPriorityUpdate {
+    mapping: SegmentMappingId,
+    space: AddressSpaceId,
+}
+
+impl MappingPriorityUpdate {
+    fn new(space: AddressSpaceId, mapping: SegmentMappingId) -> Self {
+        Self { mapping, space }
+    }
+
+    fn mapping(&self) -> SegmentMappingId {
+        self.mapping
+    }
+
+    fn space(&self) -> AddressSpaceId {
+        self.space
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MappingMetadataUpdate {
+    flags: SegmentMappingFlags,
+    kind: SegmentMappingKind,
+    mapping: SegmentMappingId,
+    provenance: SegmentMappingProvenance,
+}
+
+impl MappingMetadataUpdate {
+    pub fn new(mapping: SegmentMappingId) -> Self {
+        Self {
+            flags: SegmentMappingFlags::default(),
+            kind: SegmentMappingKind::default(),
+            mapping,
+            provenance: SegmentMappingProvenance::default(),
+        }
+    }
+
+    pub fn flags(&self) -> SegmentMappingFlags {
+        self.flags
+    }
+
+    pub fn kind(&self) -> SegmentMappingKind {
+        self.kind
+    }
+
+    pub fn mapping(&self) -> SegmentMappingId {
+        self.mapping
+    }
+
+    pub fn provenance(&self) -> SegmentMappingProvenance {
+        self.provenance
+    }
+
+    pub fn set_flags(&mut self, flags: SegmentMappingFlags) {
+        self.flags = flags;
+    }
+
+    pub fn set_kind(&mut self, kind: SegmentMappingKind) {
+        self.kind = kind;
+    }
+
+    pub fn set_provenance(&mut self, provenance: SegmentMappingProvenance) {
+        self.provenance = provenance;
+    }
+
+    pub fn with_flags(mut self, flags: SegmentMappingFlags) -> Self {
+        self.set_flags(flags);
+        self
+    }
+
+    pub fn with_kind(mut self, kind: SegmentMappingKind) -> Self {
+        self.set_kind(kind);
+        self
+    }
+
+    pub fn with_provenance(mut self, provenance: SegmentMappingProvenance) -> Self {
+        self.set_provenance(provenance);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MappingRemap {
+    mapping: SegmentMappingId,
+    start: Address,
+}
+
+impl MappingRemap {
+    fn new(mapping: SegmentMappingId, start: impl Into<Address>) -> Self {
+        Self {
+            mapping,
+            start: start.into(),
+        }
+    }
+
+    fn mapping(&self) -> SegmentMappingId {
+        self.mapping
+    }
+
+    fn start(&self) -> Address {
+        self.start
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MappingRemoval {
+    mapping: SegmentMappingId,
+}
+
+impl MappingRemoval {
+    fn new(mapping: SegmentMappingId) -> Self {
+        Self { mapping }
+    }
+
+    fn mapping(&self) -> SegmentMappingId {
+        self.mapping
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MappingResize {
+    mapping: SegmentMappingId,
+    size: u64,
+}
+
+impl MappingResize {
+    fn new(mapping: SegmentMappingId, size: u64) -> Self {
+        Self { mapping, size }
+    }
+
+    fn mapping(&self) -> SegmentMappingId {
+        self.mapping
+    }
+
+    fn size(&self) -> u64 {
+        self.size
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MappingCreationResult {
+    changes: ChangeSet,
+    mapping: SegmentMappingId,
+}
+
+impl MappingCreationResult {
+    pub fn new(mapping: SegmentMappingId, changes: ChangeSet) -> Self {
+        Self { changes, mapping }
+    }
+
+    pub fn changes(&self) -> &ChangeSet {
+        &self.changes
+    }
+
+    pub fn mapping(&self) -> SegmentMappingId {
+        self.mapping
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpaceCreationResult {
+    changes: ChangeSet,
+    space: AddressSpaceId,
+}
+
+impl SpaceCreationResult {
+    pub fn new(space: AddressSpaceId, changes: ChangeSet) -> Self {
+        Self { changes, space }
+    }
+
+    pub fn changes(&self) -> &ChangeSet {
+        &self.changes
+    }
+
+    pub fn space(&self) -> AddressSpaceId {
+        self.space
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct ProjectUpdates {
+    updates: SmallVec<[ProjectUpdate; 1]>,
+}
+
+impl ProjectUpdates {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            updates: SmallVec::with_capacity(capacity),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.updates.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.updates.is_empty()
+    }
+
+    pub(crate) fn apply(
+        self,
+        transaction: &mut ProjectTransaction<'_>,
+    ) -> Result<(), ProjectError> {
+        let mut functions = Vec::new();
+
+        for update in self.updates {
+            let update = match update.operation {
+                ProjectOperation::AddFunction(addition) => {
+                    functions.push(addition.function);
+                    continue;
+                }
+                operation => ProjectUpdate::new(operation),
+            };
+
+            if !functions.is_empty() {
+                transaction.add_functions(functions.drain(..))?;
+            }
+            update.apply(transaction)?;
+        }
+
+        if !functions.is_empty() {
+            transaction.add_functions(functions)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn reserve(&mut self, additional: usize) {
+        self.updates.reserve(additional);
+    }
+
+    pub fn add_function(&mut self, mut function: IncompleteFunction) {
+        let switches = function.take_pending_switches();
+        self.updates.push(ProjectUpdate::add_function(function));
+        self.updates
+            .extend(switches.into_iter().map(ProjectUpdate::add_derived_switch));
+    }
+
+    pub fn add_mapping_to_space(&mut self, space: AddressSpaceId, mapping: SegmentMappingId) {
+        self.updates
+            .push(ProjectUpdate::add_mapping_to_space(space, mapping));
+    }
+
+    pub fn add_mapping_to_space_bottom(
+        &mut self,
+        space: AddressSpaceId,
+        mapping: SegmentMappingId,
+    ) {
+        self.updates
+            .push(ProjectUpdate::add_mapping_to_space_bottom(space, mapping));
+    }
+
+    pub fn add_mapping_to_space_top(&mut self, space: AddressSpaceId, mapping: SegmentMappingId) {
+        self.updates
+            .push(ProjectUpdate::add_mapping_to_space_top(space, mapping));
+    }
+
+    pub fn add_problem(&mut self, address: impl Into<Address>, kind: ProblemKind) {
+        self.updates.push(ProjectUpdate::add_problem(address, kind));
+    }
+
+    pub fn add_reference(&mut self, reference: Reference) {
+        self.updates.push(ProjectUpdate::add_reference(reference));
+    }
+
+    pub fn add_switch(&mut self, switch: Switch) {
+        self.updates.push(ProjectUpdate::add_switch(switch));
+    }
+
+    pub fn add_symbol(&mut self, index: SymbolIndex, entry: SymbolEntry) {
+        self.updates.push(ProjectUpdate::add_symbol(index, entry));
+    }
+
+    pub fn deprioritise_mapping(&mut self, space: AddressSpaceId, mapping: SegmentMappingId) {
+        self.updates
+            .push(ProjectUpdate::deprioritise_mapping(space, mapping));
+    }
+
+    pub fn prioritise_mapping(&mut self, space: AddressSpaceId, mapping: SegmentMappingId) {
+        self.updates
+            .push(ProjectUpdate::prioritise_mapping(space, mapping));
+    }
+
+    pub fn remap_mapping(&mut self, mapping: SegmentMappingId, start: impl Into<Address>) {
+        self.updates
+            .push(ProjectUpdate::remap_mapping(mapping, start));
+    }
+
+    pub fn remove_function(&mut self, entry: impl Into<Address>) {
+        self.updates.push(ProjectUpdate::remove_function(entry));
+    }
+
+    pub fn remove_function_by_id(&mut self, id: FunctionId) {
+        self.updates.push(ProjectUpdate::remove_function_by_id(id));
+    }
+
+    pub fn remove_mapping(&mut self, mapping: SegmentMappingId) {
+        self.updates.push(ProjectUpdate::remove_mapping(mapping));
+    }
+
+    pub fn remove_reference(&mut self, key: ReferenceKey) {
+        self.updates.push(ProjectUpdate::remove_reference(key));
+    }
+
+    pub fn remove_switch(&mut self, branch: impl Into<Address>) {
+        self.updates.push(ProjectUpdate::remove_switch(branch));
+    }
+
+    pub fn remove_symbol(&mut self, index: SymbolIndex) {
+        self.updates.push(ProjectUpdate::remove_symbol(index));
+    }
+
+    pub fn replace_derived_references(
+        &mut self,
+        coverage: AddressRangeSet,
+        kind: ReferenceKind,
+        provenance: ReferenceProvenance,
+        references: Vec<Reference>,
+    ) {
+        self.updates.push(ProjectUpdate::new(
+            ProjectOperation::ReplaceDerivedReferences(DerivedReferenceReplacement::new(
+                coverage, kind, provenance, references,
+            )),
+        ));
+    }
+
+    pub fn resize_mapping(&mut self, mapping: SegmentMappingId, size: u64) {
+        self.updates
+            .push(ProjectUpdate::resize_mapping(mapping, size));
+    }
+
+    pub fn update_function_properties(
+        &mut self,
+        entry: impl Into<Address>,
+        properties: FunctionProperties,
+    ) {
+        self.updates
+            .push(ProjectUpdate::update_function_properties(entry, properties));
+    }
+
+    pub fn update_mapping_metadata(&mut self, update: MappingMetadataUpdate) {
+        self.updates
+            .push(ProjectUpdate::update_mapping_metadata(update));
+    }
+
+    pub fn update_symbol_properties(&mut self, id: SymbolId, properties: SymbolProperties) {
+        self.updates
+            .push(ProjectUpdate::update_symbol_properties(id, properties));
+    }
+
+    pub fn write_bytes(&mut self, address: impl Into<Address>, bytes: impl Into<Arc<[u8]>>) {
+        self.updates
+            .push(ProjectUpdate::write_bytes(address, bytes));
+    }
+}
+
+impl From<ProjectUpdate> for ProjectUpdates {
+    fn from(update: ProjectUpdate) -> Self {
+        Self {
+            updates: SmallVec::from_buf([update]),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProjectUpdate {
+    operation: ProjectOperation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProjectOperation {
+    AddFunction(FunctionAddition),
+    AddMappingToSpace(MappingPlacement),
+    AddProblem(ProblemAddition),
+    AddReference(Reference),
+    AddSwitch(SwitchAddition),
+    AddSymbol(SymbolAddition),
+    DeprioritiseMapping(MappingPriorityUpdate),
+    PrioritiseMapping(MappingPriorityUpdate),
+    RemapMapping(MappingRemap),
+    RemoveFunction(FunctionRemoval),
+    RemoveMapping(MappingRemoval),
+    RemoveReference(ReferenceRemoval),
+    RemoveSwitch(Address),
+    RemoveSymbol(SymbolRemoval),
+    ReplaceDerivedReferences(DerivedReferenceReplacement),
+    ResizeMapping(MappingResize),
+    UpdateFunctionProperties(FunctionPropertiesUpdate),
+    UpdateMappingMetadata(MappingMetadataUpdate),
+    UpdateSymbolProperties(SymbolPropertiesUpdate),
+    WriteBytes(ByteWrite),
+}
+
+impl ProjectUpdate {
+    pub(crate) fn add_function(function: IncompleteFunction) -> Self {
+        Self::new(ProjectOperation::AddFunction(FunctionAddition::new(
+            function,
+        )))
+    }
+
+    pub(crate) fn add_mapping_to_space(space: AddressSpaceId, mapping: SegmentMappingId) -> Self {
+        Self::new(ProjectOperation::AddMappingToSpace(MappingPlacement::new(
+            space,
+            mapping,
+            MappingPlacementMode::Default,
+        )))
+    }
+
+    pub(crate) fn add_mapping_to_space_bottom(
+        space: AddressSpaceId,
+        mapping: SegmentMappingId,
+    ) -> Self {
+        Self::new(ProjectOperation::AddMappingToSpace(MappingPlacement::new(
+            space,
+            mapping,
+            MappingPlacementMode::Bottom,
+        )))
+    }
+
+    pub(crate) fn add_mapping_to_space_top(
+        space: AddressSpaceId,
+        mapping: SegmentMappingId,
+    ) -> Self {
+        Self::new(ProjectOperation::AddMappingToSpace(MappingPlacement::new(
+            space,
+            mapping,
+            MappingPlacementMode::Top,
+        )))
+    }
+
+    pub(crate) fn deprioritise_mapping(space: AddressSpaceId, mapping: SegmentMappingId) -> Self {
+        Self::new(ProjectOperation::DeprioritiseMapping(
+            MappingPriorityUpdate::new(space, mapping),
+        ))
+    }
+
+    pub(crate) fn add_symbol(index: SymbolIndex, entry: SymbolEntry) -> Self {
+        Self::new(ProjectOperation::AddSymbol(SymbolAddition::new(
+            index, entry,
+        )))
+    }
+
+    pub(crate) fn prioritise_mapping(space: AddressSpaceId, mapping: SegmentMappingId) -> Self {
+        Self::new(ProjectOperation::PrioritiseMapping(
+            MappingPriorityUpdate::new(space, mapping),
+        ))
+    }
+
+    pub(crate) fn remap_mapping(mapping: SegmentMappingId, start: impl Into<Address>) -> Self {
+        Self::new(ProjectOperation::RemapMapping(MappingRemap::new(
+            mapping, start,
+        )))
+    }
+
+    pub(crate) fn remove_function(entry: impl Into<Address>) -> Self {
+        Self::new(ProjectOperation::RemoveFunction(FunctionRemoval::new(
+            entry,
+        )))
+    }
+
+    pub(crate) fn remove_function_by_id(id: FunctionId) -> Self {
+        Self::new(ProjectOperation::RemoveFunction(FunctionRemoval::by_id(id)))
+    }
+
+    pub(crate) fn remove_asserted_function(entry: impl Into<Address>) -> Self {
+        Self::new(ProjectOperation::RemoveFunction(
+            FunctionRemoval::new(entry).asserted(),
+        ))
+    }
+
+    pub(crate) fn remove_asserted_function_by_id(id: FunctionId) -> Self {
+        Self::new(ProjectOperation::RemoveFunction(
+            FunctionRemoval::by_id(id).asserted(),
+        ))
+    }
+
+    pub(crate) fn remove_mapping(mapping: SegmentMappingId) -> Self {
+        Self::new(ProjectOperation::RemoveMapping(MappingRemoval::new(
+            mapping,
+        )))
+    }
+
+    pub(crate) fn add_reference(reference: Reference) -> Self {
+        Self::new(ProjectOperation::AddReference(reference))
+    }
+
+    pub(crate) fn remove_reference(key: ReferenceKey) -> Self {
+        Self::new(ProjectOperation::RemoveReference(ReferenceRemoval::new(
+            key,
+        )))
+    }
+
+    pub(crate) fn add_switch(switch: Switch) -> Self {
+        Self::new(ProjectOperation::AddSwitch(SwitchAddition::new(switch)))
+    }
+
+    pub(crate) fn add_derived_switch(switch: Switch) -> Self {
+        Self::new(ProjectOperation::AddSwitch(SwitchAddition::derived(switch)))
+    }
+
+    pub(crate) fn add_problem(address: impl Into<Address>, kind: ProblemKind) -> Self {
+        Self::new(ProjectOperation::AddProblem(ProblemAddition::new(
+            address, kind,
+        )))
+    }
+
+    pub(crate) fn update_function_properties(
+        entry: impl Into<Address>,
+        properties: FunctionProperties,
+    ) -> Self {
+        Self::new(ProjectOperation::UpdateFunctionProperties(
+            FunctionPropertiesUpdate::new(entry, properties),
+        ))
+    }
+
+    pub(crate) fn remove_switch(branch: impl Into<Address>) -> Self {
+        Self::new(ProjectOperation::RemoveSwitch(branch.into()))
+    }
+
+    pub(crate) fn remove_symbol(index: SymbolIndex) -> Self {
+        Self::new(ProjectOperation::RemoveSymbol(SymbolRemoval::new(index)))
+    }
+
+    pub(crate) fn resize_mapping(mapping: SegmentMappingId, size: u64) -> Self {
+        Self::new(ProjectOperation::ResizeMapping(MappingResize::new(
+            mapping, size,
+        )))
+    }
+
+    pub(crate) fn update_mapping_metadata(update: MappingMetadataUpdate) -> Self {
+        Self::new(ProjectOperation::UpdateMappingMetadata(update))
+    }
+
+    pub(crate) fn update_symbol_properties(id: SymbolId, properties: SymbolProperties) -> Self {
+        Self::new(ProjectOperation::UpdateSymbolProperties(
+            SymbolPropertiesUpdate::new(id, properties),
+        ))
+    }
+
+    pub(crate) fn write_bytes(address: impl Into<Address>, bytes: impl Into<Arc<[u8]>>) -> Self {
+        Self::new(ProjectOperation::WriteBytes(ByteWrite::new(address, bytes)))
+    }
+
+    fn new(operation: ProjectOperation) -> Self {
+        Self { operation }
+    }
+
+    pub(crate) fn apply(
+        self,
+        transaction: &mut ProjectTransaction<'_>,
+    ) -> Result<(), ProjectError> {
+        match self.operation {
+            ProjectOperation::AddFunction(addition) => {
+                transaction.add_function(addition.function)?;
+                Ok(())
+            }
+            ProjectOperation::AddMappingToSpace(placement) => match placement.mode() {
+                MappingPlacementMode::Bottom => {
+                    transaction.add_mapping_to_space_bottom(placement.space(), placement.mapping())
+                }
+                MappingPlacementMode::Default => {
+                    transaction.add_mapping_to_space(placement.space(), placement.mapping())
+                }
+                MappingPlacementMode::Top => {
+                    transaction.add_mapping_to_space_top(placement.space(), placement.mapping())
+                }
+            },
+            ProjectOperation::DeprioritiseMapping(priority) => {
+                transaction.deprioritise_mapping(priority.space(), priority.mapping())
+            }
+            ProjectOperation::AddReference(reference) => {
+                transaction.add_reference(reference)?;
+                Ok(())
+            }
+            ProjectOperation::AddSwitch(addition) => {
+                let (mut switch, asserted) = addition.into_parts();
+                if asserted {
+                    switch.mark_override();
+                }
+                let branch = switch.branch();
+                transaction.add_switch(branch, move |id, _| switch.with_id(id))?;
+                Ok(())
+            }
+            ProjectOperation::AddSymbol(addition) => {
+                let (index, entry) = addition.into_parts();
+                transaction.add_symbol(index, entry)?;
+                Ok(())
+            }
+            ProjectOperation::AddProblem(problem) => {
+                transaction.add_problem(problem.address(), problem.kind())
+            }
+            ProjectOperation::PrioritiseMapping(priority) => {
+                transaction.prioritise_mapping(priority.space(), priority.mapping())
+            }
+            ProjectOperation::RemapMapping(remap) => {
+                transaction.remap_mapping(remap.mapping(), remap.start())
+            }
+            ProjectOperation::RemoveFunction(removal) => removal.apply(transaction),
+            ProjectOperation::RemoveMapping(removal) => {
+                transaction.remove_mapping(removal.mapping())
+            }
+            ProjectOperation::RemoveReference(removal) => {
+                transaction.remove_reference(removal.key())?;
+                Ok(())
+            }
+            ProjectOperation::RemoveSwitch(branch) => {
+                transaction.remove_switch(branch)?;
+                Ok(())
+            }
+            ProjectOperation::RemoveSymbol(removal) => {
+                transaction.remove_symbol_by_index(removal.index())?;
+                Ok(())
+            }
+            ProjectOperation::ReplaceDerivedReferences(replacement) => {
+                replacement.apply(transaction)
+            }
+            ProjectOperation::ResizeMapping(resize) => {
+                transaction.resize_mapping(resize.mapping(), resize.size())
+            }
+            ProjectOperation::UpdateFunctionProperties(update) => {
+                transaction.update_function_properties(update.entry(), update.properties())?;
+                Ok(())
+            }
+            ProjectOperation::UpdateMappingMetadata(update) => transaction.update_mapping_metadata(
+                update.mapping(),
+                update.kind(),
+                update.provenance(),
+                update.flags(),
+            ),
+            ProjectOperation::UpdateSymbolProperties(update) => {
+                transaction.update_symbol_properties(update.id(), update.properties())?;
+                Ok(())
+            }
+            ProjectOperation::WriteBytes(write) => {
+                transaction.write_bytes(write.address(), write.bytes())
+            }
+        }
+    }
+}

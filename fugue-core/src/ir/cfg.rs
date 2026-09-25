@@ -1,15 +1,44 @@
 use crate::ir::{Address, Insn, InsnTarget};
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FlowTargets {
+    targets: Vec<FlowTarget>,
+}
+
+impl FlowTargets {
+    pub fn new(targets: impl Into<Vec<FlowTarget>>) -> Self {
+        Self {
+            targets: targets.into(),
+        }
+    }
+
+    pub fn targets(&self) -> &[FlowTarget] {
+        &self.targets
+    }
+}
+
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub enum FlowKind {
     Branch,
-    CBranch,
-    IBranch,
     Call,
-    ICall,
-    ServiceCall,
-    Return,
+    CBranch,
     Fall,
+    IBranch,
+    ICall,
+    Return,
+    ServiceCall,
     SwitchBranch,
     SwitchCall,
     TailCallBranch,
@@ -21,7 +50,7 @@ impl FlowKind {
 
         let kind = match target {
             IntraBlk(target, false) if target.position() == 0 => {
-                if insn.has_fall() {
+                if insn.has_fall_through() {
                     Self::CBranch
                 } else {
                     Self::Branch
@@ -29,19 +58,15 @@ impl FlowKind {
             }
             IntraBlk(target, true) if target.position() == 0 => Self::Fall,
             InterBlk(_) => {
-                if insn.has_fall() {
+                if insn.has_fall_through() {
                     Self::CBranch
                 } else {
                     Self::Branch
                 }
             }
-            InterSub(target) => {
-                if target.is_some() {
-                    Self::Call
-                } else {
-                    Self::ICall
-                }
-            }
+            InterBlkIndirect(_) => Self::IBranch,
+            InterSub(_) => Self::Call,
+            InterSubIndirect(_) => Self::ICall,
             InterRet(_, _) => Self::Return,
             Intrinsic => Self::ServiceCall,
             _ => {
@@ -66,8 +91,12 @@ impl FlowKind {
         matches!(self, Self::CBranch)
     }
 
-    pub fn is_fall(&self) -> bool {
+    pub fn is_fall_through(&self) -> bool {
         matches!(self, Self::Fall)
+    }
+
+    pub fn is_global(&self) -> bool {
+        self.is_call() || self.is_return()
     }
 
     pub fn is_indirect(&self) -> bool {
@@ -83,7 +112,18 @@ impl FlowKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub struct FlowTarget {
     from: Address,
     to: Address,

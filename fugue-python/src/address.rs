@@ -39,7 +39,7 @@ impl Address {
 
     #[getter]
     fn offset(&self) -> u64 {
-        self.inner.address().offset()
+        self.inner.offset()
     }
 
     fn __str__(&self) -> String {

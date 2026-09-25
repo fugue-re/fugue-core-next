@@ -1,75 +1,74 @@
-use super::{FunctionRecoveryError, PartialFunction};
-use crate::project::Project;
+use crate::analysis::function::recovery::FunctionRecoveryError;
+use crate::engine::ProjectView;
+use crate::ir::IncompleteFunction;
 use crate::types::Confidence;
 
-pub struct FunctionRecoveryCommitContext {
-    function: PartialFunction,
-    confidence: Confidence,
+pub struct FunctionCommitContext {
+    function: IncompleteFunction,
 }
 
-impl FunctionRecoveryCommitContext {
-    pub fn new(function: PartialFunction, confidence: Confidence) -> Self {
+impl FunctionCommitContext {
+    pub fn new(function: IncompleteFunction, confidence: Confidence) -> Self {
         Self {
-            function,
-            confidence,
+            function: function.with_confidence(confidence),
         }
     }
 
-    pub fn function(&self) -> &PartialFunction {
+    pub fn function(&self) -> &IncompleteFunction {
         &self.function
     }
 
     pub fn confidence(&self) -> Confidence {
-        self.confidence
+        self.function.confidence()
     }
 
-    pub(crate) fn into_function(self) -> PartialFunction {
+    pub(crate) fn into_function(self) -> IncompleteFunction {
         self.function
     }
 }
 
-pub trait FunctionRecoveryCommitHook {
-    fn should_commit(
+pub trait FunctionCommitPolicy: Send {
+    fn should_commit_immediately(
         &self,
-        project: &mut Project,
-        context: &FunctionRecoveryCommitContext,
+        project: &ProjectView<'_>,
+        context: &FunctionCommitContext,
     ) -> Result<bool, FunctionRecoveryError>;
 }
 
-impl<F> FunctionRecoveryCommitHook for F
+impl<F> FunctionCommitPolicy for F
 where
-    F: Fn(&mut Project, &FunctionRecoveryCommitContext) -> Result<bool, FunctionRecoveryError>,
+    F: Fn(&ProjectView<'_>, &FunctionCommitContext) -> Result<bool, FunctionRecoveryError> + Send,
 {
-    fn should_commit(
+    fn should_commit_immediately(
         &self,
-        project: &mut Project,
-        context: &FunctionRecoveryCommitContext,
+        project: &ProjectView<'_>,
+        context: &FunctionCommitContext,
     ) -> Result<bool, FunctionRecoveryError> {
         (self)(project, context)
     }
 }
 
-impl FunctionRecoveryCommitHook for Box<dyn FunctionRecoveryCommitHook + 'static> {
-    fn should_commit(
+impl FunctionCommitPolicy for Box<dyn FunctionCommitPolicy + 'static> {
+    fn should_commit_immediately(
         &self,
-        project: &mut Project,
-        context: &FunctionRecoveryCommitContext,
+        project: &ProjectView<'_>,
+        context: &FunctionCommitContext,
     ) -> Result<bool, FunctionRecoveryError> {
-        self.as_ref().should_commit(project, context)
+        self.as_ref().should_commit_immediately(project, context)
     }
 }
 
-impl<T> FunctionRecoveryCommitHook for Option<T>
+impl<T> FunctionCommitPolicy for Option<T>
 where
-    T: FunctionRecoveryCommitHook,
+    T: FunctionCommitPolicy,
 {
-    fn should_commit(
+    fn should_commit_immediately(
         &self,
-        project: &mut Project,
-        context: &FunctionRecoveryCommitContext,
+        project: &ProjectView<'_>,
+        context: &FunctionCommitContext,
     ) -> Result<bool, FunctionRecoveryError> {
         match self {
-            Some(hook) => hook.should_commit(project, context),
+            Some(policy) => policy.should_commit_immediately(project, context),
             None => Ok(true),
         }
     }

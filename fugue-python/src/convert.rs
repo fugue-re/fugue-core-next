@@ -1,5 +1,5 @@
 use fugue_core::ir::{Address as CoreAddress, RawAddress};
-use fugue_core::storage::segments::space::AddressSpaceId;
+use fugue_core::storage::AddressSpaceId;
 use pyo3::prelude::*;
 
 use crate::address::Address;

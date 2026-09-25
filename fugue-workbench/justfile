@@ -1,0 +1,28 @@
+default:
+    @just --list
+
+web-install:
+    cd web && npm install
+
+web-build: web-install
+    cd web && npm run build
+
+bindings:
+    cargo run -p fugue-workbench -- export-bindings --out web/src/bindings
+
+run binary='' *args: web-build
+    #!/usr/bin/env bash
+    if [ -n "{{binary}}" ]; then
+      cargo run -p fugue-workbench -- serve "{{binary}}" {{args}}
+    else
+      cargo run -p fugue-workbench -- serve {{args}}
+    fi
+
+release binary *args: web-build
+    cargo run -p fugue-workbench --release -- serve {{binary}} {{args}}
+
+backend binary *args:
+    cargo run -p fugue-workbench -- serve {{binary}} {{args}}
+
+web-dev:
+    cd web && npm run dev

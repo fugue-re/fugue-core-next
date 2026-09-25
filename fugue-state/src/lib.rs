@@ -6,4 +6,4 @@ pub mod register;
 pub mod unique;
 
 pub mod traits;
-pub use self::traits::*;
+pub use traits::*;

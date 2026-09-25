@@ -2,15 +2,17 @@ extern crate self as fugue_core;
 
 pub mod analysis;
 pub mod arch;
+pub mod engine;
+pub mod extension;
 pub mod il;
 pub mod ir;
 pub mod lifter;
 pub mod loader;
 pub mod platform;
 pub mod project;
-pub mod registry;
+pub mod queries;
 pub mod storage;
 pub mod types;
 
-// Re-export derive macro for provider registration
-pub use fugue_core_derive::{SegmentStorageProvider, extension};
+pub use engine::AnalysisData;
+pub use fugue_core_derive::{AnalysisData, SegmentStorageProvider, extension};

@@ -1,0 +1,1550 @@
+entry_points = []
+
+[accessors]
+names = [
+    "address_range",
+    "coverage",
+    "coverage_into",
+    "call_target",
+    "entry_address",
+    "last_address",
+    "next_address",
+    "range",
+    "size",
+    "table",
+]
+prefixes = ["get"]
+suffixes = ["at", "page"]
+
+[parameters]
+before = [
+    ["arg", "width"],
+    ["block", "width"],
+    ["definition", "width"],
+    ["discriminant", "width"],
+    ["high", "width"],
+    ["location", "width"],
+    ["low", "width"],
+    ["offset", "width"],
+    ["opcode", "width"],
+    ["operation", "width"],
+    ["register", "width"],
+    ["value", "width"],
+]
+first = ["AnalysisContext"]
+
+[macros]
+registrations = ["extension::submit"]
+
+[fields]
+private = [
+    "crate::il::pcode::ir",
+    "crate::il::ecode::ir",
+    "crate::il::mcode::ir",
+]
+
+[vocabulary]
+acronyms = ["ecode", "mcode", "pcode"]
+
+[[vocabulary.term]]
+reject = "tests"
+prefer = "test"
+roles = ["module"]
+modules = ["crate"]
+reason = "Rust test modules use the repository-wide singular `test` name"
+
+[[vocabulary.term]]
+reject = "data"
+prefer = "place engine-owned invocation resources in crate::engine"
+roles = ["module"]
+modules = ["crate::analysis"]
+reason = "analysis data is engine invocation infrastructure, not an analysis implementation"
+
+[[vocabulary.term]]
+reject = "parts"
+prefer = "use the public AnalysisContext resource fields directly"
+roles = ["type"]
+modules = ["crate::engine"]
+reason = "AnalysisContext must not gain a split-borrow wrapper"
+
+[[vocabulary.term]]
+reject = "argument"
+prefer = "arg"
+roles = ["field", "function", "local", "method", "module", "type"]
+modules = ["crate::analysis::switch::interval", "crate::arch", "crate::il"]
+reason = "IL-facing identifiers use Arg and Args consistently"
+
+[[vocabulary.term]]
+reject = "definition"
+prefer = "def"
+roles = ["type"]
+modules = ["crate::il"]
+reason = "IL type names abbreviate definition to Def"
+
+[[vocabulary.term]]
+reject = "body"
+prefer = "construct the IR through its builder"
+roles = ["type"]
+modules = ["crate::il::pcode::ir", "crate::il::ecode::ir", "crate::il::mcode::ir"]
+reason = "IR construction does not use bulk construction carriers"
+
+[[vocabulary.term]]
+reject = "parts"
+prefer = "construct the IR through its builder"
+roles = ["type"]
+modules = ["crate::il::pcode::ir", "crate::il::ecode::ir", "crate::il::mcode::ir"]
+reason = "IR construction does not use bulk construction carriers"
+
+[[vocabulary.term]]
+reject = "storage"
+prefer = "construct the IR through its builder"
+roles = ["type"]
+modules = ["crate::il::pcode::ir", "crate::il::ecode::ir", "crate::il::mcode::ir"]
+reason = "IR construction does not use bulk construction carriers"
+
+[[vocabulary.term]]
+reject = "identifier"
+prefer = "id"
+roles = ["type"]
+modules = ["crate::il"]
+reason = "IL type names abbreviate identifier to Id"
+
+[[vocabulary.term]]
+reject = "operation"
+prefer = "op"
+roles = ["type", "variant"]
+modules = ["crate::il"]
+reason = "IL type names abbreviate operation to Op"
+
+[[vocabulary.term]]
+reject = "operation"
+prefer = "op"
+roles = ["function", "method"]
+modules = ["crate::arch", "crate::il", "crate::lifter"]
+reason = "IL-facing function and method names pair op with type-level Op, matching Arg and arg"
+
+[[vocabulary.term]]
+reject = "operation"
+prefer = "op"
+roles = ["field", "local"]
+modules = ["crate::arch"]
+reason = "architecture intrinsic hooks use P-code user-op identifiers"
+
+[[vocabulary.term]]
+reject = "finalise"
+prefer = "finish"
+roles = ["field", "function", "local", "method", "module", "type", "variant"]
+modules = ["crate"]
+reason = "project-owned completion identifiers use finish consistently"
+
+[[vocabulary.term]]
+reject = "finalize"
+prefer = "finish"
+roles = ["field", "function", "local", "method", "module", "type", "variant"]
+modules = ["crate"]
+reason = "project-owned completion identifiers use finish consistently"
+
+[[vocabulary.term]]
+reject = "finish"
+prefer = "use build for builders and the phase-specific verb elsewhere"
+roles = ["function", "method"]
+modules = ["crate::il::pcode", "crate::il::ecode", "crate::il::mcode"]
+reason = "IL construction, lifting, transformation and analysis use their domain verbs"
+
+[[vocabulary.term]]
+reject = "wave"
+prefer = "describe the concrete recovery state"
+roles = ["field", "function", "local", "method", "module", "type", "variant"]
+modules = ["crate::analysis::function::recovery"]
+reason = "function recovery has no wave lifecycle"
+
+[[vocabulary.term]]
+reject = "chunk"
+prefer = "invocation, batch, or the concrete representation term"
+roles = ["field", "function", "local", "method", "module", "type", "variant"]
+modules = ["crate::analysis::function::recovery"]
+reason = "chunk is overloaded and does not identify function-recovery ownership"
+
+[[vocabulary.term]]
+reject = "queue"
+prefer = "add"
+roles = ["function", "method"]
+modules = ["crate::analysis::function::recovery"]
+reason = "candidate registration uses the established add_candidate vocabulary"
+
+[[vocabulary.term]]
+reject = "run"
+prefer = "apply"
+roles = ["function", "method"]
+modules = ["crate::analysis::function::recovery"]
+reason = "analysis hook execution uses apply vocabulary"
+
+[[vocabulary.term]]
+reject = "initialisation"
+prefer = "pre_resolution"
+roles = ["field", "function", "method", "type", "variant"]
+modules = ["crate::analysis::function::recovery"]
+reason = "the general function-builder hook runs before instruction resolution"
+
+[[vocabulary.term]]
+reject = "idle"
+prefer = "name the concrete recovery state or transition"
+roles = ["field", "function", "local", "method", "type", "variant"]
+modules = ["crate::analysis::function::recovery"]
+reason = "function recovery has no generic idle lifecycle state"
+
+[[vocabulary.term]]
+reject = "inputs"
+prefer = "context or the concrete fact collection"
+roles = ["field", "method", "type"]
+modules = ["crate::analysis::function::recovery"]
+reason = "retained function-recovery facts are context, not generic inputs"
+
+[[vocabulary.term]]
+reject = "from_storage"
+prefer = "new"
+roles = ["function", "method"]
+modules = ["crate::storage::entities::cache"]
+reason = "EntityCache has one compulsory worker-backed constructor"
+
+[[vocabulary.term]]
+reject = "with_worker"
+prefer = "new for EntityCache or new_persistent for an IR facade"
+roles = ["function", "method"]
+modules = ["crate::ir", "crate::storage::entities::cache"]
+reason = "worker-backed construction uses the agreed constructor vocabulary"
+
+[[vocabulary.term]]
+reject = "from_sink"
+prefer = "new"
+roles = ["function", "method"]
+modules = ["crate::storage::entities::cache"]
+reason = "EntityCache has no alternate sink construction mode"
+
+[[vocabulary.term]]
+reject = "new_with"
+prefer = "new"
+roles = ["function", "method"]
+modules = ["crate::storage::entities::cache"]
+reason = "EntityCache has one compulsory worker-backed constructor"
+
+[[vocabulary.term]]
+reject = "new_with_sink"
+prefer = "new"
+roles = ["function", "method"]
+modules = ["crate::storage::entities::cache"]
+reason = "EntityCache has no alternate sink construction mode"
+
+[[vocabulary.term]]
+reject = "from_entries"
+prefer = "new_with"
+roles = ["function", "method"]
+modules = [
+    "crate::ir::block::table::persistent",
+    "crate::ir::call_graph::index::persistent",
+    "crate::ir::function::table::persistent",
+    "crate::ir::problem::table::persistent",
+    "crate::ir::reference::index::persistent",
+    "crate::ir::switch::table::persistent",
+    "crate::ir::symbol::table::persistent",
+]
+reason = "persistent IR implementations use new_with for constructors assembled from a prepared entity cache"
+
+[[vocabulary.term]]
+reject = "record"
+prefer = "get or a semantic operation"
+roles = ["function", "method"]
+modules = ["crate::ir::reference::index"]
+reason = "ReferenceEntry is internal index state and must not define the reference-index operation vocabulary"
+
+[[vocabulary.term]]
+reject = "get_record"
+prefer = "get or a semantic operation"
+roles = ["function", "method"]
+modules = ["crate::ir::reference::index"]
+reason = "ReferenceEntry lookup remains inside staging and concrete backend boundaries"
+
+[[vocabulary.term]]
+reject = "get_by_key"
+prefer = "get"
+roles = ["function", "method"]
+modules = ["crate::ir::reference::index"]
+reason = "ReferenceKey is the canonical reference identity"
+
+[[vocabulary.term]]
+reject = "try_get_by_key"
+prefer = "try_get"
+roles = ["function", "method"]
+modules = ["crate::ir::reference::index"]
+reason = "ReferenceKey is the canonical reference identity"
+
+[[vocabulary.term]]
+reject = "insert_or_update"
+prefer = "add_or_update"
+roles = ["function", "method"]
+modules = [
+    "crate::ir::symbol::table",
+    "crate::ir::symbol::table::persistent",
+    "crate::ir::symbol::table::transient",
+]
+reason = "symbol insertion uses the table's established add vocabulary across staging and storage implementations"
+
+[[vocabulary.term]]
+reject = "find_referent"
+prefer = "get_referent"
+roles = ["function", "method"]
+modules = ["crate::ir::symbol::table"]
+reason = "symbol referent lookup uses the table's established get vocabulary"
+
+[[vocabulary.term]]
+reject = "preview"
+prefer = "prefetch"
+roles = ["constant", "local"]
+modules = ["crate::ir::persistent"]
+reason = "free IDs are fetched ahead of allocator demand rather than presented for inspection"
+
+[[vocabulary.term]]
+reject = "publish_prepared"
+prefer = "publish_allocations"
+roles = ["function", "method"]
+modules = ["crate::ir"]
+reason = "publishing prepared table allocation state uses publish_allocations"
+
+[[vocabulary.term]]
+reject = "publish_transition"
+prefer = "publish_allocations"
+roles = ["function", "method"]
+modules = [
+    "crate::ir::block::table::persistent",
+    "crate::ir::function::table::persistent",
+    "crate::ir::symbol::table::persistent",
+]
+reason = "persistent table publication names the allocation state made visible"
+
+[[vocabulary.term]]
+reject = "append_prepared_transition_writes"
+prefer = "append_allocation_writes"
+roles = ["function", "method"]
+modules = [
+    "crate::ir::problem::table",
+    "crate::ir::switch::table",
+    "crate::ir::symbol::table",
+]
+reason = "allocator transition writes use the same allocation vocabulary as their publication operation"
+
+[[vocabulary.term]]
+reject = "publish_new_batch"
+prefer = "publish_batch"
+roles = ["function", "method"]
+modules = ["crate::ir"]
+reason = "batch publication uses the representation-neutral publish_batch name"
+
+[[vocabulary.term]]
+reject = "minimum_for"
+prefer = "new"
+roles = ["function", "method"]
+modules = ["crate::ir"]
+reason = "persisted keys use ordinary constructors and search call sites supply minimum trailing values"
+
+[[vocabulary.term]]
+reject = "first"
+prefer = "new"
+roles = ["function", "method"]
+modules = [
+    "crate::ir::block::table::persistent",
+    "crate::ir::call_graph",
+    "crate::ir::function::table::persistent",
+    "crate::ir::persistent",
+    "crate::ir::reference",
+]
+reason = "persisted keys use complete ordinary constructors; symbol-table first-result queries remain valid query vocabulary"
+
+[[vocabulary.term]]
+reject = "function_edges"
+prefer = "callees"
+roles = ["field", "function", "method", "type"]
+modules = ["crate::ir::call_graph"]
+reason = "call-graph replacement operations name the callees associated with a caller"
+
+[[vocabulary.term]]
+reject = "set_function_edges"
+prefer = "set_callees"
+roles = ["function", "method"]
+modules = ["crate::ir::call_graph"]
+reason = "call-graph replacement operations set the complete callee set for a caller"
+
+[[vocabulary.term]]
+reject = "remove_function_edges"
+prefer = "clear_callees"
+roles = ["function", "method"]
+modules = ["crate::ir::call_graph"]
+reason = "call-graph removal clears the complete callee set for a caller"
+
+[[vocabulary.term]]
+reject = "for_range"
+prefer = "new"
+roles = ["function", "method"]
+modules = ["crate::ir"]
+reason = "persisted keys use ordinary constructors rather than search-specific constructors"
+
+[[vocabulary.term]]
+reject = "supported"
+prefer = "remove the backing-reference workaround"
+roles = ["function", "method"]
+modules = ["crate::ir::function::table"]
+reason = "function staging preserves reference provenance directly and must not reconstruct a supposedly supported backing reference"
+
+[[vocabulary.term]]
+reject = "append_size_bucket_changes"
+prefer = "append_bucket_occupancy_writes"
+roles = ["function", "method"]
+modules = ["crate::ir::block::table::persistent"]
+reason = "the operation appends writes which publish bucket occupancy"
+
+[[vocabulary.term]]
+reject = "size_bucket_has_other"
+prefer = "bucket_contains_retained_block"
+roles = ["function", "method"]
+modules = ["crate::ir::block::table::persistent"]
+reason = "the predicate tests whether a bucket still contains a block outside the removal set"
+
+[[vocabulary.term]]
+reject = "admit"
+prefer = "cache"
+roles = ["function", "method"]
+modules = ["crate::storage::entities::cache"]
+reason = "cache insertion uses cache vocabulary rather than admission terminology"
+
+[[vocabulary.term]]
+reject = "fetch"
+prefer = "get"
+roles = ["function", "method"]
+modules = ["crate::storage::entities::cache"]
+reason = "entity cache lookup uses the established get vocabulary"
+
+[[vocabulary.term]]
+reject = "stage"
+prefer = "insert"
+roles = ["function", "method"]
+modules = ["crate::storage::entities::cache"]
+reason = "write-through cache insertion is not the IR transaction-staging lifecycle"
+
+[[vocabulary.term]]
+reject = "ssa"
+prefer = "omit the redundant SSA marker"
+roles = ["module", "type"]
+modules = ["crate::il::mcode"]
+reason = "SSA is an invariant of the only MCode form, not a namespace or type discriminator"
+
+[verbs]
+additional = [
+    "canonicalise",
+    "compact",
+    "configure",
+    "convert",
+    "evaluate",
+    "fold",
+    "optimise",
+    "publish",
+    "produce",
+    "recover",
+    "rewrite",
+    "solve",
+    "transform",
+    "verify",
+]
+
+[[family]]
+name = "pcode-ecode-mcode-builders"
+modules = [
+    "crate::il::pcode::ir::builder",
+    "crate::il::ecode::ir::builder",
+    "crate::il::mcode::ir::builder",
+]
+
+[[family]]
+name = "ecode-mcode-def-use"
+modules = [
+    "crate::il::ecode::analysis::def_use",
+    "crate::il::mcode::analysis::def_use",
+]
+
+[[family]]
+name = "pcode-ecode-mcode-formatting"
+modules = [
+    "crate::il::pcode::format",
+    "crate::il::ecode::format",
+    "crate::il::mcode::format",
+]
+
+[[family]]
+name = "pcode-ecode-mcode-ir"
+modules = [
+    "crate::il::pcode::ir",
+    "crate::il::ecode::ir",
+    "crate::il::mcode::ir",
+]
+
+[[family]]
+name = "ecode-mcode-memory"
+modules = ["crate::il::ecode::memory", "crate::il::mcode::memory"]
+
+[[family]]
+name = "ecode-mcode-opcodes"
+modules = ["crate::il::ecode::opcode", "crate::il::mcode::opcode"]
+
+[[family]]
+name = "pcode-ecode-mcode-operations"
+modules = [
+    "crate::il::pcode::operation",
+    "crate::il::ecode::operation",
+    "crate::il::mcode::operation",
+]
+
+[[family]]
+name = "ecode-mcode-compaction"
+modules = ["crate::il::ecode::optimise::compact", "crate::il::mcode::optimise::compact"]
+
+[[family]]
+name = "ecode-mcode-constant-folding"
+modules = ["crate::il::ecode::optimise::fold", "crate::il::mcode::optimise::fold"]
+
+[[family]]
+name = "ecode-mcode-required-defs"
+modules = ["crate::il::ecode::optimise::required", "crate::il::mcode::optimise::required"]
+
+[[family]]
+name = "ecode-mcode-values"
+modules = ["crate::il::ecode::value", "crate::il::mcode::value"]
+
+[[family]]
+name = "switch-recovery-strategies"
+modules = ["crate::analysis::switch::idiom", "crate::analysis::switch::interval"]
+
+[[family]]
+name = "ir-entity-tables"
+modules = [
+    "crate::ir::block::table",
+    "crate::ir::function::table",
+    "crate::ir::problem::table",
+    "crate::ir::switch::table",
+    "crate::ir::symbol::table",
+]
+
+[[family]]
+name = "ir-bidirectional-index-facades"
+modules = ["crate::ir::call_graph::index", "crate::ir::reference::index"]
+
+[[family]]
+name = "ir-staging"
+modules = [
+    "crate::ir::call_graph::index",
+    "crate::ir::function::table",
+    "crate::ir::reference::index",
+]
+
+[[family]]
+name = "ir-persistent-tables"
+modules = [
+    "crate::ir::block::table::persistent",
+    "crate::ir::call_graph::index::persistent",
+    "crate::ir::function::table::persistent",
+    "crate::ir::problem::table::persistent",
+    "crate::ir::reference::index::persistent",
+    "crate::ir::switch::table::persistent",
+    "crate::ir::symbol::table::persistent",
+]
+
+[[family]]
+name = "ir-transient-tables"
+modules = [
+    "crate::ir::block::table::transient",
+    "crate::ir::call_graph::index::transient",
+    "crate::ir::function::table::transient",
+    "crate::ir::problem::table::transient",
+    "crate::ir::reference::index::transient",
+    "crate::ir::switch::table::transient",
+    "crate::ir::symbol::table::transient",
+]
+
+[[family]]
+name = "pcode-ecode-mcode-verification"
+modules = [
+    "crate::il::pcode::ir::verify",
+    "crate::il::ecode::ir::verify",
+    "crate::il::mcode::ir::verify",
+]
+
+[[exception]]
+rule = "rejected_term"
+path = "fugue-core/src/il/mod.rs"
+item = "crate::il::common"
+reason = "common is the established representation-neutral IL infrastructure module"
+
+[[exception]]
+rule = "accessor_family"
+path = "fugue-core/src/il/mcode/transform/mod.rs"
+item = "ECodeToMCodeConfig::with_alias_overrides"
+reason = "the consuming composition operation rebinds the configuration's borrowed-fact lifetime and is not a field accessor"
+
+[[exception]]
+rule = "duplicate_helper"
+path = "fugue-core/src/il/ecode/transform/ssa.rs"
+item = "PCodeToECodeSsaLifter::lift_block_tree"
+reason = "dialect-owned lifting policy consumes the shared IlDominanceEvents traversal without adding a callback protocol solely to merge two orchestration loops"
+
+[[exception]]
+rule = "duplicate_helper"
+path = "fugue-core/src/il/mcode/transform/lifter.rs"
+item = "ECodeToMCodeLifter::lift_block_tree"
+reason = "dialect-owned lifting policy consumes the shared IlDominanceEvents traversal without adding a callback protocol solely to merge two orchestration loops"
+
+[[vocabulary.term]]
+reject = "converter"
+prefer = "transformer"
+roles = ["type"]
+modules = ["crate::il"]
+reason = "transform is the established IL vocabulary"
+
+[[vocabulary.term]]
+reject = "convert"
+prefer = "transform"
+roles = ["function", "method"]
+modules = ["crate::il"]
+reason = "transform is the established IL vocabulary"
+
+[[vocabulary.term]]
+reject = "converted"
+prefer = "transformed"
+roles = ["function", "method"]
+modules = ["crate::il"]
+reason = "transform is the established IL vocabulary"
+
+[[exception]]
+rule = "collection_custody"
+item = "IlGraph::blocks"
+reason = "IlGraph is the deliberate common owner of graph mechanics; its invariants bind blocks, successors and block sources together, and range checking already lives on IlIndexMapper"
+
+[[exception]]
+rule = "collection_custody"
+item = "IlGraph::block_sources"
+reason = "IlGraph is the deliberate common owner of graph mechanics; its invariants bind blocks, successors and block sources together, and range checking already lives on IlIndexMapper"
+
+[[exception]]
+rule = "collection_custody"
+item = "IlGraphBuilder::blocks"
+reason = "builder internals of the deliberate graph owner"
+
+[[exception]]
+rule = "collection_custody"
+item = "ECodeIr::memory_domains"
+reason = "read surface of a persisted dialect record; no separable contract"
+
+[[exception]]
+rule = "collection_custody"
+item = "MCodeIr::values"
+reason = "read surface of a persisted dialect record; no separable contract"
+
+[[exception]]
+rule = "collection_custody"
+item = "MCodeIr::memory_domains"
+reason = "read surface of a persisted dialect record; no separable contract"
+
+[[exception]]
+rule = "collection_custody"
+item = "PCodeIr::source_spans"
+reason = "read surface of a persisted dialect record; no separable contract"
+
+[[exception]]
+rule = "collection_custody"
+item = "IlRegistry::forms"
+reason = "form lookup surface of the registry owner"
+
+[[exception]]
+rule = "collection_custody"
+item = "IlStaging::records"
+reason = "staging lifecycle methods form the owner's contract; the stored cache is the only sibling state"
+
+[[exception]]
+rule = "allocating_getter"
+item = "IlFormId::dialect"
+reason = "component access on the form identifier; the derived id is small and the accessor form is the established call-site idiom"
+
+[[exception]]
+rule = "allocating_getter"
+path = "fugue-core/src/il/pcode/transform.rs"
+item = "metadata"
+reason = "assembles the conversion's metadata record at one natural point; not a repeated accessor"
+
+[[exception]]
+rule = "associated_namespace_helper"
+item = "IlFormId::component_count"
+reason = "the IlFormId:: spelling is the point; the constant-like query reads as form-id vocabulary"
+
+[[exception]]
+rule = "large_inherent_impl"
+item = "ECodeToMCodeLifter"
+reason = "cohesive one-function transformation owner; splitting it was reviewed and rejected"
+
+[[exception]]
+rule = "parameter_clump"
+path = "fugue-core/src/il/ecode/ir/verify.rs"
+reason = "the verify constructors mirror each other across dialects; the three-parameter shape is the mirrored surface"
+
+[[exception]]
+rule = "repeated_mechanics"
+path = "fugue-core/src/il/mcode"
+reason = "MCode is scheduled to change; leave its mechanics alone until the new form lands"
+
+[[exception]]
+rule = "repeated_mechanics"
+item = "define"
+reason = "one side lives in MCode, which is scheduled to change; leave its mechanics alone until the new form lands"
+
+[[exception]]
+rule = "family_visibility_drift"
+path = "fugue-core/src/il/ecode/optimise/required.rs"
+reason = "ECode's required defs arrive through the analysis trait while MCode's take recovery inputs directly; the constructors are not corresponding operations"
+
+[[exception]]
+rule = "index_conversion_churn"
+item = "evaluate"
+reason = "the scalar evaluator bridges bit-width, shift-amount and byte-count domains at the BitVec boundary; each conversion is the boundary"
+
+[[exception]]
+rule = "family_visibility_drift"
+path = "fugue-core/src/il/mcode/optimise/required.rs"
+item = "MCodeRequiredDefs::new"
+reason = "justified asymmetry: ECode reaches required defs through the analyse trait while MCode constructs its defs directly"
+
+[[exception]]
+rule = "repeated_mechanics"
+path = "fugue-core/src/ir/symbol/table/transient.rs"
+reason = "get_by_id and get_by_id_mut are API-symmetry twins; the mutable form mirrors the immutable body deliberately"
+
+[[exception]]
+rule = "repeated_mechanics"
+path = "fugue-core/src/ir/symbol/table/persistent.rs"
+reason = "ids_by_address and ids_by_name are parallel per-index scans; the shared shape is the index walk"
+
+[[exception]]
+rule = "family_visibility_drift"
+path = "fugue-core/src/ir/function/table/mod.rs"
+item = "publish_allocations"
+reason = "publish visibility follows the caller: function materialises internally while the transaction layer drives the other tables"
+
+[[exception]]
+rule = "family_visibility_drift"
+path = "fugue-core/src/ir/function/table/mod.rs"
+item = "publish_upsert"
+reason = "publish visibility follows the caller: function materialises internally while the transaction layer drives the other tables"
+
+[[exception]]
+rule = "family_visibility_drift"
+path = "fugue-core/src/ir/function/table/mod.rs"
+item = "publish_remove"
+reason = "publish visibility follows the caller: function materialises internally while the transaction layer drives the other tables"
+
+[[exception]]
+rule = "family_visibility_drift"
+path = "fugue-core/src/ir/symbol/table/mod.rs"
+item = "publish_allocations"
+reason = "publish visibility follows the caller: the prepared half-tie mirrors function's internal materialisation"
+
+[[exception]]
+rule = "tuple_type"
+path = "fugue-core/src/ir/insn.rs"
+reason = "the (target, kind, address) triple is a transient iteration view over persisted targets; a named record would restate InsnTarget"
+
+[[exception]]
+rule = "tuple_type"
+path = "fugue-core/src/analysis/switch/idiom/mod.rs"
+reason = "the (table, index, index_before) triple is match-internal plumbing between idiom tracing steps"
+
+[[exception]]
+rule = "tuple_type"
+path = "fugue-core/src/ir/symbol/table"
+reason = "the symbol iteration triple is the same transient view across facade and worker layers; a named record would restate SymbolEntry"
+
+[[exception]]
+rule = "accessor_family"
+path = "fugue-core/src/ir/address.rs"
+item = "with_shift"
+reason = "construction-phase fluent setter; the value is configured once while building, not mutated"
+
+[[exception]]
+rule = "accessor_family"
+path = "fugue-core/src/ir/function"
+item = "with_origin"
+reason = "construction-phase fluent setter; the value is configured once while building, not mutated"
+
+[[exception]]
+rule = "accessor_family"
+path = "fugue-core/src/ir/function"
+item = "with_confidence"
+reason = "construction-phase fluent setter; the value is configured once while building, not mutated"
+
+[[exception]]
+rule = "accessor_family"
+path = "fugue-core/src/ir/function/mod.rs"
+item = "with_blocks"
+reason = "construction-phase fluent setter; the value is configured once while building, not mutated"
+
+[[exception]]
+rule = "accessor_family"
+path = "fugue-core/src/ir/reference/mod.rs"
+item = "with_origin"
+reason = "construction-phase fluent setter; the value is configured once while building, not mutated"
+
+[[exception]]
+rule = "allocating_getter"
+path = "fugue-core/src/ir/address.rs"
+reason = "start_address and end_address derive small owned addresses from the range bounds; the accessor form is the established idiom"
+
+[[exception]]
+rule = "allocating_getter"
+path = "fugue-core/src/ir/block/mod.rs"
+reason = "address_range and coverage assemble small owned range views at one natural point; not repeated accessors"
+
+[[exception]]
+rule = "allocating_getter"
+path = "fugue-core/src/ir/block/incomplete.rs"
+item = "crate::ir::block::incomplete::CodeBlockRecord::address_range"
+reason = "address_range constructs a small Copy range view and matches the corresponding CodeBlock accessor"
+
+[[exception]]
+rule = "associated_namespace_helper"
+path = "fugue-core/src/ir/block/table/persistent.rs"
+reason = "write-batch builders group on their table type deliberately; the batch is the subject, the table names the domain"
+
+[[exception]]
+rule = "trivial_helper"
+path = "fugue-core/src/ir/block/table/persistent.rs"
+item = "crate::ir::block::table::persistent::CodeBlockSizeBucket::all"
+reason = "the bucket type owns enumeration of its bounded u16 size domain so callers do not duplicate its representation invariant"
+
+[[exception]]
+rule = "collection_custody"
+path = "fugue-core/src/ir/reference/index/mod.rs"
+item = "crate::ir::reference::index::ReferenceStaging::staged_references"
+reason = "staged references, asserted keys and derived coverage form one transaction-staging aggregate; the private methods implement its persisted-plus-staged reference view"
+
+[[exception]]
+rule = "associated_namespace_helper"
+path = "fugue-core/src/ir/function/table/persistent.rs"
+reason = "write-batch builders group on their table type deliberately; the batch is the subject, the table names the domain"
+
+[[exception]]
+rule = "associated_namespace_helper"
+path = "fugue-core/src/ir/symbol/table/persistent.rs"
+reason = "write-batch builders group on their table type deliberately; the batch is the subject, the table names the domain"
+
+[[exception]]
+rule = "associated_namespace_helper"
+path = "fugue-core/src/ir/symbol/table/transient.rs"
+reason = "write-batch builders group on their table type deliberately; the batch is the subject, the table names the domain"
+
+[[exception]]
+rule = "associated_namespace_helper"
+path = "fugue-core/src/ir/function/mod.rs"
+reason = "write-batch builders group on their table type deliberately; the batch is the subject, the table names the domain"
+
+[[exception]]
+rule = "semantic_newtype_bypass"
+path = "fugue-core/src/ir/symbol/table/persistent.rs"
+item = "selector"
+reason = "the loader key packs the selector at the storage boundary and reconstructs the newtype on read; this is the sanctioned conversion point"
+
+[[exception]]
+rule = "rejected_term"
+path = "fugue-core/src/ir/mod.rs"
+item = "crate::ir::cfg"
+reason = "cfg names the control-flow-graph module, not a config abbreviation"
+
+[[exception]]
+rule = "parameter_name_drift"
+path = "fugue-core/src/ir/address.rs"
+reason = "binary-operator and merge shapes take `other`/`base`; the prevailing single-value names do not fit pairwise operations"
+
+[[exception]]
+rule = "parameter_name_drift"
+path = "fugue-core/src/ir/block/table/mod.rs"
+reason = "merge and remap shapes name their pairwise operands; the prevailing single-value names do not fit"
+
+[[exception]]
+rule = "parameter_name_drift"
+path = "fugue-core/src/ir/function/mod.rs"
+reason = "merge shapes take `source`; the prevailing single-value name does not fit pairwise operations"
+
+[[exception]]
+rule = "parameter_name_drift"
+path = "fugue-core/src/ir/function/table/mod.rs"
+reason = "the staging layer receives its backing table; `functions` names the owner's field, not this parameter"
+
+[[exception]]
+rule = "parameter_name_drift"
+path = "fugue-core/src/ir/mod.rs"
+reason = "British spelling adopted here first; the prevailing spelling flips as remaining zones are calibrated"
+
+[[exception]]
+rule = "vague_noun"
+path = "fugue-core/src/ir/persistent.rs"
+reason = "persistence machinery genuinely models opaque state records"
+
+[[exception]]
+rule = "vague_noun"
+path = "fugue-core/src/ir/switch/mod.rs"
+item = "data"
+reason = "the switch payload is genuinely uninterpreted data at this layer"
+
+[[exception]]
+rule = "item_order"
+path = "fugue-core/src/ir"
+reason = "module-local `use` after `mod` declarations is the established layout in ir table modules"
+
+[[exception]]
+rule = "large_inherent_impl"
+path = "fugue-core/src/ir"
+reason = "reviewed cohesive owners; splitting the entity and table impls was considered and rejected"
+
+[[exception]]
+rule = "parameter_order_drift"
+path = "fugue-core/src/ir/reference/index/mod.rs"
+item = "new"
+reason = "the key type is target-major by design; its constructor mirrors the key layout"
+
+[[exception]]
+rule = "parameter_clump"
+path = "fugue-core/src/ir/block/table/mod.rs"
+reason = "the shared triple is the table worker interface; a carrier struct would restate the facade"
+
+[[exception]]
+rule = "parameter_clump"
+path = "fugue-core/src/ir/symbol/table/transient.rs"
+reason = "the shared quad is the symbol worker interface; a carrier struct would restate the facade"
+
+[[exception]]
+rule = "trivial_public_wrapper"
+path = "fugue-core/src/ir/address.rs"
+item = "new"
+reason = "the conversion-accepting constructor is the public face; into-forwarding is the point"
+
+[[exception]]
+rule = "companion_location"
+path = "fugue-core/src/ir/symbol/table/transient.rs"
+item = "SymbolEntryIter"
+reason = "the iterator is worker-layer plumbing; it lives with the storage it walks"
+
+[[exception]]
+rule = "field_forwarder"
+path = "fugue-core/src/ir/problem/table/persistent.rs"
+reason = "storage facade: the table is the public custodian of its index"
+
+[[exception]]
+rule = "field_forwarder"
+path = "fugue-core/src/ir/switch/table/persistent.rs"
+reason = "storage facade: the table is the public custodian of its index"
+
+[[exception]]
+rule = "synonym_cluster"
+path = "fugue-core/src/ir/function/incomplete.rs"
+reason = "add registers a domain fact with its owner (a block edge); insert places into a keyed store"
+
+[[exception]]
+rule = "synonym_cluster"
+path = "fugue-core/src/analysis/function/recovery/analysis.rs"
+reason = "add registers a domain fact with its owner (candidates, avoids, hints); insert places into a keyed store"
+
+[[exception]]
+rule = "synonym_cluster"
+path = "fugue-core/src/loader/image.rs"
+reason = "add registers a domain fact with its owner (a function hint); insert places into a keyed store"
+
+[[exception]]
+rule = "allow_attribute"
+path = "fugue-core/src/storage/segments/provider/memmap.rs"
+reason = "range-set-blaze exposes the reviewed rogs seek API under its deprecated rog_experimental surface; the suppression is confined to the extent-set boundary"
+
+[[exception]]
+rule = "rejected_term"
+path = "fugue-core/src/storage/entities/rocksdb/options.rs"
+item = "crate::storage::entities::rocksdb::options::DataBlockIndexType"
+reason = "the serialisable configuration type mirrors RocksDB's DataBlockIndexType vocabulary exactly"
+
+[[exception]]
+rule = "constructor_name"
+path = "fugue-core/src/storage/mod.rs"
+item = "crate::storage::StorageProviderError::create_project_already_exists"
+reason = "create_project names the CreateProject error category; create is not being used as a construction verb"
+
+[[exception]]
+rule = "constructor_name"
+path = "fugue-core/src/storage/mod.rs"
+item = "crate::storage::StorageProviderError::create_project_not_found"
+reason = "create_project names the CreateProject error category; create is not being used as a construction verb"
+
+[[exception]]
+rule = "constructor_name"
+path = "fugue-core/src/storage/mod.rs"
+item = "crate::storage::StorageProviderError::create_project_invalid_input"
+reason = "create_project names the CreateProject error category; create is not being used as a construction verb"
+
+[[exception]]
+rule = "constructor_name"
+path = "fugue-core/src/storage/mod.rs"
+item = "crate::storage::StorageProviderError::create_project"
+reason = "create_project names the CreateProject error category; create is not being used as a construction verb"
+
+[[exception]]
+rule = "rejected_term"
+path = "fugue-core/src/storage/mod.rs"
+item = "crate::storage::StorageCleanupHandlerOneShot"
+reason = "handler accurately names the supplied cleanup callback object; the wrapper guarantees that callback runs at most once"
+
+[[exception]]
+rule = "rejected_term"
+path = "fugue-core/src/storage/mod.rs"
+item = "crate::storage::StorageCleanupHandler"
+reason = "handler accurately names the supplied callback invoked when storage is cleaned up"
+
+[[exception]]
+rule = "rejected_term"
+path = "fugue-core/src/types/memmap.rs"
+item = "crate::types::memmap::SharedBytesOrMapping"
+reason = "shared precisely distinguishes the Arc-owned cloneable representation from BytesOrMapping; a generic role noun would discard ownership semantics"
+
+[[exception]]
+rule = "accessor_family"
+path = "fugue-core/src/storage/mod.rs"
+item = "crate::storage::StorageContainer::with_cleanup_handler"
+reason = "the cleanup handler is a deliberately write-only drop callback; exposing a getter would add unusable public surface"
+
+[[exception]]
+rule = "impl_method_order"
+path = "fugue-core/src/storage/mod.rs"
+item = "crate::storage::StorageContainer::contains_entity"
+reason = "contains_entity follows entity so the container retains the storage subsystem's established get-then-contains operation order"
+
+[[exception]]
+rule = "needless_pass_by_ref_mut"
+path = "fugue-core/src/storage/entities/cache.rs"
+reason = "try_get_mut and try_iter_mut require an exclusive cache borrow so callers cannot hold concurrent copy-on-write edit handles whose publication would be last-writer-wins"
+
+[[exception]]
+rule = "impl_method_order"
+path = "fugue-core/src/storage/entities/mod.rs"
+item = "crate::storage::entities::EntityReadTransaction::contains"
+reason = "contains follows get and get_as to preserve the entity storage API's established read-operation order"
+
+[[exception]]
+rule = "impl_method_order"
+path = "fugue-core/src/storage/entities/mod.rs"
+item = "crate::storage::entities::EntityWriteTransaction::commit"
+reason = "commit consumes and publishes the staged transaction after its write operations; it is not an accessor"
+
+[[exception]]
+rule = "impl_method_order"
+path = "fugue-core/src/storage/entities/mod.rs"
+item = "crate::storage::entities::EntityStorage::contains"
+reason = "contains follows the write operations to preserve the provider and backend API's established CRUD ordering"
+
+[[exception]]
+rule = "unnecessary_wraps"
+path = "fugue-core/src/analysis/combinator.rs"
+reason = "the test helper implements the fallible AnalysisPass callback contract"
+
+[[exception]]
+rule = "unnecessary_wraps"
+path = "fugue-core/src/analysis/group.rs"
+reason = "the test helper implements the fallible AnalysisPass callback contract"
+
+[[exception]]
+rule = "unnecessary_wraps"
+path = "fugue-core/src/analysis/function/recovery/linear_sweep.rs"
+reason = "the extension configure function must match the fallible FunctionRecoveryExtension callback contract"
+
+[[exception]]
+rule = "unnecessary_wraps"
+path = "fugue-core/src/analysis/non_returning/mod.rs"
+reason = "the extension configure function must match the fallible FunctionRecoveryExtension callback contract"
+
+[[exception]]
+rule = "unnecessary_wraps"
+path = "fugue-core/src/analysis/switch/mod.rs"
+reason = "the extension configure function must match the fallible FunctionRecoveryExtension callback contract"
+
+[[exception]]
+rule = "split_inherent_impl"
+path = "fugue-core/src/project/transaction"
+item = "crate::project::transaction::ProjectTransaction"
+reason = "ProjectTransaction is the intentional flat public facade over domain-owned transaction operations; co-locating the methods would collapse the project transaction API into one module"
+
+[[exception]]
+rule = "split_inherent_impl"
+path = "fugue-core/src/loader/elf/relocations"
+item = "crate::loader::elf::relocations::ElfSegmentRelocator"
+reason = "architecture-owned relocation methods deliberately share the relocator's private state; replacing the split impl with free functions would change syntax only and widen the state interface"
+
+[[exception]]
+rule = "split_inherent_impl"
+path = "fugue-core/src/loader/pe/relocations"
+item = "crate::loader::pe::relocations::PeSegmentRelocator"
+reason = "architecture-owned relocation methods deliberately share the relocator's private state; replacing the split impl with free functions would change syntax only and widen the state interface"
+
+[[exception]]
+rule = "duplicate_helper"
+path = "fugue-core/src/loader/elf/mod.rs"
+item = "crate::loader::elf::ElfImageSegments::image_segment"
+reason = "ELF and PE segment projection is deliberately format-owned because their segment representations may diverge; a shared helper would couple them"
+
+[[exception]]
+rule = "duplicate_helper"
+path = "fugue-core/src/loader/pe/mod.rs"
+item = "crate::loader::pe::PeImageSegments::image_segment"
+reason = "ELF and PE segment projection is deliberately format-owned because their segment representations may diverge; a shared helper would couple them"
+
+[[exception]]
+rule = "allow_attribute"
+path = "fugue-core/src/arch/aarch64.rs"
+reason = "the private constructors deliberately return the type-erased architecture and disassembler facades"
+
+[[exception]]
+rule = "allow_attribute"
+path = "fugue-core/src/arch/arm.rs"
+reason = "the private constructors deliberately return the type-erased architecture and disassembler facades"
+
+[[exception]]
+rule = "allow_attribute"
+path = "fugue-core/src/arch/mips.rs"
+reason = "the private constructor deliberately returns the type-erased architecture facade"
+
+[[exception]]
+rule = "allow_attribute"
+path = "fugue-core/src/arch/mips64.rs"
+reason = "the private constructor deliberately returns the type-erased architecture facade"
+
+[[exception]]
+rule = "allow_attribute"
+path = "fugue-core/src/arch/ppc.rs"
+reason = "the private constructor deliberately returns the type-erased architecture facade"
+
+[[exception]]
+rule = "allow_attribute"
+path = "fugue-core/src/arch/ppc64.rs"
+reason = "the private constructor deliberately returns the type-erased architecture facade"
+
+[[exception]]
+rule = "allow_attribute"
+path = "fugue-core/src/arch/riscv.rs"
+reason = "the private constructor deliberately returns the type-erased architecture facade"
+
+[[exception]]
+rule = "allow_attribute"
+path = "fugue-core/src/arch/riscv64.rs"
+reason = "the private constructor deliberately returns the type-erased architecture facade"
+
+[[exception]]
+rule = "allow_attribute"
+path = "fugue-core/src/arch/traits.rs"
+reason = "default architecture hooks retain named parameters to document the callback contract"
+
+[[exception]]
+rule = "allow_attribute"
+path = "fugue-core/src/arch/x86.rs"
+reason = "the private constructors deliberately return the type-erased architecture and disassembler facades"
+
+[[exception]]
+rule = "allow_attribute"
+path = "fugue-core/src/arch/x86_64.rs"
+reason = "the private constructors deliberately return the type-erased architecture and disassembler facades"
+
+[[exception]]
+rule = "rejected_term"
+path = "fugue-core/src/arch/aarch64.rs"
+item = "crate::arch::aarch64::ArchData"
+reason = "ArchData is the established private aggregate for architecture-specific cached values whose roles vary by architecture"
+
+[[exception]]
+rule = "rejected_term"
+path = "fugue-core/src/arch/arm.rs"
+item = "crate::arch::arm::ArchData"
+reason = "ArchData is the established private aggregate for architecture-specific cached values whose roles vary by architecture"
+
+[[exception]]
+rule = "rejected_term"
+path = "fugue-core/src/arch/mips.rs"
+item = "crate::arch::mips::ArchData"
+reason = "ArchData is the established private aggregate for architecture-specific cached values whose roles vary by architecture"
+
+[[exception]]
+rule = "rejected_term"
+path = "fugue-core/src/arch/mips64.rs"
+item = "crate::arch::mips64::ArchData"
+reason = "ArchData is the established private aggregate for architecture-specific cached values whose roles vary by architecture"
+
+[[exception]]
+rule = "rejected_term"
+path = "fugue-core/src/arch/ppc.rs"
+item = "crate::arch::ppc::ArchData"
+reason = "ArchData is the established private aggregate for architecture-specific cached values whose roles vary by architecture"
+
+[[exception]]
+rule = "rejected_term"
+path = "fugue-core/src/arch/ppc64.rs"
+item = "crate::arch::ppc64::ArchData"
+reason = "ArchData is the established private aggregate for architecture-specific cached values whose roles vary by architecture"
+
+[[exception]]
+rule = "rejected_term"
+path = "fugue-core/src/arch/riscv.rs"
+item = "crate::arch::riscv::ArchData"
+reason = "ArchData is the established private aggregate for architecture-specific cached values whose roles vary by architecture"
+
+[[exception]]
+rule = "rejected_term"
+path = "fugue-core/src/arch/riscv64.rs"
+item = "crate::arch::riscv64::ArchData"
+reason = "ArchData is the established private aggregate for architecture-specific cached values whose roles vary by architecture"
+
+[[exception]]
+rule = "rejected_term"
+path = "fugue-core/src/arch/x86.rs"
+item = "crate::arch::x86::ArchData"
+reason = "ArchData is the established private aggregate for architecture-specific cached values whose roles vary by architecture"
+
+[[exception]]
+rule = "rejected_term"
+path = "fugue-core/src/arch/x86_64.rs"
+item = "crate::arch::x86_64::ArchData"
+reason = "ArchData is the established private aggregate for architecture-specific cached values whose roles vary by architecture"
+
+[[exception]]
+rule = "impl_method_order"
+path = "fugue-core/src/arch/arm.rs"
+item = "crate::arch::arm::Arm::new"
+reason = "new is an internal factory for the type-erased Arch facade rather than a constructor returning Arm"
+
+[[exception]]
+rule = "impl_method_order"
+path = "fugue-core/src/arch/mod.rs"
+item = "crate::arch::Arch::is_service_call"
+reason = "intrinsic and byte-pattern predicates are behavioural classifiers rather than field accessors"
+
+[[exception]]
+rule = "split_inherent_impl"
+path = "fugue-core/src/arch/registry.rs"
+item = "crate::arch::registry::ArchProvider"
+reason = "#[fugue_core::extension] consumes the apparent impls and emits free functions plus registrations, so no split inherent impl exists after expansion"
+
+[[exception]]
+rule = "split_inherent_impl"
+path = "fugue-core/src/arch/registry.rs"
+item = "crate::arch::registry::LanguageProvider"
+reason = "#[fugue_core::extension] consumes the apparent impls and emits free functions plus registrations, so no split inherent impl exists after expansion"
+
+[[exception]]
+rule = "split_inherent_impl"
+path = "fugue-core/src/platform/non_returning.rs"
+item = "crate::platform::non_returning::NonReturningExternSet"
+reason = "#[fugue_core::extension] consumes the apparent impls and emits free functions plus registrations, so no split inherent impl exists after expansion"
+
+[[exception]]
+rule = "duplicate_helper"
+path = "fugue-core/src/arch/x86.rs"
+item = "crate::arch::x86::classify_bytes"
+reason = "32-bit and 64-bit x86 byte classification remains architecture-owned so their rules can diverge without coupling the architecture implementations"
+
+[[exception]]
+rule = "duplicate_helper"
+path = "fugue-core/src/arch/x86.rs"
+item = "crate::arch::x86::classify_contiguous_bytes"
+reason = "32-bit and 64-bit x86 contiguous classification uses distinct decoder types and remains architecture-owned"
+
+[[exception]]
+rule = "duplicate_helper"
+path = "fugue-core/src/arch/x86_64.rs"
+item = "crate::arch::x86_64::classify_bytes"
+reason = "32-bit and 64-bit x86 byte classification remains architecture-owned so their rules can diverge without coupling the architecture implementations"
+
+[[exception]]
+rule = "duplicate_helper"
+path = "fugue-core/src/arch/x86_64.rs"
+item = "crate::arch::x86_64::classify_contiguous_bytes"
+reason = "32-bit and 64-bit x86 contiguous classification uses distinct decoder types and remains architecture-owned"
+
+[[exception]]
+rule = "impl_method_order"
+path = "fugue-core/src/queries/engine.rs"
+item = "crate::queries::engine::QueryEngine::begin_publication"
+reason = "begin_publication acquires the publication guard and starts an action; it is not a field accessor"
+
+[[exception]]
+rule = "impl_method_order"
+path = "fugue-core/src/queries/term.rs"
+item = "crate::queries::term::Dependency::covers"
+reason = "covers follows the fluent on, within and and construction methods; it is a behavioural predicate rather than a field accessor"
+
+[[exception]]
+rule = "impl_method_order"
+path = "fugue-core/src/queries/reader.rs"
+item = "crate::queries::reader::QueryReader::with_project"
+reason = "with_project executes a query closure while holding the project and publication locks; it is a private execution helper rather than an accessor"
+
+[[exception]]
+rule = "impl_method_order"
+path = "fugue-core/src/queries/cache.rs"
+item = "crate::queries::cache::QueryCache::insert_flow_targets"
+reason = "insert_flow_targets mutates the cache and is grouped with the other cache insertion operations; it is not an accessor"
+
+[[exception]]
+rule = "identifier_role"
+path = "fugue-core/src/engine/update.rs"
+item = "crate::engine::update::ProjectOperation"
+reason = "ProjectOperation is project-domain vocabulary rather than an IL Op; abbreviating it would make the private update representation less clear"
+
+[[exception]]
+rule = "impl_method_order"
+path = "fugue-core/src/engine/metrics.rs"
+item = "crate::engine::metrics::EngineMetrics::record_retry"
+reason = "record_retry increments a metric counter and is an action rather than an accessor"
+
+[[exception]]
+rule = "impl_method_order"
+path = "fugue-core/src/engine/subscription.rs"
+item = "crate::engine::subscription::Subscription::iter"
+reason = "iter is grouped with the receive operations that expose the subscription channel; it is not a field accessor"
+
+[[exception]]
+rule = "impl_method_order"
+path = "fugue-core/src/engine/worker.rs"
+item = "crate::engine::worker::Worker::with_transaction"
+reason = "with_transaction executes an operation inside the engine publication and project transaction boundary; it is not an accessor"
+
+[[exception]]
+rule = "impl_method_order"
+path = "fugue-core/src/engine/view.rs"
+item = "crate::engine::view::ProjectView::record_unbounded"
+reason = "record_unbounded records an unbounded read dependency through interior state; it is an action rather than an accessor"
+
+[[exception]]
+rule = "impl_method_order"
+path = "fugue-core/src/ir/reference/index/persistent.rs"
+item = "crate::ir::reference::index::persistent::ReferenceIndex::mark_current"
+reason = "mark_current persists the derived-index revision marker through interior storage; it is bookkeeping rather than an accessor"
+
+[[exception]]
+rule = "impl_method_order"
+path = "fugue-core/src/ir/block/table/persistent.rs"
+item = "crate::ir::block::table::persistent::CodeBlockTable::flush"
+reason = "flush publishes buffered cache writes through interior state; it remains after the table's read operations as lifecycle bookkeeping rather than an accessor"
+
+[[exception]]
+rule = "unnecessary_wraps"
+path = "fugue-core/tests/addressless_work.rs"
+item = "crate::build_addressless_analyser"
+reason = "AnalyserProvider requires this callback to return Result; macro registration hides the required coercion from Clippy"
+
+[[exception]]
+rule = "unnecessary_wraps"
+path = "fugue-core/tests/analysis_coverage.rs"
+item = "crate::build_new_coverage_analyser"
+reason = "AnalyserProvider requires this callback to return Result; macro registration hides the required coercion from Clippy"
+
+[[exception]]
+rule = "unnecessary_wraps"
+path = "fugue-core/tests/analysis_coverage.rs"
+item = "crate::build_old_coverage_analyser"
+reason = "AnalyserProvider requires this callback to return Result; macro registration hides the required coercion from Clippy"
+
+[[exception]]
+rule = "unnecessary_wraps"
+path = "fugue-core/tests/engine.rs"
+item = "crate::build_error_analyser"
+reason = "AnalyserProvider requires this callback to return Result; macro registration hides the required coercion from Clippy"
+
+[[exception]]
+rule = "unnecessary_wraps"
+path = "fugue-core/tests/engine.rs"
+item = "crate::build_mutating_error_analyser"
+reason = "AnalyserProvider requires this callback to return Result; macro registration hides the required coercion from Clippy"
+
+[[exception]]
+rule = "unnecessary_wraps"
+path = "fugue-core/tests/engine.rs"
+item = "crate::build_panicking_analyser"
+reason = "AnalyserProvider requires this callback to return Result; macro registration hides the required coercion from Clippy"
+
+[[exception]]
+rule = "unnecessary_wraps"
+path = "fugue-core/tests/engine.rs"
+item = "crate::build_completion_analyser"
+reason = "AnalyserProvider requires this callback to return Result; macro registration hides the required coercion from Clippy"
+
+[[exception]]
+rule = "unnecessary_wraps"
+path = "fugue-core/tests/engine.rs"
+item = "crate::build_completion_panic_analyser"
+reason = "AnalyserProvider requires this callback to return Result; macro registration hides the required coercion from Clippy"
+
+[[exception]]
+rule = "unnecessary_wraps"
+path = "fugue-core/tests/engine.rs"
+item = "crate::build_derived_symbol_analyser"
+reason = "AnalyserProvider requires this callback to return Result; macro registration hides the required coercion from Clippy"
+
+[[exception]]
+rule = "unnecessary_wraps"
+path = "fugue-core/tests/engine.rs"
+item = "crate::build_storm_analyser"
+reason = "AnalyserProvider requires this callback to return Result; macro registration hides the required coercion from Clippy"
+
+[[exception]]
+rule = "unnecessary_wraps"
+path = "fugue-core/tests/engine.rs"
+item = "crate::FunctionRecoveryExtension::configure"
+reason = "FunctionRecoveryExtension requires this callback to return Result; macro registration hides the required coercion from Clippy"
+
+[[exception]]
+rule = "unnecessary_wraps"
+path = "fugue-core-idalib/src/lib.rs"
+item = "crate::FunctionRecoveryExtension::configure"
+reason = "FunctionRecoveryExtension requires this callback to return Result; macro registration hides the required coercion from Clippy"
+
+[[exception]]
+rule = "unnecessary_wraps"
+path = "fugue-core/tests/engine_diagnostics.rs"
+item = "crate::build_rejecting_collapse_analyser"
+reason = "AnalyserProvider requires this callback to return Result; macro registration hides the required coercion from Clippy"
+
+[[exception]]
+rule = "companion_location"
+path = "fugue-core/src/analysis/function/recovery/builder.rs"
+item = "crate::analysis::function::recovery::builder::FunctionBuilder"
+reason = "FunctionBuilder is the private recovery algorithm which produces IncompleteFunction candidates; it is not a construction companion for the persisted Function IR type"
+
+[[exception]]
+rule = "semantic_newtype_bypass"
+path = "fugue-core/src/analysis/function/recovery/mod.rs"
+reason = "candidate, function and output-byte ceilings are distinct recovery resources; IterationLimit models analysis-combinator iteration counts and is not their domain type"
+
+[[exception]]
+rule = "macro_skipped"
+path = "fugue-core/src/analysis/non_returning/externs.rs"
+reason = "the skipped invocation registers the analyser provider; the analyser implementation itself is declared directly and remains auditable"
+
+[[exception]]
+rule = "tuple_type"
+path = "fugue-core/src/analysis/switch/interval/layout.rs"
+item = "crate::analysis::switch::interval::layout::SwitchLayoutAnalysis::table_layout"
+reason = "the loaded-table triple is immediately destructured into SwitchTableLayout; another layout record would duplicate that enum"
+
+[[exception]]
+rule = "tuple_type"
+path = "fugue-core/src/analysis/switch/interval/layout.rs"
+item = "crate::analysis::switch::interval::layout::SwitchLayoutAnalysis::inline_table_layout"
+reason = "the inline-table triple is immediately destructured into SwitchTableLayout; another layout record would duplicate that enum"
+
+[[exception]]
+rule = "index_conversion_churn"
+path = "fugue-core/src/analysis/switch/interval/mod.rs"
+item = "crate::analysis::switch::interval::SwitchIntervalRecovery::resolve_layout"
+reason = "switch recovery converts at the distinct BitVec value, table-entry u32, byte-size usize and IR element-count boundaries"
+
+[[exception]]
+rule = "tuple_type"
+path = "fugue-core/src/analysis/switch/interval/mod.rs"
+item = "crate::analysis::switch::interval::SwitchIntervalRecovery::case_enumeration"
+reason = "the interval, optional guard and label offset are transient return plumbing consumed immediately by resolve_layout; a second case-analysis record was reviewed and rejected"
+
+[[exception]]
+rule = "role_mismatch"
+path = "fugue-core/src/analysis/switch/interval/mod.rs"
+item = "crate::analysis::switch::interval::SwitchIntervalRecovery::case_enumeration::index"
+reason = "index is the switch-table index expression; IlValueId is its SSA representation rather than its domain role"
+
+[[exception]]
+rule = "unresolved_impl_owner"
+path = "fugue-core/src/analysis/switch/mod.rs"
+reason = "#[fugue_core::extension] consumes the apparent impl and emits a FunctionRecoveryExtension registration before Rust resolves an inherent impl owner"
+
+[[exception]]
+rule = "macro_skipped"
+path = "fugue-core/src/analysis/value/strided.rs"
+reason = "the macros generate the reviewed owned and borrowed standard-operator implementation matrix without duplicating each forwarding body"
+
+[[exception]]
+rule = "rejected_term"
+path = "fugue-core-derive/src/lib.rs"
+item = "crate::analysis::AnalysisDataDelegation"
+reason = "the compound name identifies the derive macro's analysis-data delegation model; bare Delegation loses its domain"
+
+[[exception]]
+rule = "rejected_term"
+path = "fugue-core/src/engine/mod.rs"
+item = "crate::engine::AnalysisData"
+reason = "AnalysisData is the agreed domain term for values supplied to analysis through the engine"
+
+[[exception]]
+rule = "rejected_term"
+path = "fugue-core/src/engine/mod.rs"
+item = "crate::engine::AnalysisDataError"
+reason = "AnalysisDataError names failures from the agreed AnalysisData lookup contract"
+
+[[exception]]
+rule = "rejected_term"
+path = "fugue-core/src/engine/mod.rs"
+item = "crate::engine::AnalysisDataStore"
+reason = "AnalysisDataStore is the agreed name for the engine-owned collection of AnalysisData values"
+
+[[exception]]
+rule = "method_family_name"
+path = "fugue-core/src/engine/mod.rs"
+item = "crate::engine::AnalysisEngine::set_data"
+reason = "set_data synchronously replaces worker-owned AnalysisData through the engine's interior command transport"
+
+[[exception]]
+rule = "unresolved_impl_owner"
+path = "fugue-core/src/loader/elf/function_recovery/mod.rs"
+reason = "#[fugue_core::extension] consumes the apparent impl and emits a FunctionRecoveryExtension registration before Rust resolves an inherent impl owner"
+
+[[exception]]
+rule = "associated_namespace_helper"
+path = "fugue-core/src/storage/segments/mod.rs"
+item = "crate::storage::segments::SegmentStorage::read_metadata"
+reason = "SegmentStorage owns reconstruction from its persisted representation; the metadata record remains a serialisation carrier without filesystem responsibility"
+
+[[exception]]
+rule = "constructor_role"
+path = "fugue-core/src/storage/segments/mod.rs"
+item = "crate::storage::segments::SegmentStorage::read_metadata"
+reason = "read_metadata performs the storage aggregate's file I/O and decoding; SegmentStorageMetadata is deliberately only the decoded carrier"
+
+[[exception]]
+rule = "synonym_cluster"
+path = "fugue-core/src/storage/segments/staging.rs"
+item = "crate::storage::segments::staging::PreparedSegmentWriteRecord::new"
+reason = "new constructs private staging records while create_mapping stages a domain mutation; the verbs describe different operations"
+
+[[exception]]
+rule = "repeated_mechanics"
+path = "fugue-core/src/storage/segments/staging.rs"
+item = "crate::storage::segments::staging::SegmentStorageStaging::remap_mapping"
+reason = "remap and resize intentionally mirror validation while applying different SegmentMappingBuilder invariants; a setter callback would obscure the mutation"
+
+[[exception]]
+rule = "repeated_mechanics"
+path = "fugue-core/src/storage/segments/staging.rs"
+item = "crate::storage::segments::staging::SegmentStorageStaging::resize_mapping"
+reason = "remap and resize intentionally mirror validation while applying different SegmentMappingBuilder invariants; a setter callback would obscure the mutation"
+
+[[exception]]
+rule = "repeated_mechanics"
+path = "fugue-core/src/storage/segments/staging.rs"
+item = "crate::storage::segments::staging::SegmentStorageStaging::add_mapping_with_placement"
+reason = "add and reprioritise deliberately express opposing membership preconditions before publishing the same placement operation"
+
+[[exception]]
+rule = "repeated_mechanics"
+path = "fugue-core/src/storage/segments/staging.rs"
+item = "crate::storage::segments::staging::SegmentStorageStaging::reprioritise_mapping"
+reason = "add and reprioritise deliberately express opposing membership preconditions before publishing the same placement operation"

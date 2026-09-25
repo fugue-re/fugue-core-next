@@ -420,7 +420,9 @@ impl OpTpl {
                 varnode_tpl(data, input).build_input(data, state)?;
             }
 
-            if !self.inputs.is_empty() {
+            if self.inputs.first().is_some_and(|&input| {
+                matches!(varnode_tpl_offset(data, input), ConstTpl::Relative(_))
+            }) {
                 state.context.inputs.0[0].offset += state.context.label_base as u64;
                 state.context.label_refs.push(pcode::RelativeRecord {
                     operation: state.issued.len() as u8,

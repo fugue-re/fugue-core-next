@@ -3,9 +3,11 @@ use std::borrow::Borrow;
 use bitflags::bitflags;
 use clone_dyn::clone_dyn;
 
-use crate::il::pcode::Varnode;
-use crate::ir::{Address, Endian, ExternFunctionTemplate, Symbol};
-use crate::lifter::{ContextHint, ContextSet, Disassembler, Language, Lifter, LiftingContext};
+use crate::arch::{BytesProperties, ExternalThunkTemplate};
+use crate::ir::{Endian, RawAddress, Symbol};
+use crate::lifter::{
+    ContextHint, ContextSet, Disassembler, Language, Lifter, LiftingContext, Varnode,
+};
 
 bitflags! {
     #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -101,25 +103,23 @@ pub trait Arch: Send + Sync + 'static {
         }
     }
 
-    fn canonicalise_address(&self, addr: Address) -> Option<(Address, ContextSet)> {
-        let naddr = addr
-            .wrap(self.language())
-            .align(self.language().address_alignment());
+    fn canonicalise_address(&self, addr: RawAddress) -> Option<(RawAddress, ContextSet)> {
+        let naddr = addr.wrap_and_align(self.language());
         (naddr == addr).then(|| (naddr, ContextSet::new()))
     }
 
-    // NOTE: we the lifting context associated should be tied to the address space the address
-    // belongs to.
+    // NOTE: the lifting context should be associated with the address space containing the
+    // address.
     fn canonicalise_address_with(
         &self,
-        addr: Address,
+        addr: RawAddress,
         context: &LiftingContext,
-    ) -> Option<(Address, ContextSet)> {
+    ) -> Option<(RawAddress, ContextSet)> {
         let _ = context;
         self.canonicalise_address(addr)
     }
 
-    fn external_function_template(&self) -> ExternFunctionTemplate;
+    fn external_thunk_template(&self) -> ExternalThunkTemplate;
 
     fn flags(&self) -> &[Flag] {
         &[]
@@ -134,27 +134,40 @@ pub trait Arch: Send + Sync + 'static {
     }
 
     #[allow(unused)]
-    fn is_halt_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
+    fn is_halt_intrinsic(&self, user_op: u16, args: &[Varnode]) -> bool {
         false
     }
 
     #[allow(unused)]
-    fn is_nonsense_pattern(&self, bytes: &[u8]) -> bool {
+    fn classify_bytes(&self, bytes: &[u8]) -> BytesProperties {
+        BytesProperties::empty()
+    }
+
+    #[allow(unused)]
+    fn classify_contiguous_bytes(
+        &self,
+        address: RawAddress,
+        context: &LiftingContext,
+        bytes: &[u8],
+    ) -> (usize, BytesProperties) {
+        let _ = address;
+        let _ = context;
+        let _ = bytes;
+        (0, BytesProperties::empty())
+    }
+
+    #[allow(unused)]
+    fn is_service_call(&self, user_op: u16, args: &[Varnode]) -> bool {
         false
     }
 
     #[allow(unused)]
-    fn is_service_call(&self, op: u16, args: &[Varnode]) -> bool {
+    fn is_skip_intrinsic(&self, user_op: u16, args: &[Varnode]) -> bool {
         false
     }
 
     #[allow(unused)]
-    fn is_skip_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
-        false
-    }
-
-    #[allow(unused)]
-    fn is_trap_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
+    fn is_trap_intrinsic(&self, user_op: u16, args: &[Varnode]) -> bool {
         false
     }
 

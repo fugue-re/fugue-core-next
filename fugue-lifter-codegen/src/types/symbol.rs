@@ -144,9 +144,9 @@ impl<'a, 'b> SymbolAdaptor<'a, 'b> {
                 } else {
                     let values = value_table.iter().copied().map(|v| {
                         if v == 0xbadbeef {
-                            None
+                            quote! { None }
                         } else {
-                            Some(u16::try_from(v).expect("value fits in u16"))
+                            quote! { Some(#v) }
                         }
                     });
 

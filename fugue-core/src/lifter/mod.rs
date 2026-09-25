@@ -1,52 +1,57 @@
-use std::fmt::Display;
+use std::fmt::{self, Display};
 use std::path::PathBuf;
 
 use arrayvec::ArrayVec;
 use fugue_lifter::runtime::dynamic::LanguageLoadError;
 use fugue_lifter::runtime::language::LanguageParseError;
 pub use fugue_lifter::runtime::operand;
-pub use fugue_lifter::{ContextBitRange, Language, LanguageId, LiftingContext};
+pub use fugue_lifter::{
+    ContextBitRange, Language, LanguageId, LiftingContext, Op, PCodeOp as RawPCodeOp, Varnode,
+};
 use fugue_sleigh_language::LanguageError as SleighLanguageError;
-use rkyv::rancor::Fallible;
-use rkyv::{Archive, Place, Serialize};
+use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::ir::Address;
 
-pub mod disassembler;
+mod disassembler;
 pub use disassembler::{Disassembler, DisassemblerError};
 
-pub mod dynamic;
+mod dynamic;
 pub use dynamic::{
-    LanguageLoader, resolve_language, resolve_language_id, resolve_language_id_with,
-    resolve_language_with,
+    LanguageLoader, LanguageSource, resolve_language, resolve_language_id,
+    resolve_language_id_with, resolve_language_with,
 };
 
-pub mod lifter;
-pub use lifter::{Lifter, LifterError};
+mod lift;
+pub use lift::{Lifter, LifterError};
 
-pub mod traits;
+mod resolver;
+pub(crate) use resolver::InsnResolver;
+pub use resolver::InsnResolverError;
+
+pub(crate) mod traits;
 
 pub const MAX_CONTEXT_UPDATES: usize = 2;
 
 #[derive(Debug, Error)]
 pub enum LanguageError {
+    #[error("ambiguous language provider for `{0}`")]
+    AmbiguousProvider(String),
     #[error("ambiguous `.sla` `{}`: multiple variants match and none is `default`", path.display())]
     AmbiguousSla { path: PathBuf },
     #[error(transparent)]
     Database(#[from] SleighLanguageError),
     #[error("environment variable `{0}` is not set")]
     Environment(&'static str),
-    #[error("ambiguous language provider for `{0}`")]
-    AmbiguousProvider(String),
     #[error(transparent)]
     Load(#[from] LanguageLoadError),
     #[error(transparent)]
     Parse(#[from] LanguageParseError),
-    #[error("unsupported file extension for `{}`", path.display())]
-    UnsupportedExtension { path: PathBuf },
     #[error("unsupported architecture")]
     Unsupported,
+    #[error("unsupported file extension for `{}`", path.display())]
+    UnsupportedExtension { path: PathBuf },
 }
 
 impl LanguageError {
@@ -78,7 +83,7 @@ pub struct ContextUpdate {
 }
 
 impl Display for ContextUpdate {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let start = self.bits.start_bit();
         let end = self.bits.end_bit();
         let value = self.value;
@@ -102,10 +107,10 @@ impl ContextUpdate {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
-pub struct ContextSet(ArrayVec<ContextUpdate, MAX_CONTEXT_UPDATES>);
+pub struct ContextSet(SmallVec<[ContextUpdate; 1]>);
 
 impl Display for ContextSet {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("{")?;
         if let Some((first, rest)) = self.0.split_first() {
             first.fmt(f)?;
@@ -137,32 +142,39 @@ where
     }
 }
 
-impl Archive for ContextSet {
+impl rkyv::Archive for ContextSet {
     type Archived = ArchivedContextSet;
-    type Resolver = <ContextSetInner as Archive>::Resolver;
+    type Resolver = <ContextSetInner as rkyv::Archive>::Resolver;
 
-    fn resolve(&self, resolver: Self::Resolver, out: Place<Self::Archived>) {
+    fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        let inner = self.0.iter().cloned().collect::<ContextSetInner>();
         let out_inner = unsafe { out.cast_unchecked::<rkyv::Archived<ContextSetInner>>() };
-        self.0.resolve(resolver, out_inner);
+        inner.resolve(resolver, out_inner);
     }
 }
 
-impl<S: Fallible + ?Sized + rkyv::ser::Allocator + rkyv::ser::Writer> Serialize<S> for ContextSet {
-    fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
-        self.0.serialize(serializer)
+impl<S: rkyv::rancor::Fallible + ?Sized + rkyv::ser::Allocator + rkyv::ser::Writer>
+    rkyv::Serialize<S> for ContextSet
+{
+    fn serialize(&self, serialiser: &mut S) -> Result<Self::Resolver, S::Error> {
+        self.0
+            .iter()
+            .cloned()
+            .collect::<ContextSetInner>()
+            .serialize(serialiser)
     }
 }
 
-impl<D: Fallible + ?Sized> rkyv::Deserialize<ContextSet, D> for ArchivedContextSet {
-    fn deserialize(&self, deserializer: &mut D) -> Result<ContextSet, D::Error> {
-        let inner = rkyv::Deserialize::<ContextSetInner, D>::deserialize(&self.0, deserializer)?;
-        Ok(ContextSet(inner))
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<ContextSet, D> for ArchivedContextSet {
+    fn deserialize(&self, deserialiser: &mut D) -> Result<ContextSet, D::Error> {
+        let inner = rkyv::Deserialize::<ContextSetInner, D>::deserialize(&self.0, deserialiser)?;
+        Ok(ContextSet(inner.into_iter().collect()))
     }
 }
 
 impl From<ContextUpdate> for ContextSet {
     fn from(value: ContextUpdate) -> Self {
-        Self(ArrayVec::from_iter([value]))
+        Self(SmallVec::from_iter([value]))
     }
 }
 
@@ -177,7 +189,7 @@ impl FromIterator<(ContextBitRange, u32)> for ContextSet {
 
 impl FromIterator<ContextUpdate> for ContextSet {
     fn from_iter<T: IntoIterator<Item = ContextUpdate>>(iter: T) -> Self {
-        Self(ArrayVec::from_iter(
+        Self(SmallVec::from_iter(
             iter.into_iter().take(MAX_CONTEXT_UPDATES),
         ))
     }
@@ -189,23 +201,27 @@ impl ContextSet {
     }
 
     #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    #[inline]
     pub fn single(bits: ContextBitRange, value: u32) -> Self {
         ContextUpdate::new(bits, value).into()
     }
 
     #[inline]
-    pub fn push(&mut self, value: ContextUpdate) {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    #[inline]
+    pub fn insert(&mut self, value: ContextUpdate) {
         for update in self.0.iter_mut() {
             if update.bits == value.bits {
                 *update = value;
                 return;
             }
         }
+        assert!(
+            self.0.len() < MAX_CONTEXT_UPDATES,
+            "context update limit exceeded",
+        );
         self.0.push(value);
     }
 
@@ -221,7 +237,7 @@ impl ContextSet {
         }
 
         for update in other.0.iter() {
-            self.push(update.to_owned());
+            self.insert(update.to_owned());
         }
     }
 
@@ -265,7 +281,7 @@ pub enum ContextHintKind {
 }
 
 impl Display for ContextHintKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ContextHintKind::Code(bits) => {
                 if *bits != 0 {
@@ -330,17 +346,8 @@ pub struct ContextHint {
 }
 
 impl Display for ContextHint {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.kind {
-            ContextHintKind::Code(bits) => {
-                if *bits != 0 {
-                    write!(f, "code ({bits}-bit)")
-                } else {
-                    f.write_str("code")
-                }
-            }
-            ContextHintKind::Data => f.write_str("data"),
-        }?;
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.kind.fmt(f)?;
 
         if let Some((first, rest)) = &self
             .context
@@ -398,7 +405,11 @@ impl ContextHint {
     }
 
     pub fn with_context(mut self, context: ContextSet) -> Self {
-        self.context = Some(context);
+        self.set_context(context);
         self
+    }
+
+    pub fn set_context(&mut self, context: ContextSet) {
+        self.context = Some(context);
     }
 }

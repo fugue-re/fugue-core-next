@@ -1,27 +1,28 @@
 #[cfg(feature = "static-lifters")]
 pub use fugue_lifter::aarch64::*;
+use memchr::arch::all::is_prefix;
 use yaxpeax_arch::*;
 use yaxpeax_arm::armv8::a64::{DecodeError, InstDecoder, Instruction, Opcode};
 
-use crate::arch::Arch;
 use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
-use crate::il::pcode::Varnode;
-use crate::ir::{Address, ExternFunctionTemplate, Insn, InsnProperties, LazySymbol, Symbol};
+use crate::arch::{Arch, BytesProperties, ExternalThunkTemplate};
+use crate::ir::{Address, Insn, InsnProperties, LazySymbol, RawAddress, Symbol};
 use crate::lazy_symbol;
-use crate::lifter::dynamic::LanguageSource;
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
     ContextHint, Disassembler, DisassemblerError, Language, LanguageError, LanguageId,
-    LanguageLoader, Lifter, LiftingContext,
+    LanguageLoader, LanguageSource, Lifter, LiftingContext, Varnode,
 };
+
+const NONSENSE: &[&[u8]] = &[&[0x00, 0x00, 0x00, 0x00]];
 
 static MAPPING_SYMBOL_CODE: LazySymbol = lazy_symbol!("$x");
 static MAPPING_SYMBOL_DATA: LazySymbol = lazy_symbol!("$d");
 
 #[derive(Clone)]
 struct ArchData {
-    gprs: Vec<Varnode>,
+    gprs: [Varnode; 31],
 }
 
 impl ArchData {
@@ -33,9 +34,9 @@ impl ArchData {
             "x14", "x15", "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23", "x24", "x25",
             "x26", "x27", "x28", "x29", "x30",
         ]
-        .into_iter()
-        .filter_map(reg)
-        .collect();
+        .map(|name| {
+            reg(name).unwrap_or_else(|| panic!("AARCH64 language must define register `{name}`"))
+        });
 
         Self { gprs }
     }
@@ -56,12 +57,50 @@ impl ArchT for AArch64 {
         Lifter::new(self.language)
     }
 
-    fn external_function_template(&self) -> ExternFunctionTemplate {
-        ExternFunctionTemplate::new([0xc0, 0x03, 0x5f, 0xd6])
+    fn external_thunk_template(&self) -> ExternalThunkTemplate {
+        ExternalThunkTemplate::new([0xc0, 0x03, 0x5f, 0xd6])
     }
 
-    fn is_nonsense_pattern(&self, bytes: &[u8]) -> bool {
-        bytes == [0x00u8, 0x00u8, 0x00u8, 0x00u8]
+    fn classify_bytes(&self, bytes: &[u8]) -> BytesProperties {
+        let mut size = 0usize;
+        while let Some(remaining) = bytes.get(size..)
+            && let Some(pattern) = NONSENSE
+                .iter()
+                .copied()
+                .find(|pattern| is_prefix(remaining, pattern))
+        {
+            size += pattern.len();
+        }
+        if size != 0 && size == bytes.len() {
+            BytesProperties::NONSENSE
+        } else {
+            BytesProperties::empty()
+        }
+    }
+
+    fn classify_contiguous_bytes(
+        &self,
+        _address: RawAddress,
+        _context: &LiftingContext,
+        bytes: &[u8],
+    ) -> (usize, BytesProperties) {
+        let mut size = 0usize;
+        while let Some(remaining) = bytes.get(size..)
+            && let Some(pattern) = NONSENSE
+                .iter()
+                .copied()
+                .find(|pattern| is_prefix(remaining, pattern))
+        {
+            size += pattern.len();
+        }
+        (
+            size,
+            if size == 0 {
+                BytesProperties::empty()
+            } else {
+                BytesProperties::NONSENSE
+            },
+        )
     }
 
     fn gprs(&self) -> &[Varnode] {
@@ -135,7 +174,7 @@ impl AArch64 {
         }
         let variant = variant.or(Some("v8A"));
         let lid = LanguageId::new_with("AARCH64", is_be, 64, variant);
-        Ok(loader.load(&lid)?)
+        loader.load(&lid)
     }
 }
 
@@ -187,7 +226,7 @@ impl AArch64Disassembler {
         })
     }
 
-    fn should_lift(&self, insn: &Instruction) -> bool {
+    fn should_lift(insn: &Instruction) -> bool {
         matches!(
             insn.opcode,
             Opcode::B
@@ -239,15 +278,15 @@ impl DisassemblerT for AArch64Disassembler {
                 Insn::from_disassembly(
                     address,
                     size,
-                    if self.should_lift(&insn) {
-                        InsnProperties::NEEDS_LIFTING
+                    if Self::should_lift(&insn) {
+                        InsnProperties::NEEDS_FLOW_RESOLUTION
                     } else {
-                        InsnProperties::FALL
+                        InsnProperties::FALL_THROUGH
                     },
-                )
+                )?
             }
             Err(DecodeError::IncompleteDecoder) => {
-                Insn::from_disassembly(address, 0, InsnProperties::NEEDS_LIFTING)
+                Insn::from_disassembly(address, 0, InsnProperties::NEEDS_FLOW_RESOLUTION)?
             }
             Err(e) => {
                 return Err(DisassemblerError::disassembler(e));

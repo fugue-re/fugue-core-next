@@ -81,6 +81,10 @@ where
 
         let val = map.next_value::<V>()?;
 
+        if map.next_key::<String>()?.is_some() {
+            return Err(Error::custom("expected exactly one attribute"));
+        }
+
         Ok(AttrWithVal { attr, val })
     }
 }

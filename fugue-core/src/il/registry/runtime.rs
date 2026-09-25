@@ -1,0 +1,209 @@
+use std::any::Any;
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use super::{IlProduced, IlRegistry};
+use crate::il::common::{
+    IlArtefact, IlError, IlFormId, IlGenerationContext, IlGenerationError, IlProducer,
+    IlTransformer,
+};
+
+type IlTransformerFactory = fn() -> Box<dyn ErasedIlTransformer>;
+type IlProducerFactory = fn() -> Box<dyn ErasedIlProducer>;
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum IlRecipe {
+    Transformer(IlTransformerFactory),
+    Producer(IlProducerFactory),
+}
+
+impl IlRecipe {
+    pub(crate) const fn transformer<T: IlTransformer>() -> Self {
+        Self::Transformer(new_transformer::<T>)
+    }
+
+    pub(crate) const fn producer<T: IlProducer>() -> Self {
+        Self::Producer(new_producer::<T>)
+    }
+
+    fn instantiate(self) -> IlRecipeExecutor {
+        match self {
+            Self::Transformer(factory) => IlRecipeExecutor::Transformer(factory()),
+            Self::Producer(factory) => IlRecipeExecutor::Producer(factory()),
+        }
+    }
+}
+
+pub(crate) trait ErasedIlTransformer: Send {
+    fn transform(
+        &mut self,
+        source: &(dyn Any + Send + Sync),
+        context: &IlGenerationContext<'_>,
+    ) -> Result<IlProduced, IlGenerationError>;
+}
+
+impl<T: IlTransformer> ErasedIlTransformer for T {
+    fn transform(
+        &mut self,
+        source: &(dyn Any + Send + Sync),
+        context: &IlGenerationContext<'_>,
+    ) -> Result<IlProduced, IlGenerationError> {
+        let source = source
+            .downcast_ref::<T::Input>()
+            .ok_or_else(|| IlGenerationError::Il(IlError::mismatched_source(T::Input::FORM)))?;
+
+        Ok(Box::new(T::transform(self, source, context)?))
+    }
+}
+
+pub(crate) trait ErasedIlProducer: Send {
+    fn produce(
+        &mut self,
+        context: &IlGenerationContext<'_>,
+    ) -> Result<IlProduced, IlGenerationError>;
+}
+
+impl<T: IlProducer> ErasedIlProducer for T {
+    fn produce(
+        &mut self,
+        context: &IlGenerationContext<'_>,
+    ) -> Result<IlProduced, IlGenerationError> {
+        Ok(Box::new(T::produce(self, context)?))
+    }
+}
+
+fn new_transformer<T: IlTransformer>() -> Box<dyn ErasedIlTransformer> {
+    Box::new(T::default())
+}
+
+fn new_producer<T: IlProducer>() -> Box<dyn ErasedIlProducer> {
+    Box::new(T::default())
+}
+
+enum IlRecipeExecutor {
+    Transformer(Box<dyn ErasedIlTransformer>),
+    Producer(Box<dyn ErasedIlProducer>),
+}
+
+pub(crate) struct GeneratedIl {
+    artefacts: Vec<GeneratedArtefact>,
+}
+
+impl GeneratedIl {
+    fn new() -> Self {
+        Self {
+            artefacts: Vec::new(),
+        }
+    }
+
+    fn last(&self) -> Option<&(dyn Any + Send + Sync)> {
+        self.artefacts
+            .last()
+            .map(|artefact| artefact.value.as_ref())
+    }
+
+    fn push(&mut self, form: IlFormId, artefact: IlProduced) {
+        self.artefacts.push(GeneratedArtefact::new(form, artefact));
+    }
+
+    pub(crate) fn into_artefacts(self) -> Vec<GeneratedArtefact> {
+        self.artefacts
+    }
+
+    pub(crate) fn into_requested(self) -> Option<IlProduced> {
+        self.artefacts
+            .into_iter()
+            .next_back()
+            .map(GeneratedArtefact::into_value)
+    }
+}
+
+pub(crate) struct GeneratedArtefact {
+    form: IlFormId,
+    value: IlProduced,
+}
+
+impl GeneratedArtefact {
+    fn new(form: IlFormId, value: IlProduced) -> Self {
+        Self { form, value }
+    }
+
+    pub(crate) fn form(&self) -> &IlFormId {
+        &self.form
+    }
+
+    pub(crate) fn into_value(self) -> IlProduced {
+        self.value
+    }
+}
+
+pub(crate) struct IlGenerationSession {
+    recipes: BTreeMap<IlFormId, IlRecipeExecutor>,
+}
+
+impl IlGenerationSession {
+    pub(crate) fn new(registry: &IlRegistry) -> Self {
+        let recipes = registry
+            .forms()
+            .filter_map(|registration| {
+                registration
+                    .recipe()
+                    .map(|recipe| (registration.form().clone(), recipe.instantiate()))
+            })
+            .collect();
+        Self { recipes }
+    }
+
+    pub(crate) fn generate(
+        &mut self,
+        registry: &IlRegistry,
+        form: &IlFormId,
+        existing: impl IntoIterator<Item = Option<Arc<dyn Any + Send + Sync>>>,
+        context: &IlGenerationContext<'_>,
+    ) -> Result<GeneratedIl, IlGenerationError> {
+        if registry.form(form).is_none() {
+            return Err(IlError::unregistered_form(form.clone()).into());
+        }
+
+        let mut existing = existing.into_iter();
+        let mut generated = GeneratedIl::new();
+        let mut current = None::<Arc<dyn Any + Send + Sync>>;
+        let mut produced_previous = false;
+
+        for step in registry.canonical_path(form) {
+            if let Some(artefact) = existing.next().flatten() {
+                current = Some(artefact);
+                produced_previous = false;
+                continue;
+            }
+
+            let Some(recipe) = self.recipes.get_mut(step) else {
+                return Err(IlError::missing_recipe(step.clone()).into());
+            };
+            let artefact = match recipe {
+                IlRecipeExecutor::Producer(producer) => producer.produce(context)?,
+                IlRecipeExecutor::Transformer(transformer) => {
+                    let source = if produced_previous {
+                        generated
+                            .last()
+                            .expect("the previous recipe recorded its artefact")
+                    } else {
+                        current.as_deref().ok_or_else(|| {
+                            IlGenerationError::Il(IlError::missing_artefact(
+                                context.function(),
+                                step.clone(),
+                            ))
+                        })?
+                    };
+                    transformer.transform(source, context)?
+                }
+            };
+
+            generated.push(step.clone(), artefact);
+            current = None;
+            produced_previous = true;
+        }
+
+        Ok(generated)
+    }
+}

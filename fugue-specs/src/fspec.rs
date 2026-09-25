@@ -353,7 +353,7 @@ mod test {
 
     #[test]
     fn test_constraint() -> Result<(), Box<dyn std::error::Error>> {
-        let input1 = "language: x86:LE:32";
+        let input1 = "language: \"x86:LE:32\"";
         let input2 = "platform: posix";
 
         assert_eq!(

@@ -7,7 +7,8 @@ use itertools::{Itertools, Position};
 use crate::calculate_mask;
 use crate::constructor::Constructor;
 use crate::context::{ContextBitRange, ContextDatabase, TrackedSet};
-use crate::input::{FixedHandle, INVALID_HANDLE, ParserInput, ParserInputs};
+use crate::format::{InstructionFormatError, InstructionWriter};
+use crate::input::{FixedHandle, ParserInput, ParserInputs, INVALID_HANDLE};
 use crate::language::{Language, LanguageData, LanguageFormatter};
 use crate::operand::Operands;
 use crate::template::construct_tpl;
@@ -64,6 +65,14 @@ impl LiftingContext {
 
     pub fn language(&self) -> &'static Language {
         self.language
+    }
+
+    pub fn reset(&mut self) {
+        for input in &mut self.inputs {
+            *input = ParserInput::empty();
+        }
+        self.lifting_context = PCodeBuilderContext::new(self.lifting_context.unique_mask);
+        self.parsing_context.clear();
     }
 
     #[inline(always)]
@@ -311,23 +320,17 @@ impl<'a> LiftingContextState<'a> {
         })
     }
 
-    /// # Safety
-    ///
-    /// Called from generated code which ensures validity of arguments and state.
-    #[doc(hidden)]
     #[inline]
-    pub unsafe fn operands(
+    pub(crate) unsafe fn operands(
         &mut self,
-        data: &'static LanguageData,
+        language: &'static Language,
         operands: &mut Operands,
     ) -> Option<()> {
         unsafe {
             self.inputs.base_state();
 
             let ctor = &self.inputs.input.constructor();
-            ctor.operands(data, self, operands)?;
-
-            Some(())
+            ctor.operands(language, self, operands)
         }
     }
 
@@ -336,20 +339,16 @@ impl<'a> LiftingContextState<'a> {
     /// Called from generated code which ensures validity of arguments and state.
     #[doc(hidden)]
     #[inline]
-    pub unsafe fn format<W: fmt::Write>(
+    pub(crate) unsafe fn format<W: fmt::Write>(
         &mut self,
-        data: &'static LanguageData,
+        language: &'static Language,
         mut writer: W,
-    ) -> fmt::Result {
+    ) -> Result<(), InstructionFormatError> {
         unsafe {
             self.inputs.input.base_state();
 
             let ctor = &self.inputs.input.constructor();
-
-            ctor.format_mnemonic(data, self, &mut writer)?;
-            ctor.format_body(data, self, &mut writer)?;
-
-            Ok(())
+            ctor.format(language, self, &mut writer)
         }
     }
 
@@ -358,21 +357,30 @@ impl<'a> LiftingContextState<'a> {
     /// Called from generated code which ensures validity of arguments and state.
     #[doc(hidden)]
     #[inline]
-    pub unsafe fn format_parts<W1: fmt::Write, W2: fmt::Write>(
+    pub(crate) unsafe fn format_parts<W1: fmt::Write, W2: fmt::Write>(
         &mut self,
-        data: &'static LanguageData,
+        language: &'static Language,
         mut mnemonic: W1,
         mut operands: W2,
-    ) -> fmt::Result {
+    ) -> Result<(), InstructionFormatError> {
         unsafe {
             self.inputs.input.base_state();
 
             let ctor = &self.inputs.input.constructor();
+            ctor.format_parts(language, self, &mut mnemonic, &mut operands)
+        }
+    }
 
-            ctor.format_mnemonic(data, self, &mut mnemonic)?;
-            ctor.format_body(data, self, &mut operands)?;
+    pub(crate) unsafe fn format_instruction<O: InstructionWriter + ?Sized>(
+        &mut self,
+        language: &'static Language,
+        output: &mut O,
+    ) -> Result<(), InstructionFormatError> {
+        unsafe {
+            self.inputs.input.base_state();
 
-            Ok(())
+            let ctor = &self.inputs.input.constructor();
+            ctor.format_instruction(language, self, output)
         }
     }
 
@@ -739,7 +747,18 @@ impl Varnode {
 
     #[inline]
     pub const fn valid(&self) -> Option<&Varnode> {
-        if self.is_invalid() { None } else { Some(self) }
+        if self.is_invalid() {
+            None
+        } else {
+            Some(self)
+        }
+    }
+
+    #[inline]
+    pub const fn overlaps(&self, other: &Varnode) -> bool {
+        self.space == other.space
+            && self.offset < other.offset + other.size as u64
+            && other.offset < self.offset + self.size as u64
     }
 }
 
@@ -989,8 +1008,8 @@ impl Display for Op {
             Op::IntCarry => "INT_CARRY",
             Op::IntSignedCarry => "INT_SCARRY",
             Op::IntSignedBorrow => "INT_SBORROW",
-            Op::IntNot => "INT_2COMP",
-            Op::IntNeg => "INT_NEGATE",
+            Op::IntNot => "INT_NEGATE",
+            Op::IntNeg => "INT_2COMP",
             Op::CountOnes => "POPCOUNT",
             Op::CountLeadingZeros => "LZCOUNT",
             Op::ZeroExt => "INT_ZEXT",

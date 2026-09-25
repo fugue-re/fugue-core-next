@@ -1,9 +1,8 @@
 use std::fmt;
 use std::ops::{Add, AddAssign};
 
-use crate::il::pcode::Varnode;
-use crate::ir::{Address, RawAddress};
-use crate::lifter::Language;
+use crate::ir::{Address, RawAddress, ToRawAddress};
+use crate::lifter::{Language, Varnode};
 
 #[derive(
     Debug,
@@ -18,6 +17,7 @@ use crate::lifter::Language;
     rkyv::Serialize,
     rkyv::Deserialize,
 )]
+#[rkyv(derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash))]
 pub struct Location {
     address: Address,
     position: u16,
@@ -89,22 +89,14 @@ impl Location {
         }
     }
 
-    pub fn address(&self) -> Address {
-        self.address
-    }
-
-    pub fn position(&self) -> u16 {
-        self.position
-    }
-
     pub fn absolute_from(
         language: &Language,
         base: Address,
         address: Varnode,
         position: u16,
     ) -> Option<Self> {
-        if language.in_default_space(&address) {
-            return Some(Self::new(Address::new(base.space(), address.offset()), 0));
+        if let Some(address) = address.to_address(language) {
+            return Some(Self::new(Address::new(base.space(), address), 0));
         }
 
         if !language.in_constant_space(&address) {
@@ -126,6 +118,14 @@ impl Location {
             address: base,
             position,
         })
+    }
+
+    pub fn address(&self) -> Address {
+        self.address
+    }
+
+    pub fn position(&self) -> u16 {
+        self.position
     }
 }
 

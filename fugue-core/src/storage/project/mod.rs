@@ -1,7 +1,7 @@
 use crate::storage::{EntityStorage, EntityStorageError};
 
 #[cfg(feature = "sqlite")]
-pub mod sqlite;
+pub(crate) mod sqlite;
 #[cfg(feature = "sqlite")]
 pub use sqlite::SqliteProvider;
 

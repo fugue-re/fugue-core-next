@@ -1,12 +1,16 @@
+use std::fmt;
+
 use crate::context::ContextBitRange;
+use crate::format::InstructionFormatter;
 use crate::language::Language;
-use crate::operand::Operands;
+use crate::operand::{Operands, OperandsContext};
 use crate::pcode::{LiftingContext, PCodeBuilderContext, PCodeOp, Varnode};
 
 #[derive(Clone)]
 pub struct Lifter {
     language: &'static Language,
     context: LiftingContext,
+    operand_context: OperandsContext,
 }
 
 impl Lifter {
@@ -17,7 +21,11 @@ impl Lifter {
             language.default_context(),
             language.unique_mask(),
         );
-        Self { language, context }
+        Self {
+            language,
+            context,
+            operand_context: OperandsContext::new(),
+        }
     }
 
     pub fn with_context(language: &'static Language, context: LiftingContext) -> Self {
@@ -25,7 +33,11 @@ impl Lifter {
             std::ptr::eq(context.language(), language),
             "lifter language and context language must match",
         );
-        Self { language, context }
+        Self {
+            language,
+            context,
+            operand_context: OperandsContext::new(),
+        }
     }
 
     pub fn language(&self) -> &'static Language {
@@ -144,8 +156,13 @@ impl Lifter {
         bytes: impl AsRef<[u8]>,
         operands: &mut Operands,
     ) -> Option<usize> {
-        self.language
-            .operands(address, bytes, &mut self.context, operands)
+        self.language.operands(
+            address,
+            bytes,
+            &mut self.context,
+            &mut self.operand_context,
+            operands,
+        )
     }
 
     pub fn disassemble(
@@ -156,6 +173,16 @@ impl Lifter {
     ) -> Option<usize> {
         self.language
             .disassemble(address, bytes, &mut self.context, disassembly)
+    }
+
+    pub fn disassemble_and_format<F: InstructionFormatter + ?Sized>(
+        &mut self,
+        address: u64,
+        bytes: impl AsRef<[u8]>,
+        formatter: &mut F,
+    ) -> Result<Option<usize>, fmt::Error> {
+        self.language
+            .disassemble_and_format(address, bytes, &mut self.context, formatter)
     }
 
     pub fn disassemble_parts(

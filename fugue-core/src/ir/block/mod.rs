@@ -1,19 +1,30 @@
-use std::num::NonZeroUsize;
-use std::ops::{Range, RangeInclusive};
+use std::ops::RangeInclusive;
 
-use rkyv::rancor::Fallible;
-use rkyv::{Archive, Place, Serialize};
+use smallvec::SmallVec;
 
-use crate::ir::{Address, Id, IdSet, InsnList};
+use crate::ir::{Address, AddressRange, AddressRangeSet, FlowKind, FlowTarget, Id};
 use crate::lifter::ContextSet;
-use crate::storage::entities::schema::ENTITY_CODE_BLOCK_ID;
-use crate::storage::entities::{Entity, EntityId, MutableEntity};
+use crate::storage::entities::schema::{ENTITY_CODE_BLOCK_ID, ENTITY_KEY_CODE_BLOCK_ID};
+use crate::storage::entities::{Entity, EntityId, EntityKey, EntityKeyId, MutableEntity};
+use crate::storage::schema::bitflags::archived_bitflags;
 use crate::storage::segments::space::AddressSpaceId;
 
-pub mod table;
-pub use table::CodeBlockTable;
+pub(crate) mod incomplete;
+pub(crate) use incomplete::CodeBlockRecord;
+pub use incomplete::{IncompleteCodeBlock, IncompleteCodeBlockId};
+
+mod table;
+pub(crate) use table::{
+    ATTRIBUTE_CODE_BLOCK_CACHE_SIZE, CodeBlockIdsByAddress, DEFAULT_CODE_BLOCK_CACHE_BYTES,
+    PreparedCodeBlockRecord,
+};
+pub use table::{CodeBlockRef, CodeBlockTable};
 
 pub type CodeBlockId = Id<CodeBlock>;
+
+impl EntityKey for CodeBlockId {
+    const ID: EntityKeyId = ENTITY_KEY_CODE_BLOCK_ID;
+}
 
 #[derive(
     Debug, Clone, Default, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
@@ -21,12 +32,45 @@ pub type CodeBlockId = Id<CodeBlock>;
 pub struct CodeBlock {
     id: Id<Self>,
     start: Address,
-    len: u16,
-    instructions: InsnList,
-    successors: IdSet<CodeBlock>,
-    predecessors: IdSet<CodeBlock>,
+    size: u16,
+    targets: SmallVec<[CodeBlockFlowTarget; 2]>,
     properties: CodeBlockProperties,
     context: ContextSet,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct CodeBlockFlowTarget {
+    target: Address,
+    source_offset: u16,
+    kind: FlowKind,
+}
+
+impl CodeBlockFlowTarget {
+    fn from_flow(block: Address, size: usize, flow: FlowTarget) -> Self {
+        assert_eq!(block.space(), flow.from().space());
+        let source_offset = flow
+            .from()
+            .checked_offset_from(block)
+            .and_then(|offset| offset.try_into().ok())
+            .expect("flow source must fall within its code block");
+        assert!(
+            usize::from(source_offset) < size,
+            "flow source must fall within its code block"
+        );
+        Self {
+            target: flow.to(),
+            source_offset,
+            kind: flow.kind(),
+        }
+    }
+
+    fn to_flow(&self, block: Address) -> FlowTarget {
+        FlowTarget::new(
+            block + usize::from(self.source_offset),
+            self.target,
+            self.kind,
+        )
+    }
 }
 
 impl AsRef<CodeBlock> for CodeBlock {
@@ -56,202 +100,51 @@ impl MutableEntity for CodeBlock {
 bitflags::bitflags! {
     #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct CodeBlockProperties: u32 {
-        const NONE          = 0x0000_0000;
-        /// The block is a function entry point.
-        const ENTRY         = 0x0000_0001;
-        /// The block is a function exit point.
-        const EXIT          = 0x0000_0002;
-        /// The block causes the function to not return.
-        const NON_RETURNING = 0x0000_0004;
+        const NONE       = 0x0000_0000;
         /// The block ends in a call to another function.
-        const CALL          = 0x0000_0008;
-        /// The block ends in a tail call to another function.
-        const TAIL_CALL     = 0x0000_0010;
+        const CALL       = 0x0000_0001;
         /// The block has unresolved control flow.
-        const UNRESOLVED    = 0x0000_0020;
+        const UNRESOLVED = 0x0000_0002;
+        /// The block ends in a return.
+        const RETURN     = 0x0000_0004;
     }
 }
 
-#[repr(transparent)]
-pub struct ArchivedCodeBlockProperties(rkyv::Archived<u32>);
-
-unsafe impl rkyv::Portable for ArchivedCodeBlockProperties {}
-unsafe impl rkyv::traits::NoUndef for ArchivedCodeBlockProperties {}
-
-unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C>
-    for ArchivedCodeBlockProperties
-where
-    rkyv::primitive::ArchivedU32: rkyv::bytecheck::CheckBytes<C>,
-{
-    unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
-        unsafe { rkyv::primitive::ArchivedU32::check_bytes(value.cast(), context) }
-    }
-}
-
-impl Archive for CodeBlockProperties {
-    type Archived = ArchivedCodeBlockProperties;
-    type Resolver = ();
-
-    fn resolve(&self, _: Self::Resolver, out: Place<Self::Archived>) {
-        out.write(ArchivedCodeBlockProperties(
-            rkyv::primitive::ArchivedU32::from_native(self.bits()),
-        ));
-    }
-}
-
-impl<S: Fallible + ?Sized> Serialize<S> for CodeBlockProperties {
-    fn serialize(&self, _: &mut S) -> Result<Self::Resolver, S::Error> {
-        Ok(())
-    }
-}
-
-impl<D: Fallible + ?Sized> rkyv::Deserialize<CodeBlockProperties, D>
-    for ArchivedCodeBlockProperties
-{
-    fn deserialize(&self, _: &mut D) -> Result<CodeBlockProperties, D::Error> {
-        Ok(CodeBlockProperties::from_bits(self.0.to_native()).unwrap_or(CodeBlockProperties::NONE))
-    }
-}
+archived_bitflags!(CodeBlockProperties, ArchivedCodeBlockProperties, u32);
 
 impl CodeBlock {
-    pub fn new(id: Id<Self>, start: Address, len: NonZeroUsize, instructions: InsnList) -> Self {
-        Self::new_with(id, start, len, instructions, ContextSet::default())
-    }
-
-    pub fn new_with(
-        id: Id<Self>,
-        start: Address,
-        len: NonZeroUsize,
-        instructions: InsnList,
-        context: ContextSet,
-    ) -> Self {
-        Self {
-            id,
-            start,
-            len: len
-                .get()
-                .try_into()
-                .expect("basic block length must not exceed 65535 bytes"),
-            instructions,
-            properties: CodeBlockProperties::NONE,
-            successors: IdSet::new(),
-            predecessors: IdSet::new(),
-            context,
-        }
-    }
-
-    pub fn try_new(
-        id: Id<Self>,
-        start: Address,
-        len: usize,
-        instructions: InsnList,
-    ) -> Option<Self> {
-        Self::try_new_with(id, start, len, instructions, ContextSet::default())
-    }
-
-    pub fn try_new_with(
-        id: Id<Self>,
-        start: Address,
-        len: usize,
-        instructions: InsnList,
-        context: ContextSet,
-    ) -> Option<Self> {
-        Some(Self::new_with(
-            id,
-            start,
-            NonZeroUsize::new(len)?,
-            instructions,
-            context,
-        ))
-    }
-
     pub fn id(&self) -> CodeBlockId {
         self.id
-    }
-
-    pub fn start(&self) -> Address {
-        self.start
     }
 
     pub fn address(&self) -> Address {
         self.start
     }
 
-    pub fn last_address(&self) -> Address {
-        self.start + self.len() - 1usize
-    }
-
-    pub fn next_address(&self) -> Address {
-        self.start + self.len()
-    }
-
     pub fn space(&self) -> AddressSpaceId {
         self.start.space()
     }
 
-    pub fn len(&self) -> usize {
-        self.len as _
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    pub fn range(&self) -> Range<Address> {
-        self.address()..self.next_address()
-    }
-
-    pub fn range_inclusive(&self) -> RangeInclusive<Address> {
-        self.address()..=self.last_address()
-    }
-
-    pub fn instructions(&self) -> &InsnList {
-        &self.instructions
-    }
-
-    pub fn mark_entry(&mut self) {
-        self.properties.insert(CodeBlockProperties::ENTRY);
-    }
-
-    pub fn mark_exit(&mut self) {
-        self.properties.insert(CodeBlockProperties::EXIT);
-    }
-
-    pub fn mark_non_returning(&mut self) {
-        self.properties.insert(CodeBlockProperties::NON_RETURNING);
-    }
-
-    pub fn mark_call(&mut self) {
-        self.properties.insert(CodeBlockProperties::CALL);
-    }
-
-    pub fn mark_tail_call(&mut self) {
-        self.properties
-            .insert(CodeBlockProperties::TAIL_CALL | CodeBlockProperties::CALL);
-    }
-
-    pub fn mark_unresolved(&mut self) {
-        self.properties.insert(CodeBlockProperties::UNRESOLVED);
-    }
-
-    pub fn is_entry(&self) -> bool {
-        self.properties.contains(CodeBlockProperties::ENTRY)
-    }
-
-    pub fn is_exit(&self) -> bool {
-        self.properties.contains(CodeBlockProperties::EXIT)
-    }
-
-    pub fn is_non_returning(&self) -> bool {
-        self.properties.contains(CodeBlockProperties::NON_RETURNING)
+    pub fn size(&self) -> usize {
+        self.size as _
     }
 
     pub fn is_call(&self) -> bool {
         self.properties.contains(CodeBlockProperties::CALL)
     }
 
-    pub fn is_tail_call(&self) -> bool {
-        self.properties.contains(CodeBlockProperties::TAIL_CALL)
+    pub fn is_return(&self) -> bool {
+        self.properties.contains(CodeBlockProperties::RETURN)
+    }
+
+    pub fn is_branch(&self) -> bool {
+        self.targets.iter().any(|target| target.kind.is_branch())
+    }
+
+    pub fn call_target(&self) -> Option<Address> {
+        self.targets
+            .iter()
+            .find_map(|target| target.kind.is_call().then_some(target.target))
     }
 
     pub fn has_unresolved(&self) -> bool {
@@ -262,19 +155,34 @@ impl CodeBlock {
         &self.context
     }
 
-    pub fn add_successor(&mut self, target: CodeBlockId) {
-        self.successors.insert(target);
+    pub fn last_address(&self) -> Address {
+        self.start + self.size() - 1usize
     }
 
-    pub fn add_predecessor(&mut self, source: CodeBlockId) {
-        self.predecessors.insert(source);
+    pub fn next_address(&self) -> Address {
+        self.start + self.size()
     }
 
-    pub fn successors(&self) -> &IdSet<CodeBlock> {
-        &self.successors
+    pub fn range(&self) -> RangeInclusive<Address> {
+        self.address()..=self.last_address()
     }
 
-    pub fn predecessors(&self) -> &IdSet<CodeBlock> {
-        &self.predecessors
+    pub fn address_range(&self) -> AddressRange {
+        AddressRange::from_size(self.address(), u64::from(self.size))
+            .expect("code block range must fit within its address space")
+    }
+
+    pub fn coverage(&self) -> AddressRangeSet {
+        let mut covered = AddressRangeSet::new();
+        self.coverage_into(&mut covered);
+        covered
+    }
+
+    pub fn coverage_into(&self, covered: &mut AddressRangeSet) {
+        covered.insert_range(self.address_range());
+    }
+
+    pub fn flow_targets(&self) -> impl Iterator<Item = FlowTarget> + '_ {
+        self.targets.iter().map(|target| target.to_flow(self.start))
     }
 }

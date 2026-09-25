@@ -9,6 +9,7 @@ use thiserror::Error;
 
 create_exception!(fugue, FugueError, PyRuntimeError);
 create_exception!(fugue, LoaderError, FugueError);
+create_exception!(fugue, ProjectError, FugueError);
 create_exception!(fugue, StorageError, FugueError);
 create_exception!(fugue, LifterError, FugueError);
 
@@ -24,6 +25,8 @@ pub(crate) enum BindingError {
     AttributeValue(String),
     #[error("empty byte mappings are not supported")]
     EmptyMapping,
+    #[error("invalid IL form `{0}`")]
+    InvalidIlForm(String),
     #[error("invalid instruction at {0}")]
     InvalidInstruction(CoreAddress),
     #[error("no mapped bytes at {0}")]
@@ -43,6 +46,10 @@ impl BindingError {
         Self::InvalidInstruction(address)
     }
 
+    pub(crate) fn invalid_form(form: impl Into<String>) -> Self {
+        Self::InvalidIlForm(form.into())
+    }
+
     pub(crate) fn no_mapped_bytes(address: CoreAddress) -> Self {
         Self::NoMappedBytes(address)
     }
@@ -55,6 +62,7 @@ impl From<BindingError> for PyErr {
             BindingError::NoMappedBytes(_) => StorageError::new_err(error.to_string()),
             BindingError::EmptyMapping
             | BindingError::AddressSpace(_)
+            | BindingError::InvalidIlForm(_)
             | BindingError::AttributesNotDict
             | BindingError::AttributeKey
             | BindingError::AttributeValue(_) => PyValueError::new_err(error.to_string()),
@@ -64,6 +72,10 @@ impl From<BindingError> for PyErr {
 
 pub(crate) fn loader_error(error: impl Display) -> PyErr {
     LoaderError::new_err(error.to_string())
+}
+
+pub(crate) fn project_error(error: impl Display) -> PyErr {
+    ProjectError::new_err(error.to_string())
 }
 
 pub(crate) fn storage_error(error: impl Display) -> PyErr {
@@ -77,6 +89,7 @@ pub(crate) fn lifter_error(error: impl Display) -> PyErr {
 pub(crate) fn add_errors(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("FugueError", module.py().get_type::<FugueError>())?;
     module.add("LoaderError", module.py().get_type::<LoaderError>())?;
+    module.add("ProjectError", module.py().get_type::<ProjectError>())?;
     module.add("StorageError", module.py().get_type::<StorageError>())?;
     module.add("LifterError", module.py().get_type::<LifterError>())?;
 

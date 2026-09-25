@@ -1,5 +1,6 @@
-use std::fmt::{Debug, Display};
-use std::hash::Hash;
+use std::cmp::Ordering;
+use std::fmt::{self, Debug, Display, Formatter, Result as FmtResult};
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::str::FromStr;
 
@@ -7,8 +8,10 @@ use thiserror::Error;
 
 use crate::constructor::Constructor;
 use crate::context::{ContextBitRange, ContextDatabase};
+use crate::convention::Convention;
 use crate::dynamic::{Language as DynamicLanguage, LanguageLoadError, registry};
-use crate::operand::{OperandFilter, Operands};
+use crate::format::InstructionFormatter;
+use crate::operand::{OperandFilter, Operands, OperandsContext};
 use crate::pattern::PatternOp;
 use crate::pcode::{LiftingContext, PCodeBuilderContext, PCodeOp, Varnode};
 use crate::resolve::DecisionNode;
@@ -66,7 +69,7 @@ impl LanguageId {
 }
 
 impl Display for LanguageId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(
             f,
             "{}:{}:{}:{}",
@@ -80,34 +83,30 @@ impl Display for LanguageId {
 
 #[derive(Debug, Error)]
 pub enum LanguageParseError {
-    #[error("could not parse processor name")]
-    ParseProcessor,
-    #[error("could not parse endian")]
-    ParseEndian,
     #[error("could not parse bitness")]
     ParseBits,
-    #[error("could not parse processor variant")]
-    ParseVariant,
+    #[error("could not parse endian")]
+    ParseEndian,
     #[error("could not parse architecture definition: incorrect format")]
     ParseFormat,
+    #[error("could not parse processor name")]
+    ParseProcessor,
+    #[error("could not parse processor variant")]
+    ParseVariant,
 }
 
 pub struct LanguageData {
     pub root_dtree: u16,
-
     pub address_size: usize,
     pub constant_space: u8,
     pub default_space: u8,
     pub unique_space: u8,
-
     pub spaces: &'static [AddressSpace],
-
     pub constructors: &'static [Constructor],
     pub decision_trees: &'static [DecisionNode],
     pub operand_filters: &'static [OperandFilter],
     pub pattern_expressions: &'static [PatternOp],
     pub symbols: &'static [Symbol],
-
     pub const_templates: &'static [ConstTpl],
     pub construct_templates: &'static [ConstructTpl],
     pub handle_templates: &'static [HandleTpl],
@@ -191,6 +190,7 @@ pub trait LanguageImpl {
     const PROCESSOR: &'static str;
     const LITTLE_ENDIAN: bool;
     const VARIANT: &'static str;
+    const BITS: u32;
 
     const ADDRESS_ALIGNMENT: usize;
     const ADDRESS_BITS: u32;
@@ -216,6 +216,8 @@ pub trait LanguageImpl {
     const SPACE_NAMES: &'static [&'static str];
     const CONTEXT_VARS: &'static [(&'static str, ContextBitRange)];
     const CONTEXT_DEFAULTS: &'static [(&'static str, u32)];
+    const CALL_PRESERVED_REGISTERS: &'static [(&'static str, &'static [Varnode])] = &[];
+    const CONVENTIONS: &'static [(&'static str, Convention)] = &[];
 
     const DATA: &'static LanguageData;
 }
@@ -223,41 +225,36 @@ pub trait LanguageImpl {
 #[derive(Clone)]
 pub struct Language {
     pub(crate) id: &'static str,
-
     pub(crate) processor: &'static str,
     pub(crate) little_endian: bool,
     pub(crate) variant: &'static str,
-
+    pub(crate) bits: u32,
     pub(crate) address_alignment: usize,
     pub(crate) address_bits: u32,
     pub(crate) address_size: usize,
     pub(crate) address_upper_bound: u64,
-
     pub(crate) constant_space: u8,
     pub(crate) default_space: u8,
-
     pub(crate) register_space: u8,
     pub(crate) register_space_size: usize,
-
     pub(crate) unique_mask: u64,
     pub(crate) unique_space: u8,
     pub(crate) unique_space_size: usize,
-
     pub(crate) space_word_sizes: &'static [usize],
     pub(crate) space_upper_bounds: &'static [u64],
-
     pub(crate) registers: &'static [(&'static str, Varnode)],
     pub(crate) register_ranges: &'static [(u64, u16, &'static str)],
     pub(crate) user_ops: &'static [&'static str],
     pub(crate) space_names: &'static [&'static str],
     pub(crate) context_vars: &'static [(&'static str, ContextBitRange)],
     pub(crate) context_defaults: &'static [(&'static str, u32)],
-
+    pub(crate) call_preserved_registers: &'static [(&'static str, &'static [Varnode])],
+    pub(crate) conventions: &'static [(&'static str, Convention)],
     pub(crate) data: &'static LanguageData,
 }
 
 impl Debug for Language {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.debug_struct("Language")
             .field("id", &self.id)
             .field("address_alignment", &self.address_alignment)
@@ -267,7 +264,7 @@ impl Debug for Language {
 }
 
 impl Display for Language {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.write_str(self.id)
     }
 }
@@ -281,19 +278,19 @@ impl PartialEq for Language {
 impl Eq for Language {}
 
 impl Ord for Language {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> Ordering {
         self.id.cmp(other.id)
     }
 }
 
 impl PartialOrd for Language {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
 impl Hash for Language {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+    fn hash<H: Hasher>(&self, state: &mut H) {
         self.id.hash(state);
     }
 }
@@ -324,6 +321,7 @@ impl Language {
             processor: L::PROCESSOR,
             little_endian: L::LITTLE_ENDIAN,
             variant: L::VARIANT,
+            bits: L::BITS,
 
             address_alignment: L::ADDRESS_ALIGNMENT,
             address_bits: L::ADDRESS_BITS,
@@ -349,6 +347,8 @@ impl Language {
             space_names: L::SPACE_NAMES,
             context_vars: L::CONTEXT_VARS,
             context_defaults: L::CONTEXT_DEFAULTS,
+            call_preserved_registers: L::CALL_PRESERVED_REGISTERS,
+            conventions: L::CONVENTIONS,
 
             data: L::DATA,
         }
@@ -377,6 +377,10 @@ impl Language {
 
     pub fn variant(&self) -> &'static str {
         self.variant
+    }
+
+    pub fn bits(&self) -> u32 {
+        self.bits
     }
 
     pub fn address_alignment(&self) -> usize {
@@ -485,6 +489,28 @@ impl Language {
         self.context_defaults
     }
 
+    pub fn call_preserved_registers(&self, compiler: &str) -> Option<&'static [Varnode]> {
+        self.call_preserved_registers
+            .iter()
+            .find_map(|(candidate, registers)| (*candidate == compiler).then_some(*registers))
+    }
+
+    pub fn conventions(&self) -> &'static [(&'static str, Convention)] {
+        self.conventions
+    }
+
+    pub fn convention(&self, compiler: &str) -> Option<&'static Convention> {
+        self.conventions
+            .iter()
+            .find_map(|(candidate, convention)| (*candidate == compiler).then_some(convention))
+    }
+
+    pub fn compiler_spec_id(&self, compiler: &str) -> Option<&'static str> {
+        self.call_preserved_registers
+            .iter()
+            .find_map(|(candidate, _)| (*candidate == compiler).then_some(*candidate))
+    }
+
     pub fn default_context(&self) -> ContextDatabase {
         let mut db = ContextDatabase::new(self.address_upper_bound, self.address_alignment);
         let bits_per_word = u32::BITS as usize;
@@ -510,6 +536,10 @@ impl Language {
             .binary_search_by_key(&name, |(n, _)| *n)
             .ok()
             .map(|idx| self.registers[idx].1)
+    }
+
+    pub fn registers(&self) -> impl ExactSizeIterator<Item = (&'static str, Varnode)> + '_ {
+        self.registers.iter().copied()
     }
 
     pub fn register_name(&self, vnd: &Varnode) -> Option<&'static str> {
@@ -558,9 +588,10 @@ impl Language {
         address: u64,
         bytes: impl AsRef<[u8]>,
         context: &mut LiftingContext,
+        operand_context: &mut OperandsContext,
         operands: &mut Operands,
     ) -> Option<usize> {
-        entry::operands(address, bytes.as_ref(), context, operands)
+        entry::operands(address, bytes.as_ref(), context, operand_context, operands)
     }
 
     pub fn disassemble(
@@ -571,6 +602,16 @@ impl Language {
         disassembly: &mut String,
     ) -> Option<usize> {
         entry::disassemble(address, bytes.as_ref(), context, disassembly)
+    }
+
+    pub fn disassemble_and_format<F: InstructionFormatter + ?Sized>(
+        &self,
+        address: u64,
+        bytes: impl AsRef<[u8]>,
+        context: &mut LiftingContext,
+        formatter: &mut F,
+    ) -> Result<Option<usize>, fmt::Error> {
+        entry::disassemble_and_format(address, bytes.as_ref(), context, formatter)
     }
 
     pub fn disassemble_parts(

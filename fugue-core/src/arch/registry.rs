@@ -1,9 +1,8 @@
 use thiserror::Error;
 
 use crate::arch::Arch;
-use crate::lifter::dynamic::LanguageSource;
-use crate::lifter::{Language, LanguageError, LanguageId};
-use crate::registry::{self, Registration};
+use crate::extension::{self, Registration};
+use crate::lifter::{Language, LanguageError, LanguageId, LanguageSource};
 
 #[derive(Debug, Error)]
 pub enum ArchError {
@@ -21,12 +20,20 @@ type LanguageProvideFn = fn(
 ) -> Result<Option<&'static Language>, LanguageError>;
 
 pub struct ArchProvider {
-    pub name: &'static str,
-    pub supports: ArchSupportsFn,
-    pub create: ArchCreateFn,
+    name: &'static str,
+    supports: ArchSupportsFn,
+    create: ArchCreateFn,
 }
 
 impl ArchProvider {
+    pub const fn new(name: &'static str, supports: ArchSupportsFn, create: ArchCreateFn) -> Self {
+        Self {
+            name,
+            supports,
+            create,
+        }
+    }
+
     pub fn supports(&self, language: &'static Language) -> bool {
         (self.supports)(language)
     }
@@ -42,14 +49,18 @@ impl Registration for ArchProvider {
     }
 }
 
-registry::collect!(ArchProvider);
+extension::collect!(ArchProvider);
 
 pub struct LanguageProvider {
-    pub name: &'static str,
-    pub provide: LanguageProvideFn,
+    name: &'static str,
+    provide: LanguageProvideFn,
 }
 
 impl LanguageProvider {
+    pub const fn new(name: &'static str, provide: LanguageProvideFn) -> Self {
+        Self { name, provide }
+    }
+
     pub fn provide(
         &self,
         id: &LanguageId,
@@ -65,10 +76,10 @@ impl Registration for LanguageProvider {
     }
 }
 
-registry::collect!(LanguageProvider);
+extension::collect!(LanguageProvider);
 
 pub fn provide_arch(language: &'static Language) -> Result<Arch, ArchError> {
-    let mut matches = registry::iter::<ArchProvider>()
+    let mut matches = extension::iter::<ArchProvider>()
         .filter(|provider| provider.supports(language))
         .collect::<Vec<_>>();
 
@@ -85,7 +96,7 @@ pub fn provide_language(
 ) -> Result<Option<&'static Language>, LanguageError> {
     let mut resolved = Vec::new();
 
-    for provider in registry::iter::<LanguageProvider>() {
+    for provider in extension::iter::<LanguageProvider>() {
         if let Some(language) = provider.provide(id, source)? {
             resolved.push(language);
         }

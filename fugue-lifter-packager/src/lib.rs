@@ -7,10 +7,10 @@ mod sync;
 mod unpack;
 
 #[cfg(feature = "build")]
-pub use self::build::BuildError;
+pub use build::BuildError;
 #[cfg(feature = "sync")]
-pub use self::sync::SyncError;
-pub use self::unpack::UnpackError;
+pub use sync::SyncError;
+pub use unpack::UnpackError;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Packager;

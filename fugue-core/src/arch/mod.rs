@@ -1,37 +1,84 @@
 use std::cmp::Ordering;
-use std::fmt::{Debug, Display};
+use std::fmt::{self, Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 
-use rkyv::rancor::Fallible;
-use rkyv::{Archive, Place, Serialize};
-
-use crate::il::pcode::Varnode;
-use crate::ir::{Address, Endian, ExternFunctionTemplate, Symbol};
+use crate::ir::{Endian, RawAddress, Symbol};
 use crate::lifter::{
-    ContextHint, ContextSet, Disassembler, Language, Lifter, LiftingContext, resolve_language,
+    ContextHint, ContextSet, Disassembler, Language, Lifter, LiftingContext, Varnode,
+    resolve_language,
 };
+use crate::platform::Platform;
 use crate::storage::entities::schema::ENTITY_ARCHITECTURE_ID;
 use crate::storage::entities::{Entity, EntityId};
 
-pub mod aarch64;
-pub mod arm;
-pub mod mips;
-pub mod registry;
-pub mod x86;
-pub mod x86_64;
+pub(crate) mod aarch64;
+pub(crate) mod arm;
+pub(crate) mod mips;
+pub(crate) mod mips64;
+pub(crate) mod ppc;
+pub(crate) mod ppc64;
+pub(crate) mod registry;
+pub(crate) mod riscv;
+pub(crate) mod riscv64;
+pub(crate) mod thunk;
+pub(crate) mod traits;
+pub(crate) mod x86;
+pub(crate) mod x86_64;
 
-pub use registry::ArchError;
-
-pub mod traits;
+pub use aarch64::AArch64;
+pub use arm::Arm;
+pub use mips::Mips;
+pub use mips64::Mips64;
+pub use ppc::Ppc;
+pub use ppc64::Ppc64;
+pub use registry::{ArchError, ArchProvider, LanguageProvider, provide_arch, provide_language};
+pub use riscv::RiscV;
+pub use riscv64::RiscV64;
+pub use thunk::ExternalThunkTemplate;
 use traits::Arch as ArchT;
 pub use traits::{Flag, FlagKind};
+pub use x86::X86;
+pub use x86_64::X86_64;
+
+bitflags::bitflags! {
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct BytesProperties: u8 {
+        const ENTRY_INSN = 0b0000_0100;
+        const NONSENSE   = 0b0000_0001;
+        const NOP_INSN   = 0b0000_1000;
+        const PADDING    = 0b0000_0010;
+        const ALIGNMENT  = Self::NOP_INSN.bits() | Self::PADDING.bits();
+    }
+}
+
+impl BytesProperties {
+    pub fn is_alignment(&self) -> bool {
+        self.intersects(Self::ALIGNMENT)
+    }
+
+    pub fn is_entry_insn(&self) -> bool {
+        self.contains(Self::ENTRY_INSN)
+    }
+
+    pub fn is_nonsense(&self) -> bool {
+        self.contains(Self::NONSENSE)
+    }
+
+    pub fn is_nop_insn(&self) -> bool {
+        self.contains(Self::NOP_INSN)
+    }
+
+    pub fn is_padding(&self) -> bool {
+        self.contains(Self::PADDING)
+    }
+}
 
 #[derive(Clone)]
 #[repr(transparent)]
 pub struct Arch(Box<dyn ArchT>);
 
 impl Debug for Arch {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("Arch")
             .field("language", self.0.language())
             .finish_non_exhaustive()
@@ -39,7 +86,7 @@ impl Debug for Arch {
 }
 
 impl Display for Arch {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_str(self.0.language().id())
     }
 }
@@ -59,7 +106,7 @@ impl PartialOrd for Arch {
 }
 
 impl Ord for Arch {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> Ordering {
         self.0.language().id().cmp(other.0.language().id())
     }
 }
@@ -97,31 +144,32 @@ where
     }
 }
 
-impl Archive for Arch {
+impl rkyv::Archive for Arch {
     type Archived = ArchivedArch;
-    type Resolver = <String as Archive>::Resolver;
+    type Resolver = <String as rkyv::Archive>::Resolver;
 
-    fn resolve(&self, resolver: Self::Resolver, out: Place<Self::Archived>) {
+    fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
         let out_inner = unsafe { out.cast_unchecked::<rkyv::Archived<String>>() };
         self.0.language().to_string().resolve(resolver, out_inner);
     }
 }
 
-impl<S: Fallible + ?Sized + rkyv::ser::Allocator + rkyv::ser::Writer> Serialize<S> for Arch
+impl<S: rkyv::rancor::Fallible + ?Sized + rkyv::ser::Allocator + rkyv::ser::Writer>
+    rkyv::Serialize<S> for Arch
 where
     S::Error: rkyv::rancor::Source,
 {
-    fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
-        self.0.language().to_string().serialize(serializer)
+    fn serialize(&self, serialiser: &mut S) -> Result<Self::Resolver, S::Error> {
+        self.0.language().to_string().serialize(serialiser)
     }
 }
 
-impl<D: Fallible + ?Sized> rkyv::Deserialize<Arch, D> for ArchivedArch
+impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<Arch, D> for ArchivedArch
 where
     D::Error: rkyv::rancor::Source,
 {
-    fn deserialize(&self, deserializer: &mut D) -> Result<Arch, D::Error> {
-        let variant_str = rkyv::Deserialize::<String, D>::deserialize(&self.0, deserializer)?;
+    fn deserialize(&self, deserialiser: &mut D) -> Result<Arch, D::Error> {
+        let variant_str = rkyv::Deserialize::<String, D>::deserialize(&self.0, deserialiser)?;
         Ok(Arch::new(
             resolve_language(&variant_str).expect("invalid language variant"),
         ))
@@ -133,12 +181,12 @@ impl Entity for Arch {
 }
 
 impl Arch {
-    pub fn try_new(language: &'static Language) -> Result<Self, ArchError> {
-        registry::provide_arch(language)
-    }
-
     pub fn new(language: &'static Language) -> Self {
         Self::try_new(language).unwrap_or_else(|_| panic!("unsupported language: {language}"))
+    }
+
+    pub fn try_new(language: &'static Language) -> Result<Self, ArchError> {
+        registry::provide_arch(language)
     }
 
     pub fn disassembler(&self) -> Disassembler {
@@ -153,20 +201,23 @@ impl Arch {
         self.0.endian()
     }
 
-    pub fn canonicalise_address(&self, addr: Address) -> Option<(Address, ContextSet)> {
-        self.0.canonicalise_address(addr)
+    pub fn canonicalise_address(
+        &self,
+        addr: impl Into<RawAddress>,
+    ) -> Option<(RawAddress, ContextSet)> {
+        self.0.canonicalise_address(addr.into())
     }
 
     pub fn canonicalise_address_with(
         &self,
-        addr: Address,
+        addr: impl Into<RawAddress>,
         context: &LiftingContext,
-    ) -> Option<(Address, ContextSet)> {
-        self.0.canonicalise_address_with(addr, context)
+    ) -> Option<(RawAddress, ContextSet)> {
+        self.0.canonicalise_address_with(addr.into(), context)
     }
 
-    pub fn external_thunk_template(&self) -> ExternFunctionTemplate {
-        self.0.external_function_template()
+    pub fn external_thunk_template(&self) -> ExternalThunkTemplate {
+        self.0.external_thunk_template()
     }
 
     pub fn flags(&self) -> &[Flag] {
@@ -181,24 +232,41 @@ impl Arch {
         self.0.gprs()
     }
 
-    pub fn is_halt_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
-        self.0.is_halt_intrinsic(op, args)
+    pub fn classify_bytes(&self, bytes: &[u8]) -> BytesProperties {
+        self.0.classify_bytes(bytes)
+    }
+
+    pub fn classify_contiguous_bytes(
+        &self,
+        address: RawAddress,
+        context: &LiftingContext,
+        bytes: &[u8],
+    ) -> (usize, BytesProperties) {
+        self.0.classify_contiguous_bytes(address, context, bytes)
     }
 
     pub fn is_nonsense_pattern(&self, bytes: &[u8]) -> bool {
-        self.0.is_nonsense_pattern(bytes)
+        self.classify_bytes(bytes).is_nonsense()
     }
 
-    pub fn is_service_call(&self, op: u16, args: &[Varnode]) -> bool {
-        self.0.is_service_call(op, args)
+    pub fn is_padding_pattern(&self, bytes: &[u8]) -> bool {
+        self.classify_bytes(bytes).is_padding()
     }
 
-    pub fn is_skip_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
-        self.0.is_skip_intrinsic(op, args)
+    pub fn is_halt_intrinsic(&self, user_op: u16, args: &[Varnode]) -> bool {
+        self.0.is_halt_intrinsic(user_op, args)
     }
 
-    pub fn is_trap_intrinsic(&self, op: u16, args: &[Varnode]) -> bool {
-        self.0.is_trap_intrinsic(op, args)
+    pub fn is_service_call(&self, user_op: u16, args: &[Varnode]) -> bool {
+        self.0.is_service_call(user_op, args)
+    }
+
+    pub fn is_skip_intrinsic(&self, user_op: u16, args: &[Varnode]) -> bool {
+        self.0.is_skip_intrinsic(user_op, args)
+    }
+
+    pub fn is_trap_intrinsic(&self, user_op: u16, args: &[Varnode]) -> bool {
+        self.0.is_trap_intrinsic(user_op, args)
     }
 
     pub fn resolve_mapping_symbol(&self, symbol: impl Into<Symbol>) -> Option<ContextHint> {
@@ -207,5 +275,9 @@ impl Arch {
 
     pub fn language(&self) -> &'static Language {
         self.0.language()
+    }
+
+    pub fn platform(&self) -> Platform {
+        Platform::for_arch(self)
     }
 }

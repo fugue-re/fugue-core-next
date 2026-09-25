@@ -2,33 +2,30 @@ use object::endian::LittleEndian;
 use object::read::pe::{ImageNtHeaders, PeFile};
 use object::{ReadRef, pe};
 
-use crate::analysis::AnalysisError;
-use crate::analysis::function::FunctionRecovery;
 use crate::arch::Arch;
-use crate::ir::{Address, Endian};
-use crate::lifter::LanguageId;
-use crate::lifter::dynamic::LanguageSource;
+use crate::extension::{self, Registration};
+use crate::ir::{Endian, RawAddress};
+use crate::lifter::{LanguageId, LanguageSource};
 use crate::loader::pe::PeFileRepr;
-use crate::loader::{LoadableSegment, LoaderError, Pe};
-use crate::registry::{self, Registration};
-use crate::types::AttributeMap;
+use crate::loader::{ImageSegmentContents, LanguageVariantOverride, LoaderError};
+use crate::types::{ATTRIBUTE_LANGUAGE_VARIANT, AttributeMap};
 
 pub struct ImageContext<'a> {
     machine: u16,
     endian: Endian,
     is_64: bool,
-    base: Address,
-    preferred_base: Address,
-    entry: Option<Address>,
+    base: RawAddress,
+    preferred_base: RawAddress,
+    entry: Option<RawAddress>,
     attributes: &'a AttributeMap,
 }
 
 impl<'a> ImageContext<'a> {
     pub(crate) fn new(
         view: &PeFileRepr<'_, '_>,
-        base: Address,
-        preferred_base: Address,
-        entry: Option<Address>,
+        base: RawAddress,
+        preferred_base: RawAddress,
+        entry: Option<RawAddress>,
         attributes: &'a AttributeMap,
     ) -> Self {
         Self {
@@ -54,15 +51,15 @@ impl<'a> ImageContext<'a> {
         self.is_64
     }
 
-    pub fn base(&self) -> Address {
+    pub fn base(&self) -> RawAddress {
         self.base
     }
 
-    pub fn preferred_base(&self) -> Address {
+    pub fn preferred_base(&self) -> RawAddress {
         self.preferred_base
     }
 
-    pub fn entry(&self) -> Option<Address> {
+    pub fn entry(&self) -> Option<RawAddress> {
         self.entry
     }
 
@@ -80,19 +77,42 @@ impl<'a> ImageContext<'a> {
     ) -> Result<Arch, LoaderError> {
         let mut matches = Vec::new();
 
-        for resolver in registry::iter::<ArchResolver>() {
+        for resolver in extension::iter::<ArchResolver>() {
             if let Some(arch) = self.resolve_architecture_using(resolver, source)? {
                 matches.push(arch);
             }
         }
 
-        match matches.len() {
-            0 => Err(LoaderError::UnsupportedArch),
-            1 => Ok(matches.remove(0)),
-            _ => Err(LoaderError::extension_with(
-                "ambiguous PE architecture resolver",
-            )),
-        }
+        let arch = match matches.len() {
+            0 => return Err(LoaderError::UnsupportedArch),
+            1 => matches.remove(0),
+            _ => {
+                return Err(LoaderError::extension_with(
+                    "ambiguous PE architecture resolver",
+                ));
+            }
+        };
+
+        let Some(overrides) = self
+            .attributes
+            .get_attr::<LanguageVariantOverride>(ATTRIBUTE_LANGUAGE_VARIANT)
+        else {
+            return Ok(arch);
+        };
+
+        let language = arch.language();
+        let Some(variant) = overrides.variant_for(language) else {
+            return Ok(arch);
+        };
+
+        let id = LanguageId::new_with(
+            language.processor(),
+            language.is_big_endian(),
+            language.bits(),
+            Some(variant),
+        );
+
+        Arch::try_new(source.load(&id)?).map_err(LoaderError::extension)
     }
 
     pub fn resolve_architecture_using(
@@ -100,7 +120,7 @@ impl<'a> ImageContext<'a> {
         resolver: &ArchResolver,
         source: &LanguageSource<'_>,
     ) -> Result<Option<Arch>, LoaderError> {
-        (resolver.resolve_architecture)(self, source)
+        resolver.resolve_architecture(self, source)
     }
 }
 
@@ -108,23 +128,27 @@ type ArchResolveFn =
     fn(&ImageContext<'_>, &LanguageSource<'_>) -> Result<Option<Arch>, LoaderError>;
 
 pub struct ArchResolver {
-    pub name: &'static str,
-    pub resolve_architecture: ArchResolveFn,
+    name: &'static str,
+    resolve_architecture: ArchResolveFn,
 }
 
-impl Registration for ArchResolver {
-    fn name(&self) -> &'static str {
-        self.name
-    }
-}
-
-registry::collect!(ArchResolver);
-
-#[fugue_core::extension]
 impl ArchResolver {
-    const NAME: &str = "pe-builtins";
+    pub const fn new(name: &'static str, resolve_architecture: ArchResolveFn) -> Self {
+        Self {
+            name,
+            resolve_architecture,
+        }
+    }
 
-    fn resolve_architecture(
+    pub fn resolve_architecture(
+        &self,
+        context: &ImageContext<'_>,
+        source: &LanguageSource<'_>,
+    ) -> Result<Option<Arch>, LoaderError> {
+        (self.resolve_architecture)(context, source)
+    }
+
+    fn resolve_builtin(
         context: &ImageContext<'_>,
         source: &LanguageSource<'_>,
     ) -> Result<Option<Arch>, LoaderError> {
@@ -164,88 +188,36 @@ impl ArchResolver {
     }
 }
 
-pub struct AnalysisContext<'a> {
-    pe: &'a Pe<'a>,
-    arch: Arch,
-    convention: Option<&'a str>,
-}
-
-impl<'a> AnalysisContext<'a> {
-    pub(crate) fn new(pe: &'a Pe<'a>, arch: Arch, convention: Option<&'a str>) -> Self {
-        Self {
-            pe,
-            arch,
-            convention,
-        }
-    }
-
-    pub fn pe(&self) -> &'a Pe<'a> {
-        self.pe
-    }
-
-    pub fn arch(&self) -> &Arch {
-        &self.arch
-    }
-
-    pub fn convention(&self) -> Option<&'a str> {
-        self.convention
-    }
-
-    pub fn configure_function_recovery(
-        &self,
-        recovery: &mut FunctionRecovery,
-    ) -> Result<(), AnalysisError> {
-        for handler in registry::iter::<FunctionRecoveryHandler>() {
-            self.configure_function_recovery_with(handler, recovery)?;
-        }
-
-        Ok(())
-    }
-
-    pub fn configure_function_recovery_with(
-        &self,
-        handler: &FunctionRecoveryHandler,
-        recovery: &mut FunctionRecovery,
-    ) -> Result<(), AnalysisError> {
-        (handler.configure_function_recovery)(self, recovery)
-    }
-}
-
-type FunctionRecoveryConfigureFn =
-    fn(&AnalysisContext<'_>, &mut FunctionRecovery) -> Result<(), AnalysisError>;
-
-pub struct FunctionRecoveryHandler {
-    pub name: &'static str,
-    pub configure_function_recovery: FunctionRecoveryConfigureFn,
-}
-
-impl Registration for FunctionRecoveryHandler {
+impl Registration for ArchResolver {
     fn name(&self) -> &'static str {
         self.name
     }
 }
 
-registry::collect!(FunctionRecoveryHandler);
+extension::collect!(ArchResolver);
+extension::submit! {
+    ArchResolver::new("pe-builtins", ArchResolver::resolve_builtin)
+}
 
 pub struct RelocationContext<'a, 'data> {
     machine: u16,
-    base: Address,
-    preferred_base: Address,
-    patch_address: Address,
-    offset: usize,
+    base: RawAddress,
+    preferred_base: RawAddress,
+    patch_address: RawAddress,
+    offset: u64,
     relocation_type: u16,
-    segment: &'a mut LoadableSegment<'data>,
+    segment: &'a mut ImageSegmentContents<'data>,
 }
 
 impl<'a, 'data> RelocationContext<'a, 'data> {
     pub(crate) fn new<Headers, R>(
         pe: &PeFile<'data, Headers, R>,
-        base: Address,
-        preferred_base: Address,
-        patch_address: Address,
-        offset: usize,
+        base: RawAddress,
+        preferred_base: RawAddress,
+        patch_address: RawAddress,
+        offset: u64,
         relocation_type: u16,
-        segment: &'a mut LoadableSegment<'data>,
+        segment: &'a mut ImageSegmentContents<'data>,
     ) -> Self
     where
         Headers: ImageNtHeaders,
@@ -266,19 +238,19 @@ impl<'a, 'data> RelocationContext<'a, 'data> {
         self.machine
     }
 
-    pub fn base(&self) -> Address {
+    pub fn base(&self) -> RawAddress {
         self.base
     }
 
-    pub fn preferred_base(&self) -> Address {
+    pub fn preferred_base(&self) -> RawAddress {
         self.preferred_base
     }
 
-    pub fn patch_address(&self) -> Address {
+    pub fn patch_address(&self) -> RawAddress {
         self.patch_address
     }
 
-    pub fn offset(&self) -> usize {
+    pub fn offset(&self) -> u64 {
         self.offset
     }
 
@@ -286,47 +258,53 @@ impl<'a, 'data> RelocationContext<'a, 'data> {
         self.relocation_type
     }
 
-    pub fn segment(&self) -> &LoadableSegment<'data> {
+    pub fn segment(&self) -> &ImageSegmentContents<'data> {
         self.segment
     }
 
-    pub fn segment_mut(&mut self) -> &mut LoadableSegment<'data> {
+    pub fn segment_mut(&mut self) -> &mut ImageSegmentContents<'data> {
         self.segment
     }
 
     pub fn apply_relocation(&mut self) -> Result<bool, LoaderError> {
-        let mut applied = false;
-
-        for handler in registry::iter::<RelocationHandler>() {
-            if self.apply_relocation_with(handler)? {
-                if applied {
-                    return Err(LoaderError::extension_with(
-                        "ambiguous PE relocation handler",
-                    ));
-                }
-                applied = true;
+        for extension in extension::iter::<RelocationExtension>() {
+            if self.apply_relocation_extension(extension)? {
+                return Ok(true);
             }
         }
 
-        Ok(applied)
+        Ok(false)
     }
 
-    fn apply_relocation_with(&mut self, handler: &RelocationHandler) -> Result<bool, LoaderError> {
-        (handler.apply_relocation)(self)
+    fn apply_relocation_extension(
+        &mut self,
+        extension: &RelocationExtension,
+    ) -> Result<bool, LoaderError> {
+        extension.apply(self)
     }
 }
 
-type RelocationApplyFn = fn(&mut RelocationContext<'_, '_>) -> Result<bool, LoaderError>;
+type RelocationExtensionFn = fn(&mut RelocationContext<'_, '_>) -> Result<bool, LoaderError>;
 
-pub struct RelocationHandler {
-    pub name: &'static str,
-    pub apply_relocation: RelocationApplyFn,
+pub struct RelocationExtension {
+    name: &'static str,
+    apply: RelocationExtensionFn,
 }
 
-impl Registration for RelocationHandler {
+impl RelocationExtension {
+    pub const fn new(name: &'static str, apply: RelocationExtensionFn) -> Self {
+        Self { name, apply }
+    }
+
+    pub fn apply(&self, context: &mut RelocationContext<'_, '_>) -> Result<bool, LoaderError> {
+        (self.apply)(context)
+    }
+}
+
+impl Registration for RelocationExtension {
     fn name(&self) -> &'static str {
         self.name
     }
 }
 
-registry::collect!(RelocationHandler);
+extension::collect!(RelocationExtension);

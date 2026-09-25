@@ -3,13 +3,14 @@ use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use flate2::read::GzDecoder;
-use fugue_sleigh_language::{Language as SleighLanguage, LanguageDB, LanguageError};
+use fugue_sleigh_language::{Language as SleighLanguage, LanguageDB, LanguageDef, LanguageError};
 use rkyv::rancor::Error as RkyvError;
 use thiserror::Error;
 
 use crate::LanguageId;
 use crate::context::ContextBitRange;
 use crate::dynamic::constructor::Constructor;
+use crate::dynamic::convention::Convention;
 use crate::dynamic::install::Install;
 use crate::dynamic::operand::OperandFilter;
 use crate::dynamic::resolve::DecisionNode;
@@ -18,6 +19,7 @@ use crate::dynamic::symbol::Symbol;
 use crate::dynamic::tables::Tables;
 use crate::dynamic::template::{ConstructTpl, OpTpl};
 use crate::dynamic::{LanguageLoadError, registry};
+use crate::language::Language as StaticLanguage;
 use crate::pattern::PatternOp;
 use crate::pcode::Varnode;
 use crate::template::{ConstTpl, HandleTpl, VarnodeTpl};
@@ -48,42 +50,38 @@ pub struct Language {
     pub(crate) processor: Box<str>,
     pub(crate) variant: Box<str>,
     pub(crate) little_endian: bool,
-
+    pub(crate) bits: u32,
     pub(crate) address_alignment: usize,
     pub(crate) address_bits: u32,
     pub(crate) address_size: usize,
     pub(crate) address_upper_bound: u64,
-
     pub(crate) constant_space: u8,
     pub(crate) default_space: u8,
     pub(crate) register_space: u8,
     pub(crate) register_space_size: usize,
-
     pub(crate) unique_mask: u64,
     pub(crate) unique_space: u8,
     pub(crate) unique_space_size: usize,
-
     pub(crate) root_dtree: u16,
-
     pub(crate) spaces: Box<[AddressSpace]>,
-
     pub(crate) constructors: Box<[Constructor]>,
     pub(crate) decision_trees: Box<[DecisionNode]>,
     pub(crate) operand_filters: Box<[OperandFilter]>,
     pub(crate) pattern_expressions: Box<[PatternOp]>,
     pub(crate) symbols: Box<[Symbol]>,
-
     pub(crate) const_templates: Box<[ConstTpl]>,
     pub(crate) construct_templates: Box<[ConstructTpl]>,
     pub(crate) handle_templates: Box<[HandleTpl]>,
     pub(crate) op_templates: Box<[OpTpl]>,
     pub(crate) varnode_templates: Box<[VarnodeTpl]>,
-
     pub(crate) registers: Box<[(Box<str>, Varnode)]>,
     pub(crate) register_ranges: Box<[(u64, u16, Box<str>)]>,
     pub(crate) user_ops: Box<[Box<str>]>,
     pub(crate) context_vars: Box<[(Box<str>, ContextBitRange)]>,
     pub(crate) context_defaults: Box<[(Box<str>, u32)]>,
+    #[allow(clippy::type_complexity)]
+    pub(crate) call_preserved_registers: Box<[(Box<str>, Box<[Varnode]>)]>,
+    pub(crate) conventions: Box<[(Box<str>, Convention)]>,
     pub(crate) space_names: Box<[Box<str>]>,
 }
 
@@ -120,9 +118,7 @@ impl Language {
         rkyv::to_bytes::<RkyvError>(self).map(|aligned| aligned.into_vec().into_boxed_slice())
     }
 
-    pub(crate) fn get_or_install(
-        self,
-    ) -> Result<&'static crate::language::Language, LanguageLoadError> {
+    pub(crate) fn get_or_install(self) -> Result<&'static StaticLanguage, LanguageLoadError> {
         let id_str = &*self.id;
         let language_id = id_str
             .parse::<LanguageId>()
@@ -130,12 +126,13 @@ impl Language {
         Ok(registry::get_or_install(language_id, || self.install()))
     }
 
-    pub fn install(self) -> &'static crate::language::Language {
+    pub fn install(self) -> &'static StaticLanguage {
         let Self {
             id,
             processor,
             variant,
             little_endian,
+            bits,
             address_alignment,
             address_bits,
             address_size,
@@ -164,6 +161,8 @@ impl Language {
             user_ops,
             context_vars,
             context_defaults,
+            call_preserved_registers,
+            conventions,
             space_names,
         } = self;
 
@@ -203,6 +202,7 @@ impl Language {
             processor: processor.install(),
             little_endian,
             variant: variant.install(),
+            bits,
             address_alignment,
             address_bits,
             address_size,
@@ -222,35 +222,61 @@ impl Language {
             space_names: space_names.install(),
             context_vars: context_vars.install(),
             context_defaults: context_defaults.install(),
+            call_preserved_registers: call_preserved_registers.install(),
+            conventions: conventions.install(),
             data: language_data,
         }))
     }
 
-    pub(crate) fn from_sleigh(
-        sleigh: &SleighLanguage,
-        defaults: impl IntoIterator<Item = (impl Into<Box<str>>, u32)>,
-    ) -> Self {
+    pub(crate) fn from_sleigh(sleigh: &SleighLanguage, definition: &LanguageDef) -> Self {
         let tables = Tables::new(sleigh);
-        let context_defaults = defaults
-            .into_iter()
-            .map(|(name, value)| (name.into(), value))
+        let context_defaults = definition
+            .context_set()
+            .map(|(name, value)| (Box::<str>::from(name), value))
             .collect();
+        let truncated_spaces = definition.truncated_spaces();
 
         let arch = sleigh.architecture();
+        let declared_bits = definition
+            .id()
+            .parse::<LanguageId>()
+            .map_or_else(|_| arch.bits(), |id| id.bits());
         let default_space = sleigh.spaces().default_space_ref();
         let constant_space_id = sleigh.spaces().constant_space_id().index() as u8;
         let default_space_id = default_space.index() as u8;
         let register_space_id = sleigh.spaces().register_space_id().index() as u8;
         let unique_space_id = sleigh.spaces().unique_space_id().index() as u8;
 
-        let address_size = default_space.address_size();
-        let address_bits = (address_size as u32) * 8;
-        let address_upper_bound = default_space.highest_offset();
+        let truncated_default = truncated_spaces
+            .iter()
+            .find(|truncated| truncated.space() == default_space.name());
+
+        let (address_size, address_bits, address_upper_bound) = match truncated_default {
+            Some(truncated) => (
+                truncated.size() as usize,
+                truncated.address_bits(),
+                truncated.upper_bound().min(default_space.highest_offset()),
+            ),
+            None => (
+                default_space.address_size(),
+                (default_space.address_size() as u32) * 8,
+                default_space.highest_offset(),
+            ),
+        };
 
         let spaces = sleigh
             .spaces()
             .iter()
-            .map(|spc| AddressSpace::from_sleigh(spc, default_space_id))
+            .map(|spc| {
+                let mut space = AddressSpace::from_sleigh(spc, default_space_id);
+                if let Some(truncated) = truncated_spaces
+                    .iter()
+                    .find(|truncated| truncated.space() == spc.name())
+                {
+                    space.upper_bound = space.upper_bound.min(truncated.upper_bound());
+                }
+                space
+            })
             .collect::<Box<[AddressSpace]>>();
 
         let space_names = sleigh
@@ -278,6 +304,45 @@ impl Language {
         }
         register_pairs.sort_by(|a, b| a.0.cmp(&b.0));
         register_ranges.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        let mut call_preserved_registers = sleigh
+            .compiler_conventions()
+            .keys()
+            .map(|compiler| {
+                let registers = sleigh
+                    .call_preserved_registers(compiler)
+                    .expect("compiler convention comes from the language")
+                    .into_iter()
+                    .map(|varnode| {
+                        Varnode::new(
+                            u8::try_from(varnode.space().index())
+                                .expect("address-space identifier fits in u8"),
+                            varnode.offset(),
+                            u16::try_from(varnode.size()).expect("register size fits in u16"),
+                        )
+                    })
+                    .collect();
+                (Box::<str>::from(compiler.as_str()), registers)
+            })
+            .collect::<Vec<_>>();
+        call_preserved_registers.sort_by(|a, b| a.0.cmp(&b.0));
+        let call_preserved_registers = call_preserved_registers
+            .into_iter()
+            .collect::<Box<[(Box<str>, Box<[Varnode]>)]>>();
+
+        let mut conventions = sleigh
+            .compiler_conventions()
+            .iter()
+            .map(|(compiler, convention)| {
+                (
+                    Box::<str>::from(compiler.as_str()),
+                    Convention::from(convention),
+                )
+            })
+            .collect::<Vec<_>>();
+        conventions.sort_by(|a, b| a.0.cmp(&b.0));
+        let conventions = conventions
+            .into_iter()
+            .collect::<Box<[(Box<str>, Convention)]>>();
 
         let root_dtree = tables.root_dtree_id();
 
@@ -303,10 +368,11 @@ impl Language {
         context_pairs.sort_by(|a, b| a.0.cmp(&b.0));
 
         Self {
-            id: arch.to_string().into_boxed_str(),
+            id: Box::<str>::from(definition.id()),
             processor: Box::<str>::from(arch.processor()),
             variant: Box::<str>::from(arch.variant()),
             little_endian: arch.endian().is_little(),
+            bits: declared_bits,
             address_alignment: sleigh.alignment(),
             address_bits,
             address_size,
@@ -335,6 +401,8 @@ impl Language {
             user_ops,
             context_vars: context_pairs.into_boxed_slice(),
             context_defaults,
+            call_preserved_registers,
+            conventions,
             space_names,
         }
     }
@@ -375,10 +443,7 @@ impl Language {
             source,
         })?;
 
-        Ok(Self::from_sleigh(
-            &sleigh,
-            definition.language().context_set(),
-        ))
+        Ok(Self::from_sleigh(&sleigh, definition.language()))
     }
 }
 

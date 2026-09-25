@@ -3,16 +3,23 @@ use object::{
     Architecture, Object, ObjectSection, ReadRef, Relocation, RelocationFlags, RelocationTarget,
 };
 
-use crate::ir::{Address, SymbolIndex, SymbolTable};
+use crate::arch::Arch;
+use crate::ir::{RawAddress, SymbolEntry, SymbolIndex, TransientSymbolTable};
+use crate::lifter::ContextHint;
 use crate::loader::elf::extensions::RelocationContext;
 use crate::loader::elf::{ELF_DYNSYM_SELECTOR, ELF_SYMTAB_SELECTOR};
-use crate::loader::{LoadableSegment, LoaderError};
+use crate::loader::{ImageAddress, ImageSegmentContents, LoaderError};
 
 pub mod generic;
 
 pub mod aarch64;
 pub mod arm;
 pub mod mips;
+pub mod mips64;
+pub mod ppc;
+pub mod ppc64;
+pub mod riscv;
+pub mod riscv64;
 pub mod x86;
 pub mod x86_64;
 
@@ -23,9 +30,19 @@ where
     'file: 'data,
 {
     elf: &'file ElfFile<'data, Elf, R>,
-    base: Address,
-    symbols: &'file SymbolTable,
+    arch: &'file Arch,
+    base: RawAddress,
+    symbols: &'file TransientSymbolTable<ImageAddress>,
     is_object: bool,
+}
+
+fn elf_relocation_type(reloc: &Relocation) -> Option<u32> {
+    let RelocationFlags::Elf { r_type } = reloc.flags() else {
+        tracing::warn!("unsupported relocation flags {reloc:?}");
+        return None;
+    };
+
+    Some(r_type)
 }
 
 impl<'data, 'file, Elf, R> ElfSegmentRelocator<'data, 'file, Elf, R>
@@ -36,45 +53,85 @@ where
 {
     pub fn new(
         elf: &'file ElfFile<'data, Elf, R>,
-        symbols: &'file SymbolTable,
+        arch: &'file Arch,
+        base: RawAddress,
+        symbols: &'file TransientSymbolTable<ImageAddress>,
         is_object: bool,
-        base: Address,
     ) -> Self {
         Self {
             elf,
+            arch,
             base,
             symbols,
             is_object,
         }
     }
 
+    fn resolve_relocation_entry(
+        &self,
+        reloc: &Relocation,
+        is_dynamic: bool,
+    ) -> Option<&SymbolEntry<ImageAddress>> {
+        let RelocationTarget::Symbol(index) = reloc.target() else {
+            tracing::warn!("unsupported relocation target {reloc:?}");
+            return None;
+        };
+
+        let external_selector = if self.is_object {
+            ELF_SYMTAB_SELECTOR
+        } else {
+            ELF_DYNSYM_SELECTOR
+        };
+
+        if (is_dynamic || self.is_object)
+            && let Some((id, entry)) = self
+                .symbols
+                .get_by_index(SymbolIndex::new(external_selector, index.0))
+        {
+            tracing::trace!("found external symbol {id:?} at {}", entry.address());
+            return Some(entry);
+        }
+
+        if !is_dynamic
+            && let Some((id, entry)) = self
+                .symbols
+                .get_by_index(SymbolIndex::new(ELF_SYMTAB_SELECTOR, index.0))
+        {
+            tracing::trace!("found symbol {id:?} at {}", entry.address());
+            return Some(entry);
+        }
+
+        tracing::warn!(
+            "attempting to resolve symbol that is not contained in either expected symbol table {index:?} (dynamic: {is_dynamic})",
+        );
+
+        None
+    }
+
     pub fn apply(
         &self,
-        origin: impl Into<Address>,
-        lsegm: &mut LoadableSegment<'data>,
+        origin: RawAddress,
+        bytes: &mut ImageSegmentContents<'data>,
         sect: &ElfSection<'data, 'file, Elf, R>,
     ) -> Result<(), LoaderError> {
-        let origin = origin.into();
-        self.apply_relocations(origin, lsegm, sect)?;
-        self.apply_dynamic_relocations(origin, lsegm)?;
+        self.apply_relocations(bytes, sect)?;
+        self.apply_dynamic_relocations(origin, bytes)?;
         Ok(())
     }
 
     pub fn apply_relocations(
         &self,
-        _origin: impl Into<Address>,
-        lsegm: &mut LoadableSegment<'data>,
+        bytes: &mut ImageSegmentContents<'data>,
         sect: &ElfSection<'data, 'file, Elf, R>,
     ) -> Result<(), LoaderError> {
-        let _origin = _origin.into();
         for (off, rel) in sect.relocations() {
             tracing::trace!(
                 "applying relocation {}+{off:#x} {:?} {rel:?}",
-                lsegm.address(),
+                bytes.address(),
                 rel.kind()
             );
 
-            self.apply_relocation(lsegm, off, &rel, false)?;
+            self.apply_relocation(bytes, off, &rel, false)?;
         }
 
         Ok(())
@@ -82,8 +139,8 @@ where
 
     pub fn apply_dynamic_relocations(
         &self,
-        origin: impl Into<Address>,
-        lsegm: &mut LoadableSegment<'data>,
+        origin: RawAddress,
+        bytes: &mut ImageSegmentContents<'data>,
     ) -> Result<(), LoaderError> {
         let Some(drels) = self.elf.dynamic_relocations() else {
             tracing::trace!("no dynamic relocations");
@@ -98,7 +155,6 @@ where
                 .unwrap_or_default()
         );
 
-        let origin = origin.into();
         let Some(origin_offset) = origin.offset().checked_sub(self.base.offset()) else {
             tracing::warn!(
                 "dynamic relocation origin {origin} is below image base {}",
@@ -106,8 +162,7 @@ where
             );
             return Ok(());
         };
-        let Some(origin_last_offset) =
-            origin_offset.checked_add(lsegm.len().saturating_sub(1) as u64)
+        let Some(origin_last_offset) = origin_offset.checked_add(bytes.size().saturating_sub(1))
         else {
             return Err(LoaderError::address_overflow(origin));
         };
@@ -115,12 +170,11 @@ where
         for (off, rel) in
             drels.filter(|(off, _)| *off >= origin_offset && *off <= origin_last_offset)
         {
-            tracing::trace!("applying dynamic relocation at {}", Address::from(off));
+            tracing::trace!("applying dynamic relocation at {}", RawAddress::from(off));
 
-            // Compute offset in the segment
             let off = off - origin_offset;
 
-            self.apply_relocation(lsegm, off, &rel, true)?;
+            self.apply_relocation(bytes, off, &rel, true)?;
         }
 
         Ok(())
@@ -128,12 +182,12 @@ where
 
     pub(crate) fn apply_relocation(
         &self,
-        lsegm: &mut LoadableSegment<'data>,
+        bytes: &mut ImageSegmentContents<'data>,
         offset: u64,
         reloc: &Relocation,
         is_dynamic: bool,
     ) -> Result<(), LoaderError> {
-        let patch_address = lsegm.address() + offset;
+        let patch_address = bytes.address() + offset;
         let relocation_type = match reloc.flags() {
             RelocationFlags::Elf { r_type } => Some(r_type),
             _ => None,
@@ -145,7 +199,7 @@ where
             offset,
             relocation_type,
             is_dynamic,
-            lsegm,
+            bytes,
         );
 
         if context.apply_relocation()? {
@@ -165,6 +219,21 @@ where
             Architecture::Mips => {
                 self.apply_mips_relocation(context.segment_mut(), offset, reloc, is_dynamic);
             }
+            Architecture::Mips64 => {
+                self.apply_mips64_relocation(context.segment_mut(), offset, reloc, is_dynamic);
+            }
+            Architecture::PowerPc => {
+                self.apply_ppc_relocation(context.segment_mut(), offset, reloc, is_dynamic);
+            }
+            Architecture::PowerPc64 => {
+                self.apply_ppc64_relocation(context.segment_mut(), offset, reloc, is_dynamic);
+            }
+            Architecture::Riscv32 => {
+                self.apply_riscv_relocation(context.segment_mut(), offset, reloc, is_dynamic);
+            }
+            Architecture::Riscv64 => {
+                self.apply_riscv64_relocation(context.segment_mut(), offset, reloc, is_dynamic);
+            }
             Architecture::X86_64 => {
                 self.apply_x86_64_relocation(context.segment_mut(), offset, reloc, is_dynamic);
             }
@@ -176,99 +245,51 @@ where
         Ok(())
     }
 
-    pub(crate) fn elf_relocation_type(&self, reloc: &Relocation) -> Option<u32> {
-        let RelocationFlags::Elf { r_type } = reloc.flags() else {
-            tracing::warn!("unsupported relocation flags {reloc:?}");
-            return None;
-        };
-
-        Some(r_type)
-    }
-
     pub(crate) fn resolve_relocation_symbol(
         &self,
         reloc: &Relocation,
         is_dynamic: bool,
     ) -> Option<u64> {
-        let RelocationTarget::Symbol(index) = reloc.target() else {
-            tracing::warn!("unsupported relocation target {reloc:?}");
-            return None;
-        };
-
-        let extern_selector = if self.is_object {
-            ELF_SYMTAB_SELECTOR
-        } else {
-            ELF_DYNSYM_SELECTOR
-        };
-
-        // NOTE: this should only be checked if we are processing dynamic relocations?
-        if (is_dynamic || self.is_object)
-            // && let Some(target) = self.externs.as_ref().and_then(|e| e.get_address(index.0))
-            && let Some((id, entry)) = self.symbols.get_by_index(SymbolIndex::new(extern_selector, index.0))
-        {
-            let address = entry.address();
-            tracing::trace!("found external symbol {id:?} at {address}");
-            return Some(address.offset());
-        }
-
-        if !is_dynamic && // let Some(target) = self.symbols.get_address(index.0) {
-            let Some((id, entry)) = self.symbols.get_by_index(SymbolIndex::new(ELF_SYMTAB_SELECTOR, index.0))
-        {
-            let address = entry.address();
-            tracing::trace!("found symbol {id:?} at {address}");
-            return Some(address.offset());
-        }
-
-        tracing::warn!(
-            "attempting to resolve symbol that is not contained in either expected symbol table {index:?} (dynamic: {is_dynamic})",
-        );
-
-        None
-
-        // TODO: review this logic--it's not clear we need it.
-        //
-        // NOTE: in this case, we need to compute the address + our base
-        // for object files, this base address will be the beginning of the
-        // loaded segment containing it, probably we should save the section
-        // map computed in `elf_symbols`?
-        //
-        // let table = if is_dynamic {
-        //    self.elf.dynamic_symbol_table()?
-        // } else {
-        //    self.elf.symbol_table()?
-        // };
-        //
-        // let symbol = table.symbol_by_index(index).ok()?;
-        //
-        // Some(symbol.address())
+        self.resolve_relocation_entry(reloc, is_dynamic)
+            .map(|entry| entry.address().raw_offset())
     }
 
     pub(crate) fn mark_function_symbol(
         &self,
-        address: impl Into<Address>,
-        lsegm: &mut LoadableSegment<'data>,
+        address: impl Into<RawAddress>,
+        bytes: &mut ImageSegmentContents<'data>,
     ) {
-        let address = address.into();
+        let value = address.into();
 
-        tracing::trace!("marking symbol {address} as function");
+        tracing::trace!("marking symbol {value} as function");
 
-        lsegm.add_function_hint(address);
-
-        /*
-        if self.externs.as_ref().map_or(false, |externs| {
-            externs.update_symbol_properties(address, |props| props | SymbolProperties::FUNCTION)
-        }) {
-            return;
+        match self.arch.canonicalise_address(value) {
+            Some((entry, ctxset)) if entry != value => {
+                bytes.add_function_hint(entry);
+                bytes.add_mapping_hint(entry, ContextHint::code().with_context(ctxset));
+            }
+            _ => bytes.add_function_hint(value),
         }
+    }
 
-        let Some(entries) = self.symbols.get_by_address_mut(address) else {
-            tracing::warn!("attempting to mark non-existing symbol {address} as function");
+    pub(crate) fn mark_data_symbol(
+        &self,
+        reloc: &Relocation,
+        is_dynamic: bool,
+        bytes: &mut ImageSegmentContents<'data>,
+    ) {
+        let Some(entry) = self.resolve_relocation_entry(reloc, is_dynamic) else {
             return;
         };
 
-        entries.for_each(|(_, entry)| {
-            entry.mark_as_function();
-        });
-        */
+        if !entry.is_data() {
+            return;
+        }
+
+        let address = entry.address().raw_offset();
+
+        tracing::trace!("marking symbol {address} as data");
+
+        bytes.add_mapping_hint(address, ContextHint::data());
     }
 }

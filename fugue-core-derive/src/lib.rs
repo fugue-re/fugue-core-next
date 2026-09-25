@@ -1,101 +1,22 @@
 use proc_macro::TokenStream;
-use proc_macro2::TokenStream as TokenStream2;
-use quote::quote;
-use syn::{
-    DeriveInput, Ident, ImplItem, ItemImpl, LitBool, LitStr, Token, Type, parse_macro_input,
-};
+use syn::{DeriveInput, ItemImpl, parse_macro_input};
 
-struct ProviderAttr {
-    concrete: Option<Type>,
-    tag: Option<String>,
-    persistent: Option<bool>,
-}
+mod analysis;
+mod extension;
+mod storage;
 
-impl Default for ProviderAttr {
-    fn default() -> Self {
-        Self {
-            concrete: None,
-            tag: None,
-            persistent: None,
-        }
-    }
-}
+/// Derives `fugue_core::engine::AnalysisData` for a value supplied to an analysis engine.
+///
+/// `#[analysis_data(delegate)]` exposes contained analysis data through the derived type. Apply it
+/// to a single-field tuple struct, to an enum whose variants each contain one field, or to the one
+/// delegated field in each struct or enum variant.
+#[proc_macro_derive(AnalysisData, attributes(analysis_data))]
+pub fn derive_analysis_data(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
 
-impl ProviderAttr {
-    fn parse(attr: &syn::Attribute) -> syn::Result<ProviderAttr> {
-        let mut result = ProviderAttr::default();
-
-        attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("concrete") {
-                meta.input.parse::<Token![=]>()?;
-                result.concrete = Some(meta.input.parse::<Type>()?);
-                Ok(())
-            } else if meta.path.is_ident("tag") {
-                meta.input.parse::<Token![=]>()?;
-                let lit = meta.input.parse::<LitStr>()?;
-                result.tag = Some(lit.value());
-                Ok(())
-            } else if meta.path.is_ident("persistent") {
-                meta.input.parse::<Token![=]>()?;
-                let lit = meta.input.parse::<LitBool>()?;
-                result.persistent = Some(lit.value());
-                Ok(())
-            } else {
-                Err(meta.error("unrecognised provider attribute"))
-            }
-        })?;
-
-        Ok(result)
-    }
-}
-
-fn generate_from_storage_fn(ty: &impl quote::ToTokens) -> TokenStream2 {
-    quote! {
-        Some(|path: &::std::path::Path, attributes: &mut ::fugue_core::types::AttributeMap| ->
-            ::std::result::Result<::std::boxed::Box<dyn ::fugue_core::storage::segments::SegmentStorageProvider>, ::fugue_core::storage::segments::SegmentStorageError> {
-
-            let provider = <#ty as ::fugue_core::storage::segments::provider::SegmentStorageProviderFromStorage>::from_storage(path, attributes)?;
-            Ok(::std::boxed::Box::new(provider))
-        })
-    }
-}
-
-fn generate_registration(ty: &impl quote::ToTokens, tag: &str, persistent: bool) -> TokenStream2 {
-    let (from_storage_fn, persistence) = if persistent {
-        (
-            generate_from_storage_fn(ty),
-            quote! { ::fugue_core::storage::PERSISTENT },
-        )
-    } else {
-        (quote! { None }, quote! { ::fugue_core::storage::TRANSIENT })
-    };
-
-    quote! {
-        ::inventory::submit! {
-            ::fugue_core::storage::segments::provider::SegmentStorageProviderEntry::new_with::<#ty>(
-                #tag,
-                |start: ::fugue_core::ir::Address, end: ::fugue_core::ir::Address, attributes: &mut ::fugue_core::types::AttributeMap| ->
-                    ::std::result::Result<::std::boxed::Box<dyn ::fugue_core::storage::segments::SegmentStorageProvider>, ::fugue_core::storage::segments::SegmentStorageError> {
-
-                    let provider = <#ty as ::fugue_core::storage::segments::provider::SegmentStorageProviderFromSegmentRange>::from_segment_range(start, end, attributes)?;
-                    Ok(::std::boxed::Box::new(provider))
-                },
-                #from_storage_fn,
-            )
-        }
-
-        impl ::fugue_core::storage::segments::provider::SegmentStorageProviderDescriptor for #ty {
-            const STABLE_TAG: &'static str = #tag;
-            const PERSISTENCE: ::fugue_core::storage::StoragePersistence = #persistence;
-
-            fn stable_tag(&self) -> &'static str {
-                Self::STABLE_TAG
-            }
-
-            fn persistence(&self) -> ::fugue_core::storage::StoragePersistence {
-                Self::PERSISTENCE
-            }
-        }
+    match analysis::expand(input) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
     }
 }
 
@@ -131,80 +52,20 @@ fn generate_registration(ty: &impl quote::ToTokens, tag: &str, persistent: bool)
 #[proc_macro_derive(SegmentStorageProvider, attributes(provider))]
 pub fn derive_segment_storage_provider(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let name = &input.ident;
 
-    let mut attrs = Vec::new();
-    for attr in input.attrs.iter().filter(|a| a.path().is_ident("provider")) {
-        match ProviderAttr::parse(attr) {
-            Ok(a) => attrs.push(a),
-            Err(e) => return e.to_compile_error().into(),
-        }
+    match storage::expand(input) {
+        Ok(tokens) => tokens.into(),
+        Err(error) => error.to_compile_error().into(),
     }
-
-    let (concrete_attrs, simple_attrs) = attrs
-        .into_iter()
-        .partition::<Vec<_>, _>(|a| a.concrete.is_some());
-
-    if !concrete_attrs.is_empty() {
-        let mut registrations = Vec::new();
-
-        for attr in &concrete_attrs {
-            if attr.tag.is_none() {
-                let ty = attr.concrete.as_ref().unwrap();
-                return syn::Error::new_spanned(
-                    ty,
-                    "concrete instantiation requires `tag = \"...\"`",
-                )
-                .to_compile_error()
-                .into();
-            }
-
-            let ty = attr.concrete.as_ref().unwrap();
-            let tag = attr.tag.as_deref().unwrap();
-            let persistent = attr.persistent.unwrap_or(true);
-
-            registrations.push(generate_registration(ty, tag, persistent));
-        }
-
-        let expanded = quote! {
-            #(#registrations)*
-        };
-
-        return TokenStream::from(expanded);
-    }
-
-    let mut tag = None;
-    let mut persistent = None;
-
-    for attr in simple_attrs {
-        if attr.tag.is_some() {
-            tag = attr.tag;
-        }
-        if attr.persistent.is_some() {
-            persistent = attr.persistent;
-        }
-    }
-
-    let stable_tag = tag.unwrap_or_else(|| name.to_string());
-    let persistent = persistent.unwrap_or(true);
-
-    let expanded = generate_registration(name, &stable_tag, persistent);
-
-    TokenStream::from(expanded)
 }
 
 /// Attribute macro for declaring an extension point registration ergonomically.
 ///
-/// Applied to an `impl` block of an extension descriptor type, it maps each
-/// associated `const` and `fn` to a field of the descriptor and emits the
-/// `registry::submit!` registration automatically — replacing the boilerplate of
-/// free functions plus a positional constructor call.
+/// Applied to an `impl` block of an extension descriptor type, it passes each
+/// associated `const` and `fn` to the descriptor constructor and emits the
+/// `extension::submit!` registration automatically.
 ///
-/// - A `const` (e.g. `const NAME: &str = "...";`) maps to the field whose name is
-///   the const ident **lowercased** (`NAME` -> `name`); its value is used directly.
-/// - A `fn` maps to the field whose name is the fn ident; the function pointer is
-///   used as the value. Use `#[provides(field_name)]` on the fn to map it to a
-///   differently named field.
+/// Constants and functions are passed to `new` in declaration order.
 ///
 /// # Example
 ///
@@ -218,67 +79,11 @@ pub fn derive_segment_storage_provider(input: TokenStream) -> TokenStream {
 /// }
 /// ```
 #[proc_macro_attribute]
-pub fn extension(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    let item_impl = parse_macro_input!(item as ItemImpl);
+pub fn extension(_attribute: TokenStream, item: TokenStream) -> TokenStream {
+    let item = parse_macro_input!(item as ItemImpl);
 
-    match expand_extension(item_impl) {
+    match extension::expand(item) {
         Ok(tokens) => tokens.into(),
-        Err(err) => err.to_compile_error().into(),
+        Err(error) => error.to_compile_error().into(),
     }
-}
-
-fn expand_extension(item_impl: ItemImpl) -> syn::Result<TokenStream2> {
-    let self_ty = &item_impl.self_ty;
-
-    let mut free_fns = Vec::new();
-    let mut field_idents = Vec::new();
-    let mut field_values = Vec::new();
-
-    for item in &item_impl.items {
-        match item {
-            ImplItem::Const(c) => {
-                let field = Ident::new(&c.ident.to_string().to_lowercase(), c.ident.span());
-                let value = &c.expr;
-                field_idents.push(field);
-                field_values.push(quote! { #value });
-            }
-            ImplItem::Fn(f) => {
-                let mut field = f.sig.ident.clone();
-                let mut func = f.clone();
-
-                let mut kept_attrs = Vec::with_capacity(func.attrs.len());
-                for attr in func.attrs.drain(..) {
-                    if attr.path().is_ident("provides") {
-                        field = attr.parse_args::<Ident>()?;
-                    } else {
-                        kept_attrs.push(attr);
-                    }
-                }
-                func.attrs = kept_attrs;
-
-                let fn_ident = &func.sig.ident;
-                field_idents.push(field);
-                field_values.push(quote! { #fn_ident });
-                free_fns.push(func);
-            }
-            other => {
-                return Err(syn::Error::new_spanned(
-                    other,
-                    "`#[extension]` only supports `const` and `fn` items",
-                ));
-            }
-        }
-    }
-
-    Ok(quote! {
-        const _: () = {
-            #(#free_fns)*
-
-            ::fugue_core::registry::submit! {
-                #self_ty {
-                    #(#field_idents: #field_values),*
-                }
-            }
-        };
-    })
 }

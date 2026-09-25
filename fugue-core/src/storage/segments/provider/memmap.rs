@@ -1,23 +1,115 @@
-use std::borrow::Cow;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io;
+use std::ops::{Range, RangeInclusive};
 use std::path::{Path, PathBuf};
 
 use fugue_core_derive::SegmentStorageProvider;
 use memmap2::MmapMut;
+use range_set_blaze::RangeSetBlaze;
+#[allow(deprecated)]
+use range_set_blaze::Rog;
 use thiserror::Error;
 
 use super::{
     SegmentStorageProvider, SegmentStorageProviderFromSegmentRange,
-    SegmentStorageProviderFromStorage,
+    SegmentStorageProviderFromStorage, SegmentStorageProviderId, SegmentView,
 };
-use crate::ir::Address;
+use crate::ir::{Address, AddressRangeExt};
 use crate::storage::segments::SegmentStorageError;
 use crate::storage::{self, PERSISTENT, StoragePersistence, TRANSIENT};
 use crate::types::AttributeMap;
 use crate::types::attributes::ATTRIBUTE_PROJECT_PATH;
 
 const PROJECT_MEMORY_MAPPING_DATA: &str = "segment.data.bin";
+const PROJECT_MEMORY_MAPPING_META: &str = "segment.data.meta";
+
+#[derive(Default)]
+struct WrittenExtents {
+    ranges: RangeSetBlaze<usize>,
+}
+
+impl WrittenExtents {
+    fn iter(&self) -> impl Iterator<Item = Range<usize>> + '_ {
+        self.ranges
+            .ranges()
+            .map(|range| *range.start()..range.end().saturating_add(1))
+    }
+
+    #[allow(deprecated)]
+    fn run_at(&self, offset: usize) -> Option<Range<usize>> {
+        match self.ranges.rogs_get(offset) {
+            Rog::Range(range) => Some(*range.start()..range.end().saturating_add(1)),
+            Rog::Gap(_) => None,
+        }
+    }
+
+    #[allow(deprecated)]
+    fn runs_in(&self, range: Range<usize>) -> impl Iterator<Item = Range<usize>> + '_ {
+        let rogs = (!range.is_empty()).then(|| self.ranges.rogs_range(range.start..=range.end - 1));
+
+        rogs.into_iter().flatten().filter_map(|rog| match rog {
+            Rog::Range(range) => Some(*range.start()..range.end().saturating_add(1)),
+            Rog::Gap(_) => None,
+        })
+    }
+
+    fn insert(&mut self, range: Range<usize>) {
+        if range.is_empty() {
+            return;
+        }
+
+        self.ranges.ranges_insert(range.start..=range.end - 1);
+    }
+}
+
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct PackExtent {
+    offset: u64,
+    size: u64,
+}
+
+impl PackExtent {
+    fn new(offset: u64, size: u64) -> Self {
+        Self { offset, size }
+    }
+}
+
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct PackMetadata {
+    logical_size: u64,
+    extents: Vec<PackExtent>,
+}
+
+impl PackMetadata {
+    fn new(logical_size: u64, extents: Vec<PackExtent>) -> Self {
+        Self {
+            logical_size,
+            extents,
+        }
+    }
+}
+
+struct ExtentPlacement {
+    logical: usize,
+    source: usize,
+    size: usize,
+}
+
+impl ExtentPlacement {
+    fn new(logical: usize, source: usize, size: usize) -> Self {
+        Self {
+            logical,
+            source,
+            size,
+        }
+    }
+
+    fn relocate(&self, backing: &mut [u8]) {
+        if self.logical != self.source {
+            backing.copy_within(self.source..self.source + self.size, self.logical);
+        }
+    }
+}
 
 #[derive(SegmentStorageProvider)]
 #[provider(
@@ -31,25 +123,34 @@ const PROJECT_MEMORY_MAPPING_DATA: &str = "segment.data.bin";
 )]
 pub struct MemoryMappedSegmentStorage<const PERSISTENCE: StoragePersistence> {
     backing: MmapMut,
+    written: WrittenExtents,
     project: PathBuf,
 }
 
 #[derive(Debug, Error)]
 pub enum MemoryMappedSegmentStorageError {
-    #[error("failed to create project: {0}")]
-    CreateProject(io::Error),
     #[error("failed to create memory mapping: {0}")]
     CreateMapping(io::Error),
+    #[error("failed to create project: {0}")]
+    CreateProject(io::Error),
+    #[error("failed to decode packed segment metadata: {0}")]
+    DecodeMetadata(anyhow::Error),
+    #[error("failed to encode packed segment metadata: {0}")]
+    EncodeMetadata(anyhow::Error),
     #[error("failed to flush memory mapping: {0}")]
     FlushMapping(io::Error),
     #[error("invalid address")]
     InvalidAddress,
     #[error("invalid size")]
     InvalidSize,
-    #[error("no project path specified")]
-    NoProjectPath,
     #[error("failed to read project data from `{0}`")]
     NoProjectData(PathBuf),
+    #[error("no project path specified")]
+    NoProjectPath,
+    #[error("failed to pack segment data: {0}")]
+    PackSegment(io::Error),
+    #[error("failed to unpack segment data: {0}")]
+    UnpackSegment(io::Error),
 }
 
 impl MemoryMappedSegmentStorageError {
@@ -63,10 +164,14 @@ impl From<MemoryMappedSegmentStorageError> for SegmentStorageError {
         match e {
             MemoryMappedSegmentStorageError::CreateProject(_)
             | MemoryMappedSegmentStorageError::CreateMapping(_)
-            | MemoryMappedSegmentStorageError::FlushMapping(_) => SegmentStorageError::backing(e),
+            | MemoryMappedSegmentStorageError::FlushMapping(_)
+            | MemoryMappedSegmentStorageError::PackSegment(_)
+            | MemoryMappedSegmentStorageError::UnpackSegment(_) => SegmentStorageError::backing(e),
+            MemoryMappedSegmentStorageError::EncodeMetadata(e)
+            | MemoryMappedSegmentStorageError::DecodeMetadata(e) => SegmentStorageError::Backing(e),
             MemoryMappedSegmentStorageError::InvalidAddress => SegmentStorageError::InvalidAddress,
             MemoryMappedSegmentStorageError::InvalidSize => SegmentStorageError::InvalidSize,
-            MemoryMappedSegmentStorageError::NoProjectPath => SegmentStorageError::InvalidAddress,
+            MemoryMappedSegmentStorageError::NoProjectPath => SegmentStorageError::NoProjectPath,
             MemoryMappedSegmentStorageError::NoProjectData(path) => {
                 SegmentStorageError::ProjectData(path, io::ErrorKind::NotFound)
             }
@@ -90,6 +195,8 @@ impl<const PERSISTENCE: StoragePersistence> MemoryMappedSegmentStorage<PERSISTEN
             data_path.display(),
         );
 
+        let _ = fs::remove_file(project.join(PROJECT_MEMORY_MAPPING_META));
+
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -106,6 +213,7 @@ impl<const PERSISTENCE: StoragePersistence> MemoryMappedSegmentStorage<PERSISTEN
 
         Ok(Self {
             backing,
+            written: WrittenExtents::default(),
             project: project.to_owned(),
         })
     }
@@ -113,41 +221,168 @@ impl<const PERSISTENCE: StoragePersistence> MemoryMappedSegmentStorage<PERSISTEN
     pub fn open_existing(project_path: impl AsRef<Path>) -> Result<Self, SegmentStorageError> {
         let project = project_path.as_ref();
         let data_path = project.join(PROJECT_MEMORY_MAPPING_DATA);
+        let meta_path = project.join(PROJECT_MEMORY_MAPPING_META);
 
-        if !data_path.exists() {
-            tracing::error!(
-                "memory-mapped storage data file does not exist at {}",
-                data_path.display()
-            );
-            return Err(MemoryMappedSegmentStorageError::no_project_data(project).into());
+        let file = match OpenOptions::new().read(true).write(true).open(&data_path) {
+            Ok(file) => file,
+            Err(e) => {
+                tracing::error!(
+                    "memory-mapped storage data file at {} unavailable: {e}",
+                    data_path.display()
+                );
+                return Err(MemoryMappedSegmentStorageError::no_project_data(project).into());
+            }
+        };
+
+        if meta_path.exists() {
+            tracing::trace!("expanding packed segment data at {}", data_path.display());
+            return Self::unpack_in_place(project, &meta_path, file);
         }
 
-        tracing::trace!(
-            "opening existing memory-mapped storage at {}",
-            data_path.display()
-        );
+        tracing::trace!("opening flat backing at {}", data_path.display());
 
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(false)
-            .open(&data_path)
-            .map_err(MemoryMappedSegmentStorageError::CreateMapping)?;
+        let file_len = file
+            .metadata()
+            .map_err(MemoryMappedSegmentStorageError::UnpackSegment)?
+            .len();
 
         let backing = unsafe { MmapMut::map_mut(&file) }
             .map_err(MemoryMappedSegmentStorageError::CreateMapping)?;
 
+        let mut written = WrittenExtents::default();
+        written.insert(0..file_len as usize);
+
         Ok(Self {
             backing,
+            written,
             project: project.to_owned(),
         })
     }
+
+    fn unpack_in_place(
+        project: &Path,
+        meta_path: &Path,
+        file: File,
+    ) -> Result<Self, SegmentStorageError> {
+        let metadata_bytes =
+            fs::read(meta_path).map_err(MemoryMappedSegmentStorageError::UnpackSegment)?;
+        let metadata = rkyv::access::<ArchivedPackMetadata, rkyv::rancor::Error>(&metadata_bytes)
+            .map_err(|e| {
+            MemoryMappedSegmentStorageError::DecodeMetadata(anyhow::Error::new(e))
+        })?;
+
+        let logical_size = metadata.logical_size.to_native();
+
+        let mut written = WrittenExtents::default();
+        let mut placements = Vec::with_capacity(metadata.extents.len());
+        let mut compacted = 0usize;
+        for extent in metadata.extents.iter() {
+            let offset = usize::try_from(extent.offset.to_native()).map_err(|_| {
+                SegmentStorageError::backing_with("packed extent offset exceeds usize")
+            })?;
+            let size = usize::try_from(extent.size.to_native()).map_err(|_| {
+                SegmentStorageError::backing_with("packed extent size exceeds usize")
+            })?;
+            placements.push(ExtentPlacement::new(offset, compacted, size));
+            compacted += size;
+            written.insert(offset..offset + size);
+        }
+
+        file.set_len(logical_size)
+            .map_err(MemoryMappedSegmentStorageError::CreateMapping)?;
+        let mut backing = unsafe { MmapMut::map_mut(&file) }
+            .map_err(MemoryMappedSegmentStorageError::CreateMapping)?;
+
+        for placement in placements.iter().rev() {
+            placement.relocate(&mut backing);
+        }
+
+        let dirty_end = compacted;
+        let mut cursor = 0usize;
+        for range in written.iter() {
+            let start = range.start.min(dirty_end);
+            if cursor < start {
+                backing[cursor..start].fill(0);
+            }
+            cursor = cursor.max(range.end);
+            if cursor >= dirty_end {
+                break;
+            }
+        }
+        if cursor < dirty_end {
+            backing[cursor..dirty_end].fill(0);
+        }
+
+        backing
+            .flush()
+            .map_err(MemoryMappedSegmentStorageError::FlushMapping)?;
+        fs::remove_file(meta_path).map_err(MemoryMappedSegmentStorageError::UnpackSegment)?;
+
+        Ok(Self {
+            backing,
+            written,
+            project: project.to_owned(),
+        })
+    }
+
+    fn pack_in_place(&mut self) -> Result<(), SegmentStorageError> {
+        let logical_size = self.backing.len() as u64;
+
+        let mut extents = Vec::new();
+        let mut compacted = 0usize;
+        for range in self.written.iter() {
+            let offset = range.start;
+            let size = range.end - range.start;
+            if offset != compacted {
+                self.backing.copy_within(offset..offset + size, compacted);
+            }
+            extents.push(PackExtent::new(offset as u64, size as u64));
+            compacted += size;
+        }
+
+        let metadata = PackMetadata::new(logical_size, extents);
+
+        self.backing
+            .flush()
+            .map_err(MemoryMappedSegmentStorageError::FlushMapping)?;
+
+        let data_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(self.project.join(PROJECT_MEMORY_MAPPING_DATA))
+            .map_err(MemoryMappedSegmentStorageError::PackSegment)?;
+        data_file
+            .set_len(compacted as u64)
+            .map_err(MemoryMappedSegmentStorageError::PackSegment)?;
+        data_file
+            .sync_all()
+            .map_err(MemoryMappedSegmentStorageError::PackSegment)?;
+
+        let meta_file = File::create(self.project.join(PROJECT_MEMORY_MAPPING_META))
+            .map_err(MemoryMappedSegmentStorageError::PackSegment)?;
+        let writer = rkyv::api::high::to_bytes_in::<_, rkyv::rancor::Error>(
+            &metadata,
+            rkyv::ser::writer::IoWriter::new(meta_file),
+        )
+        .map_err(|e| MemoryMappedSegmentStorageError::EncodeMetadata(anyhow::Error::new(e)))?;
+        writer
+            .into_inner()
+            .sync_all()
+            .map_err(MemoryMappedSegmentStorageError::PackSegment)?;
+
+        Ok(())
+    }
 }
 
-impl<const PERSISTENCE: bool> Drop for MemoryMappedSegmentStorage<PERSISTENCE> {
+impl<const PERSISTENCE: StoragePersistence> Drop for MemoryMappedSegmentStorage<PERSISTENCE> {
     fn drop(&mut self) {
         if PERSISTENCE == storage::PERSISTENT {
-            tracing::trace!("skipping memory-mapped storage clean-up; persistence is enabled");
+            if let Err(e) = self.pack_in_place() {
+                tracing::error!(
+                    "failed to pack segment data at {}: {e}",
+                    self.project.display()
+                );
+            }
             return;
         }
 
@@ -177,20 +412,24 @@ impl<const PERSISTENCE: StoragePersistence> SegmentStorageProviderFromSegmentRan
     for MemoryMappedSegmentStorage<PERSISTENCE>
 {
     fn from_segment_range(
-        start: Address,
-        end: Address,
+        id: SegmentStorageProviderId,
+        range: RangeInclusive<Address>,
         attributes: &mut AttributeMap,
     ) -> Result<Self, SegmentStorageError> {
-        let project = attributes
+        let project_root = attributes
             .get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH)
             .ok_or(MemoryMappedSegmentStorageError::NoProjectPath)?;
+        let project = id.path_in(&project_root);
 
         let data_path = project.join(PROJECT_MEMORY_MAPPING_DATA);
 
-        let size = end.offset() - start.offset() + 1;
+        let size = range
+            .size()
+            .filter(|&size| size > 0)
+            .ok_or(SegmentStorageError::InvalidAddressRange)?;
 
         if data_path.exists() {
-            let existing = Self::open_existing(project)?;
+            let existing = Self::open_existing(&project)?;
 
             if existing.size() != size {
                 return Err(SegmentStorageError::backing_with(format!(
@@ -210,7 +449,7 @@ impl<const PERSISTENCE: StoragePersistence> SegmentStorageProvider
     for MemoryMappedSegmentStorage<PERSISTENCE>
 {
     fn read_bytes(&self, offset: u64, bytes: &mut [u8]) -> Result<usize, SegmentStorageError> {
-        let offset = offset as usize;
+        let offset = usize::try_from(offset).map_err(|_| SegmentStorageError::InvalidAddress)?;
         let available = self.backing.len().saturating_sub(offset);
         let read_size = bytes.len().min(available);
 
@@ -223,7 +462,7 @@ impl<const PERSISTENCE: StoragePersistence> SegmentStorageProvider
     }
 
     fn write_bytes(&mut self, offset: u64, bytes: &[u8]) -> Result<usize, SegmentStorageError> {
-        let offset = offset as usize;
+        let offset = usize::try_from(offset).map_err(|_| SegmentStorageError::InvalidAddress)?;
         let available = self.backing.len().saturating_sub(offset);
         let write_size = bytes.len().min(available);
 
@@ -232,30 +471,47 @@ impl<const PERSISTENCE: StoragePersistence> SegmentStorageProvider
         }
 
         self.backing[offset..offset + write_size].copy_from_slice(&bytes[..write_size]);
+
+        self.written.insert(offset..offset + write_size);
+
         Ok(write_size)
     }
 
-    fn view_bytes(&self, offset: u64, n: usize) -> Result<Cow<'_, [u8]>, SegmentStorageError> {
-        let offset = offset as usize;
-        if offset >= self.backing.len() {
+    fn view_bytes(&self, offset: u64, n: usize) -> Result<SegmentView<'_>, SegmentStorageError> {
+        let size = self.backing.len();
+        let offset = usize::try_from(offset).map_err(|_| SegmentStorageError::InvalidAddress)?;
+        if offset >= size {
             return Err(SegmentStorageError::InvalidAddress);
         }
+        let end = offset
+            .checked_add(n)
+            .filter(|&end| end <= size)
+            .ok_or(SegmentStorageError::InvalidSize)?;
 
-        let end = (offset + n).min(self.backing.len());
-        if end - offset < n {
-            return Err(SegmentStorageError::InvalidSize);
+        let mut view = SegmentView::new(n as u64);
+        for run in self.written.runs_in(offset..end) {
+            view.push(
+                (run.start - offset) as u64,
+                &self.backing[run.start..run.end],
+            );
         }
 
-        Ok(Cow::Borrowed(&self.backing[offset..end]))
+        Ok(view)
     }
 
-    fn view_bytes_from(&self, offset: u64) -> Result<Cow<'_, [u8]>, SegmentStorageError> {
-        let offset = offset as usize;
+    fn view_bytes_from(&self, offset: u64) -> Result<SegmentView<'_>, SegmentStorageError> {
+        let offset = usize::try_from(offset).map_err(|_| SegmentStorageError::InvalidAddress)?;
         if offset >= self.backing.len() {
             return Err(SegmentStorageError::InvalidAddress);
         }
 
-        Ok(Cow::Borrowed(&self.backing[offset..]))
+        let mut view = SegmentView::default();
+        if let Some(run) = self.written.run_at(offset) {
+            view.push(0, &self.backing[offset..run.end]);
+            view.set_size((run.end - offset) as u64);
+        }
+
+        Ok(view)
     }
 
     fn size(&self) -> u64 {
@@ -266,6 +522,182 @@ impl<const PERSISTENCE: StoragePersistence> SegmentStorageProvider
         self.backing
             .flush()
             .map_err(MemoryMappedSegmentStorageError::FlushMapping)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_sparse_view_queries_written_extents() -> Result<(), SegmentStorageError> {
+        let dir = tempfile::tempdir().map_err(SegmentStorageError::backing)?;
+        let mut store = MemoryMappedSegmentStorage::<{ TRANSIENT }>::with_size(&dir, 0x40)?;
+        store.write_bytes(0x10, b"ab")?;
+        store.write_bytes(0x12, b"cd")?;
+        store.write_bytes(0x20, b"wxyz")?;
+
+        let view = store.view_bytes(0x11, 0x12)?;
+        assert_eq!(view.size(), 0x12);
+        assert_eq!(view.chunks().len(), 2);
+        assert_eq!(view.chunks()[0].offset(), 0);
+        assert_eq!(view.chunks()[0].bytes(), b"bcd");
+        assert_eq!(view.chunks()[1].offset(), 0x0f);
+        assert_eq!(view.chunks()[1].bytes(), b"wxy");
+
+        let run = store.view_bytes_from(0x11)?;
+        assert_eq!(run.as_contiguous(), Some(&b"bcd"[..]));
+
+        let gap = store.view_bytes_from(0x18)?;
+        assert!(gap.is_empty());
+        assert!(gap.chunks().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_pack_roundtrip_sparse() -> Result<(), SegmentStorageError> {
+        let dir = tempfile::tempdir().map_err(SegmentStorageError::backing)?;
+        let logical = 0x10_0000u64;
+
+        {
+            let mut store = MemoryMappedSegmentStorage::<{ PERSISTENT }>::with_size(&dir, logical)?;
+            store.write_bytes(0x10, b"hello")?;
+            store.write_bytes(0x8_0000, b"world")?;
+        }
+
+        let data_path = dir.path().join(PROJECT_MEMORY_MAPPING_DATA);
+        let packed_len = fs::metadata(&data_path).unwrap().len();
+        assert!(
+            packed_len < 0x1000,
+            "packed file must be proportional to written bytes, not logical size (got {packed_len})"
+        );
+
+        let store = MemoryMappedSegmentStorage::<{ PERSISTENT }>::open_existing(&dir)?;
+        assert_eq!(store.size(), logical);
+
+        let mut buf = [0xffu8; 5];
+        store.read_bytes(0x10, &mut buf)?;
+        assert_eq!(&buf, b"hello");
+
+        let mut buf = [0xffu8; 5];
+        store.read_bytes(0x8_0000, &mut buf)?;
+        assert_eq!(&buf, b"world");
+
+        let mut gap = [0xffu8; 16];
+        store.read_bytes(0x4_0000, &mut gap)?;
+        assert!(gap.iter().all(|byte| *byte == 0), "gap must read zero");
+
+        drop(store);
+        Ok(())
+    }
+
+    #[test]
+    fn test_pack_post_load_write() -> Result<(), SegmentStorageError> {
+        let dir = tempfile::tempdir().map_err(SegmentStorageError::backing)?;
+        let logical = 0x10_0000u64;
+
+        {
+            let mut store = MemoryMappedSegmentStorage::<{ PERSISTENT }>::with_size(&dir, logical)?;
+            store.write_bytes(0x10, b"hello")?;
+        }
+        {
+            let mut store = MemoryMappedSegmentStorage::<{ PERSISTENT }>::open_existing(&dir)?;
+            store.write_bytes(0x200, b"patch")?;
+        }
+
+        let store = MemoryMappedSegmentStorage::<{ PERSISTENT }>::open_existing(&dir)?;
+        let mut buf = [0u8; 5];
+        store.read_bytes(0x200, &mut buf)?;
+        assert_eq!(&buf, b"patch");
+        let mut buf = [0u8; 5];
+        store.read_bytes(0x10, &mut buf)?;
+        assert_eq!(&buf, b"hello");
+        let mut gap = [0xffu8; 8];
+        store.read_bytes(0x100, &mut gap)?;
+        assert!(gap.iter().all(|byte| *byte == 0));
+
+        drop(store);
+        Ok(())
+    }
+
+    #[test]
+    fn test_pack_fully_initialised() -> Result<(), SegmentStorageError> {
+        let dir = tempfile::tempdir().map_err(SegmentStorageError::backing)?;
+        let payload = (0..0x20u8).collect::<Vec<_>>();
+
+        {
+            let mut store = MemoryMappedSegmentStorage::<{ PERSISTENT }>::with_size(&dir, 0x20)?;
+            store.write_bytes(0, &payload)?;
+        }
+
+        let store = MemoryMappedSegmentStorage::<{ PERSISTENT }>::open_existing(&dir)?;
+        assert_eq!(store.size(), 0x20);
+        let mut buf = [0u8; 0x20];
+        store.read_bytes(0, &mut buf)?;
+        assert_eq!(&buf[..], &payload[..]);
+
+        drop(store);
+        Ok(())
+    }
+
+    #[test]
+    fn test_pack_empty() -> Result<(), SegmentStorageError> {
+        let dir = tempfile::tempdir().map_err(SegmentStorageError::backing)?;
+
+        {
+            MemoryMappedSegmentStorage::<{ PERSISTENT }>::with_size(&dir, 0x1000)?;
+        }
+
+        let store = MemoryMappedSegmentStorage::<{ PERSISTENT }>::open_existing(&dir)?;
+        assert_eq!(store.size(), 0x1000);
+        let mut buf = [0xffu8; 32];
+        store.read_bytes(0x400, &mut buf)?;
+        assert!(buf.iter().all(|byte| *byte == 0));
+
+        drop(store);
+        Ok(())
+    }
+
+    #[test]
+    fn test_segment_ranges_use_distinct_provider_storage() -> Result<(), SegmentStorageError> {
+        let dir = tempfile::tempdir().map_err(SegmentStorageError::backing)?;
+        let mut attributes = AttributeMap::new();
+        attributes.set_attr(ATTRIBUTE_PROJECT_PATH, dir.path().to_path_buf());
+
+        {
+            let mut first = MemoryMappedSegmentStorage::<{ PERSISTENT }>::from_segment_range(
+                SegmentStorageProviderId::new(0),
+                Address::from(0u64)..=Address::from(31u64),
+                &mut attributes,
+            )?;
+            let mut second = MemoryMappedSegmentStorage::<{ PERSISTENT }>::from_segment_range(
+                SegmentStorageProviderId::new(1),
+                Address::from(0u64)..=Address::from(63u64),
+                &mut attributes,
+            )?;
+            first.write_bytes(0, b"first")?;
+            second.write_bytes(0, b"second")?;
+        }
+
+        let first = MemoryMappedSegmentStorage::<{ PERSISTENT }>::open_existing(
+            SegmentStorageProviderId::new(0).path_in(dir.path()),
+        )?;
+        let second = MemoryMappedSegmentStorage::<{ PERSISTENT }>::open_existing(
+            SegmentStorageProviderId::new(1).path_in(dir.path()),
+        )?;
+        let mut first_bytes = [0u8; 5];
+        let mut second_bytes = [0u8; 6];
+        first.read_bytes(0, &mut first_bytes)?;
+        second.read_bytes(0, &mut second_bytes)?;
+
+        assert_eq!(&first_bytes, b"first");
+        assert_eq!(&second_bytes, b"second");
+        assert_eq!(first.size(), 32);
+        assert_eq!(second.size(), 64);
+
+        drop(first);
+        drop(second);
         Ok(())
     }
 }

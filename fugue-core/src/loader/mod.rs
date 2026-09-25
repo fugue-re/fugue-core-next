@@ -1,40 +1,64 @@
-use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Debug, Display};
-use std::ops::{Range, RangeInclusive};
 use std::path::Path;
 
 use digest::Digest as _;
 use fallible_iterator::FallibleIterator;
-use fugue_bytes::{BE, ByteCast, LE};
-use smallvec::{SmallVec, smallvec};
+use rustc_hash::FxHashMap;
 use thiserror::Error;
 
-use crate::analysis::AnalysisError;
-use crate::analysis::core::{FunctionRecovery, FunctionRecoveryConfig};
+use crate::AnalysisData;
 use crate::arch::Arch;
-use crate::ir::symbol::SymbolTable;
-use crate::ir::{Address, SegmentProperties};
-use crate::lifter::{ContextHint, LanguageError};
-use crate::storage::segments::space::AddressSpaceId;
+use crate::ir::Address;
+use crate::ir::symbol::TransientSymbolTable;
+use crate::lifter::{Language, LanguageError};
+use crate::platform::Platform;
 use crate::types::{AttributeMap, BytesOrMapping};
 
-pub mod elf;
-pub use elf::Elf;
+pub(crate) mod elf;
+pub use elf::extensions::{
+    ArchResolver as ElfArchResolver, ImageContext as ElfImageContext,
+    RelocationContext as ElfRelocationContext, RelocationExtension as ElfRelocationExtension,
+};
+pub use elf::{
+    ATTRIBUTE_LOAD_HEADERS as ATTRIBUTE_ELF_LOAD_HEADERS,
+    ATTRIBUTE_OVERRIDE_SEGMENT_PERMISSIONS as ATTRIBUTE_ELF_OVERRIDE_SEGMENT_PERMISSIONS,
+    ATTRIBUTE_PRESERVE_RELOCATABLE_SECTION_ADDRESSES, ATTRIBUTE_SKIP_NOTE_SECTIONS,
+    ELF_DYNSYM_SELECTOR, ELF_SYMTAB_SELECTOR, Elf, ElfFileRepr, ElfSegmentRelocator,
+};
+
+pub(crate) mod image;
+pub use image::{
+    ImageAddress, ImageBacking, ImageBank, ImageBankHandle, ImageBanks, ImageLayout,
+    ImageResolution, ImageSegment, ImageSegmentContents, ImageSegmentContentsIterator,
+    ImageSegmentIterator, ImageSpace, ImageSpaceHandle, ImageSpaceKind, ImageSpaces, ImageWrite,
+};
+pub(crate) use image::{ImageBankLayout, ImageCoveredRegions, ImageRegionBankMap};
 
 // pub mod macho
 // pub use macho::Macho;
 
-pub mod pe;
-pub use pe::Pe;
+pub(crate) mod pe;
+pub use pe::extensions::{
+    ArchResolver as PeArchResolver, ImageContext as PeImageContext,
+    RelocationContext as PeRelocationContext, RelocationExtension as PeRelocationExtension,
+};
+pub use pe::{
+    ATTRIBUTE_LOAD_HEADERS as ATTRIBUTE_PE_LOAD_HEADERS, ATTRIBUTE_PERMISSIVE, PE_EXPORT_SELECTOR,
+    PE_IMPORT_SELECTOR, Pe, PeSegmentRelocator,
+};
 
-pub mod shellcode;
+pub(crate) mod shellcode;
 pub use shellcode::Shellcode;
+
+pub(crate) mod thunk;
+pub use thunk::{ExternalThunkLayout, ExternalThunkLayoutError};
 
 #[derive(Debug, Error)]
 pub enum LoaderError {
     #[error("cannot load object: address overflow using base address of {0}")]
     AddressOverflow(Address),
+    #[error("cannot load object: image has zero size")]
+    EmptyImage,
     #[error("cannot apply loader extension: {0}")]
     Extension(anyhow::Error),
     #[error("cannot load object: {0}")]
@@ -45,10 +69,10 @@ pub enum LoaderError {
     Language(#[from] LanguageError),
     #[error("cannot load object: {0}")]
     Other(anyhow::Error),
-    #[error("cannot load object: unsupported file format")]
-    UnsupportedFormat,
     #[error("cannot load object: unsupported architecture")]
     UnsupportedArch,
+    #[error("cannot load object: unsupported file format")]
+    UnsupportedFormat,
 }
 
 impl LoaderError {
@@ -96,6 +120,26 @@ impl LoaderError {
         M: Debug + Display + Send + Sync + 'static,
     {
         Self::Other(anyhow::Error::msg(m))
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(untagged)]
+pub enum LanguageVariantOverride {
+    Any(String),
+    ByLanguage(FxHashMap<String, String>),
+}
+
+impl LanguageVariantOverride {
+    pub fn variant_for(&self, language: &Language) -> Option<&str> {
+        match self {
+            Self::Any(variant) => Some(variant),
+            Self::ByLanguage(variants) => {
+                let endian = if language.is_big_endian() { "BE" } else { "LE" };
+                let key = format!("{}:{endian}:{}", language.processor(), language.bits());
+                variants.get(&key).map(String::as_str)
+            }
+        }
     }
 }
 
@@ -152,18 +196,6 @@ impl LoadableMetadata {
         }
     }
 
-    fn compute_hashes(bytes: &[u8]) -> ([u8; 16], [u8; 32]) {
-        let mut md5 = md5::Md5::new();
-        let mut sha256 = sha2::Sha256::new();
-
-        for chunk in bytes.chunks(Self::BLOCK_SIZE) {
-            md5.update(chunk);
-            sha256.update(chunk);
-        }
-
-        (md5.finalize().into(), sha256.finalize().into())
-    }
-
     /// Returns the original path of the loadable object, if any.
     pub fn path(&self) -> Option<&str> {
         self.path.as_deref()
@@ -172,11 +204,6 @@ impl LoadableMetadata {
     /// Sets the path of the loadable object.
     pub fn set_path(&mut self, path: impl Into<String>) {
         self.path = Some(path.into());
-    }
-
-    /// Clears the path of the loadable object.
-    pub fn clear_path(&mut self) {
-        self.path = None;
     }
 
     /// Sets the path of the loadable object.
@@ -195,411 +222,31 @@ impl LoadableMetadata {
         self.sha256
     }
 
+    /// Returns the loader version string.
+    pub fn loader(&self) -> &str {
+        &self.loader
+    }
+
+    /// Clears the path of the loadable object.
+    pub fn clear_path(&mut self) {
+        self.path = None;
+    }
+
     /// Returns the default (strongest) hash of the loadable object.
     pub fn digest(&self) -> [u8; 32] {
         self.sha256()
     }
 
-    /// Returns the loader version string.
-    pub fn loader(&self) -> &str {
-        &self.loader
-    }
-}
+    fn compute_hashes(bytes: &[u8]) -> ([u8; 16], [u8; 32]) {
+        let mut md5 = md5::Md5::new();
+        let mut sha256 = sha2::Sha256::new();
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
-pub struct LoadableSegment<'a> {
-    name: Cow<'a, str>,
-    address: Address,
-    properties: SegmentProperties,
-    bytes: Cow<'a, [u8]>,
-    mapping_hints: Cow<'a, BTreeMap<Address, ContextHint>>,
-    function_hints: Cow<'a, BTreeSet<Address>>,
-}
-
-impl Display for LoadableSegment<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let name = &self.name;
-        let address = self.address;
-        let last_address = self.last_address();
-        let properties = self.properties;
-        let function_count = self.function_hints.len();
-        write!(
-            f,
-            "{name} with bounds {address}-{last_address} and properties {properties:?}; at least {function_count} potential functions"
-        )
-    }
-}
-
-impl<'a> LoadableSegment<'a> {
-    pub fn new(
-        name: impl Into<Cow<'a, str>>,
-        address: impl Into<Address>,
-        properties: SegmentProperties,
-        bytes: impl Into<Cow<'a, [u8]>>,
-    ) -> LoadableSegment<'a> {
-        Self::from_parts(
-            name,
-            address,
-            properties,
-            bytes,
-            Cow::Owned(BTreeMap::new()),
-            Cow::Owned(BTreeSet::new()),
-        )
-    }
-
-    pub fn new_with_hints(
-        name: impl Into<Cow<'a, str>>,
-        address: impl Into<Address>,
-        properties: SegmentProperties,
-        bytes: impl Into<Cow<'a, [u8]>>,
-        mapping_hints: impl Into<Cow<'a, BTreeMap<Address, ContextHint>>>,
-        function_hints: impl Into<Cow<'a, BTreeSet<Address>>>,
-    ) -> LoadableSegment<'a> {
-        Self::from_parts(
-            name,
-            address,
-            properties,
-            bytes,
-            mapping_hints,
-            function_hints,
-        )
-    }
-
-    pub fn from_parts(
-        name: impl Into<Cow<'a, str>>,
-        address: impl Into<Address>,
-        properties: SegmentProperties,
-        bytes: impl Into<Cow<'a, [u8]>>,
-        mapping_hints: impl Into<Cow<'a, BTreeMap<Address, ContextHint>>>,
-        function_hints: impl Into<Cow<'a, BTreeSet<Address>>>,
-    ) -> LoadableSegment<'a> {
-        Self {
-            name: name.into(),
-            address: address.into(),
-            properties,
-            bytes: bytes.into(),
-            mapping_hints: mapping_hints.into(),
-            function_hints: function_hints.into(),
-        }
-    }
-
-    pub fn address(&self) -> Address {
-        self.address
-    }
-
-    pub fn next_address(&self) -> Address {
-        self.address + self.bytes.len()
-    }
-
-    pub fn last_address(&self) -> Address {
-        self.address + self.bytes.len() - 1usize
-    }
-
-    pub fn name(&self) -> &str {
-        self.name.as_ref()
-    }
-
-    pub fn properties(&self) -> SegmentProperties {
-        self.properties
-    }
-
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-
-    pub fn mapping_hints(&self) -> &BTreeMap<Address, ContextHint> {
-        &self.mapping_hints
-    }
-
-    pub fn mapping_hints_mut(&mut self) -> &mut BTreeMap<Address, ContextHint> {
-        self.mapping_hints.to_mut()
-    }
-
-    pub fn add_context_hint(&mut self, address: impl Into<Address>, hint: ContextHint) {
-        self.mapping_hints.to_mut().insert(address.into(), hint);
-    }
-
-    pub fn function_hints(&self) -> &BTreeSet<Address> {
-        &self.function_hints
-    }
-
-    pub fn function_hints_mut(&mut self) -> &mut BTreeSet<Address> {
-        self.function_hints.to_mut()
-    }
-
-    pub fn add_function_hint(&mut self, address: impl Into<Address>) {
-        self.function_hints.to_mut().insert(address.into());
-    }
-
-    /// Returns the length of the segment in bytes.
-    pub fn len(&self) -> usize {
-        self.bytes.len()
-    }
-
-    /// Returns whether the segment is empty.
-    pub fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
-    }
-
-    pub fn offset_of(&self, address: Address) -> Option<usize> {
-        if address.space() != self.address.space()
-            || address < self.address
-            || address > self.last_address()
-        {
-            return None;
-        }
-        Some((address.offset() - self.address.offset()) as usize)
-    }
-
-    pub fn contains_address(&self, address: Address) -> bool {
-        address >= self.address && address <= self.last_address()
-    }
-
-    pub fn read_value<T: ByteCast>(&self, offset: usize) -> Option<T> {
-        let range = self.view_bytes_at(offset, T::SIZEOF)?;
-        Some(if self.properties.is_big_endian() {
-            T::from_bytes::<BE>(range)
-        } else {
-            T::from_bytes::<LE>(range)
-        })
-    }
-
-    pub fn update_value<T: ByteCast>(
-        &mut self,
-        offset: usize,
-        f: impl FnOnce(T) -> T,
-    ) -> Option<()> {
-        let is_be = self.properties.is_big_endian();
-        let range = self.view_bytes_at_mut(offset, T::SIZEOF)?;
-        if is_be {
-            f(T::from_bytes::<BE>(range)).into_bytes::<BE>(range);
-        } else {
-            f(T::from_bytes::<LE>(range)).into_bytes::<LE>(range);
-        }
-        Some(())
-    }
-
-    pub fn write_value<T: ByteCast>(&mut self, offset: usize, value: T) -> Option<()> {
-        let is_be = self.properties.is_big_endian();
-        let range = self.view_bytes_at_mut(offset, T::SIZEOF)?;
-
-        if is_be {
-            value.into_bytes::<BE>(range);
-        } else {
-            value.into_bytes::<LE>(range);
-        }
-        Some(())
-    }
-
-    pub fn view_bytes_at(&self, offset: usize, count: usize) -> Option<&[u8]> {
-        let len = self.bytes.len();
-        if offset >= len {
-            return None;
+        for chunk in bytes.chunks(Self::BLOCK_SIZE) {
+            md5.update(chunk);
+            sha256.update(chunk);
         }
 
-        if let Some(last_offset) = offset.checked_add(count) {
-            if last_offset > len {
-                None
-            } else {
-                Some(&self.bytes[offset..last_offset])
-            }
-        } else {
-            None
-        }
-    }
-
-    pub fn view_bytes_at_address(&self, address: Address, count: usize) -> Option<&[u8]> {
-        let offset = self.offset_of(address)?;
-        self.view_bytes_at(offset, count)
-    }
-
-    pub fn view_bytes_from(&self, offset: usize) -> Option<&[u8]> {
-        let len = self.bytes.len();
-        if offset >= len {
-            return None;
-        }
-
-        Some(&self.bytes[offset..])
-    }
-
-    pub fn view_bytes_from_address(&self, address: Address) -> Option<&[u8]> {
-        let offset = self.offset_of(address)?;
-        self.view_bytes_from(offset)
-    }
-
-    pub fn view_bytes_at_mut(&mut self, offset: usize, count: usize) -> Option<&mut [u8]> {
-        let len = self.bytes.len();
-        if offset >= len {
-            return None;
-        }
-
-        if let Some(last_offset) = offset.checked_add(count) {
-            if last_offset > len {
-                None
-            } else {
-                Some(&mut self.bytes.to_mut()[offset..last_offset])
-            }
-        } else {
-            None
-        }
-    }
-
-    pub fn view_bytes_at_address_mut(
-        &mut self,
-        address: Address,
-        count: usize,
-    ) -> Option<&mut [u8]> {
-        let offset = self.offset_of(address)?;
-        self.view_bytes_at_mut(offset, count)
-    }
-
-    pub fn view_bytes_from_mut(&mut self, offset: usize) -> Option<&mut [u8]> {
-        let len = self.bytes.len();
-        if offset >= len {
-            return None;
-        }
-
-        Some(&mut self.bytes.to_mut()[offset..])
-    }
-
-    pub fn view_bytes_from_address_mut(&mut self, address: Address) -> Option<&mut [u8]> {
-        let offset = self.offset_of(address)?;
-        self.view_bytes_from_mut(offset)
-    }
-
-    pub fn into_owned(self) -> LoadableSegment<'static> {
-        LoadableSegment {
-            name: self.name.into_owned().into(),
-            address: self.address,
-            properties: self.properties,
-            bytes: self.bytes.into_owned().into(),
-            mapping_hints: Cow::Owned(self.mapping_hints.into_owned()),
-            function_hints: Cow::Owned(self.function_hints.into_owned()),
-        }
-    }
-
-    pub fn space(&self) -> AddressSpaceId {
-        self.address.space()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-pub struct LoadableSegmentMetadata {
-    name: String,
-    address: Address,
-    physical_offset: Option<usize>,
-    properties: SegmentProperties,
-    size: usize,
-    mapping_hints: BTreeMap<Address, ContextHint>,
-    function_hints: BTreeSet<Address>,
-}
-
-impl LoadableSegmentMetadata {
-    pub fn new(segm: &LoadableSegment, physical_offset: impl Into<Option<usize>>) -> Self {
-        Self {
-            address: segm.address(),
-            name: segm.name().to_owned(),
-            physical_offset: physical_offset.into(),
-            properties: segm.properties(),
-            size: segm.len(),
-            mapping_hints: segm.mapping_hints().clone(),
-            function_hints: segm.function_hints().clone(),
-        }
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn address(&self) -> Address {
-        self.address
-    }
-
-    pub fn last_address(&self) -> Address {
-        self.address + self.size as u64 - 1usize
-    }
-
-    pub fn next_address(&self) -> Address {
-        self.address + self.size
-    }
-
-    pub fn range(&self) -> Range<Address> {
-        self.address()..self.next_address()
-    }
-
-    pub fn range_inclusive(&self) -> RangeInclusive<Address> {
-        self.address()..=self.last_address()
-    }
-
-    pub fn physical_offset(&self) -> Option<usize> {
-        self.physical_offset
-    }
-
-    pub fn physical_range(&self) -> Option<Range<usize>> {
-        self.physical_offset
-            .map(|offset| offset..offset + self.size)
-    }
-
-    pub fn properties(&self) -> SegmentProperties {
-        self.properties
-    }
-
-    pub fn mapping_hints(&self) -> &BTreeMap<Address, ContextHint> {
-        &self.mapping_hints
-    }
-
-    pub fn function_hints(&self) -> &BTreeSet<Address> {
-        &self.function_hints
-    }
-
-    pub fn len(&self) -> usize {
-        self.size
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.size == 0
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct LoadableSegmentBounds {
-    banks: SmallVec<[Range<Address>; 4]>,
-}
-
-impl LoadableSegmentBounds {
-    pub fn new(range: Range<Address>) -> Self {
-        Self {
-            banks: smallvec![range],
-        }
-    }
-
-    pub fn with_bank(mut self, range: Range<Address>) -> Self {
-        self.banks.push(range);
-        self
-    }
-
-    pub fn len(&self) -> usize {
-        self.banks.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        false
-    }
-
-    pub fn first(&self) -> &Range<Address> {
-        &self.banks[0]
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (usize, &Range<Address>)> + '_ {
-        self.banks.iter().enumerate()
-    }
-}
-
-impl std::ops::Index<usize> for LoadableSegmentBounds {
-    type Output = Range<Address>;
-
-    fn index(&self, index: usize) -> &Self::Output {
-        &self.banks[index]
+        (md5.finalize().into(), sha256.finalize().into())
     }
 }
 
@@ -620,7 +267,7 @@ pub trait LoadableFromBytes<'a>: Loadable {
 }
 
 pub trait LoadableFromFile: Loadable {
-    fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self, LoaderError>
+    fn from_file(path: impl AsRef<Path>) -> Result<Self, LoaderError>
     where
         Self: Sized,
     {
@@ -628,7 +275,7 @@ pub trait LoadableFromFile: Loadable {
     }
 
     fn from_file_with(
-        path: impl AsRef<std::path::Path>,
+        path: impl AsRef<Path>,
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, LoaderError>
     where
@@ -644,71 +291,31 @@ pub trait Loadable {
 
     fn architecture(&self) -> Arch;
 
-    fn symbols(&self) -> Option<&SymbolTable> {
+    fn platform(&self) -> Platform {
+        self.architecture().platform()
+    }
+
+    fn image_symbols(&self) -> Option<&TransientSymbolTable<ImageAddress>> {
         None
     }
 
-    fn segments<'a>(
+    fn entry_point(&self) -> Option<ImageAddress> {
+        None
+    }
+
+    fn image_segments<'a>(
         &'a self,
-    ) -> impl FallibleIterator<Item = LoadableSegment<'a>, Error = LoaderError> + 'a;
+    ) -> impl FallibleIterator<Item = ImageSegment<'a>, Error = LoaderError> + 'a;
 
-    fn segment_bounds(&self) -> LoadableSegmentBounds;
+    fn image_layout(&self) -> &ImageLayout;
 
-    fn analysers(&self) -> impl LoadableAnalysers {
-        DefaultLoadableAnalysers
-    }
+    fn image_contents<'a>(
+        &'a self,
+    ) -> impl FallibleIterator<Item = ImageSegmentContents<'a>, Error = LoaderError> + 'a;
 }
 
-pub trait LoadableAnalysers {
-    fn function_recovery(&self) -> Result<FunctionRecovery, AnalysisError> {
-        self.function_recovery_with(FunctionRecoveryConfig::default())
-    }
-
-    fn function_recovery_with(
-        &self,
-        config: FunctionRecoveryConfig,
-    ) -> Result<FunctionRecovery, AnalysisError> {
-        Ok(FunctionRecovery::new_with(config))
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct DefaultLoadableAnalysers;
-
-impl LoadableAnalysers for DefaultLoadableAnalysers {}
-
-impl<T> LoadableAnalysers for Box<T>
-where
-    T: LoadableAnalysers + ?Sized,
-{
-    fn function_recovery(&self) -> Result<FunctionRecovery, AnalysisError> {
-        self.as_ref().function_recovery()
-    }
-
-    fn function_recovery_with(
-        &self,
-        config: FunctionRecoveryConfig,
-    ) -> Result<FunctionRecovery, AnalysisError> {
-        self.as_ref().function_recovery_with(config)
-    }
-}
-
-impl<T> LoadableAnalysers for &T
-where
-    T: LoadableAnalysers + ?Sized,
-{
-    fn function_recovery(&self) -> Result<FunctionRecovery, AnalysisError> {
-        (*self).function_recovery()
-    }
-
-    fn function_recovery_with(
-        &self,
-        config: FunctionRecoveryConfig,
-    ) -> Result<FunctionRecovery, AnalysisError> {
-        (*self).function_recovery_with(config)
-    }
-}
-
+#[derive(AnalysisData)]
+#[analysis_data(delegate)]
 pub enum Loader<'a> {
     Elf(elf::Elf<'a>),
     Pe(pe::Pe<'a>),
@@ -744,11 +351,10 @@ impl<'a> Loader<'a> {
         path: impl AsRef<Path>,
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, LoaderError> {
-        let data = BytesOrMapping::from_file(path)?;
-        Self::new_with(data, attributes)
+        <Self as LoadableFromFile>::from_file_with(path, attributes)
     }
 
-    pub fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self, LoaderError> {
+    pub fn from_file(path: impl AsRef<Path>) -> Result<Self, LoaderError> {
         Self::from_file_with(path, AttributeMap::new())
     }
 }
@@ -770,7 +376,8 @@ impl LoadableFromFile for Loader<'_> {
     where
         Self: Sized,
     {
-        Self::from_file_with(path, attributes)
+        let data = BytesOrMapping::from_file(path)?;
+        Self::new_with(data, attributes)
     }
 }
 
@@ -782,6 +389,13 @@ impl Loadable for Loader<'_> {
         }
     }
 
+    fn platform(&self) -> Platform {
+        match self {
+            Self::Elf(elf) => elf.platform(),
+            Self::Pe(pe) => pe.platform(),
+        }
+    }
+
     fn metadata(&self) -> &LoadableMetadata {
         match self {
             Self::Elf(elf) => elf.metadata(),
@@ -789,10 +403,10 @@ impl Loadable for Loader<'_> {
         }
     }
 
-    fn symbols(&self) -> Option<&SymbolTable> {
+    fn image_symbols(&self) -> Option<&TransientSymbolTable<ImageAddress>> {
         match self {
-            Self::Elf(elf) => Some(elf.symbols()),
-            Self::Pe(pe) => Some(pe.symbols()),
+            Self::Elf(elf) => Loadable::image_symbols(elf),
+            Self::Pe(pe) => Loadable::image_symbols(pe),
         }
     }
 
@@ -810,40 +424,46 @@ impl Loadable for Loader<'_> {
         }
     }
 
-    fn segments<'a>(
+    fn entry_point(&self) -> Option<ImageAddress> {
+        match self {
+            Self::Elf(elf) => elf.entry_point(),
+            Self::Pe(pe) => pe.entry_point(),
+        }
+    }
+
+    fn image_segments<'a>(
         &'a self,
-    ) -> impl FallibleIterator<Item = LoadableSegment<'a>, Error = LoaderError> + 'a {
+    ) -> impl FallibleIterator<Item = ImageSegment<'a>, Error = LoaderError> + 'a {
         match self {
-            Self::Elf(elf) => {
-                Box::new(elf.segments()) as Box<dyn FallibleIterator<Item = _, Error = _>>
-            }
-            Self::Pe(pe) => {
-                Box::new(pe.segments()) as Box<dyn FallibleIterator<Item = _, Error = _>>
-            }
+            Self::Elf(elf) => Box::new(elf.image_segments()) as ImageSegmentIterator<'a>,
+            Self::Pe(pe) => Box::new(pe.image_segments()) as ImageSegmentIterator<'a>,
         }
     }
 
-    fn segment_bounds(&self) -> LoadableSegmentBounds {
+    fn image_layout(&self) -> &ImageLayout {
         match self {
-            Self::Elf(elf) => elf.segment_bounds(),
-            Self::Pe(pe) => pe.segment_bounds(),
+            Self::Elf(elf) => elf.image_layout(),
+            Self::Pe(pe) => pe.image_layout(),
         }
     }
 
-    fn analysers(&self) -> impl LoadableAnalysers {
+    fn image_contents<'a>(
+        &'a self,
+    ) -> impl FallibleIterator<Item = ImageSegmentContents<'a>, Error = LoaderError> + 'a {
         match self {
-            Self::Elf(elf) => Box::new(elf.analysers()) as Box<dyn LoadableAnalysers>,
-            Self::Pe(pe) => Box::new(pe.analysers()) as Box<dyn LoadableAnalysers>,
+            Self::Elf(elf) => Box::new(elf.image_contents()) as ImageSegmentContentsIterator<'a>,
+            Self::Pe(pe) => Box::new(pe.image_contents()) as ImageSegmentContentsIterator<'a>,
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
+mod test {
     use super::*;
     use crate::attributes;
 
     #[test]
+    #[ignore = "requires local language data and binary fixtures"]
     fn test_loader() -> Result<(), LoaderError> {
         let loaded = Loader::from_file_with(
             "tests/ls.elf",
@@ -862,12 +482,7 @@ mod tests {
         assert_eq!(loaded.attributes().get_attr::<u32>("test2"), Some(2));
         assert_eq!(loaded.attributes().get_attr::<u64>("test3"), Some(3));
 
-        let bounds = loaded.segment_bounds();
-        let range = bounds.first();
-
-        let start = range.start;
-        let end = range.end;
-        println!("segment range: {start:#x} - {end:#x}");
+        assert!(!loaded.image_layout().banks().is_empty());
 
         Ok(())
     }

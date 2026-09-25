@@ -1,0 +1,60 @@
+use crate::il::common::{IlBlockArgId, IlBlockId, IlOpId, IlSsaDef, IlValueId};
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[rkyv(derive(Debug, PartialEq, Eq))]
+pub struct ECodeValue {
+    width: u32,
+    definition: IlSsaDef,
+}
+
+impl ECodeValue {
+    pub(crate) const fn new(definition: IlSsaDef, width: u32) -> Self {
+        Self { width, definition }
+    }
+
+    pub const fn op_result(operation: IlOpId, width: u32) -> Self {
+        Self::new(IlSsaDef::Op(operation), width)
+    }
+
+    pub const fn block_arg(arg: IlBlockArgId, width: u32) -> Self {
+        Self::new(IlSsaDef::BlockArg(arg), width)
+    }
+
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub const fn definition(&self) -> IlSsaDef {
+        self.definition
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[rkyv(derive(Debug, PartialEq, Eq))]
+pub struct ECodeBlockArg {
+    block: IlBlockId,
+    value: IlValueId,
+    width: u32,
+}
+
+impl ECodeBlockArg {
+    pub(crate) const fn new(block: IlBlockId, value: IlValueId, width: u32) -> Self {
+        Self {
+            block,
+            value,
+            width,
+        }
+    }
+
+    pub const fn block(&self) -> IlBlockId {
+        self.block
+    }
+
+    pub const fn value(&self) -> IlValueId {
+        self.value
+    }
+
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+}

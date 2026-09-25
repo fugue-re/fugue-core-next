@@ -1,9 +1,7 @@
 use std::path::PathBuf;
 
-use fallible_iterator::FallibleIterator;
 use fugue_core::arch::Arch as CoreArch;
-use fugue_core::il::pcode::Varnode as CoreVarnode;
-use fugue_core::lifter::Language as CoreLanguage;
+use fugue_core::lifter::{Language as CoreLanguage, Varnode as CoreVarnode};
 use fugue_core::loader::{Loadable, Loader as CoreLoader};
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
@@ -12,7 +10,7 @@ use crate::attributes::attribute_map_from_py;
 use crate::convert::bytes_from_any;
 use crate::errors::loader_error;
 use crate::lifter::Lifter;
-use crate::segments::{LoadableSegment, loadable_segment_from_core};
+use crate::segments::{LoadableSegment, loadable_segments_from_loader};
 
 #[pyclass(unsendable)]
 pub(crate) struct Binary {
@@ -62,14 +60,7 @@ impl Binary {
     }
 
     fn segments(&self) -> PyResult<Vec<LoadableSegment>> {
-        let mut segments = Vec::new();
-        let mut iter = self.loader.segments();
-
-        while let Some(segment) = iter.next().map_err(loader_error)? {
-            segments.push(loadable_segment_from_core(&segment));
-        }
-
-        Ok(segments)
+        loadable_segments_from_loader(&self.loader)
     }
 }
 

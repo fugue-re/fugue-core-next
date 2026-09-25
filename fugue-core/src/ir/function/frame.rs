@@ -15,9 +15,7 @@ use crate::ir::Address;
     rkyv::Deserialize,
 )]
 pub struct StackChangePoint {
-    /// The stack pointer change point.
     address: Address,
-    /// The stack pointer change value.
     delta: i64,
 }
 
@@ -52,13 +50,9 @@ impl StackChangePoint {
     rkyv::Deserialize,
 )]
 pub struct FunctionFrame {
-    /// The size of local (stack) variables in bytes.
     locals_size: usize,
-    /// The size of the preserved registers in bytes.
     preserved_registers_size: usize,
-    /// The function's frame (stack) pointer delta.
     frame_pointer_delta: i64,
-    /// The function's stack pointer change points.
     change_points: Vec<StackChangePoint>,
 }
 
@@ -76,11 +70,6 @@ impl FunctionFrame {
         }
     }
 
-    pub fn add_change_point(&mut self, address: impl Into<Address>, delta: i64) {
-        self.change_points
-            .push(StackChangePoint::new(address, delta));
-    }
-
     pub fn locals_size(&self) -> usize {
         self.locals_size
     }
@@ -95,5 +84,10 @@ impl FunctionFrame {
 
     pub fn change_points(&self) -> &[StackChangePoint] {
         &self.change_points
+    }
+
+    pub fn add_change_point(&mut self, address: impl Into<Address>, delta: i64) {
+        self.change_points
+            .push(StackChangePoint::new(address, delta));
     }
 }

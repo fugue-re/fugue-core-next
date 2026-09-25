@@ -1,17 +1,18 @@
+use std::ops::RangeInclusive;
 use std::path::Path;
 use std::sync::OnceLock;
 
 use rustc_hash::FxHashMap;
 
-use super::{SegmentStorageError, SegmentStorageProvider};
+use super::{SegmentStorageError, SegmentStorageProvider, SegmentStorageProviderId};
 use crate::ir::Address;
 use crate::types::AttributeMap;
 
 static REGISTRY: OnceLock<SegmentStorageProviderRegistry> = OnceLock::new();
 
 type FromSegmentRangeFn = fn(
-    start: Address,
-    end: Address,
+    id: SegmentStorageProviderId,
+    range: RangeInclusive<Address>,
     attributes: &mut AttributeMap,
 ) -> Result<Box<dyn SegmentStorageProvider>, SegmentStorageError>;
 
@@ -73,26 +74,42 @@ impl SegmentStorageProviderRegistry {
         Self { by_tag }
     }
 
-    pub fn get() -> &'static Self {
-        REGISTRY.get_or_init(SegmentStorageProviderRegistry::new)
+    pub fn by_tag(&self, tag: &str) -> Option<&SegmentStorageProviderEntry> {
+        self.by_tag.get(tag).copied()
     }
 
-    pub fn get_by_tag(&self, tag: &str) -> Option<&SegmentStorageProviderEntry> {
-        self.by_tag.get(tag).copied()
+    pub fn tags(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.by_tag.keys().copied()
+    }
+
+    pub fn contains_tag(&self, tag: &str) -> bool {
+        self.by_tag.contains_key(tag)
+    }
+
+    pub fn len(&self) -> usize {
+        self.by_tag.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_tag.is_empty()
+    }
+
+    pub fn get() -> &'static Self {
+        REGISTRY.get_or_init(SegmentStorageProviderRegistry::new)
     }
 
     pub fn from_segment_range(
         &self,
         tag: &str,
-        start: Address,
-        end: Address,
+        id: SegmentStorageProviderId,
+        range: RangeInclusive<Address>,
         attributes: &mut AttributeMap,
     ) -> Result<Box<dyn SegmentStorageProvider>, SegmentStorageError> {
         let entry = self.by_tag.get(tag).ok_or_else(|| {
             SegmentStorageError::backing_with(format!("unknown provider tag: {tag}"))
         })?;
 
-        (entry.from_segment_range)(start, end, attributes)
+        (entry.from_segment_range)(id, range, attributes)
     }
 
     pub fn from_storage(
@@ -112,21 +129,5 @@ impl SegmentStorageProviderRegistry {
         })?;
 
         factory(path, attributes)
-    }
-
-    pub fn tags(&self) -> impl Iterator<Item = &'static str> + '_ {
-        self.by_tag.keys().copied()
-    }
-
-    pub fn has_tag(&self, tag: &str) -> bool {
-        self.by_tag.contains_key(tag)
-    }
-
-    pub fn len(&self) -> usize {
-        self.by_tag.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.by_tag.is_empty()
     }
 }

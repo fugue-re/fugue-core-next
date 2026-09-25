@@ -1,16 +1,16 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
-use std::ops::{Range, RangeInclusive};
+use std::fmt;
 
 use bitflags::bitflags;
-use uuid::Uuid;
 
-use crate::ir::{Address, SegmentProperties};
+use crate::ir::{Address, AddressRange, RawAddress};
 use crate::lifter::ContextHint;
-use crate::storage::segments::overlay::OverlayTree;
+use crate::storage::schema::bitflags::archived_bitflags;
 use crate::storage::segments::provider::SegmentStorageProviderId;
 use crate::storage::segments::space::AddressSpaceId;
-use crate::storage::segments::{SegmentStorage, SegmentStorageError};
+use crate::storage::segments::{SegmentProperties, SegmentStorage, SegmentStorageError};
+use crate::types::Revision;
 
 #[derive(
     Debug,
@@ -41,8 +41,8 @@ impl SegmentMappingId {
     }
 }
 
-impl std::fmt::Display for SegmentMappingId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for SegmentMappingId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
 }
@@ -59,24 +59,47 @@ impl TryFrom<usize> for SegmentMappingId {
     Debug, Clone, Copy, PartialEq, Eq, Default, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
 )]
 pub enum SegmentMappingKind {
-    #[default]
-    None,
-    Heap,
-    Stack,
-    Mmap,
-    Mmio,
-    Dma,
-    Jit,
     Bss,
-    Shared,
-    Kernel,
-    Guard,
-    Null,
-    Gpu,
-    Tls,
     Buffer,
     Cow,
+    Dma,
+    Gpu,
+    Guard,
+    Heap,
+    Jit,
+    Kernel,
+    Mmap,
+    Mmio,
+    #[default]
+    None,
+    Null,
     PageTable,
+    Shared,
+    Stack,
+    Tls,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Default,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+pub enum SegmentMappingProvenance {
+    #[default]
+    Generic,
+    External,
+    FileResidue,
+    Section,
+    Segment,
+    Synthetic,
+    Uninitialised,
 }
 
 bitflags! {
@@ -93,121 +116,73 @@ bitflags! {
     }
 }
 
-#[repr(transparent)]
-pub struct ArchivedSegmentMappingFlags(rkyv::Archived<u32>);
-
-unsafe impl rkyv::Portable for ArchivedSegmentMappingFlags {}
-unsafe impl rkyv::traits::NoUndef for ArchivedSegmentMappingFlags {}
-
-unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C>
-    for ArchivedSegmentMappingFlags
-{
-    unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
-        unsafe {
-            <rkyv::Archived<u32> as rkyv::bytecheck::CheckBytes<C>>::check_bytes(
-                value.cast(),
-                context,
-            )
-        }
-    }
-}
-
-impl rkyv::Archive for SegmentMappingFlags {
-    type Archived = ArchivedSegmentMappingFlags;
-    type Resolver = rkyv::Resolver<u32>;
-
-    fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
-        let out = unsafe { out.cast_unchecked::<rkyv::Archived<u32>>() };
-        self.bits().resolve(resolver, out);
-    }
-}
-
-impl<S: rkyv::rancor::Fallible + rkyv::ser::Writer<S::Error> + ?Sized> rkyv::Serialize<S>
-    for SegmentMappingFlags
-{
-    fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
-        self.bits().serialize(serializer)
-    }
-}
-
-impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<SegmentMappingFlags, D>
-    for ArchivedSegmentMappingFlags
-{
-    fn deserialize(&self, deserializer: &mut D) -> Result<SegmentMappingFlags, D::Error> {
-        let bits = rkyv::Deserialize::<u32, D>::deserialize(&self.0, deserializer)?;
-        Ok(SegmentMappingFlags::from_bits_truncate(bits))
-    }
-}
+archived_bitflags!(SegmentMappingFlags, ArchivedSegmentMappingFlags, u32);
 
 #[derive(Debug)]
 pub struct SegmentMapping {
     id: SegmentMappingId,
-    start: Address,
-    size: usize,
+    range: AddressRange,
     offset: u64,
     provider_id: SegmentStorageProviderId,
     properties: SegmentProperties,
     kind: SegmentMappingKind,
+    provenance: SegmentMappingProvenance,
     flags: SegmentMappingFlags,
-    overlay: OverlayTree,
-    version: u64,
+    revision: Revision,
     name: String,
-    mapping_hints: BTreeMap<Address, ContextHint>,
-    function_hints: BTreeSet<Address>,
+    mapping_hints: BTreeMap<RawAddress, ContextHint>,
+    function_hints: BTreeSet<RawAddress>,
 }
 
 impl SegmentMapping {
     pub fn new(
         id: SegmentMappingId,
-        start: impl Into<Address>,
-        size: usize,
+        range: AddressRange,
         offset: u64,
         provider_id: SegmentStorageProviderId,
         properties: SegmentProperties,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, SegmentStorageError> {
+        if AddressRange::from_size(range.start_address(), range.size()) != Some(range) {
+            return Err(SegmentStorageError::InvalidAddressRange);
+        }
+
+        Ok(Self {
             id,
-            start: start.into(),
-            size,
+            range,
             offset,
             provider_id,
             properties,
             kind: SegmentMappingKind::None,
+            provenance: SegmentMappingProvenance::default(),
             flags: SegmentMappingFlags::NONE,
-            overlay: OverlayTree::new(),
-            version: 0,
+            revision: Revision::default(),
             name: String::new(),
             mapping_hints: BTreeMap::new(),
             function_hints: BTreeSet::new(),
-        }
+        })
     }
 
-    pub fn new_with_metadata(
+    pub(crate) fn from_builder(
         id: SegmentMappingId,
-        start: impl Into<Address>,
-        size: usize,
-        offset: u64,
-        provider_id: SegmentStorageProviderId,
-        properties: SegmentProperties,
-        name: impl Into<String>,
-        mapping_hints: BTreeMap<Address, ContextHint>,
-        function_hints: BTreeSet<Address>,
-    ) -> Self {
-        Self {
+        builder: SegmentMappingBuilder,
+    ) -> Result<Self, SegmentStorageError> {
+        let range = builder
+            .range()
+            .ok_or(SegmentStorageError::InvalidAddressRange)?;
+        let mut mapping = Self::new(
             id,
-            start: start.into(),
-            size,
-            offset,
-            provider_id,
-            properties,
-            kind: SegmentMappingKind::None,
-            flags: SegmentMappingFlags::NONE,
-            overlay: OverlayTree::new(),
-            version: 0,
-            name: name.into(),
-            mapping_hints,
-            function_hints,
-        }
+            range,
+            builder.offset,
+            builder.provider_id,
+            builder.properties,
+        )?;
+        mapping.kind = builder.kind;
+        mapping.provenance = builder.provenance;
+        mapping.flags = builder.flags;
+        mapping.name = builder.name;
+        mapping.mapping_hints = builder.mapping_hints;
+        mapping.function_hints = builder.function_hints;
+        Ok(mapping)
     }
 
     pub fn id(&self) -> SegmentMappingId {
@@ -215,23 +190,19 @@ impl SegmentMapping {
     }
 
     pub fn start(&self) -> Address {
-        self.start
+        self.range.start_address()
     }
 
-    pub fn size(&self) -> usize {
-        self.size
-    }
-
-    pub fn end(&self) -> Address {
-        self.start + self.size
+    pub fn size(&self) -> u64 {
+        self.range.size()
     }
 
     pub fn last(&self) -> Address {
-        self.end() - 1usize
+        self.range.end_address()
     }
 
-    pub fn range(&self) -> Range<Address> {
-        self.start..self.end()
+    pub fn range(&self) -> AddressRange {
+        self.range
     }
 
     pub fn offset(&self) -> u64 {
@@ -239,7 +210,7 @@ impl SegmentMapping {
     }
 
     pub fn space(&self) -> AddressSpaceId {
-        self.start.space()
+        self.range.space()
     }
 
     pub fn provider_id(&self) -> SegmentStorageProviderId {
@@ -264,6 +235,15 @@ impl SegmentMapping {
         self.touch();
     }
 
+    pub fn provenance(&self) -> SegmentMappingProvenance {
+        self.provenance
+    }
+
+    pub fn set_provenance(&mut self, provenance: SegmentMappingProvenance) {
+        self.provenance = provenance;
+        self.touch();
+    }
+
     pub fn flags(&self) -> SegmentMappingFlags {
         self.flags
     }
@@ -273,46 +253,26 @@ impl SegmentMapping {
         self.touch();
     }
 
-    pub fn overlay(&self) -> &OverlayTree {
-        &self.overlay
-    }
-
-    pub fn overlay_mut(&mut self) -> &mut OverlayTree {
-        &mut self.overlay
-    }
-
-    pub fn version(&self) -> u64 {
-        self.version
-    }
-
-    fn touch(&mut self) {
-        self.version += 1;
+    pub fn revision(&self) -> Revision {
+        self.revision
     }
 
     pub fn contains(&self, addr: impl Into<Address>) -> bool {
-        let addr = addr.into();
-        addr >= self.start && addr < self.end()
+        self.range.contains_address(addr.into())
     }
 
-    pub fn to_offset(&self, addr: impl Into<Address>) -> u64 {
-        let addr = addr.into();
-        let relative = addr.offset() - self.start.offset();
-        self.offset + relative
-    }
-
-    pub fn to_address(&self, phys_offset: u64) -> Address {
-        let relative = phys_offset - self.offset;
-        Address::new(self.start.space(), self.start.offset() + relative)
-    }
-
-    pub fn set_start(&mut self, start: impl Into<Address>) {
-        self.start = start.into();
+    pub fn set_start(&mut self, start: impl Into<Address>) -> Result<(), SegmentStorageError> {
+        self.range = AddressRange::from_size(start.into(), self.size())
+            .ok_or(SegmentStorageError::InvalidAddressRange)?;
         self.touch();
+        Ok(())
     }
 
-    pub fn set_size(&mut self, size: usize) {
-        self.size = size;
+    pub fn set_size(&mut self, size: u64) -> Result<(), SegmentStorageError> {
+        self.range = AddressRange::from_size(self.start(), size)
+            .ok_or(SegmentStorageError::InvalidAddressRange)?;
         self.touch();
+        Ok(())
     }
 
     pub fn name(&self) -> &str {
@@ -324,76 +284,116 @@ impl SegmentMapping {
         self.touch();
     }
 
-    pub fn mapping_hints(&self) -> &BTreeMap<Address, ContextHint> {
+    pub(crate) fn mapping_hint_offsets(&self) -> &BTreeMap<RawAddress, ContextHint> {
         &self.mapping_hints
     }
 
-    pub fn mapping_hints_mut(&mut self) -> &mut BTreeMap<Address, ContextHint> {
-        &mut self.mapping_hints
-    }
-
-    pub fn function_hints(&self) -> &BTreeSet<Address> {
+    pub(crate) fn function_hint_offsets(&self) -> &BTreeSet<RawAddress> {
         &self.function_hints
     }
 
-    pub fn function_hints_mut(&mut self) -> &mut BTreeSet<Address> {
-        &mut self.function_hints
+    pub fn mapping_hint_at(&self, addr: impl Into<Address>) -> Option<&ContextHint> {
+        let addr = addr.into();
+        (addr.space() == self.space())
+            .then(|| self.mapping_hints.get(&addr.raw_address()))
+            .flatten()
     }
 
-    pub fn make_ref(&self) -> SegmentMappingRef {
+    pub fn mapping_hints(&self) -> impl Iterator<Item = (Address, &ContextHint)> + '_ {
+        let space = self.space();
+        self.mapping_hints
+            .iter()
+            .map(move |(&offset, hint)| (Address::new(space, offset), hint))
+    }
+
+    pub(crate) fn mapping_hints_from(
+        &self,
+        offset: RawAddress,
+    ) -> impl Iterator<Item = (Address, &ContextHint)> + '_ {
+        let space = self.space();
+        self.mapping_hints
+            .range(offset..)
+            .map(move |(&offset, hint)| (Address::new(space, offset), hint))
+    }
+
+    pub fn function_hints(&self) -> impl Iterator<Item = Address> + '_ {
+        let space = self.space();
+        self.function_hints
+            .iter()
+            .map(move |&offset| Address::new(space, offset))
+    }
+
+    pub fn mapping_ref(&self) -> SegmentMappingRef {
         SegmentMappingRef {
             mapping_id: self.id,
-            version: self.version,
+            revision: self.revision,
         }
+    }
+
+    pub(crate) fn update_metadata(
+        &mut self,
+        kind: SegmentMappingKind,
+        provenance: SegmentMappingProvenance,
+        flags: SegmentMappingFlags,
+    ) {
+        self.kind = kind;
+        self.provenance = provenance;
+        self.flags = flags;
+        self.touch();
+    }
+
+    fn touch(&mut self) {
+        self.revision = self.revision.next();
+    }
+
+    pub fn to_offset(&self, addr: impl Into<Address>) -> u64 {
+        let addr = addr.into();
+        let relative = addr.offset() - self.start().offset();
+        self.offset + relative
+    }
+
+    pub fn to_address(&self, phys_offset: u64) -> Address {
+        let relative = phys_offset - self.offset;
+        Address::new(self.space(), self.start().offset() + relative)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SegmentMappingRef {
     mapping_id: SegmentMappingId,
-    version: u64,
+    revision: Revision,
 }
 
 impl SegmentMappingRef {
-    pub fn new(mapping_id: SegmentMappingId, version: u64) -> Self {
-        Self {
-            mapping_id,
-            version,
-        }
-    }
-
     pub fn mapping_id(&self) -> SegmentMappingId {
         self.mapping_id
     }
 
-    pub fn version(&self) -> u64 {
-        self.version
+    pub fn revision(&self) -> Revision {
+        self.revision
     }
 
     pub fn is_valid(&self, mapping: &SegmentMapping) -> bool {
-        self.mapping_id == mapping.id() && self.version == mapping.version()
+        self.mapping_id == mapping.id() && self.revision == mapping.revision()
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct SegmentSubMapping {
     mapping_ref: SegmentMappingRef,
-    start: Address,
-    size: usize,
+    range: AddressRange,
     properties: SegmentProperties,
 }
 
 impl SegmentSubMapping {
-    pub fn new(
+    pub(crate) fn new(
         mapping_ref: SegmentMappingRef,
-        start: impl Into<Address>,
-        size: usize,
+        range: AddressRange,
         properties: SegmentProperties,
     ) -> Self {
         Self {
             mapping_ref,
-            start: start.into(),
-            size,
+            range,
             properties,
         }
     }
@@ -403,31 +403,23 @@ impl SegmentSubMapping {
     }
 
     pub fn start(&self) -> Address {
-        self.start
+        self.range.start_address()
     }
 
-    pub fn size(&self) -> usize {
-        self.size
-    }
-
-    pub fn end(&self) -> Address {
-        self.start + self.size
+    pub fn size(&self) -> u64 {
+        self.range.size()
     }
 
     pub fn last(&self) -> Address {
-        self.end() - 1usize
+        self.range.end_address()
     }
 
-    pub fn range(&self) -> Range<Address> {
-        self.start..self.end()
-    }
-
-    pub fn range_inclusive(&self) -> RangeInclusive<Address> {
-        self.start..=self.last()
+    pub fn range(&self) -> AddressRange {
+        self.range
     }
 
     pub fn space(&self) -> AddressSpaceId {
-        self.start.space()
+        self.range.space()
     }
 
     pub fn properties(&self) -> SegmentProperties {
@@ -435,44 +427,31 @@ impl SegmentSubMapping {
     }
 
     pub fn contains(&self, addr: impl Into<Address>) -> bool {
-        let addr = addr.into();
-        self.space() == addr.space() && addr >= self.start && addr < self.end()
+        self.range.contains_address(addr.into())
     }
 
     pub fn with_start(&self, new_start: impl Into<Address>) -> Option<Self> {
         let new_start = new_start.into();
-        if new_start.space() != self.space() {
+        if new_start.space() != self.space() || new_start > self.last() {
             return None;
         }
 
-        if new_start >= self.end() {
-            return None;
-        }
-
-        let new_size = usize::from(self.end() - new_start);
         Some(Self::new(
             self.mapping_ref,
-            new_start,
-            new_size,
+            AddressRange::new(self.space(), new_start.raw_address(), self.range.end()),
             self.properties,
         ))
     }
 
-    pub fn with_end(&self, new_end: impl Into<Address>) -> Option<Self> {
-        let new_end = new_end.into();
-        if new_end.space() != self.space() {
+    pub fn with_last(&self, new_last: impl Into<Address>) -> Option<Self> {
+        let new_last = new_last.into();
+        if new_last.space() != self.space() || new_last < self.start() {
             return None;
         }
 
-        if new_end <= self.start {
-            return None;
-        }
-
-        let new_size = usize::from(new_end - self.start);
         Some(Self::new(
             self.mapping_ref,
-            self.start,
-            new_size,
+            AddressRange::new(self.space(), self.range.start(), new_last.raw_address()),
             self.properties,
         ))
     }
@@ -483,19 +462,28 @@ impl SegmentSubMapping {
             return (None, None);
         }
 
-        if addr <= self.start {
+        if addr <= self.start() {
             return (None, Some(self.clone()));
         }
 
-        if addr >= self.end() {
+        if addr > self.last() {
             return (Some(self.clone()), None);
         }
 
-        let left_size = usize::from(addr - self.start().offset());
-        let right_size = usize::from(self.end() - addr);
-
-        let left = Self::new(self.mapping_ref, self.start, left_size, self.properties);
-        let right = Self::new(self.mapping_ref, addr, right_size, self.properties);
+        let left = Self::new(
+            self.mapping_ref,
+            AddressRange::new(
+                self.space(),
+                self.range.start(),
+                (addr - 1usize).raw_address(),
+            ),
+            self.properties,
+        );
+        let right = Self::new(
+            self.mapping_ref,
+            AddressRange::new(self.space(), addr.raw_address(), self.range.end()),
+            self.properties,
+        );
 
         (Some(left), Some(right))
     }
@@ -503,7 +491,7 @@ impl SegmentSubMapping {
 
 impl PartialEq for SegmentSubMapping {
     fn eq(&self, other: &Self) -> bool {
-        self.start == other.start
+        self.start() == other.start()
     }
 }
 
@@ -517,28 +505,29 @@ impl PartialOrd for SegmentSubMapping {
 
 impl Ord for SegmentSubMapping {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.start.cmp(&other.start)
+        self.start().cmp(&other.start())
     }
 }
 
 #[derive(Debug)]
 pub struct SegmentMappingBuilder {
     start: Address,
-    size: usize,
+    size: u64,
     offset: u64,
     provider_id: SegmentStorageProviderId,
     properties: SegmentProperties,
     kind: SegmentMappingKind,
+    provenance: SegmentMappingProvenance,
     flags: SegmentMappingFlags,
     name: String,
-    mapping_hints: BTreeMap<Address, ContextHint>,
-    function_hints: BTreeSet<Address>,
+    mapping_hints: BTreeMap<RawAddress, ContextHint>,
+    function_hints: BTreeSet<RawAddress>,
 }
 
 impl SegmentMappingBuilder {
     pub fn new(
         start: impl Into<Address>,
-        size: usize,
+        size: u64,
         offset: u64,
         provider_id: SegmentStorageProviderId,
     ) -> Self {
@@ -549,8 +538,9 @@ impl SegmentMappingBuilder {
             provider_id,
             properties: SegmentProperties::default(),
             kind: SegmentMappingKind::default(),
+            provenance: SegmentMappingProvenance::default(),
             flags: SegmentMappingFlags::default(),
-            name: Uuid::now_v7().to_string(),
+            name: String::new(),
             mapping_hints: BTreeMap::new(),
             function_hints: BTreeSet::new(),
         }
@@ -569,15 +559,15 @@ impl SegmentMappingBuilder {
         self
     }
 
-    pub fn size(&self) -> usize {
+    pub fn size(&self) -> u64 {
         self.size
     }
 
-    pub fn set_size(&mut self, size: usize) {
+    pub fn set_size(&mut self, size: u64) {
         self.size = size;
     }
 
-    pub fn with_size(mut self, size: usize) -> Self {
+    pub fn with_size(mut self, size: u64) -> Self {
         self.set_size(size);
         self
     }
@@ -634,6 +624,19 @@ impl SegmentMappingBuilder {
         self
     }
 
+    pub fn provenance(&self) -> SegmentMappingProvenance {
+        self.provenance
+    }
+
+    pub fn set_provenance(&mut self, provenance: impl Into<SegmentMappingProvenance>) {
+        self.provenance = provenance.into();
+    }
+
+    pub fn with_provenance(mut self, provenance: impl Into<SegmentMappingProvenance>) -> Self {
+        self.set_provenance(provenance);
+        self
+    }
+
     pub fn flags(&self) -> SegmentMappingFlags {
         self.flags
     }
@@ -660,55 +663,64 @@ impl SegmentMappingBuilder {
         self
     }
 
-    pub fn mapping_hints(&self) -> &BTreeMap<Address, ContextHint> {
+    pub fn mapping_hints(&self) -> &BTreeMap<RawAddress, ContextHint> {
         &self.mapping_hints
     }
 
-    pub fn set_mapping_hints(&mut self, mapping_hints: impl Into<BTreeMap<Address, ContextHint>>) {
-        self.mapping_hints = mapping_hints.into();
+    pub fn function_hints(&self) -> &BTreeSet<RawAddress> {
+        &self.function_hints
     }
 
-    pub fn extend_mapping_hints(
+    pub fn set_mapping_hints(
         &mut self,
-        mapping_hints: impl IntoIterator<Item = (Address, ContextHint)>,
+        mapping_hints: impl IntoIterator<Item = (RawAddress, ContextHint)>,
     ) {
+        self.mapping_hints.clear();
         self.mapping_hints.extend(mapping_hints);
-    }
-
-    pub fn add_mapping_hint(&mut self, address: impl Into<Address>, hint: ContextHint) {
-        self.mapping_hints.insert(address.into(), hint);
     }
 
     pub fn with_mapping_hints(
         mut self,
-        mapping_hints: impl IntoIterator<Item = (Address, ContextHint)>,
+        mapping_hints: impl IntoIterator<Item = (RawAddress, ContextHint)>,
     ) -> Self {
-        self.extend_mapping_hints(mapping_hints);
+        self.set_mapping_hints(mapping_hints);
         self
     }
 
-    pub fn function_hints(&self) -> &BTreeSet<Address> {
-        &self.function_hints
-    }
-
-    pub fn set_function_hints(&mut self, function_hints: impl Into<BTreeSet<Address>>) {
-        self.function_hints = function_hints.into();
-    }
-
-    pub fn extend_function_hints(&mut self, function_hints: impl IntoIterator<Item = Address>) {
+    pub fn set_function_hints(&mut self, function_hints: impl IntoIterator<Item = RawAddress>) {
+        self.function_hints.clear();
         self.function_hints.extend(function_hints);
-    }
-
-    pub fn add_function_hint(&mut self, address: impl Into<Address>) {
-        self.function_hints.insert(address.into());
     }
 
     pub fn with_function_hints(
         mut self,
-        function_hints: impl IntoIterator<Item = Address>,
+        function_hints: impl IntoIterator<Item = RawAddress>,
     ) -> Self {
-        self.extend_function_hints(function_hints);
+        self.set_function_hints(function_hints);
         self
+    }
+
+    pub fn range(&self) -> Option<AddressRange> {
+        AddressRange::from_size(self.start, self.size)
+    }
+
+    pub fn extend_mapping_hints(
+        &mut self,
+        mapping_hints: impl IntoIterator<Item = (RawAddress, ContextHint)>,
+    ) {
+        self.mapping_hints.extend(mapping_hints);
+    }
+
+    pub fn add_mapping_hint(&mut self, offset: impl Into<RawAddress>, hint: ContextHint) {
+        self.mapping_hints.insert(offset.into(), hint);
+    }
+
+    pub fn extend_function_hints(&mut self, function_hints: impl IntoIterator<Item = RawAddress>) {
+        self.function_hints.extend(function_hints);
+    }
+
+    pub fn add_function_hint(&mut self, offset: impl Into<RawAddress>) {
+        self.function_hints.insert(offset.into());
     }
 
     pub fn build(

@@ -1,12 +1,19 @@
-#[cfg(feature = "mips-be")]
-pub mod be;
-#[cfg(feature = "mips-le")]
-pub mod le;
+#[cfg(any(feature = "mips-be", feature = "mips-le"))]
+pub mod mips;
+#[cfg(any(feature = "mips64-be", feature = "mips64-le"))]
+pub mod mips64;
 
 #[cfg(feature = "mips-be")]
-pub use be::{context, register, space, user_op};
+pub use mips::be::{context, register, space, user_op};
 #[cfg(all(feature = "mips-le", not(feature = "mips-be")))]
-pub use le::{context, register, space, user_op};
+pub use mips::le::{context, register, space, user_op};
 
-#[cfg(not(any(feature = "mips-be", feature = "mips-le")))]
-compile_error!("At least one feature (`mips-be` or `mips-le`) must be enabled.");
+#[cfg(not(any(
+    feature = "mips-be",
+    feature = "mips-le",
+    feature = "mips64-be",
+    feature = "mips64-le"
+)))]
+compile_error!(
+    "At least one feature (`mips-be`, `mips-le`, `mips64-be` or `mips64-le`) must be enabled."
+);

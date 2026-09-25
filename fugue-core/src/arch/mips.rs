@@ -1,17 +1,16 @@
 #[cfg(feature = "static-lifters")]
 pub use fugue_lifter::mips::*;
 
-use crate::arch::Arch;
 use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
-use crate::il::pcode::Varnode;
-use crate::ir::ExternFunctionTemplate;
-use crate::lifter::dynamic::LanguageSource;
-use crate::lifter::{Disassembler, Language, LanguageError, LanguageId, LanguageLoader, Lifter};
+use crate::arch::{Arch, ExternalThunkTemplate};
+use crate::lifter::{
+    Language, LanguageError, LanguageId, LanguageLoader, LanguageSource, Lifter, Varnode,
+};
 
 #[derive(Clone)]
 struct ArchData {
-    gprs: Vec<Varnode>,
+    gprs: [Varnode; 33],
 }
 
 impl ArchData {
@@ -23,9 +22,9 @@ impl ArchData {
             "t6", "t7", "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "t8", "t9", "k0", "k1",
             "gp", "sp", "s8", "ra", "pc",
         ]
-        .into_iter()
-        .filter_map(reg)
-        .collect();
+        .map(|name| {
+            reg(name).unwrap_or_else(|| panic!("MIPS language must define register `{name}`"))
+        });
 
         Self { gprs }
     }
@@ -38,20 +37,16 @@ pub struct Mips {
 }
 
 impl ArchT for Mips {
-    fn disassembler(&self) -> Disassembler {
-        Disassembler::new(self.lifter())
-    }
-
     fn lifter(&self) -> Lifter {
         Lifter::new(self.language)
     }
 
-    fn external_function_template(&self) -> ExternFunctionTemplate {
+    fn external_thunk_template(&self) -> ExternalThunkTemplate {
         let mut bytes = [0x08, 0x00, 0xe0, 0x03]; // jr $ra
         if self.language().is_big_endian() {
             bytes.reverse();
         }
-        ExternFunctionTemplate::new(bytes)
+        ExternalThunkTemplate::new(bytes)
     }
 
     fn gprs(&self) -> &[Varnode] {
@@ -112,7 +107,7 @@ impl Mips {
             _ => {}
         }
         let lid = LanguageId::new_with("MIPS", is_be, 32, variant);
-        Ok(loader.load(&lid)?)
+        loader.load(&lid)
     }
 }
 
@@ -121,7 +116,7 @@ impl ArchProvider {
     const NAME: &str = "mips";
 
     fn supports(language: &'static Language) -> bool {
-        language.processor() == "MIPS" && language.address_bits() == 32
+        language.processor() == "MIPS" && language.bits() == 32
     }
 
     fn create(language: &'static Language) -> Arch {
