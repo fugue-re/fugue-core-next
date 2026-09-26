@@ -6,6 +6,7 @@ use std::ops::Bound;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -19,8 +20,9 @@ use fugue_core::il::common::{
     IlBlockId, IlBlockProperties, IlDominance, IlDominanceEvent, IlEdgeKinds, IlGraphBuilder,
     IlIndexRange,
 };
-use fugue_core::il::ecode::{ECodeIr, ECodeOpcode};
-use fugue_core::il::mcode::ECodeToMCode;
+use fugue_core::il::ecode::{ECodeIr, ECodeOpcode, PCodeToECode};
+use fugue_core::il::mcode::{ECodeToMCode, MCodeIr};
+use fugue_core::il::pcode::PCodeIr;
 use fugue_core::ir::{
     Address, AddressRange, AddressRangeSet, IncompleteCodeBlock, IncompleteFunction, Reference,
     ReferenceProperties, SymbolEntry, SymbolIndex, SymbolProperties, SymbolTableSelector,
@@ -44,6 +46,8 @@ use fugue_core::storage::{
 #[cfg(feature = "sqlite")]
 use fugue_core::types::ATTRIBUTE_PROJECT_PATH;
 use fugue_core::types::{AttributeMap, BytesOrSlice};
+use rayon::ThreadPoolBuilder;
+use rayon::prelude::*;
 
 const SYNTHETIC_SYMBOLS: usize = 1024;
 const SYNTHETIC_FUNCTIONS: usize = 256;
@@ -66,6 +70,8 @@ static ENTITY_WRITES: AtomicU64 = AtomicU64::new(0);
 static LIVE_BYTES: AtomicU64 = AtomicU64::new(0);
 static PEAK_LIVE_BYTES: AtomicU64 = AtomicU64::new(0);
 
+const MEASURE_ALLOCATIONS: bool = option_env!("FUGUE_BENCH_TIMING_ONLY").is_none();
+
 #[global_allocator]
 static ALLOCATOR: MeasuringAllocator = MeasuringAllocator;
 
@@ -83,7 +89,7 @@ impl MeasuringAllocator {
 unsafe impl GlobalAlloc for MeasuringAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let allocation = unsafe { System.alloc(layout) };
-        if !allocation.is_null() {
+        if MEASURE_ALLOCATIONS && !allocation.is_null() {
             ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
             ALLOCATED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
             Self::grow(layout.size());
@@ -93,7 +99,7 @@ unsafe impl GlobalAlloc for MeasuringAllocator {
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         let allocation = unsafe { System.alloc_zeroed(layout) };
-        if !allocation.is_null() {
+        if MEASURE_ALLOCATIONS && !allocation.is_null() {
             ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
             ALLOCATED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
             Self::grow(layout.size());
@@ -103,12 +109,14 @@ unsafe impl GlobalAlloc for MeasuringAllocator {
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
         unsafe { System.dealloc(pointer, layout) };
-        Self::shrink(layout.size());
+        if MEASURE_ALLOCATIONS {
+            Self::shrink(layout.size());
+        }
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
         let allocation = unsafe { System.realloc(pointer, layout, size) };
-        if !allocation.is_null() {
+        if MEASURE_ALLOCATIONS && !allocation.is_null() {
             ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
             ALLOCATED_BYTES.fetch_add(size as u64, Ordering::Relaxed);
             if size >= layout.size() {
@@ -877,6 +885,118 @@ fn bench_call_heavy_mcode(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn 
     Ok(())
 }
 
+fn bench_parallel_il_transforms(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
+    let loader = Loader::from_file(REPRESENTATIVE_FIXTURE)?;
+    let project = Project::new_transient(&loader)?;
+    let engine = AnalysisEngine::new(project)?;
+    engine.analyse()?;
+    let reader = engine.query_reader()?;
+    let project = reader.project()?;
+    let arch = project.arch().clone();
+    let platform = project.platform().clone();
+    let functions = project
+        .functions()
+        .iter()
+        .map(|function| function.id())
+        .collect::<Vec<_>>();
+    drop(project);
+
+    let mut pcode = Vec::<Arc<PCodeIr>>::with_capacity(functions.len());
+    let mut ecode = Vec::<Arc<ECodeIr>>::with_capacity(functions.len());
+    for function in functions {
+        let Some(source) = reader.pcode(function)? else {
+            continue;
+        };
+        pcode.push(source);
+        if let Some(source) = reader.ecode(function)? {
+            ecode.push(source);
+        }
+    }
+
+    let worker_limit = thread::available_parallelism()?.get();
+    for (workers, pcode_name, mcode_name) in [
+        (1, "pcode_to_ecode_1_worker", "ecode_to_mcode_1_worker"),
+        (2, "pcode_to_ecode_2_workers", "ecode_to_mcode_2_workers"),
+        (4, "pcode_to_ecode_4_workers", "ecode_to_mcode_4_workers"),
+        (8, "pcode_to_ecode_8_workers", "ecode_to_mcode_8_workers"),
+        (16, "pcode_to_ecode_16_workers", "ecode_to_mcode_16_workers"),
+    ] {
+        if workers > worker_limit {
+            continue;
+        }
+        let pool = ThreadPoolBuilder::new().num_threads(workers).build()?;
+        let (pcode_result, operation_count) = measure(pcode_name, || {
+            let operation_count = pool.install(|| {
+                pcode
+                    .par_iter()
+                    .map_init(PCodeToECode::default, |transform, source| {
+                        transform
+                            .transform(&arch, &platform, source)
+                            .map(|ir| ir.ops().len())
+                    })
+                    .try_reduce(|| 0usize, |left, right| Ok(left + right))
+            })?;
+            Ok((operation_count, pcode.len()))
+        })?;
+        black_box(operation_count);
+        results.push(pcode_result);
+
+        let (mcode_result, operation_count) = measure(mcode_name, || {
+            let operation_count = pool.install(|| {
+                ecode
+                    .par_iter()
+                    .map_init(ECodeToMCode::default, |transform, source| {
+                        transform
+                            .transform(source, &arch, &platform, None)
+                            .map(|ir| ir.ops().len())
+                    })
+                    .try_reduce(|| 0usize, |left, right| Ok(left + right))
+            })?;
+            Ok((operation_count, ecode.len()))
+        })?;
+        black_box(operation_count);
+        results.push(mcode_result);
+    }
+
+    for (workers, name) in [
+        (1, "engine_mcode_batch_1_worker"),
+        (2, "engine_mcode_batch_2_workers"),
+        (4, "engine_mcode_batch_4_workers"),
+        (8, "engine_mcode_batch_8_workers"),
+        (16, "engine_mcode_batch_16_workers"),
+    ] {
+        if workers > worker_limit {
+            continue;
+        }
+
+        let loader = Loader::from_file(REPRESENTATIVE_FIXTURE)?;
+        let project = Project::new_transient(&loader)?;
+        let config = AnalysisEngineConfig::default().with_worker_limit(workers);
+        let engine = AnalysisEngine::with_config(project, config)?;
+        engine.analyse()?;
+        let reader = engine.query_reader()?;
+        let functions = reader
+            .project()?
+            .functions()
+            .iter()
+            .map(|function| function.id())
+            .collect::<Vec<_>>();
+        let (result, operation_count) = measure(name, || {
+            let mut operation_count = 0usize;
+            for function in reader.lifted_batch::<MCodeIr>(functions.iter().copied())? {
+                let function = function
+                    .ok_or_else(|| std::io::Error::other("function did not produce MCode"))?;
+                operation_count += function.ops().len();
+            }
+            Ok((operation_count, functions.len()))
+        })?;
+        black_box(operation_count);
+        results.push(result);
+    }
+
+    Ok(())
+}
+
 fn bench_repeated_flow_targets(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
     let (engine, entry) = load_engine()?;
     let reader = engine.query_reader()?;
@@ -1505,6 +1625,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if selected_group(selected.as_deref(), "il") {
         bench_dominance_traversal(&mut results)?;
         bench_call_heavy_mcode(&mut results)?;
+        bench_parallel_il_transforms(&mut results)?;
     }
     if selected_group(selected.as_deref(), "queries") {
         bench_repeated_flow_targets(&mut results)?;
