@@ -18,7 +18,7 @@ use worker::Worker;
 
 use crate::analysis::AnalysisError;
 use crate::extension::{self, Registration};
-use crate::il::common::{IlAnalyser, IlArtefact, IlFormId};
+use crate::il::common::{IlAnalyser, IlArtefact, IlError, IlFormId};
 use crate::il::registry::IlRegistry;
 use crate::ir::{
     Address, AddressRange, AddressRangeSet, FunctionId, IncompleteFunction, Reference,
@@ -50,6 +50,7 @@ pub use view::ProjectView;
 pub(crate) use worker::Intake;
 
 const DEFAULT_CHANNEL_CAPACITY: usize = 1024;
+const DEFAULT_FUNCTIONS_PER_WORKER: usize = 16;
 const DEFAULT_LIFTED_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const DEFAULT_SUBSCRIPTION_CAPACITY: usize = 1024;
 pub(crate) const DEFAULT_WORK_ITEM_MAX_ATTEMPTS: usize = 3;
@@ -326,6 +327,7 @@ pub struct AnalysisEngineConfig {
     analyser_types: FxHashMap<TypeId, AnalyserTypeSelection>,
     analysers_enabled: bool,
     channel_capacity: usize,
+    functions_per_worker: usize,
     lifted_cache_bytes: usize,
     registry: Arc<IlRegistry>,
     worker_limit: usize,
@@ -345,6 +347,7 @@ impl Default for AnalysisEngineConfig {
             analyser_types: FxHashMap::default(),
             analysers_enabled: true,
             channel_capacity: DEFAULT_CHANNEL_CAPACITY,
+            functions_per_worker: DEFAULT_FUNCTIONS_PER_WORKER,
             lifted_cache_bytes: DEFAULT_LIFTED_CACHE_BYTES,
             registry: IlRegistry::standard().clone(),
             worker_limit: 1,
@@ -385,6 +388,19 @@ impl AnalysisEngineConfig {
 
     pub fn with_channel_capacity(mut self, capacity: usize) -> Self {
         self.set_channel_capacity(capacity);
+        self
+    }
+
+    pub fn functions_per_worker(&self) -> usize {
+        self.functions_per_worker
+    }
+
+    pub fn set_functions_per_worker(&mut self, functions: usize) {
+        self.functions_per_worker = functions.max(1);
+    }
+
+    pub fn with_functions_per_worker(mut self, functions: usize) -> Self {
+        self.set_functions_per_worker(functions);
         self
     }
 
@@ -701,6 +717,15 @@ pub enum EngineError {
     UnregisteredAnalyserName(String),
     #[error("analyser type is not registered: `{0}`")]
     UnregisteredAnalyserType(&'static str),
+}
+
+impl EngineError {
+    pub(crate) const fn is_missing_artefact(&self) -> bool {
+        matches!(
+            self,
+            Self::Project(ProjectError::Il(IlError::MissingArtefact { .. }))
+        )
+    }
 }
 
 pub struct AnalysisEngine {
