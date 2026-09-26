@@ -385,6 +385,47 @@ impl QueryReader {
         self.request_generated::<T>(function)
     }
 
+    pub fn lifted_batch<T>(
+        &self,
+        functions: impl IntoIterator<Item = FunctionId>,
+    ) -> Result<Vec<Option<Arc<T>>>, QueryError>
+    where
+        T: QueryableIl,
+    {
+        self.registry
+            .registered_form::<T>()
+            .map_err(ProjectError::from)?;
+        let functions = functions.into_iter().collect::<Vec<_>>();
+        if functions.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let Some(intake) = &self.intake else {
+            return Ok(vec![None; functions.len()]);
+        };
+
+        let (reply_tx, reply_rx) = flume::bounded(1);
+        intake
+            .send(Intake::GenerateLiftedBatch {
+                functions,
+                form: T::FORM,
+                reply: reply_tx,
+            })
+            .map_err(|_| QueryError::Stopped)?;
+
+        reply_rx
+            .recv()
+            .map_err(|_| QueryError::Stopped)??
+            .into_iter()
+            .map(|generated| {
+                generated
+                    .map(Arc::downcast::<T>)
+                    .transpose()
+                    .map_err(|_| ProjectError::from(IlError::mismatched_artefact(T::FORM)).into())
+            })
+            .collect()
+    }
+
     pub fn pcode(&self, function: FunctionId) -> Result<Option<Arc<PCodeIr>>, QueryError> {
         self.lifted::<PCodeIr>(function)
     }
@@ -465,9 +506,7 @@ impl QueryReader {
                 .map(Some)
                 .map_err(|_| ProjectError::from(IlError::mismatched_artefact(T::FORM)).into()),
             Ok(None) => Ok(None),
-            Err(EngineError::Project(ProjectError::Il(IlError::MissingArtefact { .. }))) => {
-                Ok(None)
-            }
+            Err(error) if error.is_missing_artefact() => Ok(None),
             Err(error) => Err(QueryError::from(error)),
         }
     }

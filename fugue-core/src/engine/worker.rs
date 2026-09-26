@@ -1,10 +1,14 @@
 use std::any::{Any, TypeId};
 use std::collections::{BTreeMap, VecDeque};
 use std::convert::Infallible;
+use std::iter::from_fn;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::thread;
 
 use flume::{Receiver, Sender, TryRecvError};
 use parking_lot::RwLock;
+use rayon::prelude::*;
 use smallvec::SmallVec;
 
 use crate::analysis::AnalysisError;
@@ -33,13 +37,15 @@ use crate::queries::{IlLookup, QueryEngine};
 use crate::storage::segments::mapping::SegmentMappingBuilder;
 use crate::types::Revision;
 
+type IntakeReply<T> = Sender<Result<T, EngineError>>;
+
 pub(crate) enum Intake {
-    Analyse(Sender<Result<(), EngineError>>),
+    Analyse(IntakeReply<()>),
     CreateMapping {
         builder: SegmentMappingBuilder,
-        reply: Sender<Result<MappingCreationResult, EngineError>>,
+        reply: IntakeReply<MappingCreationResult>,
     },
-    CreateSpace(Sender<Result<SpaceCreationResult, EngineError>>),
+    CreateSpace(IntakeReply<SpaceCreationResult>),
     Direct {
         kind: ChangeKinds,
         regions: AddressRangeSet,
@@ -47,24 +53,29 @@ pub(crate) enum Intake {
     EnsureLifted {
         function: FunctionId,
         form: IlFormId,
-        reply: Sender<Result<ChangeSet, EngineError>>,
+        reply: IntakeReply<ChangeSet>,
     },
     GenerateLifted {
         function: FunctionId,
         form: IlFormId,
-        reply: Sender<Result<Option<Arc<dyn Any + Send + Sync>>, EngineError>>,
+        reply: IntakeReply<Option<Arc<dyn Any + Send + Sync>>>,
+    },
+    GenerateLiftedBatch {
+        functions: Vec<FunctionId>,
+        form: IlFormId,
+        reply: IntakeReply<Vec<Option<Arc<dyn Any + Send + Sync>>>>,
     },
     SetData {
         data: Box<dyn AnalysisData>,
         root: TypeId,
-        reply: Sender<Result<(), EngineError>>,
+        reply: IntakeReply<()>,
     },
     Shutdown,
     Subscribe(Subscriber),
     Updates {
         source: ChangeSource,
         updates: ProjectUpdates,
-        reply: Sender<Result<ChangeSet, EngineError>>,
+        reply: IntakeReply<ChangeSet>,
     },
 }
 
@@ -370,6 +381,9 @@ impl Worker {
                 Ok(Intake::GenerateLifted { reply, .. }) => {
                     let _ = reply.send(Err(EngineError::Poisoned(message.to_owned())));
                 }
+                Ok(Intake::GenerateLiftedBatch { reply, .. }) => {
+                    let _ = reply.send(Err(EngineError::Poisoned(message.to_owned())));
+                }
                 Ok(Intake::SetData { reply, .. }) => {
                     let _ = reply.send(Err(EngineError::Poisoned(message.to_owned())));
                 }
@@ -441,6 +455,16 @@ impl Worker {
                     let result = self
                         .drain()
                         .and_then(|()| self.generate_lifted(function, &form));
+                    let _ = reply.send(result);
+                }
+                Intake::GenerateLiftedBatch {
+                    functions,
+                    form,
+                    reply,
+                } => {
+                    let result = self
+                        .drain()
+                        .and_then(|()| self.generate_lifted_batch(&functions, &form));
                     let _ = reply.send(result);
                 }
                 Intake::SetData { data, root, reply } => {
@@ -1246,6 +1270,158 @@ impl Worker {
                     .map_err(EngineError::from)
             }
         }
+    }
+
+    fn generate_lifted_batch(
+        &mut self,
+        functions: &[FunctionId],
+        form: &IlFormId,
+    ) -> Result<Vec<Option<Arc<dyn Any + Send + Sync>>>, EngineError> {
+        if functions.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let workers = thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(self.config.worker_limit())
+            .min(functions.len());
+        if workers == 1 {
+            return functions
+                .iter()
+                .map(|&function| self.generate_lifted(function, form))
+                .collect();
+        }
+
+        let mut generation = (0..workers)
+            .map(|_| IlGenerationSession::new(&self.registry))
+            .collect::<Vec<_>>();
+        let mut generated = Vec::with_capacity(functions.len());
+        let batch_size = workers.saturating_mul(self.config.functions_per_worker());
+
+        for functions in functions.chunks(batch_size) {
+            let (input_revision, prepared) = {
+                let registry = &self.registry;
+                let queries = &self.queries;
+                let project = self.project.read();
+                let input_revision = project.semantic_revision();
+                let prepare = |generation: &mut IlGenerationSession,
+                               function: FunctionId|
+                 -> Result<PreparedLiftedArtefacts, EngineError> {
+                    let path = registry.canonical_path(form);
+                    if function.is_invalid() {
+                        let root = path.first().unwrap_or(form).clone();
+                        return Err(
+                            ProjectError::from(IlError::missing_artefact(function, root)).into(),
+                        );
+                    }
+
+                    let view = ProjectView::with_registry(&project, registry);
+                    let context = IlGenerationContext::new(
+                        IlSubject::Admitted(function),
+                        view.arch(),
+                        view.platform(),
+                        view.functions(),
+                        view.blocks(),
+                        view.segments(),
+                        project.semantic_revision(),
+                    );
+                    let existing = path
+                        .iter()
+                        .map(|step| {
+                            queries.lookup_lifted_erased(
+                                &project,
+                                function,
+                                step,
+                                IlLookup::Current,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let generated = generation
+                        .generate(registry, form, existing, &context)
+                        .map_err(ProjectError::from)?;
+                    Ok(PreparedLiftedArtefacts::new(generated.into_artefacts()))
+                };
+                let next = AtomicUsize::new(0);
+                let mut prepared = generation
+                    .par_iter_mut()
+                    .map(|generation| {
+                        from_fn(|| {
+                            let index = next.fetch_add(1, Ordering::Relaxed);
+                            let &function = functions.get(index)?;
+                            let result = prepare(generation, function);
+                            Some((index, result))
+                        })
+                        .collect::<Vec<_>>()
+                    })
+                    .flatten()
+                    .collect::<Vec<_>>();
+                prepared.sort_unstable_by_key(|(index, _)| *index);
+                (input_revision, prepared)
+            };
+
+            for ((_, prepared), &function) in prepared.into_iter().zip(functions) {
+                let mut prepared = match prepared {
+                    Ok(prepared) => prepared,
+                    Err(error) if error.is_missing_artefact() => {
+                        generated.push(None);
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                if self.project.read().semantic_revision() != input_revision {
+                    prepared = match self.prepare_generated_lifted(function, form) {
+                        Ok(prepared) => prepared,
+                        Err(error) if error.is_missing_artefact() => {
+                            generated.push(None);
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
+                }
+                if prepared.artefacts.is_empty() {
+                    let project = self.project.read();
+                    generated.push(self.queries.lookup_lifted_erased(
+                        &project,
+                        function,
+                        form,
+                        IlLookup::Current,
+                    )?);
+                    continue;
+                }
+
+                let inputs = IlAnalysisInputs::new(function, prepared.artefacts);
+                let requested = inputs.requested(form);
+                self.il_inputs = Some(inputs);
+                self.schedule_il_analysers(function);
+                let admission = self.drain();
+                let inputs = self
+                    .il_inputs
+                    .take()
+                    .expect("generated IL analysis owns its prepared inputs");
+                admission?;
+
+                for artefact in inputs.into_artefacts() {
+                    let form = artefact.form().clone();
+                    self.queries
+                        .insert_lifted_erased(function, &form, artefact.into_artefact())?;
+                }
+
+                match requested {
+                    Some(requested) => generated.push(Some(requested)),
+                    None => {
+                        let project = self.project.read();
+                        generated.push(self.queries.lookup_lifted_erased(
+                            &project,
+                            function,
+                            form,
+                            IlLookup::Current,
+                        )?);
+                    }
+                }
+            }
+        }
+
+        Ok(generated)
     }
 
     fn prepare_generated_lifted(
