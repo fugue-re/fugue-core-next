@@ -12,6 +12,7 @@ const MAX_PARSER_DEPTH: usize = 128; // 64;
 
 pub const INVALID_HANDLE: u8 = 0xff;
 pub const BREADCRUMBS: usize = MAX_PARSER_DEPTH + 1;
+pub const MAX_INSN_BYTES: usize = 16;
 
 #[derive(Debug, Copy, Clone)]
 pub struct FixedHandle {
@@ -73,7 +74,7 @@ pub struct ContextCommit {
 
 #[derive(Clone)]
 pub struct ParserContext {
-    pub buffer: [u8; 16],
+    pub buffer: [u8; MAX_INSN_BYTES],
     pub context: ArrayVec<u32, MAX_CTXT_CHUNKS>,
     pub constructors: [ConstructorNode; MAX_CTOR_STATES],
     pub commits: ArrayVec<ContextCommit, MAX_CTOR_STATES>,
@@ -280,7 +281,7 @@ impl ParserInput {
 
     #[inline]
     pub fn set_buffer(&mut self, bytes: &[u8]) {
-        let mut buffer = [0u8; 16];
+        let mut buffer = [0u8; MAX_INSN_BYTES];
 
         let view_len = bytes.len().min(buffer.len());
         buffer[..view_len].copy_from_slice(&bytes[..view_len]);

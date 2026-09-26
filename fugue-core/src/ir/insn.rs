@@ -5,7 +5,9 @@ use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::il::pcode::raw::analysis::{RawPCodeFlow, RawPCodeFlows};
-use crate::ir::{Address, FlowTarget, Id, Location, Reference, ReferenceOrigin, ToRawAddress};
+use crate::ir::{
+    Address, AddressRange, FlowTarget, Id, Location, Reference, ReferenceOrigin, ToRawAddress,
+};
 use crate::lifter::{Language, Op, RawPCodeOp};
 use crate::storage::schema::bitflags::archived_bitflags;
 use crate::types::EstimateSize;
@@ -41,6 +43,7 @@ pub struct Insn {
     properties: InsnProperties,
     targets: SmallVec<[(u16, InsnTarget); 1]>,
     size: u8,
+    delay_slot_size: u8,
 }
 
 impl Insn {
@@ -108,6 +111,7 @@ impl Insn {
             size: size
                 .try_into()
                 .map_err(|_| InsnError::insn_too_large(size))?,
+            delay_slot_size: 0,
         })
     }
 
@@ -171,6 +175,7 @@ impl Insn {
             size: size
                 .try_into()
                 .map_err(|_| InsnError::insn_too_large(size))?,
+            delay_slot_size: 0,
         })
     }
 
@@ -186,6 +191,7 @@ impl Insn {
             size: size
                 .try_into()
                 .map_err(|_| InsnError::insn_too_large(size))?,
+            delay_slot_size: 0,
         })
     }
 
@@ -203,6 +209,16 @@ impl Insn {
 
     pub fn size(&self) -> usize {
         self.size as _
+    }
+
+    pub fn delay_slot(&self) -> Option<AddressRange> {
+        if self.delay_slot_size == 0 {
+            return None;
+        }
+        AddressRange::from_size(
+            self.address + (self.size - self.delay_slot_size) as usize,
+            u64::from(self.delay_slot_size),
+        )
     }
 
     pub fn iter_targets<'a>(
@@ -358,7 +374,11 @@ impl Insn {
         size: usize,
         operations: &[RawPCodeOp],
     ) -> Result<(), InsnError> {
+        let encoded_size = self.size;
         *self = Self::from_resolved_flow(language, self.address, size, operations)?;
+        if encoded_size != 0 {
+            self.delay_slot_size = self.size.saturating_sub(encoded_size);
+        }
         Ok(())
     }
 

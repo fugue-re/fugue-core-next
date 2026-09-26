@@ -40,9 +40,9 @@ impl ArchT for Mips64 {
     }
 
     fn external_thunk_template(&self) -> ExternalThunkTemplate {
-        let mut bytes = [0x08, 0x00, 0xe0, 0x03];
+        let mut bytes = [0x08, 0x00, 0xe0, 0x03, 0x00, 0x00, 0x00, 0x00];
         if self.language().is_big_endian() {
-            bytes.reverse();
+            bytes[..4].reverse();
         }
         ExternalThunkTemplate::new(bytes)
     }

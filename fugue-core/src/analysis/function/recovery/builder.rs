@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::mem;
 
+use fugue_lifter::runtime::input::MAX_INSN_BYTES;
 use indexmap::{IndexMap, IndexSet};
 use itertools::Either;
 use rustc_hash::FxBuildHasher;
@@ -622,6 +623,7 @@ impl FunctionBuilderContext {
             )
             .unwrap_or(usize::MAX);
             let bytes = &bytes[..bytes.len().min(remaining)];
+            let mut insn_bytes = [0u8; MAX_INSN_BYTES];
             let mut offset = 0usize;
             let mut mapping_hints = view.mapping_hints_from(block);
             let mut next_mapping_hint = mapping_hints.next();
@@ -667,7 +669,14 @@ impl FunctionBuilderContext {
                 // If we've already disassembled this instruction select the next candidate,
                 // otherwise get the entry ready for update.
                 let entry = match f.insn_entry(address) {
-                    InsnEntry::Vacant(entry) => entry,
+                    InsnEntry::Vacant(entry) => {
+                        if let Some(covering) = entry.covering_insn() {
+                            tracing::debug!(
+                                "{address} enters the delay slot of the instruction at {covering}"
+                            );
+                        }
+                        entry
+                    }
                     InsnEntry::Occupied(mut entry) => {
                         // If two blocks overlap, then they may share a common suffix to account
                         // for this we mark instructions that appear in multiple blocks as starts
@@ -684,6 +693,19 @@ impl FunctionBuilderContext {
                 }
 
                 let bytes = &bytes[offset..];
+                let bytes = if bytes.len() < insn_bytes.len() {
+                    let read = self
+                        .mapping_cache
+                        .read_bytes(segments, address, &mut insn_bytes)
+                        .unwrap_or(0);
+                    if read > bytes.len() {
+                        &insn_bytes[..read]
+                    } else {
+                        bytes
+                    }
+                } else {
+                    bytes
+                };
 
                 match resolver.resolve(address, bytes) {
                     Ok(resolved) => {
@@ -713,6 +735,16 @@ impl FunctionBuilderContext {
                         }
 
                         let insn = f.insn(insn_id).expect("inserted instruction must exist");
+
+                        if let Some(slot) = insn.delay_slot()
+                            && f.contains_insn(slot.start_address())
+                        {
+                            tracing::debug!(
+                                "delay slot at {} of the instruction at {address} overlaps an \
+                                 existing instruction",
+                                slot.start_address(),
+                            );
+                        }
 
                         let orphaned_fall_through = if config.non_returning_analysis()
                             && insn.call_target().is_some_and(|target| {

@@ -42,9 +42,9 @@ impl ArchT for Mips {
     }
 
     fn external_thunk_template(&self) -> ExternalThunkTemplate {
-        let mut bytes = [0x08, 0x00, 0xe0, 0x03]; // jr $ra
+        let mut bytes = [0x08, 0x00, 0xe0, 0x03, 0x00, 0x00, 0x00, 0x00]; // jr $ra; nop
         if self.language().is_big_endian() {
-            bytes.reverse();
+            bytes[..4].reverse();
         }
         ExternalThunkTemplate::new(bytes)
     }
