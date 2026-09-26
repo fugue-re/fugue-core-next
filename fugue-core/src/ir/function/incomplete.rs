@@ -1,5 +1,5 @@
-use std::collections::BTreeSet;
 use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, BTreeSet};
 use std::mem::{self, size_of};
 use std::num::NonZeroU16;
 
@@ -10,19 +10,29 @@ use thiserror::Error;
 use crate::ir::{
     Address, AddressRange, AddressRangeSet, AddressWithContext, CodeBlockId, CodeBlockRecord,
     FlowKind, FlowTarget, Function, FunctionId, FunctionProperties, IncompleteCodeBlock,
-    IncompleteCodeBlockId, Insn, InsnId, Reference, ReferenceOrigin, Switch, SwitchCase, Symbol,
+    IncompleteCodeBlockId, Insn, InsnId, RawAddress, RawAddressMap, Reference, ReferenceOrigin,
+    Switch, SwitchCase, Symbol,
 };
+use crate::storage::AddressSpaceId;
 use crate::types::{Confidence, EstimateSize, Revision};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct FunctionInsnIndex {
     additional: FxHashMap<Address, SmallVec<[InsnId; 1]>>,
+    covering: BTreeMap<AddressSpaceId, RawAddressMap<InsnId>>,
     first: FxHashMap<Address, InsnId>,
 }
 
 impl FunctionInsnIndex {
     fn contains(&self, address: Address) -> bool {
         self.first.contains_key(&address)
+    }
+
+    fn covering_insn(&self, address: Address) -> Option<InsnId> {
+        self.covering
+            .get(&address.space())?
+            .get(address.raw_address())
+            .copied()
     }
 
     fn first(&self, address: Address) -> Option<InsnId> {
@@ -41,33 +51,53 @@ impl FunctionInsnIndex {
 
     fn clear(&mut self) {
         self.additional.clear();
+        self.covering.clear();
         self.first.clear();
     }
 
-    fn insert(&mut self, address: Address, id: InsnId) {
-        match self.first.entry(address) {
+    fn insert(&mut self, insn: &Insn, id: InsnId) {
+        match self.first.entry(insn.address()) {
             Entry::Vacant(entry) => {
                 entry.insert(id);
             }
             Entry::Occupied(_) => {
-                self.additional.entry(address).or_default().push(id);
+                self.additional.entry(insn.address()).or_default().push(id);
             }
+        }
+        if let Some(slot) = insn.delay_slot() {
+            self.covering
+                .entry(slot.space())
+                .or_default()
+                .insert_range(slot.raw_range(), id);
         }
     }
 }
 
 impl EstimateSize for FunctionInsnIndex {
     fn estimate_size(&self) -> usize {
-        let mut size = size_of::<Self>().saturating_add(
-            self.first
-                .capacity()
-                .saturating_mul(size_of::<(Address, InsnId)>())
-                .saturating_add(
-                    self.additional
-                        .capacity()
-                        .saturating_mul(size_of::<(Address, SmallVec<[InsnId; 1]>)>()),
-                ),
-        );
+        let covering_bytes = self
+            .covering
+            .len()
+            .saturating_mul(size_of::<(AddressSpaceId, RawAddressMap<InsnId>)>())
+            .saturating_add(
+                self.covering
+                    .values()
+                    .map(RawAddressMap::run_count)
+                    .sum::<usize>()
+                    .saturating_mul(size_of::<(RawAddress, RawAddress, InsnId)>()),
+            );
+        let first_bytes = self
+            .first
+            .capacity()
+            .saturating_mul(size_of::<(Address, InsnId)>());
+        let additional_bytes = self
+            .additional
+            .capacity()
+            .saturating_mul(size_of::<(Address, SmallVec<[InsnId; 1]>)>());
+        let mut size = size_of::<Self>()
+            .saturating_add(covering_bytes)
+            .saturating_add(first_bytes)
+            .saturating_add(additional_bytes);
         for ids in self.additional.values().filter(|ids| ids.spilled()) {
             size = size.saturating_add(ids.capacity().saturating_mul(size_of::<InsnId>()));
         }
@@ -202,6 +232,7 @@ pub enum InsnEntry<'a> {
 
 pub struct VacantInsnEntry<'a> {
     address: Address,
+    covering_insn: Option<Address>,
     generation: u32,
     insns: &'a mut Vec<Insn>,
     insn_index: &'a mut FunctionInsnIndex,
@@ -209,6 +240,10 @@ pub struct VacantInsnEntry<'a> {
 }
 
 impl<'a> VacantInsnEntry<'a> {
+    pub fn covering_insn(&self) -> Option<Address> {
+        self.covering_insn
+    }
+
     pub fn insert(self, insn: Insn) -> InsnId {
         assert!(
             self.address == insn.address(),
@@ -225,10 +260,10 @@ impl<'a> VacantInsnEntry<'a> {
             self.insns.len().try_into().expect("too many instructions"),
             self.generation,
         );
-        self.insns.push(insn);
         if !self.insn_index.is_empty() {
-            self.insn_index.insert(self.address, id);
+            self.insn_index.insert(&insn, id);
         }
+        self.insns.push(insn);
         id
     }
 }
@@ -414,6 +449,11 @@ impl IncompleteFunction {
         self.insns
             .binary_search_by_key(&address, Insn::address)
             .is_ok()
+    }
+
+    pub fn covering_insn(&self, address: Address) -> Option<&Insn> {
+        let id = self.insn_index.covering_insn(address)?;
+        self.insns.get(id.index())
     }
 
     pub fn insn(&self, id: InsnId) -> Option<&Insn> {
@@ -686,11 +726,35 @@ impl IncompleteFunction {
                 .last()
                 .is_some_and(|insn| insn.address() < address);
 
-        let existing = if append {
-            None
+        let (existing, covering_insn) = if append {
+            let covering_insn = if self.insn_index.is_empty() {
+                self.insns
+                    .last()
+                    .filter(|insn| {
+                        insn.delay_slot()
+                            .is_some_and(|slot| slot.contains_address(address))
+                    })
+                    .map(Insn::address)
+            } else {
+                self.insn_index
+                    .covering_insn(address)
+                    .and_then(|id| self.insns.get(id.index()))
+                    .map(Insn::address)
+            };
+            (None, covering_insn)
         } else {
             self.ensure_insn_index();
-            self.insn_index.first(address)
+            match self.insn_index.first(address) {
+                Some(id) => (Some(id), None),
+                None => {
+                    let covering_insn = self
+                        .insn_index
+                        .covering_insn(address)
+                        .and_then(|id| self.insns.get(id.index()))
+                        .map(Insn::address);
+                    (None, covering_insn)
+                }
+            }
         };
 
         match existing {
@@ -700,6 +764,7 @@ impl IncompleteFunction {
             }),
             None => InsnEntry::Vacant(VacantInsnEntry {
                 address,
+                covering_insn,
                 generation: self.insn_generation,
                 insns: &mut self.insns,
                 insn_index: &mut self.insn_index,
@@ -751,7 +816,7 @@ impl IncompleteFunction {
                 index.try_into().expect("too many instructions"),
                 self.insn_generation,
             );
-            self.insn_index.insert(insn.address(), id);
+            self.insn_index.insert(insn, id);
         }
         self.insns_unsorted = false;
     }
@@ -766,7 +831,7 @@ impl IncompleteFunction {
                 index.try_into().expect("too many instructions"),
                 self.insn_generation,
             );
-            self.insn_index.insert(insn.address(), id);
+            self.insn_index.insert(insn, id);
         }
     }
 
