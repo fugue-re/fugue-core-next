@@ -131,6 +131,16 @@ impl FunctionStructurer {
                 }
 
                 if current == next_cut {
+                    if let Some(covering) = function.covering_insn(insn.address()) {
+                        let covering = covering.address();
+                        tracing::debug!(
+                            "cutting block at {address} before delay-slot block at {} covered by \
+                             the instruction at {covering}",
+                            insn.address(),
+                        );
+                        self.push_block(function, address, size, insns, block_context);
+                        continue 'cuts;
+                    }
                     if !insn.is_flow()
                         && function
                             .insns()
@@ -159,6 +169,14 @@ impl FunctionStructurer {
                     if size > u16::MAX as usize {
                         return Err(FunctionRecoveryError::invalid_block_size(address, size));
                     }
+                } else if insn.address() < expected
+                    && function.covering_insn(insn.address()).is_some()
+                {
+                    tracing::debug!(
+                        "skipping delay-slot instruction at {}; block at {address} extends to \
+                         {expected} and no block starts at the instruction",
+                        insn.address(),
+                    );
                 }
             }
 
