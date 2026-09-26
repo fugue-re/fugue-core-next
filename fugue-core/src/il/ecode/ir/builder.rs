@@ -141,7 +141,7 @@ impl ECodeBuilder {
         Ok(ir)
     }
 
-    pub(crate) fn build_unchecked(mut self) -> ECodeIr {
+    pub fn build_unchecked(mut self) -> ECodeIr {
         if self.edge_args.is_empty() && !self.graph.successors().is_empty() {
             self.edge_args = vec![IlIndexRange::EMPTY; self.graph.successors().len()];
         }

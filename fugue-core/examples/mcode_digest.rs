@@ -3,6 +3,7 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 
 use fugue_core::engine::{AnalysisEngine, AnalysisEngineConfig};
+use fugue_core::il::mcode::MCodeOpcode;
 use fugue_core::loader::Loader;
 use fugue_core::project::Project;
 use sha2::{Digest, Sha256};
@@ -35,6 +36,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut operations = 0usize;
         let mut values = 0usize;
         let mut variables = 0usize;
+        let mut memory_operations = 0usize;
+        let mut loads = 0usize;
+        let mut stores = 0usize;
         for function in functions {
             let Some(mcode) = reader.mcode(function)? else {
                 continue;
@@ -43,13 +47,19 @@ fn main() -> Result<(), Box<dyn Error>> {
             operations += mcode.ops().len();
             values += mcode.values().len();
             variables += mcode.variables().len();
+            for operation in mcode.ops() {
+                let opcode = operation.opcode();
+                memory_operations += usize::from(opcode.requires_memory_domain());
+                loads += usize::from(opcode == MCodeOpcode::Load);
+                stores += usize::from(opcode == MCodeOpcode::Store);
+            }
             let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(mcode.as_ref())?;
             digest.update(bytes.as_slice());
         }
 
         println!(
             "{}: lifted={lifted} operations={operations} values={values} variables={variables} \
-             digest={:x}",
+             memory_operations={memory_operations} loads={loads} stores={stores} digest={:x}",
             input.display(),
             digest.finalize()
         );
