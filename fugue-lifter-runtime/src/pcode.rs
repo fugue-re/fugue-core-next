@@ -8,7 +8,7 @@ use crate::calculate_mask;
 use crate::constructor::Constructor;
 use crate::context::{ContextBitRange, ContextDatabase, TrackedSet};
 use crate::format::{InstructionFormatError, InstructionWriter};
-use crate::input::{FixedHandle, ParserInput, ParserInputs, INVALID_HANDLE};
+use crate::input::{FixedHandle, INVALID_HANDLE, ParserInput, ParserInputs};
 use crate::language::{Language, LanguageData, LanguageFormatter};
 use crate::operand::Operands;
 use crate::template::construct_tpl;
@@ -747,11 +747,7 @@ impl Varnode {
 
     #[inline]
     pub const fn valid(&self) -> Option<&Varnode> {
-        if self.is_invalid() {
-            None
-        } else {
-            Some(self)
-        }
+        if self.is_invalid() { None } else { Some(self) }
     }
 
     #[inline]

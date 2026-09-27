@@ -73,7 +73,7 @@ impl MCodeAliasSet {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::il::common::{IlError, IlGraph, IlMetadata, IlValueId, RegisterId};
+    use crate::il::common::{IlError, IlMetadata, IlValueId, RegisterId};
     use crate::il::ecode::{ECodeBuilder, ECodeDomain, ECodeIr, ECodeOpSpec, ECodeOpcode};
     use crate::il::mcode::MCodeVarKind;
     use crate::il::mcode::transform::stack::MCodeStackModel;
@@ -86,15 +86,11 @@ mod test {
         spec: ECodeOpSpec,
         operands: impl IntoIterator<Item = IlValueId>,
     ) -> Result<IlValueId, IlError> {
-        let (_, results) = builder.emitter().emit(spec, operands, 1)?;
-        IlValueId::try_from_index(results.start())
+        builder.emit_value(spec, operands)
     }
 
     fn escaping_frame() -> (ECodeIr, MCodeStackModel, MCodeVariableModel) {
-        let mut builder = ECodeBuilder::new(
-            IlMetadata::new(FunctionId::default(), 0),
-            IlGraph::default(),
-        );
+        let mut builder = ECodeBuilder::new(IlMetadata::new(FunctionId::default(), 0));
 
         let sp = emit_value(
             &mut builder,
@@ -103,7 +99,6 @@ mod test {
         )
         .unwrap();
         builder
-            .emitter()
             .set_value_domain(sp, ECodeDomain::Register(RegisterId::new(STACK_POINTER)))
             .unwrap();
 

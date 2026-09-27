@@ -425,8 +425,7 @@ mod test {
         spec: ECodeOpSpec,
         operands: impl IntoIterator<Item = IlValueId>,
     ) -> Result<IlValueId, IlError> {
-        let (_, results) = builder.emitter().emit(spec, operands, 1)?;
-        IlValueId::try_from_index(results.start())
+        builder.emit_value(spec, operands)
     }
 
     #[derive(Default)]
@@ -517,7 +516,7 @@ mod test {
     #[test]
     fn ecode_verifier_rejects_register_write_with_wrong_domain() {
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = ECodeBuilder::new(metadata);
         let source = emit_value(
             &mut builder,
             ECodeOpSpec::new(ECodeOpcode::Constant, 64),
@@ -525,17 +524,13 @@ mod test {
         )
         .unwrap();
 
-        let (_, written_results) = builder
-            .emitter()
-            .emit(
+        let written = builder
+            .emit_value(
                 ECodeOpSpec::new(ECodeOpcode::WriteRegister, 64).with_immediate(7),
                 [source],
-                1,
             )
             .unwrap();
-        let written = IlValueId::try_from_index(written_results.start()).unwrap();
         builder
-            .emitter()
             .set_value_domain(written, ECodeDomain::Flag(FlagId::new(7)))
             .unwrap();
 
@@ -570,9 +565,8 @@ mod test {
     fn ecode_verifier_rejects_load_without_memory_domain() {
         let metadata = IlMetadata::new(FunctionId::default(), 0);
         let space = AddressSpaceId::new(7);
-        let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = ECodeBuilder::new(metadata);
         builder
-            .emitter()
             .emit(
                 ECodeOpSpec::new(ECodeOpcode::Load, 8).with_address_space(space),
                 [],
@@ -613,18 +607,29 @@ mod test {
         }
 
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = ECodeBuilder::new(metadata, graph.build(1).unwrap());
+        let mut builder = ECodeBuilder::new_with(metadata, graph.build(1).unwrap());
+        let mut args = Vec::with_capacity(blocks.len() - 1);
+        for &block in &blocks[1..] {
+            args.push(builder.add_block_arg(block, 64).unwrap());
+        }
+        builder.switch_to_block(blocks[0]).unwrap();
+        builder.begin_block().unwrap();
         let mut incoming = emit_value(
             &mut builder,
             ECodeOpSpec::new(ECodeOpcode::Constant, 64),
             [],
         )
         .unwrap();
-        for &block in &blocks[1..] {
-            let arg = builder.emitter().emit_block_arg(block, 64).unwrap();
-            builder.emitter().emit_edge_args([incoming]).unwrap();
+        for (&block, &arg) in blocks[1..].iter().zip(&args) {
+            builder
+                .add_successor(block, IlEdgeKinds::FALL_THROUGH, [incoming])
+                .unwrap();
+            builder.end_block().unwrap();
+            builder.switch_to_block(block).unwrap();
+            builder.begin_block().unwrap();
             incoming = arg;
         }
+        builder.end_block().unwrap();
 
         let ir = builder.build_unchecked();
 
@@ -635,8 +640,8 @@ mod test {
     fn ecode_verifier_reports_invalid_store_result_count() {
         let metadata = IlMetadata::new(FunctionId::default(), 0);
         let space = AddressSpaceId::new(7);
-        let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
-        builder.emitter().intern_memory_domain(space);
+        let mut builder = ECodeBuilder::new(metadata);
+        builder.intern_memory_domain(space);
 
         let pointer = emit_value(
             &mut builder,
@@ -656,7 +661,6 @@ mod test {
         .unwrap();
 
         builder
-            .emitter()
             .emit(
                 ECodeOpSpec::new(ECodeOpcode::Store, 0).with_address_space(space),
                 [pointer, value, memory],
@@ -679,7 +683,7 @@ mod test {
     #[test]
     fn ecode_verifier_rejects_wide_constant_beyond_pool() {
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = ECodeBuilder::new(metadata);
         let _value = emit_value(
             &mut builder,
             ECodeOpSpec::new(ECodeOpcode::Constant, 128).with_immediate(100),
@@ -698,7 +702,7 @@ mod test {
     #[test]
     fn ecode_verifier_rejects_operand_width_mismatch() {
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = ECodeBuilder::new(metadata);
 
         let wide = emit_value(
             &mut builder,
@@ -725,7 +729,7 @@ mod test {
     #[test]
     fn ecode_verifier_accepts_wide_constant_within_pool() {
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = ECodeBuilder::new(metadata);
 
         let source = emit_value(
             &mut builder,
@@ -742,7 +746,6 @@ mod test {
         .unwrap();
 
         builder
-            .emitter()
             .emit(ECodeOpSpec::new(ECodeOpcode::Return, 0), [widened], 0)
             .unwrap();
 
@@ -1059,7 +1062,7 @@ mod test {
     }
 
     #[test]
-    fn ecode_verifier_rejects_an_edge_arg_from_a_different_domain() {
+    fn ecode_builder_rejects_an_edge_arg_from_a_different_domain() {
         let successor = IlBlockId::try_from_index(1).unwrap();
         let graph = IlGraph::new(
             vec![
@@ -1077,7 +1080,16 @@ mod test {
             vec![successor],
             vec![IlEdgeKinds::UNCONDITIONAL],
         );
-        let mut builder = ECodeBuilder::new(IlMetadata::new(FunctionId::default(), 0), graph);
+        let mut builder = ECodeBuilder::new_with(IlMetadata::new(FunctionId::default(), 0), graph);
+
+        let arg = builder.add_block_arg(successor, 64).unwrap();
+        builder
+            .set_value_domain(arg, ECodeDomain::Register(RegisterId::new(24)))
+            .unwrap();
+        builder
+            .switch_to_block(IlBlockId::try_from_index(0).unwrap())
+            .unwrap();
+        builder.begin_block().unwrap();
 
         let left = emit_value(
             &mut builder,
@@ -1086,7 +1098,6 @@ mod test {
         )
         .unwrap();
         builder
-            .emitter()
             .set_value_domain(left, ECodeDomain::Register(RegisterId::new(16)))
             .unwrap();
         let right = emit_value(
@@ -1096,27 +1107,17 @@ mod test {
         )
         .unwrap();
         builder
-            .emitter()
             .set_value_domain(right, ECodeDomain::Register(RegisterId::new(24)))
             .unwrap();
 
-        let arg = builder.emitter().emit_block_arg(successor, 64).unwrap();
-        builder
-            .emitter()
-            .set_value_domain(arg, ECodeDomain::Register(RegisterId::new(24)))
-            .unwrap();
-        builder.emitter().emit_edge_args([left]).unwrap();
-
-        let ir = builder.build_unchecked();
-
         assert!(matches!(
-            ir.verify(),
-            Err(VerifyError::InconsistentValueDomain { .. })
+            builder.add_successor(successor, IlEdgeKinds::UNCONDITIONAL, [left],),
+            Err(IlError::InvalidArtefact { .. })
         ));
     }
 
     #[test]
-    fn ecode_verifier_checks_edge_arg_width_from_an_unreachable_block() {
+    fn ecode_builder_checks_edge_arg_width_from_an_unreachable_block() {
         let successor = IlBlockId::try_from_index(2).unwrap();
         let graph = IlGraph::new(
             vec![
@@ -1139,21 +1140,20 @@ mod test {
             vec![successor],
             vec![IlEdgeKinds::UNCONDITIONAL],
         );
-        let mut builder = ECodeBuilder::new(IlMetadata::new(FunctionId::default(), 0), graph);
+        let mut builder = ECodeBuilder::new_with(IlMetadata::new(FunctionId::default(), 0), graph);
+        builder.add_block_arg(successor, 64).unwrap();
+        let unreachable = IlBlockId::try_from_index(1).unwrap();
+        builder.switch_to_block(unreachable).unwrap();
+        builder.begin_block().unwrap();
         let incoming = emit_value(
             &mut builder,
             ECodeOpSpec::new(ECodeOpcode::Constant, 32),
             [],
         )
         .unwrap();
-        builder.emitter().emit_block_arg(successor, 64).unwrap();
-        builder.emitter().emit_edge_args([incoming]).unwrap();
-
-        let ir = builder.build_unchecked();
-
         assert!(matches!(
-            ir.verify(),
-            Err(VerifyError::Il(IlError::WidthMismatch { .. }))
+            builder.add_successor(successor, IlEdgeKinds::UNCONDITIONAL, [incoming],),
+            Err(IlError::InvalidArtefact { .. })
         ));
     }
 }

@@ -1,9 +1,41 @@
 use fugue_bv::BitVec;
 
-use crate::il::common::IlIndexRange;
+use crate::il::common::{IlIndexRange, IlValueId};
 use crate::il::mcode::{MCodeOpcode, MCodeVarId};
 use crate::ir::Address;
 use crate::storage::segments::space::AddressSpaceId;
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct MCodeResultSpec {
+    width: u32,
+    variable: Option<MCodeVarId>,
+}
+
+impl MCodeResultSpec {
+    pub const fn new(width: u32) -> Self {
+        Self {
+            width,
+            variable: None,
+        }
+    }
+
+    pub const fn set_variable(&mut self, variable: MCodeVarId) {
+        self.variable = Some(variable);
+    }
+
+    pub const fn with_variable(mut self, variable: MCodeVarId) -> Self {
+        self.set_variable(variable);
+        self
+    }
+
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub const fn variable(&self) -> Option<MCodeVarId> {
+        self.variable
+    }
+}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct MCodeOpSpec {
@@ -162,6 +194,12 @@ impl MCodeOp {
 
     pub const fn results(&self) -> IlIndexRange {
         self.results
+    }
+
+    pub fn single_result(&self) -> Option<IlValueId> {
+        (self.results.len() == 1)
+            .then(|| self.results.start())
+            .and_then(|index| IlValueId::try_from_index(index).ok())
     }
 
     pub const fn operands(&self) -> IlIndexRange {

@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::mem;
 
+use fixedbitset::FixedBitSet;
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 
 use super::state::{ECodeLiftEffect, ECodeLiftExprKind, ECodeLiftState};
 use crate::il::common::{
@@ -15,6 +16,7 @@ pub(crate) struct PCodeToECodeSsaScratch {
     expression_operands: Vec<IlValueId>,
     expr_visits: Vec<ExprVisit>,
     effect_operands: Vec<IlValueId>,
+    edge_args: SmallVec<[IlValueId; 2]>,
 }
 
 #[derive(Debug, Default)]
@@ -94,8 +96,7 @@ pub(crate) struct PCodeToECodeSsaLifter<'a> {
     domain_widths: BTreeMap<ECodeDomain, u32>,
     entry_block: Option<IlBlockId>,
     input_domains: Vec<(ECodeDomain, u32)>,
-    blocks: Vec<Option<IlBlock>>,
-    edge_args: Vec<Vec<IlValueId>>,
+    lifted_blocks: FixedBitSet,
     op_ranges: IlIndexRangeMap,
 }
 
@@ -212,7 +213,6 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
         let expression_count = source.expressions().len();
         let operation_count = source.ops().len();
         let block_count = graph.blocks().len();
-        let edge_count = graph.successors().len();
 
         Self {
             source,
@@ -227,8 +227,7 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
             domain_widths: BTreeMap::new(),
             entry_block: None,
             input_domains: Vec::new(),
-            blocks: vec![None; block_count],
-            edge_args: vec![Vec::new(); edge_count],
+            lifted_blocks: FixedBitSet::with_capacity(block_count),
             op_ranges: IlIndexRangeMap::unmapped(operation_count),
         }
     }
@@ -249,7 +248,6 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
             self.lift_op_at(index, &mut current)?;
         }
 
-        self.builder.set_graph(mem::take(&mut self.graph));
         self.builder
             .set_source_spans(self.op_ranges.remap_source_spans(&self.source_spans)?);
         self.builder
@@ -259,6 +257,17 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
     }
 
     fn lift_blocks(&mut self, entry: IlBlockId) -> Result<(), IlError> {
+        for (index, source_block) in self.graph.blocks().iter().enumerate() {
+            let block = IlBlockId::try_from_index(index)?;
+            let added = match self.graph.block_source(block) {
+                Some(source) => self
+                    .builder
+                    .add_block_with_source(source_block.properties(), source)?,
+                None => self.builder.add_block(source_block.properties())?,
+            };
+            debug_assert_eq!(added, block);
+        }
+
         let dominance =
             IlDominance::from_blocks(self.graph.blocks(), self.graph.successors(), entry);
         let domains = ECodeDomains::new(&self.source, &self.graph)?;
@@ -277,21 +286,11 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
         for block_index in 0..self.graph.blocks().len() {
             let block_id = IlBlockId::try_from_index(block_index)?;
 
-            if self.blocks[block_index].is_none() {
+            if !self.lifted_blocks.contains(block_index) {
                 self.lift_block(block_id, &mut ECodeRenameState::default())?;
             }
         }
 
-        for args in mem::take(&mut self.edge_args) {
-            self.builder.emitter().emit_edge_args(args)?;
-        }
-        let blocks = mem::take(&mut self.blocks)
-            .into_iter()
-            .collect::<Option<Vec<_>>>()
-            .expect("every block is constructed before the graph is replaced");
-        let graph = mem::take(&mut self.graph)
-            .with_op_ranges(blocks.into_iter().map(|block| block.ops()))?;
-        self.builder.set_graph(graph);
         self.builder
             .set_source_spans(self.op_ranges.remap_source_spans(&self.source_spans)?);
         self.builder
@@ -331,6 +330,8 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
         block: IlBlockId,
         current: &mut ECodeRenameState,
     ) -> Result<(), IlError> {
+        self.builder.switch_to_block(block)?;
+        self.builder.begin_block()?;
         for (domain, value) in &self.block_args[block.index()] {
             current.define(*domain, *value);
         }
@@ -344,8 +345,6 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
                     block.index(),
                     self.graph.blocks().len(),
                 ))?;
-        let start = self.builder.emitter().op_count();
-
         if self.entry_block == Some(block) {
             self.allocate_input_values(current)?;
         }
@@ -357,13 +356,8 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
         }
 
         self.lift_edge_args(source_block, current)?;
-
-        let end = self.builder.emitter().op_count();
-        self.blocks[block.index()] = Some(IlBlock::new(
-            IlIndexRange::new(start, end)?,
-            source_block.successors(),
-            source_block.properties(),
-        ));
+        self.builder.end_block()?;
+        self.lifted_blocks.insert(block.index());
 
         Ok(())
     }
@@ -376,7 +370,7 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
         for successor_offset in 0..source_block.successors().len() {
             let edge = source_block.successors().start() + successor_offset;
             let successor = self.graph.successors()[edge];
-            let mut args = Vec::new();
+            self.scratch.edge_args.clear();
             let arg_count = self.block_args[successor.index()].len();
 
             for arg_index in 0..arg_count {
@@ -393,10 +387,14 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
                     }
                 };
 
-                args.push(value);
+                self.scratch.edge_args.push(value);
             }
 
-            self.edge_args[edge] = args;
+            self.builder.add_successor(
+                successor,
+                self.graph.successor_kinds()[edge],
+                self.scratch.edge_args.iter().copied(),
+            )?;
         }
 
         Ok(())
@@ -426,12 +424,12 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
         {
             self.reset_expression_cache();
         }
-        let start = self.builder.emitter().op_count();
+        let start = self.builder.op_count();
         let op = self.source.ops()[index];
 
         self.lift_op(&op, current)?;
 
-        let end = self.builder.emitter().op_count();
+        let end = self.builder.op_count();
         self.op_ranges
             .set_range(index, IlIndexRange::new(start, end)?)?;
 
@@ -468,9 +466,8 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
                     _ => unreachable!(),
                 };
                 let spec = ECodeOpSpec::new(opcode, width).with_immediate(op.immediate());
-                let (_, results) = self.builder.emitter().emit(spec, [source], 1)?;
-                let value = IlValueId::try_from_index(results.start())?;
-                self.builder.emitter().set_value_domain(value, domain)?;
+                let value = self.builder.emit_value(spec, [source])?;
+                self.builder.set_value_domain(value, domain)?;
                 current.define(domain, value);
             }
             ECodeOpcode::Store => {
@@ -486,13 +483,10 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
                 let spec = ECodeOpSpec::new(ECodeOpcode::Store, 0)
                     .with_address_space(address_space)
                     .with_immediate(op.immediate());
-                let (_, results) = self.builder.emitter().emit(
-                    spec,
-                    self.scratch.effect_operands.iter().copied(),
-                    1,
-                )?;
-                let memory = IlValueId::try_from_index(results.start())?;
-                self.builder.emitter().set_value_domain(memory, domain)?;
+                let memory = self
+                    .builder
+                    .emit_value(spec, self.scratch.effect_operands.iter().copied())?;
+                self.builder.set_value_domain(memory, domain)?;
                 current.define(domain, memory);
             }
             opcode => {
@@ -507,11 +501,8 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
                     spec = spec.with_address_space(address_space);
                 }
 
-                self.builder.emitter().emit(
-                    spec,
-                    self.scratch.effect_operands.iter().copied(),
-                    0,
-                )?;
+                self.builder
+                    .emit(spec, self.scratch.effect_operands.iter().copied(), 0)?;
                 if matches!(opcode, ECodeOpcode::Call | ECodeOpcode::CallIndirect) {
                     let preserved = self.source.call_preserved_registers();
                     current.retain(|domain, _| match domain {
@@ -627,12 +618,9 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
             if let Some(address_space) = expression.address_space() {
                 spec.set_address_space(address_space);
             }
-            let (_, results) = self.builder.emitter().emit(
-                spec,
-                self.scratch.expression_operands.iter().copied(),
-                1,
-            )?;
-            let value = IlValueId::try_from_index(results.start())?;
+            let value = self
+                .builder
+                .emit_value(spec, self.scratch.expression_operands.iter().copied())?;
             self.values[expression_id.index()] = Some(value);
             self.built_expressions.push(expression_id);
         }
@@ -665,9 +653,8 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
             ECodeDomain::Register(register) => register.value(),
         };
         let spec = ECodeOpSpec::new(ECodeOpcode::Undefined, width).with_immediate(immediate);
-        let (_, results) = self.builder.emitter().emit(spec, [], 1)?;
-        let value = IlValueId::try_from_index(results.start())?;
-        self.builder.emitter().set_value_domain(value, domain)?;
+        let value = self.builder.emit_value(spec, [])?;
+        self.builder.set_value_domain(value, domain)?;
 
         Ok(value)
     }
@@ -690,8 +677,8 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
                     continue;
                 }
 
-                let value = self.builder.emitter().emit_block_arg(*block, width)?;
-                self.builder.emitter().set_value_domain(value, *domain)?;
+                let value = self.builder.add_block_arg(*block, width)?;
+                self.builder.set_value_domain(value, *domain)?;
                 self.block_args[block.index()].push((*domain, value));
             }
         }
@@ -789,7 +776,7 @@ mod test {
 
     impl ECodeFixtureBuilder {
         fn build(&mut self, fixture: ECodeLiftStateFixture) -> Result<ECodeIr, IlError> {
-            let builder = ECodeBuilder::new(fixture.metadata, IlGraph::default());
+            let builder = ECodeBuilder::new(fixture.metadata);
             PCodeToECodeSsaLifter::new(
                 fixture.state,
                 fixture.graph,
@@ -1420,7 +1407,6 @@ mod test {
                 )
                 .unwrap();
         }
-
         let source = builder.build();
         let mut transform = ECodeFixtureBuilder::default();
         let ir = transform.build(source).unwrap();

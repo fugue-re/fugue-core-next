@@ -10,10 +10,10 @@ mod value;
 mod variable;
 
 pub use format::{MCodeIrDisplay, MCodeSourceDisplay};
-pub use ir::{MCodeBuilder, MCodeEmitter, MCodeIr};
+pub use ir::{MCodeBuilder, MCodeIr};
 pub use memory::MCodeMemoryDomain;
 pub use opcode::MCodeOpcode;
-pub use operation::{MCodeOp, MCodeOpSpec};
+pub use operation::{MCodeOp, MCodeOpSpec, MCodeResultSpec};
 pub(crate) use optimise::MCodeOptimiser;
 pub use transform::{ECodeToMCode, MCodeCallFacts, MCodeFunctionFacts, MCodeStorageFact};
 pub use value::{MCodeBinding, MCodeBlockArg, MCodeValue, MCodeVersion};
@@ -24,8 +24,8 @@ mod test {
     use super::ir::verify::VerifyError;
     use super::*;
     use crate::il::common::{
-        IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlError, IlGraph, IlGraphBuilder,
-        IlIndexRange, IlMetadata, IlOpId, IlParentSpan, IlSourceSpan, IlValueId, RegisterId,
+        IlBlockProperties, IlEdgeKinds, IlError, IlIndexRange, IlMetadata, IlOpId, IlParentSpan,
+        IlSourceSpan, IlValueId, RegisterId,
     };
     use crate::il::mcode::{MCodeVar, MCodeVarId};
     use crate::ir::{Address, FunctionId};
@@ -40,12 +40,20 @@ mod test {
         operands: impl IntoIterator<Item = IlValueId>,
         width: u32,
     ) -> Result<IlValueId, IlError> {
-        let (_, results) = builder.emitter().emit(spec, operands, [width])?;
-        IlValueId::try_from_index(results.start())
+        emit_result(builder, spec, operands, MCodeResultSpec::new(width))
+    }
+
+    fn emit_result(
+        builder: &mut MCodeBuilder,
+        spec: MCodeOpSpec,
+        operands: impl IntoIterator<Item = IlValueId>,
+        result: MCodeResultSpec,
+    ) -> Result<IlValueId, IlError> {
+        builder.emit_value(spec, operands, result)
     }
 
     fn provenance_builder(operation_count: usize) -> MCodeBuilder {
-        let mut builder = MCodeBuilder::new(metadata(), IlGraph::default());
+        let mut builder = MCodeBuilder::new(metadata());
         for _ in 0..operation_count {
             emit_value(
                 &mut builder,
@@ -185,7 +193,7 @@ mod test {
 
     #[test]
     fn rewriter_preserves_result_identity_across_algebraic_replacements() {
-        let mut builder = MCodeBuilder::new(metadata(), IlGraph::default());
+        let mut builder = MCodeBuilder::new(metadata());
         let left = emit_value(
             &mut builder,
             MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
@@ -200,14 +208,18 @@ mod test {
             64,
         )
         .unwrap();
-        let (operation, results) = builder
-            .emitter()
-            .emit(MCodeOpSpec::new(MCodeOpcode::Not, 64), [left], [64])
+        let operation = IlOpId::try_from_index(builder.op_count()).unwrap();
+        let emitted = builder
+            .emit(
+                MCodeOpSpec::new(MCodeOpcode::Not, 64),
+                [left],
+                [MCodeResultSpec::new(64)],
+            )
             .unwrap();
-        let result = IlValueId::try_from_index(results.start()).unwrap();
+        let results = emitted.results();
+        let result = emitted.single_result().unwrap();
         builder
-            .emitter()
-            .emit(MCodeOpSpec::new(MCodeOpcode::Return, 0), [result], [])
+            .emit_effect(MCodeOpSpec::new(MCodeOpcode::Return, 0), [result])
             .unwrap();
         let mut ir = builder.build_unchecked();
 
@@ -234,7 +246,7 @@ mod test {
 
     #[test]
     fn ssa_body_display_is_deterministic() {
-        let mut builder = MCodeBuilder::new(metadata(), IlGraph::default());
+        let mut builder = MCodeBuilder::new(metadata());
         let value = emit_value(
             &mut builder,
             MCodeOpSpec::new(MCodeOpcode::Constant, 64).with_immediate(0x2a),
@@ -244,8 +256,7 @@ mod test {
         .unwrap();
 
         builder
-            .emitter()
-            .emit(MCodeOpSpec::new(MCodeOpcode::Return, 0), [value], [])
+            .emit_effect(MCodeOpSpec::new(MCodeOpcode::Return, 0), [value])
             .unwrap();
         let destination = IlIndexRange::new(0, 1).unwrap();
         builder.add_source_span(
@@ -268,10 +279,9 @@ mod test {
 
     #[test]
     fn bound_value_renders_variable_name() {
-        let mut builder = MCodeBuilder::new(metadata(), IlGraph::default());
+        let mut builder = MCodeBuilder::new(metadata());
         let variable = builder
-            .emitter()
-            .intern_variable(MCodeVar::register(RegisterId::new(16), 0))
+            .add_variable(MCodeVar::register(RegisterId::new(16), 0))
             .unwrap();
 
         let source = emit_value(
@@ -282,17 +292,13 @@ mod test {
         )
         .unwrap();
 
-        let bound = emit_value(
+        let bound = emit_result(
             &mut builder,
             MCodeOpSpec::new(MCodeOpcode::SetVar, 64).with_variable(variable),
             [source],
-            64,
+            MCodeResultSpec::new(64).with_variable(variable),
         )
         .unwrap();
-        builder
-            .emitter()
-            .bind_value(bound, variable, MCodeVersion::new(1))
-            .unwrap();
 
         let ir = builder.build_unchecked();
 
@@ -309,23 +315,18 @@ mod test {
 
     #[test]
     fn field_offset_renders_in_bits_including_zero() {
-        let mut builder = MCodeBuilder::new(metadata(), IlGraph::default());
+        let mut builder = MCodeBuilder::new(metadata());
         let variable = builder
-            .emitter()
-            .intern_variable(MCodeVar::register(RegisterId::new(16), 0))
+            .add_variable(MCodeVar::register(RegisterId::new(16), 0))
             .unwrap();
 
-        let previous = emit_value(
+        let previous = emit_result(
             &mut builder,
             MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
             [],
-            64,
+            MCodeResultSpec::new(64).with_variable(variable),
         )
         .unwrap();
-        builder
-            .emitter()
-            .bind_value(previous, variable, MCodeVersion::new(1))
-            .unwrap();
 
         let source = emit_value(
             &mut builder,
@@ -335,17 +336,13 @@ mod test {
         )
         .unwrap();
 
-        let result = emit_value(
+        let _ = emit_result(
             &mut builder,
             MCodeOpSpec::new(MCodeOpcode::SetVarField, 8).with_variable(variable),
             [previous, source],
-            64,
+            MCodeResultSpec::new(64).with_variable(variable),
         )
         .unwrap();
-        builder
-            .emitter()
-            .bind_value(result, variable, MCodeVersion::new(2))
-            .unwrap();
 
         let ir = builder.build_unchecked();
 
@@ -359,7 +356,7 @@ mod test {
 
     #[test]
     fn ssa_round_trips_through_rkyv_and_reverifies() {
-        let mut builder = MCodeBuilder::new(metadata(), IlGraph::default());
+        let mut builder = MCodeBuilder::new(metadata());
         let value = emit_value(
             &mut builder,
             MCodeOpSpec::new(MCodeOpcode::Constant, 64).with_immediate(0x2a),
@@ -368,8 +365,7 @@ mod test {
         )
         .unwrap();
         builder
-            .emitter()
-            .emit(MCodeOpSpec::new(MCodeOpcode::Return, 0), [value], [])
+            .emit_effect(MCodeOpSpec::new(MCodeOpcode::Return, 0), [value])
             .unwrap();
 
         let ir = builder.build_unchecked();
@@ -386,39 +382,40 @@ mod test {
     fn verifier_indexes_block_args_in_a_large_chain() {
         const BLOCK_COUNT: usize = 512;
 
-        let mut graph = IlGraphBuilder::new();
+        let mut builder = MCodeBuilder::new(metadata());
         let mut blocks = Vec::with_capacity(BLOCK_COUNT);
-        blocks.push(
-            graph
-                .push_block(IlIndexRange::new(0, 1).unwrap(), IlBlockProperties::ENTRY)
-                .unwrap(),
-        );
+        blocks.push(builder.add_block(IlBlockProperties::ENTRY).unwrap());
         for _ in 1..BLOCK_COUNT {
-            blocks.push(
-                graph
-                    .push_block(IlIndexRange::new(1, 1).unwrap(), IlBlockProperties::empty())
+            blocks.push(builder.add_block(IlBlockProperties::empty()).unwrap());
+        }
+        let mut block_args = Vec::with_capacity(BLOCK_COUNT - 1);
+        for &block in &blocks[1..] {
+            block_args.push(
+                builder
+                    .add_block_arg(block, MCodeResultSpec::new(64))
                     .unwrap(),
             );
         }
-        for pair in blocks.windows(2) {
-            graph
-                .add_successor(pair[0], pair[1], IlEdgeKinds::FALL_THROUGH)
-                .unwrap();
-        }
 
-        let mut builder = MCodeBuilder::new(metadata(), graph.build(1).unwrap());
-        let mut incoming = emit_value(
-            &mut builder,
-            MCodeOpSpec::new(MCodeOpcode::Constant, 64),
-            [],
-            64,
-        )
-        .unwrap();
-        for &block in &blocks[1..] {
-            let arg = builder.emitter().emit_block_arg(block, 64).unwrap();
-            builder.emitter().emit_edge_args([incoming]).unwrap();
+        builder.switch_to_block(blocks[0]).unwrap();
+        builder.begin_block().unwrap();
+        let mut incoming = builder
+            .emit_value(
+                MCodeOpSpec::new(MCodeOpcode::Constant, 64),
+                [],
+                MCodeResultSpec::new(64),
+            )
+            .unwrap();
+        for (&block, &arg) in blocks[1..].iter().zip(&block_args) {
+            builder
+                .add_successor(block, IlEdgeKinds::FALL_THROUGH, [incoming])
+                .unwrap();
+            builder.end_block().unwrap();
+            builder.switch_to_block(block).unwrap();
+            builder.begin_block().unwrap();
             incoming = arg;
         }
+        builder.end_block().unwrap();
 
         let ir = builder.build_unchecked();
 
@@ -427,7 +424,7 @@ mod test {
 
     #[test]
     fn verifier_rejects_missing_required_variable() {
-        let mut builder = MCodeBuilder::new(metadata(), IlGraph::default());
+        let mut builder = MCodeBuilder::new(metadata());
         let source = emit_value(
             &mut builder,
             MCodeOpSpec::new(MCodeOpcode::Constant, 64),
@@ -436,8 +433,11 @@ mod test {
         )
         .unwrap();
         builder
-            .emitter()
-            .emit(MCodeOpSpec::new(MCodeOpcode::SetVar, 64), [source], [64])
+            .emit(
+                MCodeOpSpec::new(MCodeOpcode::SetVar, 64),
+                [source],
+                [MCodeResultSpec::new(64)],
+            )
             .unwrap();
 
         let ir = builder.build_unchecked();
@@ -450,14 +450,13 @@ mod test {
 
     #[test]
     fn verifier_rejects_unknown_variable() {
-        let mut builder = MCodeBuilder::new(metadata(), IlGraph::default());
+        let mut builder = MCodeBuilder::new(metadata());
         let unknown = MCodeVarId::try_from_index(3).unwrap();
         builder
-            .emitter()
             .emit(
                 MCodeOpSpec::new(MCodeOpcode::AddressOf, 64).with_variable(unknown),
                 [],
-                [64],
+                [MCodeResultSpec::new(64)],
             )
             .unwrap();
 
@@ -471,11 +470,8 @@ mod test {
 
     #[test]
     fn verifier_rejects_aliased_ordinary_variable() {
-        let mut builder = MCodeBuilder::new(metadata(), IlGraph::default());
-        let variable = builder
-            .emitter()
-            .intern_variable(MCodeVar::stack(-16))
-            .unwrap();
+        let mut builder = MCodeBuilder::new(metadata());
+        let variable = builder.add_variable(MCodeVar::stack(-16)).unwrap();
 
         let _ = emit_value(
             &mut builder,
@@ -494,88 +490,33 @@ mod test {
     }
 
     #[test]
-    fn verifier_rejects_an_unknown_bound_variable() {
-        let mut builder = MCodeBuilder::new(metadata(), IlGraph::default());
-        let value = emit_value(
-            &mut builder,
-            MCodeOpSpec::new(MCodeOpcode::Constant, 64).with_immediate(1),
-            [],
-            64,
-        )
-        .unwrap();
-        builder
-            .emitter()
-            .bind_value(
-                value,
-                MCodeVarId::try_from_index(9).unwrap(),
-                MCodeVersion::new(1),
-            )
-            .unwrap();
-
-        let ir = builder.build_unchecked();
-
+    fn builder_rejects_an_unknown_bound_variable() {
+        let mut builder = MCodeBuilder::new(metadata());
         assert!(matches!(
-            ir.verify(),
-            Err(VerifyError::UnknownVariable { .. })
-        ));
-    }
-
-    #[test]
-    fn verifier_rejects_a_duplicate_version() {
-        let mut builder = MCodeBuilder::new(metadata(), IlGraph::default());
-        let variable = builder
-            .emitter()
-            .intern_variable(MCodeVar::register(RegisterId::new(16), 0))
-            .unwrap();
-
-        for _ in 0..2 {
-            let source = emit_value(
+            emit_result(
                 &mut builder,
                 MCodeOpSpec::new(MCodeOpcode::Constant, 64).with_immediate(1),
                 [],
-                64,
-            )
-            .unwrap();
-            let bound = emit_value(
-                &mut builder,
-                MCodeOpSpec::new(MCodeOpcode::SetVar, 64).with_variable(variable),
-                [source],
-                64,
-            )
-            .unwrap();
-            builder
-                .emitter()
-                .bind_value(bound, variable, MCodeVersion::new(1))
-                .unwrap();
-        }
-
-        let ir = builder.build_unchecked();
-
-        assert!(matches!(
-            ir.verify(),
-            Err(VerifyError::DuplicateVersion { .. })
+                MCodeResultSpec::new(64).with_variable(MCodeVarId::try_from_index(9).unwrap()),
+            ),
+            Err(IlError::RangeOutOfBounds { .. })
         ));
     }
 
     #[test]
     fn verifier_rejects_a_field_beyond_its_variable() {
-        let mut builder = MCodeBuilder::new(metadata(), IlGraph::default());
+        let mut builder = MCodeBuilder::new(metadata());
         let variable = builder
-            .emitter()
-            .intern_variable(MCodeVar::register(RegisterId::new(16), 0))
+            .add_variable(MCodeVar::register(RegisterId::new(16), 0))
             .unwrap();
 
-        let previous = emit_value(
+        let previous = emit_result(
             &mut builder,
             MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
             [],
-            64,
+            MCodeResultSpec::new(64).with_variable(variable),
         )
         .unwrap();
-        builder
-            .emitter()
-            .bind_value(previous, variable, MCodeVersion::new(1))
-            .unwrap();
 
         let source = emit_value(
             &mut builder,
@@ -585,19 +526,15 @@ mod test {
         )
         .unwrap();
 
-        let bound = emit_value(
+        let _ = emit_result(
             &mut builder,
             MCodeOpSpec::new(MCodeOpcode::SetVarField, 64)
                 .with_variable(variable)
                 .with_immediate(32),
             [previous, source],
-            64,
+            MCodeResultSpec::new(64).with_variable(variable),
         )
         .unwrap();
-        builder
-            .emitter()
-            .bind_value(bound, variable, MCodeVersion::new(2))
-            .unwrap();
 
         let ir = builder.build_unchecked();
 
@@ -609,23 +546,18 @@ mod test {
 
     #[test]
     fn verifier_accepts_a_partial_field_update() {
-        let mut builder = MCodeBuilder::new(metadata(), IlGraph::default());
+        let mut builder = MCodeBuilder::new(metadata());
         let variable = builder
-            .emitter()
-            .intern_variable(MCodeVar::register(RegisterId::new(16), 0))
+            .add_variable(MCodeVar::register(RegisterId::new(16), 0))
             .unwrap();
 
-        let previous = emit_value(
+        let previous = emit_result(
             &mut builder,
             MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
             [],
-            64,
+            MCodeResultSpec::new(64).with_variable(variable),
         )
         .unwrap();
-        builder
-            .emitter()
-            .bind_value(previous, variable, MCodeVersion::new(1))
-            .unwrap();
 
         let source = emit_value(
             &mut builder,
@@ -635,19 +567,15 @@ mod test {
         )
         .unwrap();
 
-        let bound = emit_value(
+        let _ = emit_result(
             &mut builder,
             MCodeOpSpec::new(MCodeOpcode::SetVarField, 8)
                 .with_variable(variable)
                 .with_immediate(8),
             [previous, source],
-            64,
+            MCodeResultSpec::new(64).with_variable(variable),
         )
         .unwrap();
-        builder
-            .emitter()
-            .bind_value(bound, variable, MCodeVersion::new(2))
-            .unwrap();
 
         let ir = builder.build_unchecked();
 
@@ -656,23 +584,18 @@ mod test {
 
     #[test]
     fn verifier_accepts_a_field_predecessor_with_an_earlier_version() {
-        let mut builder = MCodeBuilder::new(metadata(), IlGraph::default());
+        let mut builder = MCodeBuilder::new(metadata());
         let variable = builder
-            .emitter()
-            .intern_variable(MCodeVar::register(RegisterId::new(16), 0))
+            .add_variable(MCodeVar::register(RegisterId::new(16), 0))
             .unwrap();
 
-        let first = emit_value(
+        let first = emit_result(
             &mut builder,
             MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
             [],
-            64,
+            MCodeResultSpec::new(64).with_variable(variable),
         )
         .unwrap();
-        builder
-            .emitter()
-            .bind_value(first, variable, MCodeVersion::new(1))
-            .unwrap();
 
         let second_source = emit_value(
             &mut builder,
@@ -681,17 +604,13 @@ mod test {
             64,
         )
         .unwrap();
-        let second = emit_value(
+        let _ = emit_result(
             &mut builder,
             MCodeOpSpec::new(MCodeOpcode::SetVar, 64).with_variable(variable),
             [second_source],
-            64,
+            MCodeResultSpec::new(64).with_variable(variable),
         )
         .unwrap();
-        builder
-            .emitter()
-            .bind_value(second, variable, MCodeVersion::new(2))
-            .unwrap();
 
         let field = emit_value(
             &mut builder,
@@ -700,113 +619,32 @@ mod test {
             8,
         )
         .unwrap();
-        let third = emit_value(
+        let _ = emit_result(
             &mut builder,
             MCodeOpSpec::new(MCodeOpcode::SetVarField, 8).with_variable(variable),
             [first, field],
-            64,
+            MCodeResultSpec::new(64).with_variable(variable),
         )
         .unwrap();
-        builder
-            .emitter()
-            .bind_value(third, variable, MCodeVersion::new(3))
-            .unwrap();
 
         let ir = builder.build_unchecked();
 
         assert!(ir.verify().is_ok());
-    }
-
-    #[test]
-    fn verifier_accepts_a_field_predecessor_with_a_later_version() {
-        let mut builder = MCodeBuilder::new(metadata(), IlGraph::default());
-        let variable = builder
-            .emitter()
-            .intern_variable(MCodeVar::register(RegisterId::new(16), 0))
-            .unwrap();
-
-        let previous = emit_value(
-            &mut builder,
-            MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
-            [],
-            64,
-        )
-        .unwrap();
-        builder
-            .emitter()
-            .bind_value(previous, variable, MCodeVersion::new(2))
-            .unwrap();
-
-        let source = emit_value(
-            &mut builder,
-            MCodeOpSpec::new(MCodeOpcode::Constant, 64),
-            [],
-            64,
-        )
-        .unwrap();
-
-        let bound = emit_value(
-            &mut builder,
-            MCodeOpSpec::new(MCodeOpcode::SetVarField, 64).with_variable(variable),
-            [previous, source],
-            64,
-        )
-        .unwrap();
-        builder
-            .emitter()
-            .bind_value(bound, variable, MCodeVersion::new(1))
-            .unwrap();
-
-        let ir = builder.build_unchecked();
-
-        assert!(ir.verify().is_ok());
-    }
-
-    #[test]
-    fn verifier_rejects_a_non_dense_version() {
-        let mut builder = MCodeBuilder::new(metadata(), IlGraph::default());
-        let variable = builder
-            .emitter()
-            .intern_variable(MCodeVar::register(RegisterId::new(16), 0))
-            .unwrap();
-        let value = emit_value(
-            &mut builder,
-            MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
-            [],
-            64,
-        )
-        .unwrap();
-        builder
-            .emitter()
-            .bind_value(value, variable, MCodeVersion::new(2))
-            .unwrap();
-
-        let ir = builder.build_unchecked();
-
-        assert!(matches!(
-            ir.verify(),
-            Err(VerifyError::InvalidVersion { .. })
-        ));
     }
 
     #[test]
     fn verifier_rejects_a_binding_from_an_invalid_opcode() {
-        let mut builder = MCodeBuilder::new(metadata(), IlGraph::default());
+        let mut builder = MCodeBuilder::new(metadata());
         let variable = builder
-            .emitter()
-            .intern_variable(MCodeVar::register(RegisterId::new(16), 0))
+            .add_variable(MCodeVar::register(RegisterId::new(16), 0))
             .unwrap();
-        let value = emit_value(
+        let _ = emit_result(
             &mut builder,
             MCodeOpSpec::new(MCodeOpcode::Address, 64),
             [],
-            64,
+            MCodeResultSpec::new(64).with_variable(variable),
         )
         .unwrap();
-        builder
-            .emitter()
-            .bind_value(value, variable, MCodeVersion::new(1))
-            .unwrap();
 
         let ir = builder.build_unchecked();
 
@@ -818,7 +656,7 @@ mod test {
 
     #[test]
     fn verifier_rejects_a_malformed_fixed_arity_operation() {
-        let mut builder = MCodeBuilder::new(metadata(), IlGraph::default());
+        let mut builder = MCodeBuilder::new(metadata());
         let _ = emit_value(
             &mut builder,
             MCodeOpSpec::new(MCodeOpcode::Copy, 64),
@@ -837,10 +675,9 @@ mod test {
 
     #[test]
     fn verifier_rejects_an_empty_field_result() {
-        let mut builder = MCodeBuilder::new(metadata(), IlGraph::default());
+        let mut builder = MCodeBuilder::new(metadata());
         let variable = builder
-            .emitter()
-            .intern_variable(MCodeVar::register(RegisterId::new(16), 0))
+            .add_variable(MCodeVar::register(RegisterId::new(16), 0))
             .unwrap();
         let mut operands = Vec::new();
         for _ in 0..2 {
@@ -854,11 +691,9 @@ mod test {
             operands.push(value);
         }
         builder
-            .emitter()
-            .emit(
+            .emit_effect(
                 MCodeOpSpec::new(MCodeOpcode::SetVarField, 64).with_variable(variable),
                 operands,
-                [],
             )
             .unwrap();
 
@@ -871,42 +706,26 @@ mod test {
     }
 
     #[test]
-    fn verifier_rejects_a_terminator_before_the_end_of_a_block() {
-        let block = IlBlock::new(
-            IlIndexRange::new(0, 2).unwrap(),
-            IlIndexRange::EMPTY,
-            IlBlockProperties::ENTRY | IlBlockProperties::EXIT,
-        );
-        let mut builder = MCodeBuilder::new(
-            metadata(),
-            IlGraph::new(vec![block], Vec::new(), Vec::new()),
-        );
-        builder
-            .emitter()
-            .emit(MCodeOpSpec::new(MCodeOpcode::Trap, 0), [], [])
+    fn terminator_emission_does_not_end_a_block() {
+        let mut builder = MCodeBuilder::new(metadata());
+        let block = builder
+            .add_block(IlBlockProperties::ENTRY | IlBlockProperties::EXIT)
             .unwrap();
-        let _ = emit_value(
-            &mut builder,
-            MCodeOpSpec::new(MCodeOpcode::Constant, 64),
-            [],
-            64,
-        )
-        .unwrap();
+        builder.switch_to_block(block).unwrap();
+        builder.begin_block().unwrap();
+        builder
+            .emit_effect(MCodeOpSpec::new(MCodeOpcode::Trap, 0), [])
+            .unwrap();
+        builder.end_block().unwrap();
 
-        let ir = builder.build_unchecked();
-
-        assert!(matches!(
-            ir.verify(),
-            Err(VerifyError::InvalidOpPlacement { .. })
-        ));
+        assert!(builder.build().is_ok());
     }
 
     #[test]
     fn verifier_rejects_a_terminator_before_the_end_of_a_linear_body() {
-        let mut builder = MCodeBuilder::new(metadata(), IlGraph::default());
+        let mut builder = MCodeBuilder::new(metadata());
         builder
-            .emitter()
-            .emit(MCodeOpSpec::new(MCodeOpcode::Trap, 0), [], [])
+            .emit_effect(MCodeOpSpec::new(MCodeOpcode::Trap, 0), [])
             .unwrap();
         let _ = emit_value(
             &mut builder,
@@ -925,174 +744,323 @@ mod test {
     }
 
     #[test]
-    fn verifier_rejects_wrong_edge_arg_table_count() {
-        let successor = IlBlockId::try_from_index(1).unwrap();
-        let graph = IlGraph::new(
-            vec![
-                IlBlock::new(
-                    IlIndexRange::EMPTY,
-                    IlIndexRange::new(0, 1).unwrap(),
-                    IlBlockProperties::ENTRY,
-                ),
-                IlBlock::new(
-                    IlIndexRange::EMPTY,
-                    IlIndexRange::EMPTY,
-                    IlBlockProperties::EXIT,
-                ),
-            ],
-            vec![successor],
-            vec![IlEdgeKinds::UNCONDITIONAL],
-        );
-        let mut builder = MCodeBuilder::new(metadata(), graph);
-        builder.emitter().emit_edge_args([]).unwrap();
-        builder.emitter().emit_edge_args([]).unwrap();
-        let ir = builder.build_unchecked();
+    fn switching_blocks_only_changes_the_selected_block() {
+        let mut builder = MCodeBuilder::new(metadata());
+        let entry = builder.add_block(IlBlockProperties::ENTRY).unwrap();
+        let exit = builder.add_block(IlBlockProperties::EXIT).unwrap();
 
-        assert_eq!(
-            ir.verify(),
-            Err(VerifyError::EdgeArgTableCount {
-                expected: 1,
-                found: 2,
-            })
+        builder.switch_to_block(entry).unwrap();
+        builder.switch_to_block(exit).unwrap();
+
+        assert_eq!(builder.op_count(), 0);
+        builder.switch_to_block(entry).unwrap();
+        builder.begin_block().unwrap();
+        builder.end_block().unwrap();
+        builder.switch_to_block(exit).unwrap();
+        builder.begin_block().unwrap();
+        builder.end_block().unwrap();
+        let ir = builder.build_unchecked();
+        assert!(ir.ops().is_empty());
+        assert!(
+            ir.graph()
+                .blocks()
+                .iter()
+                .all(|block| block.ops().is_empty())
         );
     }
 
     #[test]
-    fn verifier_rejects_wrong_edge_arg_count() {
-        let successor = IlBlockId::try_from_index(1).unwrap();
-        let graph = IlGraph::new(
-            vec![
-                IlBlock::new(
-                    IlIndexRange::EMPTY,
-                    IlIndexRange::new(0, 1).unwrap(),
-                    IlBlockProperties::ENTRY,
-                ),
-                IlBlock::new(
-                    IlIndexRange::EMPTY,
-                    IlIndexRange::EMPTY,
-                    IlBlockProperties::EXIT,
-                ),
-            ],
-            vec![successor],
-            vec![IlEdgeKinds::UNCONDITIONAL],
-        );
-        let mut builder = MCodeBuilder::new(metadata(), graph);
-        builder.emitter().emit_block_arg(successor, 64).unwrap();
-        let ir = builder.build_unchecked();
+    fn builder_rejects_switching_away_from_a_started_block() {
+        let mut builder = MCodeBuilder::new(metadata());
+        let entry = builder.add_block(IlBlockProperties::ENTRY).unwrap();
+        let exit = builder.add_block(IlBlockProperties::EXIT).unwrap();
+        builder.switch_to_block(entry).unwrap();
+        builder.begin_block().unwrap();
 
         assert!(matches!(
-            ir.verify(),
-            Err(VerifyError::BlockArgCount { .. })
+            builder.switch_to_block(exit),
+            Err(IlError::InvalidArtefact { .. })
         ));
     }
 
     #[test]
-    fn verifier_rejects_an_edge_arg_for_a_different_variable() {
-        let successor = IlBlockId::try_from_index(1).unwrap();
-        let graph = IlGraph::new(
-            vec![
-                IlBlock::new(
-                    IlIndexRange::new(0, 2).unwrap(),
-                    IlIndexRange::new(0, 1).unwrap(),
-                    IlBlockProperties::ENTRY,
-                ),
-                IlBlock::new(
-                    IlIndexRange::EMPTY,
-                    IlIndexRange::EMPTY,
-                    IlBlockProperties::EXIT,
-                ),
-            ],
-            vec![successor],
-            vec![IlEdgeKinds::UNCONDITIONAL],
-        );
-        let mut builder = MCodeBuilder::new(metadata(), graph);
+    fn builder_rejects_a_block_argument_after_the_block_starts() {
+        let mut builder = MCodeBuilder::new(metadata());
+        let block = builder
+            .add_block(IlBlockProperties::ENTRY | IlBlockProperties::EXIT)
+            .unwrap();
+        builder.switch_to_block(block).unwrap();
+        builder.begin_block().unwrap();
+
+        assert!(matches!(
+            builder.add_block_arg(block, MCodeResultSpec::new(64)),
+            Err(IlError::InvalidArtefact { .. })
+        ));
+    }
+
+    #[test]
+    fn builder_requires_a_started_block_for_emission() {
+        let mut builder = MCodeBuilder::new(metadata());
+        let block = builder
+            .add_block(IlBlockProperties::ENTRY | IlBlockProperties::EXIT)
+            .unwrap();
+        builder.switch_to_block(block).unwrap();
+
+        assert!(matches!(
+            builder.emit_value(
+                MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
+                [],
+                MCodeResultSpec::new(64),
+            ),
+            Err(IlError::InvalidArtefact { .. })
+        ));
+    }
+
+    #[test]
+    fn builder_rejects_emission_after_a_block_ends() {
+        let mut builder = MCodeBuilder::new(metadata());
+        let block = builder
+            .add_block(IlBlockProperties::ENTRY | IlBlockProperties::EXIT)
+            .unwrap();
+        builder.switch_to_block(block).unwrap();
+        builder.begin_block().unwrap();
+        builder.end_block().unwrap();
+
+        assert!(matches!(
+            builder.emit_value(
+                MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
+                [],
+                MCodeResultSpec::new(64),
+            ),
+            Err(IlError::InvalidArtefact { .. })
+        ));
+    }
+
+    #[test]
+    fn builder_rejects_invalid_block_transitions() {
+        let mut builder = MCodeBuilder::new(metadata());
+
+        assert!(matches!(
+            builder.begin_block(),
+            Err(IlError::InvalidArtefact { .. })
+        ));
+
+        let block = builder
+            .add_block(IlBlockProperties::ENTRY | IlBlockProperties::EXIT)
+            .unwrap();
+        builder.switch_to_block(block).unwrap();
+        assert!(matches!(
+            builder.end_block(),
+            Err(IlError::InvalidArtefact { .. })
+        ));
+
+        builder.begin_block().unwrap();
+        assert!(matches!(
+            builder.begin_block(),
+            Err(IlError::InvalidArtefact { .. })
+        ));
+        builder.end_block().unwrap();
+        assert!(matches!(
+            builder.end_block(),
+            Err(IlError::InvalidArtefact { .. })
+        ));
+        assert!(matches!(
+            builder.switch_to_block(block),
+            Err(IlError::InvalidArtefact { .. })
+        ));
+    }
+
+    #[test]
+    fn builder_requires_declared_blocks_to_end_before_building() {
+        let mut pending = MCodeBuilder::new(metadata());
+        pending
+            .add_block(IlBlockProperties::ENTRY | IlBlockProperties::EXIT)
+            .unwrap();
+        assert!(matches!(
+            pending.build(),
+            Err(IlError::InvalidArtefact { .. })
+        ));
+
+        let mut started = MCodeBuilder::new(metadata());
+        let block = started
+            .add_block(IlBlockProperties::ENTRY | IlBlockProperties::EXIT)
+            .unwrap();
+        started.switch_to_block(block).unwrap();
+        started.begin_block().unwrap();
+        assert!(matches!(
+            started.build(),
+            Err(IlError::InvalidArtefact { .. })
+        ));
+    }
+
+    #[test]
+    fn successor_construction_requires_a_started_block_and_does_not_end_it() {
+        let mut builder = MCodeBuilder::new(metadata());
+        let entry = builder.add_block(IlBlockProperties::ENTRY).unwrap();
+        let successor = builder.add_block(IlBlockProperties::EXIT).unwrap();
+        builder.switch_to_block(entry).unwrap();
+
+        assert!(matches!(
+            builder.add_successor(successor, IlEdgeKinds::FALL_THROUGH, []),
+            Err(IlError::InvalidArtefact { .. })
+        ));
+
+        builder.begin_block().unwrap();
+        builder
+            .add_successor(successor, IlEdgeKinds::FALL_THROUGH, [])
+            .unwrap();
+        builder.end_block().unwrap();
+
+        assert!(matches!(
+            builder.add_successor(successor, IlEdgeKinds::UNCONDITIONAL, []),
+            Err(IlError::InvalidArtefact { .. })
+        ));
+    }
+
+    #[test]
+    fn builder_rejects_wrong_edge_arg_count() {
+        let mut builder = MCodeBuilder::new(metadata());
+        let entry = builder.add_block(IlBlockProperties::ENTRY).unwrap();
+        let successor = builder.add_block(IlBlockProperties::EXIT).unwrap();
+        builder.switch_to_block(entry).unwrap();
+        builder
+            .add_block_arg(successor, MCodeResultSpec::new(64))
+            .unwrap();
+        builder.begin_block().unwrap();
+        assert!(matches!(
+            builder.add_successor(successor, IlEdgeKinds::UNCONDITIONAL, []),
+            Err(IlError::InvalidArtefact { .. })
+        ));
+    }
+
+    #[test]
+    fn verifier_rejects_an_edge_kind_incompatible_with_the_terminator() {
+        let mut builder = MCodeBuilder::new(metadata());
+        let entry = builder.add_block(IlBlockProperties::ENTRY).unwrap();
+        let successor = builder.add_block(IlBlockProperties::EXIT).unwrap();
+        builder.switch_to_block(entry).unwrap();
+        builder.begin_block().unwrap();
+        builder
+            .emit_effect(
+                MCodeOpSpec::new(MCodeOpcode::Branch, 0).with_address(Address::from(0x1000u64)),
+                [],
+            )
+            .unwrap();
+        builder
+            .add_successor(successor, IlEdgeKinds::FALL_THROUGH, [])
+            .unwrap();
+        builder.end_block().unwrap();
+        builder.switch_to_block(successor).unwrap();
+        builder.begin_block().unwrap();
+        builder.end_block().unwrap();
+
+        let error = builder.build_unchecked().verify().unwrap_err();
+        assert!(matches!(error, VerifyError::Structure(_)), "{error:?}");
+    }
+
+    #[test]
+    fn builder_rejects_a_repeated_singular_edge_kind() {
+        let mut builder = MCodeBuilder::new(metadata());
+        let entry = builder.add_block(IlBlockProperties::ENTRY).unwrap();
+        let left = builder.add_block(IlBlockProperties::EXIT).unwrap();
+        let right = builder.add_block(IlBlockProperties::EXIT).unwrap();
+        builder.switch_to_block(entry).unwrap();
+        builder.begin_block().unwrap();
+        builder
+            .add_successor(left, IlEdgeKinds::FALL_THROUGH, [])
+            .unwrap();
+
+        assert!(matches!(
+            builder.add_successor(right, IlEdgeKinds::FALL_THROUGH, []),
+            Err(IlError::InvalidArtefact { .. })
+        ));
+    }
+
+    #[test]
+    fn builder_rejects_different_args_for_a_collapsed_edge() {
+        let mut builder = MCodeBuilder::new(metadata());
+        let entry = builder.add_block(IlBlockProperties::ENTRY).unwrap();
+        let successor = builder.add_block(IlBlockProperties::EXIT).unwrap();
+        builder
+            .add_block_arg(successor, MCodeResultSpec::new(64))
+            .unwrap();
+        builder.switch_to_block(entry).unwrap();
+        builder.begin_block().unwrap();
         let left = builder
-            .emitter()
-            .intern_variable(MCodeVar::register(RegisterId::new(16), 0))
+            .emit_value(
+                MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
+                [],
+                MCodeResultSpec::new(64),
+            )
             .unwrap();
         let right = builder
-            .emitter()
-            .intern_variable(MCodeVar::register(RegisterId::new(24), 0))
+            .emit_value(
+                MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
+                [],
+                MCodeResultSpec::new(64),
+            )
             .unwrap();
-
-        let left_value = emit_value(
-            &mut builder,
-            MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
-            [],
-            64,
-        )
-        .unwrap();
         builder
-            .emitter()
-            .bind_value(left_value, left, MCodeVersion::new(1))
+            .add_successor(successor, IlEdgeKinds::FALL_THROUGH, [left])
             .unwrap();
-        let right_value = emit_value(
-            &mut builder,
-            MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
-            [],
-            64,
-        )
-        .unwrap();
-        builder
-            .emitter()
-            .bind_value(right_value, right, MCodeVersion::new(1))
-            .unwrap();
-
-        let arg = builder.emitter().emit_block_arg(successor, 64).unwrap();
-        builder
-            .emitter()
-            .bind_value(arg, right, MCodeVersion::new(2))
-            .unwrap();
-        builder.emitter().emit_edge_args([left_value]).unwrap();
-
-        let ir = builder.build_unchecked();
 
         assert!(matches!(
-            ir.verify(),
-            Err(VerifyError::InconsistentBinding { .. })
+            builder.add_successor(successor, IlEdgeKinds::UNCONDITIONAL, [right]),
+            Err(IlError::InvalidArtefact { .. })
         ));
     }
 
     #[test]
-    fn verifier_checks_edge_arg_width_from_an_unreachable_block() {
-        let successor = IlBlockId::try_from_index(2).unwrap();
-        let graph = IlGraph::new(
-            vec![
-                IlBlock::new(
-                    IlIndexRange::EMPTY,
-                    IlIndexRange::EMPTY,
-                    IlBlockProperties::ENTRY,
-                ),
-                IlBlock::new(
-                    IlIndexRange::new(0, 1).unwrap(),
-                    IlIndexRange::new(0, 1).unwrap(),
-                    IlBlockProperties::empty(),
-                ),
-                IlBlock::new(
-                    IlIndexRange::EMPTY,
-                    IlIndexRange::EMPTY,
-                    IlBlockProperties::EXIT,
-                ),
-            ],
-            vec![successor],
-            vec![IlEdgeKinds::UNCONDITIONAL],
-        );
-        let mut builder = MCodeBuilder::new(metadata(), graph);
-        let incoming = emit_value(
-            &mut builder,
-            MCodeOpSpec::new(MCodeOpcode::Constant, 32),
-            [],
-            32,
-        )
-        .unwrap();
-        builder.emitter().emit_block_arg(successor, 64).unwrap();
-        builder.emitter().emit_edge_args([incoming]).unwrap();
-
-        let ir = builder.build_unchecked();
-
+    fn builder_rejects_an_edge_arg_for_a_different_variable() {
+        let mut builder = MCodeBuilder::new(metadata());
+        let entry = builder.add_block(IlBlockProperties::ENTRY).unwrap();
+        let successor = builder.add_block(IlBlockProperties::EXIT).unwrap();
+        let left = builder
+            .add_variable(MCodeVar::register(RegisterId::new(16), 0))
+            .unwrap();
+        let right = builder
+            .add_variable(MCodeVar::register(RegisterId::new(24), 0))
+            .unwrap();
+        builder
+            .add_block_arg(successor, MCodeResultSpec::new(64).with_variable(right))
+            .unwrap();
+        builder.switch_to_block(entry).unwrap();
+        builder.begin_block().unwrap();
+        let left_value = builder
+            .emit_value(
+                MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
+                [],
+                MCodeResultSpec::new(64).with_variable(left),
+            )
+            .unwrap();
         assert!(matches!(
-            ir.verify(),
-            Err(VerifyError::Il(IlError::WidthMismatch { .. }))
+            builder.add_successor(successor, IlEdgeKinds::UNCONDITIONAL, [left_value],),
+            Err(IlError::InvalidArtefact { .. })
+        ));
+    }
+
+    #[test]
+    fn builder_checks_edge_arg_width_from_an_unreachable_block() {
+        let mut builder = MCodeBuilder::new(metadata());
+        let entry = builder.add_block(IlBlockProperties::ENTRY).unwrap();
+        let unreachable = builder.add_block(IlBlockProperties::empty()).unwrap();
+        let successor = builder.add_block(IlBlockProperties::EXIT).unwrap();
+        builder
+            .add_block_arg(successor, MCodeResultSpec::new(64))
+            .unwrap();
+        builder.switch_to_block(entry).unwrap();
+        builder.switch_to_block(unreachable).unwrap();
+        builder.begin_block().unwrap();
+        let incoming = builder
+            .emit_value(
+                MCodeOpSpec::new(MCodeOpcode::Constant, 32),
+                [],
+                MCodeResultSpec::new(32),
+            )
+            .unwrap();
+        assert!(matches!(
+            builder.add_successor(successor, IlEdgeKinds::UNCONDITIONAL, [incoming]),
+            Err(IlError::InvalidArtefact { .. })
         ));
     }
 }

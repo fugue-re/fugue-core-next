@@ -31,10 +31,10 @@ mod test {
 
     use super::{MCodeCompaction, MCodeOptimiser};
     use crate::il::common::{
-        IlArtefact, IlError, IlGraph, IlIndexRange, IlMetadata, IlParentSpan, IlSourceSpan,
+        IlArtefact, IlError, IlIndexRange, IlMetadata, IlOpId, IlParentSpan, IlSourceSpan,
         IlValueId, RegisterId,
     };
-    use crate::il::mcode::{MCodeBuilder, MCodeOpSpec, MCodeOpcode, MCodeVar, MCodeVersion};
+    use crate::il::mcode::{MCodeBuilder, MCodeOpSpec, MCodeOpcode, MCodeResultSpec, MCodeVar};
     use crate::ir::{Address, FunctionId};
     use crate::storage::segments::space::AddressSpaceId;
 
@@ -44,21 +44,23 @@ mod test {
         operands: impl IntoIterator<Item = IlValueId>,
         width: u32,
     ) -> Result<IlValueId, IlError> {
-        let (_, results) = builder.emitter().emit(spec, operands, [width])?;
-        IlValueId::try_from_index(results.start())
+        builder.emit_value(spec, operands, MCodeResultSpec::new(width))
     }
 
     #[test]
     fn compaction_preserves_interned_constants_across_inline_capacity() {
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = MCodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = MCodeBuilder::new(metadata);
         let mut constants = Vec::new();
         for width in [65, 128, 192] {
-            let (operation, results) = builder
-                .emitter()
-                .emit(MCodeOpSpec::new(MCodeOpcode::Constant, width), [], [width])
+            let operation = IlOpId::try_from_index(builder.op_count()).unwrap();
+            let value = builder
+                .emit_value(
+                    MCodeOpSpec::new(MCodeOpcode::Constant, width),
+                    [],
+                    MCodeResultSpec::new(width),
+                )
                 .unwrap();
-            let value = IlValueId::try_from_index(results.start()).unwrap();
             constants.push((value, operation));
         }
         let mut ir = builder.build_unchecked();
@@ -86,16 +88,16 @@ mod test {
     #[test]
     fn compaction_preserves_empty_and_multi_space_memory_domains() {
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut empty = MCodeBuilder::new(metadata, IlGraph::default()).build_unchecked();
+        let mut empty = MCodeBuilder::new(metadata).build_unchecked();
 
         empty.rewrite(MCodeCompaction::new(&[]));
 
         assert!(empty.memory_domains().is_empty());
 
         let spaces = [AddressSpaceId::new(3), AddressSpaceId::new(7)];
-        let mut builder = MCodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = MCodeBuilder::new(metadata);
         for space in spaces {
-            builder.emitter().intern_memory_domain(space);
+            builder.add_memory_domain(space);
         }
         let mut multi_space = builder.build_unchecked();
 
@@ -114,7 +116,7 @@ mod test {
     #[test]
     fn compaction_removes_a_dead_pure_definition() {
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = MCodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = MCodeBuilder::new(metadata);
         emit_value(
             &mut builder,
             MCodeOpSpec::new(MCodeOpcode::Constant, 64).with_immediate(7),
@@ -133,10 +135,9 @@ mod test {
     #[test]
     fn compaction_preserves_an_explicitly_required_value() {
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = MCodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = MCodeBuilder::new(metadata);
         let variable = builder
-            .emitter()
-            .intern_variable(MCodeVar::register(RegisterId::new(16), 0))
+            .add_variable(MCodeVar::register(RegisterId::new(16), 0))
             .unwrap();
         let source = emit_value(
             &mut builder,
@@ -145,16 +146,12 @@ mod test {
             64,
         )
         .unwrap();
-        let required = emit_value(
-            &mut builder,
-            MCodeOpSpec::new(MCodeOpcode::SetVar, 64).with_variable(variable),
-            [source],
-            64,
-        )
-        .unwrap();
-        builder
-            .emitter()
-            .bind_value(required, variable, MCodeVersion::new(1))
+        let required = builder
+            .emit_value(
+                MCodeOpSpec::new(MCodeOpcode::SetVar, 64).with_variable(variable),
+                [source],
+                MCodeResultSpec::new(64).with_variable(variable),
+            )
             .unwrap();
         let mut ir = builder.build_unchecked();
 
@@ -168,7 +165,7 @@ mod test {
     #[test]
     fn compaction_remaps_supplemental_provenance() {
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = MCodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = MCodeBuilder::new(metadata);
         emit_value(
             &mut builder,
             MCodeOpSpec::new(MCodeOpcode::Constant, 64).with_immediate(3),
@@ -210,25 +207,18 @@ mod test {
     #[test]
     fn compaction_preserves_variable_definitions_for_required_addresses() {
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = MCodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = MCodeBuilder::new(metadata);
         let mut required = Vec::new();
         let mut aliased_variables = Vec::new();
         for index in 0..256 {
-            let variable = builder
-                .emitter()
-                .intern_variable(MCodeVar::stack(index))
-                .unwrap();
+            let variable = builder.add_variable(MCodeVar::stack(index)).unwrap();
             aliased_variables.push(variable);
-            let source = emit_value(
-                &mut builder,
-                MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
-                [],
-                64,
-            )
-            .unwrap();
-            builder
-                .emitter()
-                .bind_value(source, variable, MCodeVersion::new(1))
+            let _ = builder
+                .emit_value(
+                    MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
+                    [],
+                    MCodeResultSpec::new(64).with_variable(variable),
+                )
                 .unwrap();
             let address = emit_value(
                 &mut builder,
@@ -251,10 +241,9 @@ mod test {
     #[test]
     fn folding_preserves_a_bound_value() {
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = MCodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = MCodeBuilder::new(metadata);
         let variable = builder
-            .emitter()
-            .intern_variable(MCodeVar::register(RegisterId::new(16), 0))
+            .add_variable(MCodeVar::register(RegisterId::new(16), 0))
             .unwrap();
         let source = emit_value(
             &mut builder,
@@ -263,20 +252,15 @@ mod test {
             64,
         )
         .unwrap();
-        let bound = emit_value(
-            &mut builder,
-            MCodeOpSpec::new(MCodeOpcode::SetVar, 64).with_variable(variable),
-            [source],
-            64,
-        )
-        .unwrap();
-        builder
-            .emitter()
-            .bind_value(bound, variable, MCodeVersion::new(1))
+        let bound = builder
+            .emit_value(
+                MCodeOpSpec::new(MCodeOpcode::SetVar, 64).with_variable(variable),
+                [source],
+                MCodeResultSpec::new(64).with_variable(variable),
+            )
             .unwrap();
         builder
-            .emitter()
-            .emit(MCodeOpSpec::new(MCodeOpcode::Return, 0), [bound], [])
+            .emit_effect(MCodeOpSpec::new(MCodeOpcode::Return, 0), [bound])
             .unwrap();
         let mut ir = builder.build_unchecked();
 

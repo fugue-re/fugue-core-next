@@ -78,8 +78,7 @@ mod test {
 
     use super::*;
     use crate::il::common::{
-        IlBlock, IlBlockProperties, IlError, IlGraph, IlIndexRange, IlMetadata, IlValueId,
-        RegisterId,
+        IlBlockProperties, IlError, IlMetadata, IlOpId, IlValueId, RegisterId,
     };
     use crate::il::ecode::{ECodeBuilder, ECodeDomain, ECodeOpSpec, ECodeOpcode};
     use crate::il::mcode::transform::abi::{
@@ -98,8 +97,7 @@ mod test {
         spec: ECodeOpSpec,
         operands: impl IntoIterator<Item = IlValueId>,
     ) -> Result<IlValueId, IlError> {
-        let (_, results) = builder.emitter().emit(spec, operands, 1)?;
-        IlValueId::try_from_index(results.start())
+        builder.emit_value(spec, operands)
     }
 
     fn x86_64_config() -> ECodeToMCodeConfig<'static> {
@@ -160,43 +158,28 @@ mod test {
 
     #[test]
     fn recovery_bundles_all_models() {
-        let mut builder = ECodeBuilder::new(
-            IlMetadata::new(FunctionId::default(), 0),
-            IlGraph::default(),
-        );
-        let mut operations = 0;
-        let mut define = |builder: &mut ECodeBuilder, root: u64| {
+        let mut builder = ECodeBuilder::new(IlMetadata::new(FunctionId::default(), 0));
+        let block = builder.add_block(IlBlockProperties::ENTRY).unwrap();
+        builder.switch_to_block(block).unwrap();
+        builder.begin_block().unwrap();
+        let define = |builder: &mut ECodeBuilder, root: u64| {
             let id = emit_value(builder, ECodeOpSpec::new(ECodeOpcode::Constant, 64), []).unwrap();
             builder
-                .emitter()
                 .set_value_domain(id, ECodeDomain::Register(RegisterId::new(root)))
                 .unwrap();
-            operations += 1;
             id
         };
 
         let rdi = define(&mut builder, RDI);
         let rsi = define(&mut builder, RSI);
-        let site = builder
-            .emitter()
-            .emit(
+        let site = IlOpId::try_from_index(builder.op_count()).unwrap();
+        builder
+            .emit_effect(
                 ECodeOpSpec::new(ECodeOpcode::Call, 0).with_address(Address::from(0x1000u64)),
                 [],
-                0,
             )
-            .map(|(operation, _)| operation)
             .unwrap();
-        operations += 1;
-
-        builder.set_graph(IlGraph::new(
-            vec![IlBlock::new(
-                IlIndexRange::new(0, operations).unwrap(),
-                IlIndexRange::EMPTY,
-                IlBlockProperties::ENTRY,
-            )],
-            Vec::new(),
-            Vec::new(),
-        ));
+        builder.end_block().unwrap();
         let ir = builder.build_unchecked();
 
         let registers = RegisterBank::new(resolve_language("x86:LE:64").unwrap()).unwrap();

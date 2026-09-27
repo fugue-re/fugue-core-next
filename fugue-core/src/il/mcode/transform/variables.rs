@@ -585,8 +585,7 @@ impl<'a> MCodeCallOutputSolver<'a> {
 mod test {
     use super::*;
     use crate::il::common::{
-        IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlError, IlGraph, IlIndexRange,
-        IlMetadata, IlValueId, RegisterId,
+        IlBlockProperties, IlEdgeKinds, IlError, IlMetadata, IlValueId, RegisterId,
     };
     use crate::il::ecode::{ECodeBuilder, ECodeOpSpec, ECodeOpcode};
     use crate::il::mcode::transform::stack::MCodeStackModel;
@@ -600,21 +599,16 @@ mod test {
         spec: ECodeOpSpec,
         operands: impl IntoIterator<Item = IlValueId>,
     ) -> Result<IlValueId, IlError> {
-        let (_, results) = builder.emitter().emit(spec, operands, 1)?;
-        IlValueId::try_from_index(results.start())
+        builder.emit_value(spec, operands)
     }
 
     fn builder() -> ECodeBuilder {
-        ECodeBuilder::new(
-            IlMetadata::new(FunctionId::default(), 0),
-            IlGraph::default(),
-        )
+        ECodeBuilder::new(IlMetadata::new(FunctionId::default(), 0))
     }
 
     fn register_definition(builder: &mut ECodeBuilder) -> IlValueId {
         let id = emit_value(builder, ECodeOpSpec::new(ECodeOpcode::Undefined, 64), []).unwrap();
         builder
-            .emitter()
             .set_value_domain(id, ECodeDomain::Register(RegisterId::new(REGISTER)))
             .unwrap();
         id
@@ -627,29 +621,30 @@ mod test {
 
     struct ECodeFunctionBuilder {
         builder: ECodeBuilder,
-        operations: usize,
     }
 
     impl ECodeFunctionBuilder {
         fn new() -> Self {
+            let mut builder = ECodeBuilder::new(IlMetadata::new(FunctionId::default(), 0));
+            let block = builder.add_block(IlBlockProperties::ENTRY).unwrap();
+            builder.switch_to_block(block).unwrap();
+            builder.begin_block().unwrap();
+            Self { builder }
+        }
+
+        fn new_linear() -> Self {
             Self {
-                builder: ECodeBuilder::new(
-                    IlMetadata::new(FunctionId::default(), 0),
-                    IlGraph::default(),
-                ),
-                operations: 0,
+                builder: ECodeBuilder::new(IlMetadata::new(FunctionId::default(), 0)),
             }
         }
 
         fn constant(&mut self, value: u64) -> IlValueId {
-            let id = emit_value(
+            emit_value(
                 &mut self.builder,
                 ECodeOpSpec::new(ECodeOpcode::Constant, 64).with_immediate(value),
                 [],
             )
-            .unwrap();
-            self.operations += 1;
-            id
+            .unwrap()
         }
 
         fn unary(&mut self, opcode: ECodeOpcode, source: IlValueId, register: bool) -> IlValueId {
@@ -661,35 +656,23 @@ mod test {
             .unwrap();
             if register {
                 self.builder
-                    .emitter()
                     .set_value_domain(id, ECodeDomain::Register(RegisterId::new(REGISTER)))
                     .unwrap();
             }
-            self.operations += 1;
             id
         }
 
         fn binary(&mut self, opcode: ECodeOpcode, left: IlValueId, right: IlValueId) -> IlValueId {
-            let id = emit_value(
+            emit_value(
                 &mut self.builder,
                 ECodeOpSpec::new(opcode, 64),
                 [left, right],
             )
-            .unwrap();
-            self.operations += 1;
-            id
+            .unwrap()
         }
 
         fn build(mut self) -> ECodeIr {
-            self.builder.set_graph(IlGraph::new(
-                vec![IlBlock::new(
-                    IlIndexRange::new(0, self.operations).unwrap(),
-                    IlIndexRange::EMPTY,
-                    IlBlockProperties::ENTRY,
-                )],
-                Vec::new(),
-                Vec::new(),
-            ));
+            self.builder.end_block().unwrap();
             self.builder.build_unchecked()
         }
 
@@ -699,43 +682,36 @@ mod test {
     }
 
     fn branching_ir(reverse: bool) -> ECodeIr {
-        let left = IlBlockId::try_from_index(1).unwrap();
-        let right = IlBlockId::try_from_index(2).unwrap();
         let mut builder = builder();
-        register_definition(&mut builder);
-        register_definition(&mut builder);
-        let (successors, kinds) = if reverse {
-            (
-                vec![right, left],
-                vec![IlEdgeKinds::TAKEN, IlEdgeKinds::FALL_THROUGH],
-            )
+        let entry = builder.add_block(IlBlockProperties::ENTRY).unwrap();
+        let left = builder.add_block(IlBlockProperties::EXIT).unwrap();
+        let right = builder.add_block(IlBlockProperties::EXIT).unwrap();
+        builder.switch_to_block(entry).unwrap();
+        builder.begin_block().unwrap();
+        if reverse {
+            builder
+                .add_successor(right, IlEdgeKinds::TAKEN, [])
+                .unwrap();
+            builder
+                .add_successor(left, IlEdgeKinds::FALL_THROUGH, [])
+                .unwrap();
         } else {
-            (
-                vec![left, right],
-                vec![IlEdgeKinds::FALL_THROUGH, IlEdgeKinds::TAKEN],
-            )
-        };
-        builder.set_graph(IlGraph::new(
-            vec![
-                IlBlock::new(
-                    IlIndexRange::EMPTY,
-                    IlIndexRange::new(0, 2).unwrap(),
-                    IlBlockProperties::ENTRY,
-                ),
-                IlBlock::new(
-                    IlIndexRange::new(0, 1).unwrap(),
-                    IlIndexRange::EMPTY,
-                    IlBlockProperties::EXIT,
-                ),
-                IlBlock::new(
-                    IlIndexRange::new(1, 2).unwrap(),
-                    IlIndexRange::EMPTY,
-                    IlBlockProperties::EXIT,
-                ),
-            ],
-            successors,
-            kinds,
-        ));
+            builder
+                .add_successor(left, IlEdgeKinds::FALL_THROUGH, [])
+                .unwrap();
+            builder
+                .add_successor(right, IlEdgeKinds::TAKEN, [])
+                .unwrap();
+        }
+        builder.end_block().unwrap();
+        builder.switch_to_block(left).unwrap();
+        builder.begin_block().unwrap();
+        register_definition(&mut builder);
+        builder.end_block().unwrap();
+        builder.switch_to_block(right).unwrap();
+        builder.begin_block().unwrap();
+        register_definition(&mut builder);
+        builder.end_block().unwrap();
         builder.build_unchecked()
     }
 
@@ -762,35 +738,23 @@ mod test {
 
     #[test]
     fn a_phi_connected_web_is_one_variable() {
-        let entry = IlBlockId::try_from_index(0).unwrap();
-        let merge = IlBlockId::try_from_index(1).unwrap();
         let mut builder = builder();
-
-        builder.set_graph(IlGraph::new(
-            vec![
-                IlBlock::new(
-                    IlIndexRange::new(0, 1).unwrap(),
-                    IlIndexRange::new(0, 1).unwrap(),
-                    IlBlockProperties::ENTRY,
-                ),
-                IlBlock::new(
-                    IlIndexRange::EMPTY,
-                    IlIndexRange::EMPTY,
-                    IlBlockProperties::EXIT,
-                ),
-            ],
-            vec![merge],
-            vec![IlEdgeKinds::UNCONDITIONAL],
-        ));
-
-        let _ = entry;
-        let definition = register_definition(&mut builder);
-        let arg = builder.emitter().emit_block_arg(merge, 64).unwrap();
+        let entry = builder.add_block(IlBlockProperties::ENTRY).unwrap();
+        let merge = builder.add_block(IlBlockProperties::EXIT).unwrap();
+        let arg = builder.add_block_arg(merge, 64).unwrap();
         builder
-            .emitter()
             .set_value_domain(arg, ECodeDomain::Register(RegisterId::new(REGISTER)))
             .unwrap();
-        builder.emitter().emit_edge_args([definition]).unwrap();
+        builder.switch_to_block(entry).unwrap();
+        builder.begin_block().unwrap();
+        let definition = register_definition(&mut builder);
+        builder
+            .add_successor(merge, IlEdgeKinds::UNCONDITIONAL, [definition])
+            .unwrap();
+        builder.end_block().unwrap();
+        builder.switch_to_block(merge).unwrap();
+        builder.begin_block().unwrap();
+        builder.end_block().unwrap();
 
         let ir = builder.build_unchecked();
         let table = table(&ir);
@@ -812,7 +776,6 @@ mod test {
             )
             .unwrap();
             builder
-                .emitter()
                 .set_value_domain(id, ECodeDomain::Register(RegisterId::new(0x20)))
                 .unwrap();
             id
@@ -843,11 +806,9 @@ mod test {
         )
         .unwrap();
         builder
-            .emitter()
             .set_value_domain(memory, ECodeDomain::Memory(space))
             .unwrap();
         builder
-            .emitter()
             .emit(
                 ECodeOpSpec::new(ECodeOpcode::Store, 0).with_address_space(space),
                 [frame, value, memory],
@@ -894,7 +855,7 @@ mod test {
 
     #[test]
     fn an_overlapping_linear_redefinition_is_one_variable() {
-        let mut function = ECodeFunctionBuilder::new();
+        let mut function = ECodeFunctionBuilder::new_linear();
         let first_value = function.constant(1);
         let first = function.unary(ECodeOpcode::WriteRegister, first_value, true);
         let second_value = function.constant(2);

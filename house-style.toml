@@ -28,6 +28,7 @@ before = [
     ["offset", "width"],
     ["opcode", "width"],
     ["operation", "width"],
+    ["properties", "source"],
     ["register", "width"],
     ["value", "width"],
 ]

@@ -83,8 +83,8 @@ impl IlAnalysis<MCodeIr> for MCodeBlockArgInputs {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::il::common::{IlArtefact, IlError, IlGraph, IlMetadata, IlValueId};
-    use crate::il::mcode::{MCodeBuilder, MCodeOpSpec, MCodeOpcode};
+    use crate::il::common::{IlArtefact, IlError, IlMetadata, IlOpId, IlValueId};
+    use crate::il::mcode::{MCodeBuilder, MCodeOpSpec, MCodeOpcode, MCodeResultSpec};
     use crate::ir::FunctionId;
 
     fn emit_value(
@@ -93,14 +93,13 @@ mod test {
         operands: impl IntoIterator<Item = IlValueId>,
         width: u32,
     ) -> Result<IlValueId, IlError> {
-        let (_, results) = builder.emitter().emit(spec, operands, [width])?;
-        IlValueId::try_from_index(results.start())
+        builder.emit_value(spec, operands, MCodeResultSpec::new(width))
     }
 
     #[test]
     fn uses_preserve_operand_positions() {
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = MCodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = MCodeBuilder::new(metadata);
         let left = emit_value(
             &mut builder,
             MCodeOpSpec::new(MCodeOpcode::Constant, 64),
@@ -115,12 +114,11 @@ mod test {
             64,
         )
         .unwrap();
-        let (user, _) = builder
-            .emitter()
-            .emit(
+        let user = IlOpId::try_from_index(builder.op_count()).unwrap();
+        builder
+            .emit_effect(
                 MCodeOpSpec::new(MCodeOpcode::Intrinsic, 0),
                 [left, right, left],
-                [],
             )
             .unwrap();
         let ir = builder.build().unwrap();

@@ -89,7 +89,7 @@ impl IlAnalysis<ECodeIr> for ECodeBlockArgInputs {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::il::common::{IlArtefact, IlError, IlGraph, IlMetadata, IlValueId};
+    use crate::il::common::{IlArtefact, IlError, IlMetadata, IlValueId};
     use crate::il::ecode::{ECodeBuilder, ECodeOpSpec, ECodeOpcode};
     use crate::ir::FunctionId;
 
@@ -98,14 +98,13 @@ mod test {
         spec: ECodeOpSpec,
         operands: impl IntoIterator<Item = IlValueId>,
     ) -> Result<IlValueId, IlError> {
-        let (_, results) = builder.emitter().emit(spec, operands, 1)?;
-        IlValueId::try_from_index(results.start())
+        builder.emit_value(spec, operands)
     }
 
     #[test]
     fn uses_builds_from_ecode_body() {
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = ECodeBuilder::new(metadata);
         let left = emit_value(
             &mut builder,
             ECodeOpSpec::new(ECodeOpcode::Constant, 64),
@@ -118,13 +117,9 @@ mod test {
             [],
         )
         .unwrap();
-        let (user, _) = builder
-            .emitter()
-            .emit(
-                ECodeOpSpec::new(ECodeOpcode::Add, 64),
-                [left, right, left],
-                0,
-            )
+        let user = IlOpId::try_from_index(builder.op_count()).unwrap();
+        builder
+            .emit_effect(ECodeOpSpec::new(ECodeOpcode::Add, 64), [left, right, left])
             .unwrap();
         let ir = builder.build().unwrap();
         let index = ir.analyse::<ECodeUses>();

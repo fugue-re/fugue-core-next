@@ -154,15 +154,29 @@ mod test {
     }
 
     fn ecode_for_test(function: FunctionId, graph: IlGraph) -> ECodeIr {
-        ECodeBuilder::new(IlMetadata::new(function, 0), graph)
-            .build()
-            .expect("test ECode IR should verify")
+        let block_count = graph.blocks().len();
+        let mut builder = ECodeBuilder::new_with(IlMetadata::new(function, 0), graph);
+        for index in 0..block_count {
+            builder
+                .switch_to_block(IlBlockId::try_from_index(index).unwrap())
+                .unwrap();
+            builder.begin_block().unwrap();
+            builder.end_block().unwrap();
+        }
+        builder.build().expect("test ECode IR should verify")
     }
 
     fn mcode_for_test(function: FunctionId, graph: IlGraph) -> MCodeIr {
-        MCodeBuilder::new(IlMetadata::new(function, 0), graph)
-            .build()
-            .expect("test MCode should verify")
+        let block_count = graph.blocks().len();
+        let mut builder = MCodeBuilder::new_with(IlMetadata::new(function, 0), graph);
+        for index in 0..block_count {
+            builder
+                .switch_to_block(IlBlockId::try_from_index(index).unwrap())
+                .unwrap();
+            builder.begin_block().unwrap();
+            builder.end_block().unwrap();
+        }
+        builder.build().expect("test MCode should verify")
     }
 
     #[test]

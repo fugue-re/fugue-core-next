@@ -303,7 +303,7 @@ mod test {
         }
 
         fn ecode_for(function: FunctionId) -> ECodeIr {
-            ECodeBuilder::new(IlMetadata::new(function, 0), IlGraph::default())
+            ECodeBuilder::new(IlMetadata::new(function, 0))
                 .build()
                 .expect("empty ecode ir should build")
         }

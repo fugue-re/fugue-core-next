@@ -5,8 +5,8 @@ use super::ssa::{PCodeToECodeSsaLifter, PCodeToECodeSsaScratch};
 use super::state::ECodeLiftState;
 use crate::arch::Arch;
 use crate::il::common::{
-    FlagId, IlArtefact, IlError, IlExprId, IlGraph, IlIndexMapper, IlMetadata, RegisterBank,
-    RegisterId, RegisterRange, RegisterSlice,
+    FlagId, IlArtefact, IlError, IlExprId, IlIndexMapper, IlMetadata, RegisterBank, RegisterId,
+    RegisterRange, RegisterSlice,
 };
 use crate::il::ecode::{ECodeBuilder, ECodeIr, ECodeOpcode};
 use crate::il::pcode::{PCodeIr, PCodeLocation, PCodeLocationId, PCodeOp, PCodeOpcode};
@@ -175,7 +175,7 @@ impl<'a, 'b> PCodeToECodeLifter<'a, 'b> {
             self.source.metadata().function(),
             self.source.metadata().input_revision(),
         );
-        let builder = ECodeBuilder::new(metadata, IlGraph::default());
+        let builder = ECodeBuilder::new(metadata);
 
         PCodeToECodeSsaLifter::new(
             self.state,
@@ -570,8 +570,8 @@ mod test {
     use super::*;
     use crate::arch::Arch;
     use crate::il::common::{
-        IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlExprId, IlIndexRange, IlMetadata,
-        IlParentSpan, IlSourceSpan,
+        IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlExprId, IlGraph, IlIndexRange,
+        IlMetadata, IlParentSpan, IlSourceSpan,
     };
     use crate::il::ecode::{ECodeBuilder, ECodeIr, ECodeOpcode};
     use crate::il::pcode::{
@@ -629,7 +629,7 @@ mod test {
         }
 
         fn build(self) -> Result<ECodeIr, IlError> {
-            let builder = ECodeBuilder::new(self.metadata, IlGraph::default());
+            let builder = ECodeBuilder::new(self.metadata);
             PCodeToECodeSsaLifter::new(
                 self.state,
                 self.graph,

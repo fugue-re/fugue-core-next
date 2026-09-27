@@ -19,7 +19,7 @@ use crate::types::EstimateSize;
 mod builder;
 pub(crate) mod verify;
 
-pub use builder::{MCodeBuilder, MCodeEmitter};
+pub use builder::MCodeBuilder;
 
 #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(derive(Debug, PartialEq, Eq))]
@@ -581,5 +581,135 @@ impl EstimateSize for MCodeIr {
             size_of::<Self>().saturating_sub(size_of::<IlGraph>()),
             usize::saturating_add,
         )
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::verify::VerifyError;
+    use super::*;
+    use crate::il::common::{IlBlockProperties, IlEdgeKinds, IlIndexRange, RegisterId};
+    use crate::il::mcode::{MCodeOpSpec, MCodeResultSpec, MCodeVersion};
+    use crate::ir::FunctionId;
+
+    #[test]
+    fn verifier_rejects_wrong_edge_arg_table_count() {
+        let metadata = IlMetadata::new(FunctionId::default(), 0);
+        let mut builder = MCodeBuilder::new(metadata);
+        let entry = builder.add_block(IlBlockProperties::ENTRY).unwrap();
+        let successor = builder.add_block(IlBlockProperties::EXIT).unwrap();
+        builder.switch_to_block(entry).unwrap();
+        builder.begin_block().unwrap();
+        builder
+            .add_successor(successor, IlEdgeKinds::UNCONDITIONAL, [])
+            .unwrap();
+        builder.end_block().unwrap();
+        builder.switch_to_block(successor).unwrap();
+        builder.begin_block().unwrap();
+        builder.end_block().unwrap();
+        let mut ir = builder.build_unchecked();
+        ir.edge_args.push(IlIndexRange::EMPTY);
+
+        assert_eq!(
+            ir.verify(),
+            Err(VerifyError::EdgeArgTableCount {
+                expected: 1,
+                found: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn verifier_rejects_a_duplicate_version() {
+        let metadata = IlMetadata::new(FunctionId::default(), 0);
+        let mut builder = MCodeBuilder::new(metadata);
+        let variable = builder
+            .add_variable(MCodeVar::register(RegisterId::new(16), 0))
+            .unwrap();
+        let mut second = None;
+        for _ in 0..2 {
+            let source = builder
+                .emit_value(
+                    MCodeOpSpec::new(MCodeOpcode::Constant, 64).with_immediate(1),
+                    [],
+                    MCodeResultSpec::new(64),
+                )
+                .unwrap();
+            second = Some(
+                builder
+                    .emit_value(
+                        MCodeOpSpec::new(MCodeOpcode::SetVar, 64).with_variable(variable),
+                        [source],
+                        MCodeResultSpec::new(64).with_variable(variable),
+                    )
+                    .unwrap(),
+            );
+        }
+        let second = second.expect("a bound value was emitted");
+        let mut ir = builder.build_unchecked();
+        ir.values[second.index()].set_binding(variable, MCodeVersion::new(1));
+
+        assert!(matches!(
+            ir.verify(),
+            Err(VerifyError::DuplicateVersion { .. })
+        ));
+    }
+
+    #[test]
+    fn verifier_accepts_a_field_predecessor_with_a_later_version() {
+        let metadata = IlMetadata::new(FunctionId::default(), 0);
+        let mut builder = MCodeBuilder::new(metadata);
+        let variable = builder
+            .add_variable(MCodeVar::register(RegisterId::new(16), 0))
+            .unwrap();
+        let previous = builder
+            .emit_value(
+                MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
+                [],
+                MCodeResultSpec::new(64).with_variable(variable),
+            )
+            .unwrap();
+        let source = builder
+            .emit_value(
+                MCodeOpSpec::new(MCodeOpcode::Constant, 64),
+                [],
+                MCodeResultSpec::new(64),
+            )
+            .unwrap();
+        let bound = builder
+            .emit_value(
+                MCodeOpSpec::new(MCodeOpcode::SetVarField, 64).with_variable(variable),
+                [previous, source],
+                MCodeResultSpec::new(64).with_variable(variable),
+            )
+            .unwrap();
+        let mut ir = builder.build_unchecked();
+        ir.values[previous.index()].set_binding(variable, MCodeVersion::new(2));
+        ir.values[bound.index()].set_binding(variable, MCodeVersion::new(1));
+
+        assert!(ir.verify().is_ok());
+    }
+
+    #[test]
+    fn verifier_rejects_a_non_dense_version() {
+        let metadata = IlMetadata::new(FunctionId::default(), 0);
+        let mut builder = MCodeBuilder::new(metadata);
+        let variable = builder
+            .add_variable(MCodeVar::register(RegisterId::new(16), 0))
+            .unwrap();
+        let value = builder
+            .emit_value(
+                MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
+                [],
+                MCodeResultSpec::new(64).with_variable(variable),
+            )
+            .unwrap();
+        let mut ir = builder.build_unchecked();
+        ir.values[value.index()].set_binding(variable, MCodeVersion::new(2));
+
+        assert!(matches!(
+            ir.verify(),
+            Err(VerifyError::InvalidVersion { .. })
+        ));
     }
 }

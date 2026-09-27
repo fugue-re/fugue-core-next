@@ -1,14 +1,15 @@
 use fugue_lifter::runtime::convention::Convention;
+use smallvec::SmallVec;
 
 use crate::arch::Arch;
 use crate::il::common::{
-    IlArtefact, IlError, IlGenerationContext, IlGenerationError, IlGraph, IlMetadata,
-    IlTransformer, IlValueId, RegisterBank, RegisterId,
+    IlArtefact, IlError, IlGenerationContext, IlGenerationError, IlMetadata, IlTransformer,
+    IlValueId, RegisterBank, RegisterId,
 };
 use crate::il::ecode::ECodeIr;
 use crate::il::mcode::transform::abi::MCodeCallingConvention;
 use crate::il::mcode::transform::lifter::ECodeToMCodeLifter;
-use crate::il::mcode::{MCodeBuilder, MCodeIr, MCodeOptimiser, MCodeVar};
+use crate::il::mcode::{MCodeBuilder, MCodeIr, MCodeOptimiser, MCodeResultSpec, MCodeVar};
 use crate::lifter::Varnode;
 use crate::platform::Platform;
 
@@ -34,7 +35,9 @@ pub struct ECodeToMCode {
 #[derive(Debug, Default)]
 struct ECodeToMCodeScratch {
     operands: Vec<IlValueId>,
+    result_specs: Vec<MCodeResultSpec>,
     required_values: Vec<IlValueId>,
+    edge_args: SmallVec<[IlValueId; 2]>,
 }
 
 #[derive(Debug)]
@@ -163,7 +166,7 @@ impl ECodeToMCode {
 
         self.scratch.required_values.clear();
         let metadata = IlMetadata::new(ir.metadata().function(), ir.metadata().input_revision());
-        let builder = MCodeBuilder::new(metadata, IlGraph::default());
+        let builder = MCodeBuilder::new(metadata);
         let mut mcode =
             ECodeToMCodeLifter::new(ir, &analysis, builder, &mut self.scratch)?.lift()?;
         #[cfg(debug_assertions)]
@@ -224,8 +227,8 @@ mod test {
     use super::variables::{MCodeCallOutputSite, MCodeCallOutputVariables};
     use super::*;
     use crate::il::common::{
-        IlArtefact, IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlError, IlGraph,
-        IlIndexRange, IlMetadata, IlOpId, IlSsaDef, IlValueId, RegisterBank, RegisterId,
+        IlArtefact, IlBlockProperties, IlEdgeKinds, IlError, IlMetadata, IlOpId, IlSsaDef,
+        IlValueId, RegisterBank, RegisterId,
     };
     use crate::il::ecode::{ECodeBuilder, ECodeDomain, ECodeIr, ECodeOpSpec, ECodeOpcode};
     use crate::il::mcode::transform::abi::MCodeStorageLocation;
@@ -268,8 +271,18 @@ mod test {
         spec: ECodeOpSpec,
         operands: impl IntoIterator<Item = IlValueId>,
     ) -> Result<IlValueId, IlError> {
-        let (_, results) = builder.emitter().emit(spec, operands, 1)?;
-        IlValueId::try_from_index(results.start())
+        builder.emit_value(spec, operands)
+    }
+
+    fn emit_op(
+        builder: &mut ECodeBuilder,
+        spec: ECodeOpSpec,
+        operands: impl IntoIterator<Item = IlValueId>,
+        result_count: usize,
+    ) -> Result<IlOpId, IlError> {
+        let operation = IlOpId::try_from_index(builder.op_count())?;
+        builder.emit(spec, operands, result_count)?;
+        Ok(operation)
     }
 
     fn config() -> ECodeToMCodeConfig<'static> {
@@ -281,21 +294,19 @@ mod test {
 
     fn call_source(function: FunctionId) -> (ECodeIr, IlOpId) {
         let metadata = IlMetadata::new(function, 0);
-        let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = ECodeBuilder::new(metadata);
         let input = push_undefined(
             &mut builder,
             64,
             Some(ECodeDomain::Register(RegisterId::new(RDI))),
         );
-        let site = builder
-            .emitter()
-            .emit(
-                ECodeOpSpec::new(ECodeOpcode::Call, 0).with_address(Address::from(0x1000u64)),
-                [],
-                0,
-            )
-            .map(|(operation, _)| operation)
-            .unwrap();
+        let site = emit_op(
+            &mut builder,
+            ECodeOpSpec::new(ECodeOpcode::Call, 0).with_address(Address::from(0x1000u64)),
+            [],
+            0,
+        )
+        .unwrap();
         push_return(&mut builder, [input]);
         (builder.build().unwrap(), site)
     }
@@ -308,16 +319,14 @@ mod test {
         let language = resolve_language("x86:LE:64").unwrap();
         let registers = RegisterBank::new(language).unwrap();
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
-        let site = builder
-            .emitter()
-            .emit(
-                ECodeOpSpec::new(ECodeOpcode::Call, 0).with_address(Address::from(0x1000u64)),
-                [],
-                0,
-            )
-            .map(|(operation, _)| operation)
-            .unwrap();
+        let mut builder = ECodeBuilder::new(metadata);
+        let site = emit_op(
+            &mut builder,
+            ECodeOpSpec::new(ECodeOpcode::Call, 0).with_address(Address::from(0x1000u64)),
+            [],
+            0,
+        )
+        .unwrap();
         let source = builder.build().unwrap();
         let mut call = MCodeCallFacts::new(site);
         call.set_inputs(inputs.iter().copied());
@@ -347,9 +356,9 @@ mod test {
         let language = resolve_language("x86:LE:64").unwrap();
         let registers = RegisterBank::new(language).unwrap();
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = ECodeBuilder::new(metadata);
         let space = AddressSpaceId::new(0);
-        builder.emitter().intern_memory_domain(space);
+        builder.intern_memory_domain(space);
         let stack_pointer = push_undefined(
             &mut builder,
             64,
@@ -388,7 +397,7 @@ mod test {
             source.metadata().function(),
             source.metadata().input_revision(),
         );
-        let builder = MCodeBuilder::new(metadata, IlGraph::default());
+        let builder = MCodeBuilder::new(metadata);
         let mut scratch = ECodeToMCodeScratch::default();
         let mut mcode = ECodeToMCodeLifter::new(source, analysis, builder, &mut scratch)
             .unwrap()
@@ -426,7 +435,7 @@ mod test {
         )
         .unwrap();
         if let Some(domain) = domain {
-            builder.emitter().set_value_domain(value, domain).unwrap();
+            builder.set_value_domain(value, domain).unwrap();
         }
         value
     }
@@ -454,7 +463,6 @@ mod test {
         )
         .unwrap();
         builder
-            .emitter()
             .set_value_domain(result, ECodeDomain::Memory(space))
             .unwrap();
         result
@@ -494,7 +502,6 @@ mod test {
         )
         .unwrap();
         builder
-            .emitter()
             .set_value_domain(written, ECodeDomain::Register(RegisterId::new(RAX)))
             .unwrap();
         written
@@ -502,7 +509,6 @@ mod test {
 
     fn push_return(builder: &mut ECodeBuilder, values: impl IntoIterator<Item = IlValueId>) {
         builder
-            .emitter()
             .emit(ECodeOpSpec::new(ECodeOpcode::Return, 0), values, 0)
             .unwrap();
     }
@@ -511,7 +517,7 @@ mod test {
     fn memory_domain_identifiers_round_trip_through_ecode_and_mcode() {
         let space = AddressSpaceId::from(u16::MAX);
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = ECodeBuilder::new(metadata);
         let pointer = push_constant(&mut builder, 64, 0x1000);
         let stored = push_constant(&mut builder, 64, 0x2a);
         let memory = push_undefined(&mut builder, 0, Some(ECodeDomain::Memory(space)));
@@ -555,7 +561,7 @@ mod test {
         let config =
             ECodeToMCodeConfig::from_convention(&registers, convention, Vec::new()).unwrap();
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = ECodeBuilder::new(metadata);
         let constant = push_constant(&mut builder, 64, 7);
         let written = emit_value(
             &mut builder,
@@ -564,7 +570,6 @@ mod test {
         )
         .unwrap();
         builder
-            .emitter()
             .set_value_domain(written, ECodeDomain::Register(RegisterId::new(0x38)))
             .unwrap();
         push_return(&mut builder, [written]);
@@ -589,7 +594,7 @@ mod test {
     #[test]
     fn a_partial_register_write_uses_the_immediate_predecessor() {
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = ECodeBuilder::new(metadata);
         let previous = push_undefined(
             &mut builder,
             64,
@@ -618,14 +623,18 @@ mod test {
     #[test]
     fn sibling_partial_writes_materialise_a_non_adjacent_predecessor() {
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = ECodeBuilder::new(metadata);
+        let entry = builder.add_block(IlBlockProperties::ENTRY).unwrap();
+        let left_block = builder.add_block(IlBlockProperties::EXIT).unwrap();
+        let right_block = builder.add_block(IlBlockProperties::EXIT).unwrap();
+        builder.switch_to_block(entry).unwrap();
+        builder.begin_block().unwrap();
         let previous = push_undefined(
             &mut builder,
             64,
             Some(ECodeDomain::Register(RegisterId::new(RAX))),
         );
         builder
-            .emitter()
             .emit(
                 ECodeOpSpec::new(ECodeOpcode::ConditionalBranch, 0)
                     .with_address(Address::from(0x1000u64)),
@@ -633,34 +642,23 @@ mod test {
                 0,
             )
             .unwrap();
+        builder
+            .add_successor(left_block, IlEdgeKinds::FALL_THROUGH, [])
+            .unwrap();
+        builder
+            .add_successor(right_block, IlEdgeKinds::TAKEN, [])
+            .unwrap();
+        builder.end_block().unwrap();
+        builder.switch_to_block(left_block).unwrap();
+        builder.begin_block().unwrap();
         let left = push_partial_write(&mut builder, previous, 0x11);
         push_return(&mut builder, [left]);
+        builder.end_block().unwrap();
+        builder.switch_to_block(right_block).unwrap();
+        builder.begin_block().unwrap();
         let right = push_partial_write(&mut builder, previous, 0x22);
         push_return(&mut builder, [right]);
-        builder.set_graph(IlGraph::new(
-            vec![
-                IlBlock::new(
-                    IlIndexRange::new(0, 2).unwrap(),
-                    IlIndexRange::new(0, 2).unwrap(),
-                    IlBlockProperties::ENTRY,
-                ),
-                IlBlock::new(
-                    IlIndexRange::new(2, 6).unwrap(),
-                    IlIndexRange::EMPTY,
-                    IlBlockProperties::EXIT,
-                ),
-                IlBlock::new(
-                    IlIndexRange::new(6, 10).unwrap(),
-                    IlIndexRange::EMPTY,
-                    IlBlockProperties::EXIT,
-                ),
-            ],
-            vec![
-                IlBlockId::try_from_index(1).unwrap(),
-                IlBlockId::try_from_index(2).unwrap(),
-            ],
-            vec![IlEdgeKinds::FALL_THROUGH, IlEdgeKinds::TAKEN],
-        ));
+        builder.end_block().unwrap();
 
         let mcode = transform_with_config(builder, &config());
         let field_count = mcode
@@ -687,9 +685,9 @@ mod test {
     #[test]
     fn a_fixed_stack_slot_promotes_store_and_load() {
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = ECodeBuilder::new(metadata);
         let space = AddressSpaceId::new(0);
-        builder.emitter().intern_memory_domain(space);
+        builder.intern_memory_domain(space);
         let stack_pointer = push_undefined(
             &mut builder,
             64,
@@ -793,9 +791,9 @@ mod test {
     #[test]
     fn an_address_taken_stack_slot_uses_aliased_operations() {
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = ECodeBuilder::new(metadata);
         let space = AddressSpaceId::new(0);
-        builder.emitter().intern_memory_domain(space);
+        builder.intern_memory_domain(space);
         let stack_pointer = push_undefined(
             &mut builder,
             64,
@@ -841,9 +839,9 @@ mod test {
         let config =
             ECodeToMCodeConfig::from_convention(&registers, &convention, Vec::new()).unwrap();
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = ECodeBuilder::new(metadata);
         let space = AddressSpaceId::new(0);
-        builder.emitter().intern_memory_domain(space);
+        builder.intern_memory_domain(space);
 
         push_undefined(
             &mut builder,
@@ -861,7 +859,6 @@ mod test {
         let initial_memory = push_undefined(&mut builder, 0, Some(ECodeDomain::Memory(space)));
         push_store(&mut builder, space, pointer, stored, initial_memory);
         builder
-            .emitter()
             .emit(
                 ECodeOpSpec::new(ECodeOpcode::Call, 0).with_address(Address::from(0x1000u64)),
                 [],
@@ -944,49 +941,46 @@ mod test {
         let config =
             ECodeToMCodeConfig::from_convention(&registers, &convention, Vec::new()).unwrap();
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = ECodeBuilder::new(metadata);
+        let entry = builder.add_block(IlBlockProperties::ENTRY).unwrap();
+        let successors = (0..BRANCH_COUNT)
+            .map(|_| builder.add_block(IlBlockProperties::EXIT).unwrap())
+            .collect::<Vec<_>>();
+        builder.switch_to_block(entry).unwrap();
+        builder.begin_block().unwrap();
         push_constant(&mut builder, 1, 1);
+        for &successor in &successors {
+            builder
+                .add_successor(successor, IlEdgeKinds::UNCONDITIONAL, [])
+                .unwrap();
+        }
+        builder.end_block().unwrap();
 
         let mut calls = Vec::new();
-        for index in 1..BRANCH_COUNT {
-            let call = builder
-                .emitter()
-                .emit(
-                    ECodeOpSpec::new(ECodeOpcode::Call, 0)
-                        .with_address(Address::from(0x1000u64 + index as u64)),
-                    [],
-                    0,
-                )
-                .map(|(operation, _)| operation)
-                .unwrap();
+        for (index, &successor) in successors.iter().take(BRANCH_COUNT - 1).enumerate() {
+            builder.switch_to_block(successor).unwrap();
+            builder.begin_block().unwrap();
+            let call = emit_op(
+                &mut builder,
+                ECodeOpSpec::new(ECodeOpcode::Call, 0)
+                    .with_address(Address::from(0x1001u64 + index as u64)),
+                [],
+                0,
+            )
+            .unwrap();
             calls.push(call);
+            builder.end_block().unwrap();
         }
+        builder
+            .switch_to_block(successors[BRANCH_COUNT - 1])
+            .unwrap();
+        builder.begin_block().unwrap();
         push_undefined(
             &mut builder,
             64,
             Some(ECodeDomain::Register(RegisterId::new(RAX))),
         );
-
-        let successors = (1..=BRANCH_COUNT)
-            .map(|index| IlBlockId::try_from_index(index).unwrap())
-            .collect::<Vec<_>>();
-        let mut blocks = vec![IlBlock::new(
-            IlIndexRange::new(0, 1).unwrap(),
-            IlIndexRange::new(0, BRANCH_COUNT).unwrap(),
-            IlBlockProperties::ENTRY,
-        )];
-        blocks.extend((1..=BRANCH_COUNT).map(|index| {
-            IlBlock::new(
-                IlIndexRange::new(index, index + 1).unwrap(),
-                IlIndexRange::EMPTY,
-                IlBlockProperties::EXIT,
-            )
-        }));
-        builder.set_graph(IlGraph::new(
-            blocks,
-            successors,
-            vec![IlEdgeKinds::UNCONDITIONAL; BRANCH_COUNT],
-        ));
+        builder.end_block().unwrap();
         let source = builder.build_unchecked();
         let analysis = ECodeToMCodeAnalysis::new(&source, &config, &registers).unwrap();
         let outputs = MCodeCallOutputVariables::new(&source, &analysis).unwrap();
@@ -1010,19 +1004,17 @@ mod test {
         let language = resolve_language("x86:LE:64").unwrap();
         let registers = RegisterBank::new(language).unwrap();
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = ECodeBuilder::new(metadata);
         let space = AddressSpaceId::new(0);
-        builder.emitter().intern_memory_domain(space);
+        builder.intern_memory_domain(space);
         let memory = push_undefined(&mut builder, 0, Some(ECodeDomain::Memory(space)));
-        let call = builder
-            .emitter()
-            .emit(
-                ECodeOpSpec::new(ECodeOpcode::Call, 0).with_address(Address::from(0x1000u64)),
-                [],
-                0,
-            )
-            .map(|(operation, _)| operation)
-            .unwrap();
+        let call = emit_op(
+            &mut builder,
+            ECodeOpSpec::new(ECodeOpcode::Call, 0).with_address(Address::from(0x1000u64)),
+            [],
+            0,
+        )
+        .unwrap();
         push_return(&mut builder, [memory]);
         let source = builder.build().unwrap();
         let mut call_facts = MCodeCallFacts::new(call);
@@ -1079,7 +1071,7 @@ mod test {
         let language = resolve_language("x86:LE:64").unwrap();
         let registers = RegisterBank::new(language).unwrap();
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = ECodeBuilder::new(metadata);
         push_undefined(
             &mut builder,
             64,
@@ -1090,15 +1082,13 @@ mod test {
             64,
             Some(ECodeDomain::Register(RegisterId::new(RAX))),
         );
-        let site = builder
-            .emitter()
-            .emit(
-                ECodeOpSpec::new(ECodeOpcode::Call, 0).with_address(Address::from(0x1000u64)),
-                [],
-                0,
-            )
-            .map(|(operation, _)| operation)
-            .unwrap();
+        let site = emit_op(
+            &mut builder,
+            ECodeOpSpec::new(ECodeOpcode::Call, 0).with_address(Address::from(0x1000u64)),
+            [],
+            0,
+        )
+        .unwrap();
         push_return(&mut builder, [rax]);
         let source = builder.build().unwrap();
         let mut call = MCodeCallFacts::new(site);
@@ -1140,16 +1130,14 @@ mod test {
         let language = resolve_language("x86:LE:64").unwrap();
         let registers = RegisterBank::new(language).unwrap();
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
-        let site = builder
-            .emitter()
-            .emit(
-                ECodeOpSpec::new(ECodeOpcode::Call, 0).with_address(Address::from(0x1000u64)),
-                [],
-                0,
-            )
-            .map(|(operation, _)| operation)
-            .unwrap();
+        let mut builder = ECodeBuilder::new(metadata);
+        let site = emit_op(
+            &mut builder,
+            ECodeOpSpec::new(ECodeOpcode::Call, 0).with_address(Address::from(0x1000u64)),
+            [],
+            0,
+        )
+        .unwrap();
         push_undefined(
             &mut builder,
             64,
@@ -1415,7 +1403,12 @@ mod test {
         let language = resolve_language("x86:LE:64").unwrap();
         let registers = RegisterBank::new(language).unwrap();
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = ECodeBuilder::new(metadata);
+        let block = builder
+            .add_block(IlBlockProperties::ENTRY | IlBlockProperties::EXIT)
+            .unwrap();
+        builder.switch_to_block(block).unwrap();
+        builder.begin_block().unwrap();
         for register in [RDI, RDX, RAX] {
             push_undefined(
                 &mut builder,
@@ -1423,24 +1416,14 @@ mod test {
                 Some(ECodeDomain::Register(RegisterId::new(register))),
             );
         }
-        let site = builder
-            .emitter()
-            .emit(
-                ECodeOpSpec::new(ECodeOpcode::Branch, 0).with_address(Address::from(0x2000u64)),
-                [],
-                0,
-            )
-            .map(|(operation, _)| operation)
-            .unwrap();
-        builder.set_graph(IlGraph::new(
-            vec![IlBlock::new(
-                IlIndexRange::new(0, 4).unwrap(),
-                IlIndexRange::EMPTY,
-                IlBlockProperties::ENTRY | IlBlockProperties::EXIT,
-            )],
-            Vec::new(),
-            Vec::new(),
-        ));
+        let site = emit_op(
+            &mut builder,
+            ECodeOpSpec::new(ECodeOpcode::Branch, 0).with_address(Address::from(0x2000u64)),
+            [],
+            0,
+        )
+        .unwrap();
+        builder.end_block().unwrap();
         let source = builder.build().unwrap();
         let locations = [
             MCodeStorageLocation::Register(RegisterId::new(RDI)),
@@ -1516,10 +1499,13 @@ mod test {
         let registers = RegisterBank::new(language).unwrap();
         let config = config();
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = ECodeBuilder::new(metadata);
+        let entry = builder.add_block(IlBlockProperties::ENTRY).unwrap();
+        let exit = builder.add_block(IlBlockProperties::EXIT).unwrap();
+        builder.switch_to_block(entry).unwrap();
+        builder.begin_block().unwrap();
         let selector = push_undefined(&mut builder, 64, None);
         builder
-            .emitter()
             .emit(
                 ECodeOpSpec::new(ECodeOpcode::BranchIndirect, 0)
                     .with_address_space(AddressSpaceId::new(0)),
@@ -1527,23 +1513,14 @@ mod test {
                 0,
             )
             .unwrap();
+        builder
+            .add_successor(exit, IlEdgeKinds::COMPUTED, [])
+            .unwrap();
+        builder.end_block().unwrap();
+        builder.switch_to_block(exit).unwrap();
+        builder.begin_block().unwrap();
         push_return(&mut builder, [selector]);
-        builder.set_graph(IlGraph::new(
-            vec![
-                IlBlock::new(
-                    IlIndexRange::new(0, 2).unwrap(),
-                    IlIndexRange::new(0, 1).unwrap(),
-                    IlBlockProperties::ENTRY,
-                ),
-                IlBlock::new(
-                    IlIndexRange::new(2, 3).unwrap(),
-                    IlIndexRange::EMPTY,
-                    IlBlockProperties::EXIT,
-                ),
-            ],
-            vec![IlBlockId::try_from_index(1).unwrap()],
-            vec![IlEdgeKinds::COMPUTED],
-        ));
+        builder.end_block().unwrap();
         let source = builder.build().unwrap();
         let analysis = ECodeToMCodeAnalysis::new(&source, &config, &registers).unwrap();
         let mcode = lift_with_analysis(&source, &analysis);
@@ -1563,12 +1540,11 @@ mod test {
         let registers = RegisterBank::new(language).unwrap();
         let config = config();
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
-        let (operation, results) = builder
-            .emitter()
-            .emit(ECodeOpSpec::new(ECodeOpcode::Constant, 128), [], 1)
+        let mut builder = ECodeBuilder::new(metadata);
+        let operation = IlOpId::try_from_index(builder.op_count()).unwrap();
+        let constant = builder
+            .emit_value(ECodeOpSpec::new(ECodeOpcode::Constant, 128), [])
             .unwrap();
-        let constant = IlValueId::try_from_index(results.start()).unwrap();
         push_return(&mut builder, [constant]);
         let mut source = builder.build_unchecked();
         let constant_value = BitVec::from_le_bytes(&[

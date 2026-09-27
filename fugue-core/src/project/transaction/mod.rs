@@ -612,7 +612,9 @@ mod test {
     use fugue_lifter::runtime::pcode::Inputs;
 
     use super::*;
-    use crate::il::common::{IlArtefact, IlGraph, IlIndexRange, IlMetadata, IlSourceSpan};
+    use crate::il::common::{
+        IlArtefact, IlBlockId, IlGraph, IlIndexRange, IlMetadata, IlSourceSpan,
+    };
     use crate::il::ecode::{ECodeBuilder, ECodeIr};
     use crate::il::pcode::{PCodeBuilder, PCodeIr};
     use crate::ir::{
@@ -692,9 +694,16 @@ mod test {
     }
 
     fn ecode_for_test(function: FunctionId, graph: IlGraph) -> ECodeIr {
-        ECodeBuilder::new(IlMetadata::new(function, 0), graph)
-            .build()
-            .expect("test ECode IR should verify")
+        let block_count = graph.blocks().len();
+        let mut builder = ECodeBuilder::new_with(IlMetadata::new(function, 0), graph);
+        for index in 0..block_count {
+            builder
+                .switch_to_block(IlBlockId::try_from_index(index).unwrap())
+                .unwrap();
+            builder.begin_block().unwrap();
+            builder.end_block().unwrap();
+        }
+        builder.build().expect("test ECode IR should verify")
     }
 
     fn first_mapping_placement(

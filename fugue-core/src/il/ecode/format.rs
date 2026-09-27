@@ -292,26 +292,22 @@ impl fmt::Display for ECodeOpDisplay<'_> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::il::common::{IlGraph, IlMetadata, IlValueId};
+    use crate::il::common::IlMetadata;
     use crate::il::ecode::{ECodeBuilder, ECodeOpSpec};
     use crate::ir::FunctionId;
 
     #[test]
     fn ecode_display_is_deterministic() {
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
-        let (_, results) = builder
-            .emitter()
-            .emit(
+        let mut builder = ECodeBuilder::new(metadata);
+        let value = builder
+            .emit_value(
                 ECodeOpSpec::new(ECodeOpcode::Constant, 64).with_immediate(0x2a),
                 [],
-                1,
             )
             .unwrap();
-        let value = IlValueId::try_from_index(results.start()).unwrap();
         builder
-            .emitter()
-            .emit(ECodeOpSpec::new(ECodeOpcode::Return, 0), [value], 0)
+            .emit_effect(ECodeOpSpec::new(ECodeOpcode::Return, 0), [value])
             .unwrap();
 
         let ir = builder.build().unwrap();

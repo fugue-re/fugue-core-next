@@ -14,7 +14,7 @@ use fugue_core::il::common::{
 use fugue_core::il::ecode::analysis::ECodeLiveness;
 use fugue_core::il::ecode::{ECodeBuilder, ECodeDomain, ECodeIr, ECodeOpSpec, ECodeOpcode};
 use fugue_core::il::mcode::analysis::MCodeUses;
-use fugue_core::il::mcode::{MCodeBuilder, MCodeOpSpec, MCodeOpcode, MCodeVar, MCodeVersion};
+use fugue_core::il::mcode::{MCodeBuilder, MCodeOpSpec, MCodeOpcode, MCodeResultSpec, MCodeVar};
 use fugue_core::il::pcode::{
     PCodeBuilder, PCodeIr, PCodeLifterSpaceHandle, PCodeLocation, PCodeLocationProperties,
     PCodeOpSpec, PCodeOpcode,
@@ -423,55 +423,40 @@ fn built_in_dialects_have_target_native_external_build_apis() {
     assert_eq!(pcode.targets().len(), 1);
     assert!(pcode.display().to_string().contains("copy"));
 
-    let mut ecode = ECodeBuilder::new(metadata, IlGraph::default());
+    let mut ecode = ECodeBuilder::new(metadata);
     let register = RegisterId::new(0x10);
-    let block = IlBlockId::try_from_index(0).expect("the ECode block identifier is valid");
-    let (written, arg) = {
-        let mut emitter = ecode.emitter();
-        let (_, constant_results) = emitter
-            .emit(
-                ECodeOpSpec::new(ECodeOpcode::Constant, 64).with_immediate(7),
-                [],
-                1,
-            )
-            .expect("the ECode operation is emitted");
-        let constant = IlValueId::try_from_index(constant_results.start())
-            .expect("the ECode constant result exists");
-        let (_, written_results) = emitter
-            .emit(
-                ECodeOpSpec::new(ECodeOpcode::WriteRegister, 64).with_immediate(register.value()),
-                [constant],
-                1,
-            )
-            .expect("the ECode register write is emitted");
-        let written = IlValueId::try_from_index(written_results.start())
-            .expect("the ECode register result exists");
-        emitter
-            .set_value_domain(written, ECodeDomain::Register(register))
-            .expect("the ECode register domain is assigned");
-        let arg = emitter
-            .emit_block_arg(block, 64)
-            .expect("the ECode block argument is emitted");
-        emitter
-            .set_value_domain(arg, ECodeDomain::Register(register))
-            .expect("the ECode block-argument domain is assigned");
-        (written, arg)
-    };
-    let ecode_operation_count = ecode.emitter().op_count();
+    let block = ecode
+        .add_block(IlBlockProperties::ENTRY | IlBlockProperties::EXIT)
+        .expect("the ECode block is added");
+    let arg = ecode
+        .add_block_arg(block, 64)
+        .expect("the ECode block argument is added");
+    ecode
+        .set_value_domain(arg, ECodeDomain::Register(register))
+        .expect("the ECode block-argument domain is assigned");
+    ecode
+        .switch_to_block(block)
+        .expect("the ECode block is selected");
+    ecode.begin_block().expect("the ECode block is started");
+    let constant = ecode
+        .emit_value(
+            ECodeOpSpec::new(ECodeOpcode::Constant, 64).with_immediate(7),
+            [],
+        )
+        .expect("the ECode operation is emitted");
+    let written = ecode
+        .emit_value(
+            ECodeOpSpec::new(ECodeOpcode::WriteRegister, 64).with_immediate(register.value()),
+            [constant],
+        )
+        .expect("the ECode register write is emitted");
+    ecode
+        .set_value_domain(written, ECodeDomain::Register(register))
+        .expect("the ECode register domain is assigned");
+    ecode.end_block().expect("the ECode block is ended");
+    let ecode_operation_count = ecode.op_count();
     let ecode_operations =
         IlIndexRange::new(0, ecode_operation_count).expect("the ECode operation range is valid");
-    let mut ecode_graph = IlGraphBuilder::new();
-    ecode_graph
-        .push_block(
-            ecode_operations,
-            IlBlockProperties::ENTRY | IlBlockProperties::EXIT,
-        )
-        .expect("the ECode block is allocated");
-    ecode.set_graph(
-        ecode_graph
-            .build(ecode_operation_count)
-            .expect("the ECode graph is valid"),
-    );
     ecode.set_source_spans(vec![
         IlSourceSpan::try_new(
             ecode_operations,
@@ -498,56 +483,43 @@ fn built_in_dialects_have_target_native_external_build_apis() {
     assert_eq!(ecode.source_spans().len(), 1);
     assert_eq!(ecode.parent_spans().len(), 1);
     assert!(ecode.display().to_string().contains("const"));
-    let _: ECodeLiveness = ecode.analyse();
+    ecode.analyse::<ECodeLiveness>();
 
-    let mut mcode = MCodeBuilder::new(metadata, IlGraph::default());
-    let (bound, variable, aliased) = {
-        let mut emitter = mcode.emitter();
-        let variable = emitter
-            .intern_variable(MCodeVar::register(register, 0))
-            .expect("the MCode register variable is interned");
-        let aliased = emitter
-            .intern_variable(MCodeVar::stack(-8))
-            .expect("the MCode stack variable is interned");
-        let (_, constant_results) = emitter
-            .emit(
-                MCodeOpSpec::new(MCodeOpcode::Constant, 64).with_immediate(7),
-                [],
-                [64],
-            )
-            .expect("the MCode operation is emitted");
-        let constant = IlValueId::try_from_index(constant_results.start())
-            .expect("the MCode constant result exists");
-        let (_, bound_results) = emitter
-            .emit(
-                MCodeOpSpec::new(MCodeOpcode::SetVar, 64).with_variable(variable),
-                [constant],
-                [64],
-            )
-            .expect("the MCode variable definition is emitted");
-        let bound = IlValueId::try_from_index(bound_results.start())
-            .expect("the MCode variable result exists");
-        emitter
-            .bind_value(bound, variable, MCodeVersion::new(1))
-            .expect("the MCode variable result is bound");
-        (bound, variable, aliased)
-    };
-    mcode.set_aliased_variables(vec![aliased]);
-    let mcode_operation_count = mcode.emitter().op_count();
+    let mut mcode = MCodeBuilder::new(metadata);
+    let variable = mcode
+        .add_variable(MCodeVar::register(register, 0))
+        .expect("the MCode register variable is added");
+    let aliased = mcode
+        .add_variable(MCodeVar::stack(-8))
+        .expect("the MCode stack variable is added");
+    mcode
+        .add_aliased_variable(aliased)
+        .expect("the MCode stack variable is aliased");
+    let block = mcode
+        .add_block(IlBlockProperties::ENTRY | IlBlockProperties::EXIT)
+        .expect("the MCode block is added");
+    mcode
+        .switch_to_block(block)
+        .expect("the MCode block is selected");
+    mcode.begin_block().expect("the MCode block is started");
+    let constant = mcode
+        .emit_value(
+            MCodeOpSpec::new(MCodeOpcode::Constant, 64).with_immediate(7),
+            [],
+            MCodeResultSpec::new(64),
+        )
+        .expect("the MCode operation is emitted");
+    let bound = mcode
+        .emit_value(
+            MCodeOpSpec::new(MCodeOpcode::SetVar, 64).with_variable(variable),
+            [constant],
+            MCodeResultSpec::new(64).with_variable(variable),
+        )
+        .expect("the MCode variable definition is emitted");
+    mcode.end_block().expect("the MCode block is ended");
+    let mcode_operation_count = mcode.op_count();
     let mcode_operations =
         IlIndexRange::new(0, mcode_operation_count).expect("the MCode operation range is valid");
-    let mut mcode_graph = IlGraphBuilder::new();
-    mcode_graph
-        .push_block(
-            mcode_operations,
-            IlBlockProperties::ENTRY | IlBlockProperties::EXIT,
-        )
-        .expect("the MCode block is allocated");
-    mcode.set_graph(
-        mcode_graph
-            .build(mcode_operation_count)
-            .expect("the MCode graph is valid"),
-    );
     mcode.set_source_spans(vec![
         IlSourceSpan::try_new(
             mcode_operations,

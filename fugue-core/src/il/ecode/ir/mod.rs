@@ -19,7 +19,7 @@ use crate::types::EstimateSize;
 mod builder;
 mod verify;
 
-pub use builder::{ECodeBuilder, ECodeEmitter};
+pub use builder::ECodeBuilder;
 
 #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(derive(Debug, PartialEq, Eq))]

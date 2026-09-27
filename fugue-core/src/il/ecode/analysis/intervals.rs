@@ -133,13 +133,12 @@ mod test {
         spec: ECodeOpSpec,
         operands: impl IntoIterator<Item = IlValueId>,
     ) -> Result<IlValueId, IlError> {
-        let (_, results) = builder.emitter().emit(spec, operands, 1)?;
-        IlValueId::try_from_index(results.start())
+        builder.emit_value(spec, operands)
     }
 
     fn builder() -> ECodeBuilder {
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        ECodeBuilder::new(metadata, IlGraph::default())
+        ECodeBuilder::new(metadata)
     }
 
     #[test]
@@ -208,9 +207,7 @@ mod test {
     fn loop_carried_value_widens_to_termination() {
         let block1 = IlBlockId::try_from_index(1).unwrap();
         let block2 = IlBlockId::try_from_index(2).unwrap();
-        let mut builder = builder();
-
-        builder.set_graph(IlGraph::new(
+        let graph = IlGraph::new(
             vec![
                 IlBlock::new(
                     IlIndexRange::new(0, 1).unwrap(),
@@ -230,7 +227,14 @@ mod test {
             ],
             vec![block1, block1, block2],
             vec![IlEdgeKinds::UNCONDITIONAL; 3],
-        ));
+        );
+        let mut builder = ECodeBuilder::new_with(IlMetadata::new(FunctionId::default(), 0), graph);
+
+        let counter = builder.add_block_arg(block1, 32).unwrap();
+        builder
+            .switch_to_block(IlBlockId::try_from_index(0).unwrap())
+            .unwrap();
+        builder.begin_block().unwrap();
 
         let initial = emit_value(
             &mut builder,
@@ -239,7 +243,12 @@ mod test {
         )
         .unwrap();
 
-        let counter = builder.emitter().emit_block_arg(block1, 32).unwrap();
+        builder
+            .add_successor(block1, IlEdgeKinds::UNCONDITIONAL, [initial])
+            .unwrap();
+        builder.end_block().unwrap();
+        builder.switch_to_block(block1).unwrap();
+        builder.begin_block().unwrap();
 
         let one = emit_value(
             &mut builder,
@@ -254,9 +263,16 @@ mod test {
         )
         .unwrap();
 
-        builder.emitter().emit_edge_args([initial]).unwrap();
-        builder.emitter().emit_edge_args([next]).unwrap();
-        builder.emitter().emit_edge_args([]).unwrap();
+        builder
+            .add_successor(block1, IlEdgeKinds::UNCONDITIONAL, [next])
+            .unwrap();
+        builder
+            .add_successor(block2, IlEdgeKinds::UNCONDITIONAL, [])
+            .unwrap();
+        builder.end_block().unwrap();
+        builder.switch_to_block(block2).unwrap();
+        builder.begin_block().unwrap();
+        builder.end_block().unwrap();
 
         let ir = builder.build().unwrap();
         let intervals = ir.analyse::<ECodeStridedIntervals>();

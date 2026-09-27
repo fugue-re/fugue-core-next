@@ -24,7 +24,7 @@ mod test {
     use super::{ECodeCompaction, ECodeConstantFolding};
     use crate::il::common::{
         IlArtefact, IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlError, IlGraph,
-        IlIndexRange, IlMetadata, IlSsaDef, IlValueId,
+        IlIndexRange, IlMetadata, IlOpId, IlSsaDef, IlValueId,
     };
     use crate::il::ecode::{ECodeBuilder, ECodeOpSpec, ECodeOpcode};
     use crate::ir::{Address, FunctionId};
@@ -35,29 +35,27 @@ mod test {
         spec: ECodeOpSpec,
         operands: impl IntoIterator<Item = IlValueId>,
     ) -> Result<IlValueId, IlError> {
-        let (_, results) = builder.emitter().emit(spec, operands, 1)?;
-        IlValueId::try_from_index(results.start())
+        builder.emit_value(spec, operands)
     }
 
     #[test]
     fn compaction_preserves_interned_constants_across_inline_capacity() {
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = ECodeBuilder::new(metadata);
         let mut constants = Vec::new();
         for width in [65, 128, 192] {
-            let (operation, results) = builder
-                .emitter()
+            let operation = IlOpId::try_from_index(builder.op_count()).unwrap();
+            let value = builder
                 .emit(ECodeOpSpec::new(ECodeOpcode::Constant, width), [], 1)
+                .unwrap()
+                .single_result()
                 .unwrap();
-            let value = IlValueId::try_from_index(results.start()).unwrap();
             constants.push((value, operation));
         }
         builder
-            .emitter()
-            .emit(
+            .emit_effect(
                 ECodeOpSpec::new(ECodeOpcode::Return, 0),
                 constants.iter().map(|(value, _)| *value),
-                0,
             )
             .unwrap();
         let mut ir = builder.build_unchecked();
@@ -81,16 +79,16 @@ mod test {
     #[test]
     fn compaction_preserves_empty_and_multi_space_memory_domains() {
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut empty = ECodeBuilder::new(metadata, IlGraph::default()).build_unchecked();
+        let mut empty = ECodeBuilder::new(metadata).build_unchecked();
 
         empty.rewrite(ECodeCompaction);
 
         assert!(empty.memory_domains().is_empty());
 
         let spaces = [AddressSpaceId::new(3), AddressSpaceId::new(7)];
-        let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = ECodeBuilder::new(metadata);
         for space in spaces {
-            builder.emitter().intern_memory_domain(space);
+            builder.intern_memory_domain(space);
         }
         let mut multi_space = builder.build_unchecked();
 
@@ -109,7 +107,7 @@ mod test {
     #[test]
     fn fold_constants_materialises_wide_result_in_pool() {
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = ECodeBuilder::new(metadata);
 
         let source = emit_value(
             &mut builder,
@@ -170,7 +168,12 @@ mod test {
             vec![block1, block2, block3, block3],
             vec![IlEdgeKinds::UNCONDITIONAL; 4],
         );
-        let mut builder = ECodeBuilder::new(metadata, graph);
+        let mut builder = ECodeBuilder::new_with(metadata, graph);
+        let phi = builder.add_block_arg(block3, 32).unwrap();
+        builder
+            .switch_to_block(IlBlockId::try_from_index(0).unwrap())
+            .unwrap();
+        builder.begin_block().unwrap();
 
         let _ = emit_value(
             &mut builder,
@@ -178,6 +181,15 @@ mod test {
             [],
         )
         .unwrap();
+        builder
+            .add_successor(block1, IlEdgeKinds::UNCONDITIONAL, [])
+            .unwrap();
+        builder
+            .add_successor(block2, IlEdgeKinds::UNCONDITIONAL, [])
+            .unwrap();
+        builder.end_block().unwrap();
+        builder.switch_to_block(block1).unwrap();
+        builder.begin_block().unwrap();
 
         let left = emit_value(
             &mut builder,
@@ -185,6 +197,12 @@ mod test {
             [],
         )
         .unwrap();
+        builder
+            .add_successor(block3, IlEdgeKinds::UNCONDITIONAL, [left])
+            .unwrap();
+        builder.end_block().unwrap();
+        builder.switch_to_block(block2).unwrap();
+        builder.begin_block().unwrap();
 
         let right = emit_value(
             &mut builder,
@@ -192,8 +210,13 @@ mod test {
             [],
         )
         .unwrap();
+        builder
+            .add_successor(block3, IlEdgeKinds::UNCONDITIONAL, [right])
+            .unwrap();
+        builder.end_block().unwrap();
+        builder.switch_to_block(block3).unwrap();
+        builder.begin_block().unwrap();
 
-        let phi = builder.emitter().emit_block_arg(block3, 32).unwrap();
         let sum = emit_value(
             &mut builder,
             ECodeOpSpec::new(ECodeOpcode::Add, 32),
@@ -202,14 +225,9 @@ mod test {
         .unwrap();
 
         builder
-            .emitter()
-            .emit(ECodeOpSpec::new(ECodeOpcode::Return, 0), [sum], 0)
+            .emit_effect(ECodeOpSpec::new(ECodeOpcode::Return, 0), [sum])
             .unwrap();
-
-        builder.emitter().emit_edge_args([]).unwrap();
-        builder.emitter().emit_edge_args([]).unwrap();
-        builder.emitter().emit_edge_args([left]).unwrap();
-        builder.emitter().emit_edge_args([right]).unwrap();
+        builder.end_block().unwrap();
 
         let mut ir = builder.build_unchecked();
         ir.verify().unwrap();
@@ -253,7 +271,12 @@ mod test {
             vec![block1, block2, block3, block3],
             vec![IlEdgeKinds::UNCONDITIONAL; 4],
         );
-        let mut builder = ECodeBuilder::new(metadata, graph);
+        let mut builder = ECodeBuilder::new_with(metadata, graph);
+        let phi = builder.add_block_arg(block3, 32).unwrap();
+        builder
+            .switch_to_block(IlBlockId::try_from_index(0).unwrap())
+            .unwrap();
+        builder.begin_block().unwrap();
 
         let _ = emit_value(
             &mut builder,
@@ -261,6 +284,15 @@ mod test {
             [],
         )
         .unwrap();
+        builder
+            .add_successor(block1, IlEdgeKinds::UNCONDITIONAL, [])
+            .unwrap();
+        builder
+            .add_successor(block2, IlEdgeKinds::UNCONDITIONAL, [])
+            .unwrap();
+        builder.end_block().unwrap();
+        builder.switch_to_block(block1).unwrap();
+        builder.begin_block().unwrap();
 
         let left = emit_value(
             &mut builder,
@@ -268,6 +300,12 @@ mod test {
             [],
         )
         .unwrap();
+        builder
+            .add_successor(block3, IlEdgeKinds::UNCONDITIONAL, [left])
+            .unwrap();
+        builder.end_block().unwrap();
+        builder.switch_to_block(block2).unwrap();
+        builder.begin_block().unwrap();
 
         let right = emit_value(
             &mut builder,
@@ -275,8 +313,13 @@ mod test {
             [],
         )
         .unwrap();
+        builder
+            .add_successor(block3, IlEdgeKinds::UNCONDITIONAL, [right])
+            .unwrap();
+        builder.end_block().unwrap();
+        builder.switch_to_block(block3).unwrap();
+        builder.begin_block().unwrap();
 
-        let phi = builder.emitter().emit_block_arg(block3, 32).unwrap();
         let sum = emit_value(
             &mut builder,
             ECodeOpSpec::new(ECodeOpcode::Add, 32),
@@ -285,14 +328,9 @@ mod test {
         .unwrap();
 
         builder
-            .emitter()
-            .emit(ECodeOpSpec::new(ECodeOpcode::Return, 0), [sum], 0)
+            .emit_effect(ECodeOpSpec::new(ECodeOpcode::Return, 0), [sum])
             .unwrap();
-
-        builder.emitter().emit_edge_args([]).unwrap();
-        builder.emitter().emit_edge_args([]).unwrap();
-        builder.emitter().emit_edge_args([left]).unwrap();
-        builder.emitter().emit_edge_args([right]).unwrap();
+        builder.end_block().unwrap();
 
         let mut ir = builder.build_unchecked();
         ir.rewrite(ECodeConstantFolding);
@@ -314,16 +352,18 @@ mod test {
             Vec::new(),
             Vec::new(),
         );
-        let mut builder = ECodeBuilder::new(metadata, graph);
+        let mut builder = ECodeBuilder::new_with(metadata, graph);
 
-        let phi = builder.emitter().emit_block_arg(block0, 32).unwrap();
+        let phi = builder.add_block_arg(block0, 32).unwrap();
+        builder.switch_to_block(block0).unwrap();
+        builder.begin_block().unwrap();
         let copied =
             emit_value(&mut builder, ECodeOpSpec::new(ECodeOpcode::Copy, 32), [phi]).unwrap();
 
         builder
-            .emitter()
-            .emit(ECodeOpSpec::new(ECodeOpcode::Return, 0), [copied], 0)
+            .emit_effect(ECodeOpSpec::new(ECodeOpcode::Return, 0), [copied])
             .unwrap();
+        builder.end_block().unwrap();
 
         let mut ir = builder.build_unchecked();
         ir.verify().unwrap();
@@ -360,7 +400,12 @@ mod test {
             vec![block1, block1, block2],
             vec![IlEdgeKinds::UNCONDITIONAL; 3],
         );
-        let mut builder = ECodeBuilder::new(metadata, graph);
+        let mut builder = ECodeBuilder::new_with(metadata, graph);
+        let phi = builder.add_block_arg(block1, 32).unwrap();
+        builder
+            .switch_to_block(IlBlockId::try_from_index(0).unwrap())
+            .unwrap();
+        builder.begin_block().unwrap();
 
         let initial = emit_value(
             &mut builder,
@@ -368,23 +413,33 @@ mod test {
             [],
         )
         .unwrap();
+        builder
+            .add_successor(block1, IlEdgeKinds::UNCONDITIONAL, [initial])
+            .unwrap();
+        builder.end_block().unwrap();
+        builder.switch_to_block(block1).unwrap();
+        builder.begin_block().unwrap();
 
-        let phi = builder.emitter().emit_block_arg(block1, 32).unwrap();
         let sum = emit_value(
             &mut builder,
             ECodeOpSpec::new(ECodeOpcode::Add, 32),
             [phi, phi],
         )
         .unwrap();
+        builder
+            .add_successor(block1, IlEdgeKinds::UNCONDITIONAL, [phi])
+            .unwrap();
+        builder
+            .add_successor(block2, IlEdgeKinds::UNCONDITIONAL, [])
+            .unwrap();
+        builder.end_block().unwrap();
+        builder.switch_to_block(block2).unwrap();
+        builder.begin_block().unwrap();
 
         builder
-            .emitter()
-            .emit(ECodeOpSpec::new(ECodeOpcode::Return, 0), [sum], 0)
+            .emit_effect(ECodeOpSpec::new(ECodeOpcode::Return, 0), [sum])
             .unwrap();
-
-        builder.emitter().emit_edge_args([initial]).unwrap();
-        builder.emitter().emit_edge_args([phi]).unwrap();
-        builder.emitter().emit_edge_args([]).unwrap();
+        builder.end_block().unwrap();
 
         let mut ir = builder.build_unchecked();
         ir.rewrite(ECodeConstantFolding);
@@ -396,7 +451,7 @@ mod test {
     #[test]
     fn compact_removes_dead_operations_and_remaps_indices() {
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = ECodeBuilder::new(metadata);
 
         let first = emit_value(
             &mut builder,
@@ -425,7 +480,6 @@ mod test {
         )
         .unwrap();
         builder
-            .emitter()
             .emit(ECodeOpSpec::new(ECodeOpcode::Return, 0), [sum], 0)
             .unwrap();
 
@@ -485,7 +539,9 @@ mod test {
         )
         .with_block_sources(vec![entry_source, exit_source]);
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = ECodeBuilder::new(metadata, graph);
+        let mut builder = ECodeBuilder::new_with(metadata, graph);
+        builder.switch_to_block(entry).unwrap();
+        builder.begin_block().unwrap();
 
         let _ = emit_value(
             &mut builder,
@@ -494,9 +550,15 @@ mod test {
         )
         .unwrap();
         builder
-            .emitter()
-            .emit(ECodeOpSpec::new(ECodeOpcode::Return, 0), [], 0)
+            .add_successor(exit, IlEdgeKinds::UNCONDITIONAL, [])
             .unwrap();
+        builder.end_block().unwrap();
+        builder.switch_to_block(exit).unwrap();
+        builder.begin_block().unwrap();
+        builder
+            .emit_effect(ECodeOpSpec::new(ECodeOpcode::Return, 0), [])
+            .unwrap();
+        builder.end_block().unwrap();
 
         let mut ir = builder.build_unchecked();
         ir.rewrite(ECodeCompaction);
@@ -533,7 +595,11 @@ mod test {
             vec![block1, block1, block2],
             vec![IlEdgeKinds::UNCONDITIONAL; 3],
         );
-        let mut builder = ECodeBuilder::new(metadata, graph);
+        let mut builder = ECodeBuilder::new_with(metadata, graph);
+        let counter = builder.add_block_arg(block1, 32).unwrap();
+        let block0 = IlBlockId::try_from_index(0).unwrap();
+        builder.switch_to_block(block0).unwrap();
+        builder.begin_block().unwrap();
 
         let initial = emit_value(
             &mut builder,
@@ -548,23 +614,33 @@ mod test {
             [],
         )
         .unwrap();
+        builder
+            .add_successor(block1, IlEdgeKinds::UNCONDITIONAL, [initial])
+            .unwrap();
+        builder.end_block().unwrap();
+        builder.switch_to_block(block1).unwrap();
+        builder.begin_block().unwrap();
 
-        let counter = builder.emitter().emit_block_arg(block1, 32).unwrap();
         let next = emit_value(
             &mut builder,
             ECodeOpSpec::new(ECodeOpcode::Add, 32),
             [counter, one],
         )
         .unwrap();
+        builder
+            .add_successor(block1, IlEdgeKinds::UNCONDITIONAL, [next])
+            .unwrap();
+        builder
+            .add_successor(block2, IlEdgeKinds::UNCONDITIONAL, [])
+            .unwrap();
+        builder.end_block().unwrap();
+        builder.switch_to_block(block2).unwrap();
+        builder.begin_block().unwrap();
 
         builder
-            .emitter()
-            .emit(ECodeOpSpec::new(ECodeOpcode::Return, 0), [], 0)
+            .emit_effect(ECodeOpSpec::new(ECodeOpcode::Return, 0), [])
             .unwrap();
-
-        builder.emitter().emit_edge_args([initial]).unwrap();
-        builder.emitter().emit_edge_args([next]).unwrap();
-        builder.emitter().emit_edge_args([]).unwrap();
+        builder.end_block().unwrap();
 
         let mut ir = builder.build_unchecked();
         ir.verify().unwrap();
@@ -612,7 +688,11 @@ mod test {
             vec![block1, block2, block3, block3],
             vec![IlEdgeKinds::UNCONDITIONAL; 4],
         );
-        let mut builder = ECodeBuilder::new(metadata, graph);
+        let mut builder = ECodeBuilder::new_with(metadata, graph);
+        let phi = builder.add_block_arg(block3, 32).unwrap();
+        let block0 = IlBlockId::try_from_index(0).unwrap();
+        builder.switch_to_block(block0).unwrap();
+        builder.begin_block().unwrap();
 
         let _ = emit_value(
             &mut builder,
@@ -620,6 +700,15 @@ mod test {
             [],
         )
         .unwrap();
+        builder
+            .add_successor(block1, IlEdgeKinds::UNCONDITIONAL, [])
+            .unwrap();
+        builder
+            .add_successor(block2, IlEdgeKinds::UNCONDITIONAL, [])
+            .unwrap();
+        builder.end_block().unwrap();
+        builder.switch_to_block(block1).unwrap();
+        builder.begin_block().unwrap();
 
         let left = emit_value(
             &mut builder,
@@ -627,6 +716,12 @@ mod test {
             [],
         )
         .unwrap();
+        builder
+            .add_successor(block3, IlEdgeKinds::UNCONDITIONAL, [left])
+            .unwrap();
+        builder.end_block().unwrap();
+        builder.switch_to_block(block2).unwrap();
+        builder.begin_block().unwrap();
 
         let right = emit_value(
             &mut builder,
@@ -634,17 +729,17 @@ mod test {
             [],
         )
         .unwrap();
-
-        let phi = builder.emitter().emit_block_arg(block3, 32).unwrap();
         builder
-            .emitter()
-            .emit(ECodeOpSpec::new(ECodeOpcode::Return, 0), [phi], 0)
+            .add_successor(block3, IlEdgeKinds::UNCONDITIONAL, [right])
             .unwrap();
+        builder.end_block().unwrap();
+        builder.switch_to_block(block3).unwrap();
+        builder.begin_block().unwrap();
 
-        builder.emitter().emit_edge_args([]).unwrap();
-        builder.emitter().emit_edge_args([]).unwrap();
-        builder.emitter().emit_edge_args([left]).unwrap();
-        builder.emitter().emit_edge_args([right]).unwrap();
+        builder
+            .emit_effect(ECodeOpSpec::new(ECodeOpcode::Return, 0), [phi])
+            .unwrap();
+        builder.end_block().unwrap();
 
         let mut ir = builder.build_unchecked();
         ir.verify().unwrap();
@@ -702,7 +797,21 @@ mod test {
             vec![block1, block2, block3, block3],
             vec![IlEdgeKinds::UNCONDITIONAL; 4],
         );
-        let mut builder = ECodeBuilder::new(metadata, graph);
+        let mut builder = ECodeBuilder::new_with(metadata, graph);
+        let _dead_phi = builder.add_block_arg(block3, 32).unwrap();
+        let live_phi = builder.add_block_arg(block3, 64).unwrap();
+        let block0 = IlBlockId::try_from_index(0).unwrap();
+        builder.switch_to_block(block0).unwrap();
+        builder.begin_block().unwrap();
+        builder
+            .add_successor(block1, IlEdgeKinds::UNCONDITIONAL, [])
+            .unwrap();
+        builder
+            .add_successor(block2, IlEdgeKinds::UNCONDITIONAL, [])
+            .unwrap();
+        builder.end_block().unwrap();
+        builder.switch_to_block(block1).unwrap();
+        builder.begin_block().unwrap();
 
         let narrow_left = emit_value(
             &mut builder,
@@ -716,6 +825,12 @@ mod test {
             [],
         )
         .unwrap();
+        builder
+            .add_successor(block3, IlEdgeKinds::UNCONDITIONAL, [narrow_left, wide_left])
+            .unwrap();
+        builder.end_block().unwrap();
+        builder.switch_to_block(block2).unwrap();
+        builder.begin_block().unwrap();
 
         let narrow_right = emit_value(
             &mut builder,
@@ -729,24 +844,21 @@ mod test {
             [],
         )
         .unwrap();
+        builder
+            .add_successor(
+                block3,
+                IlEdgeKinds::UNCONDITIONAL,
+                [narrow_right, wide_right],
+            )
+            .unwrap();
+        builder.end_block().unwrap();
+        builder.switch_to_block(block3).unwrap();
+        builder.begin_block().unwrap();
 
-        let _dead_phi = builder.emitter().emit_block_arg(block3, 32).unwrap();
-        let live_phi = builder.emitter().emit_block_arg(block3, 64).unwrap();
         builder
-            .emitter()
-            .emit(ECodeOpSpec::new(ECodeOpcode::Return, 0), [live_phi], 0)
+            .emit_effect(ECodeOpSpec::new(ECodeOpcode::Return, 0), [live_phi])
             .unwrap();
-
-        builder.emitter().emit_edge_args([]).unwrap();
-        builder.emitter().emit_edge_args([]).unwrap();
-        builder
-            .emitter()
-            .emit_edge_args([narrow_left, wide_left])
-            .unwrap();
-        builder
-            .emitter()
-            .emit_edge_args([narrow_right, wide_right])
-            .unwrap();
+        builder.end_block().unwrap();
 
         let mut ir = builder.build_unchecked();
         ir.verify().unwrap();
@@ -764,7 +876,7 @@ mod test {
     #[test]
     fn fold_then_compact_collapses_constant_expression() {
         let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = ECodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = ECodeBuilder::new(metadata);
 
         let first = emit_value(
             &mut builder,
@@ -786,7 +898,6 @@ mod test {
         )
         .unwrap();
         builder
-            .emitter()
             .emit(ECodeOpSpec::new(ECodeOpcode::Return, 0), [sum], 0)
             .unwrap();
 

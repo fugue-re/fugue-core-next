@@ -188,8 +188,7 @@ mod test {
         spec: ECodeOpSpec,
         operands: impl IntoIterator<Item = IlValueId>,
     ) -> Result<IlValueId, IlError> {
-        let (_, results) = builder.emitter().emit(spec, operands, 1)?;
-        IlValueId::try_from_index(results.start())
+        builder.emit_value(spec, operands)
     }
 
     #[test]
@@ -213,7 +212,9 @@ mod test {
             vec![block1],
             vec![IlEdgeKinds::UNCONDITIONAL; 1],
         );
-        let mut builder = ECodeBuilder::new(metadata, graph);
+        let mut builder = ECodeBuilder::new_with(metadata, graph);
+        builder.switch_to_block(block0).unwrap();
+        builder.begin_block().unwrap();
         let value = emit_value(
             &mut builder,
             ECodeOpSpec::new(ECodeOpcode::Constant, 64),
@@ -221,9 +222,15 @@ mod test {
         )
         .unwrap();
         builder
-            .emitter()
-            .emit(ECodeOpSpec::new(ECodeOpcode::Return, 0), [value], 0)
+            .add_successor(block1, IlEdgeKinds::UNCONDITIONAL, [])
             .unwrap();
+        builder.end_block().unwrap();
+        builder.switch_to_block(block1).unwrap();
+        builder.begin_block().unwrap();
+        builder
+            .emit_effect(ECodeOpSpec::new(ECodeOpcode::Return, 0), [value])
+            .unwrap();
+        builder.end_block().unwrap();
 
         let ir = builder.build().unwrap();
         let liveness = ir.analyse::<ECodeLiveness>();
@@ -247,7 +254,9 @@ mod test {
             Vec::new(),
             Vec::new(),
         );
-        let mut builder = ECodeBuilder::new(metadata, graph);
+        let mut builder = ECodeBuilder::new_with(metadata, graph);
+        builder.switch_to_block(block).unwrap();
+        builder.begin_block().unwrap();
         let value = emit_value(
             &mut builder,
             ECodeOpSpec::new(ECodeOpcode::Constant, 32),
@@ -255,9 +264,9 @@ mod test {
         )
         .unwrap();
         builder
-            .emitter()
-            .emit(ECodeOpSpec::new(ECodeOpcode::Return, 0), [value], 0)
+            .emit_effect(ECodeOpSpec::new(ECodeOpcode::Return, 0), [value])
             .unwrap();
+        builder.end_block().unwrap();
 
         let ir = builder.build().unwrap();
         let liveness = ir.analyse::<ECodeLiveness>();
@@ -279,12 +288,14 @@ mod test {
             Vec::new(),
             Vec::new(),
         );
-        let mut builder = ECodeBuilder::new(metadata, graph);
-        let arg = builder.emitter().emit_block_arg(block, 32).unwrap();
+        let mut builder = ECodeBuilder::new_with(metadata, graph);
+        let arg = builder.add_block_arg(block, 32).unwrap();
+        builder.switch_to_block(block).unwrap();
+        builder.begin_block().unwrap();
         builder
-            .emitter()
-            .emit(ECodeOpSpec::new(ECodeOpcode::Return, 0), [arg], 0)
+            .emit_effect(ECodeOpSpec::new(ECodeOpcode::Return, 0), [arg])
             .unwrap();
+        builder.end_block().unwrap();
 
         let ir = builder.build().unwrap();
         let liveness = ir.analyse::<ECodeLiveness>();
@@ -314,7 +325,11 @@ mod test {
             vec![block1],
             vec![IlEdgeKinds::UNCONDITIONAL; 1],
         );
-        let mut builder = ECodeBuilder::new(metadata, graph);
+        let mut builder = ECodeBuilder::new_with(metadata, graph);
+
+        let arg = builder.add_block_arg(block1, 64).unwrap();
+        builder.switch_to_block(block0).unwrap();
+        builder.begin_block().unwrap();
 
         let value = emit_value(
             &mut builder,
@@ -323,13 +338,16 @@ mod test {
         )
         .unwrap();
 
-        let arg = builder.emitter().emit_block_arg(block1, 64).unwrap();
         builder
-            .emitter()
-            .emit(ECodeOpSpec::new(ECodeOpcode::Return, 0), [arg], 0)
+            .add_successor(block1, IlEdgeKinds::UNCONDITIONAL, [value])
             .unwrap();
-
-        builder.emitter().emit_edge_args([value]).unwrap();
+        builder.end_block().unwrap();
+        builder.switch_to_block(block1).unwrap();
+        builder.begin_block().unwrap();
+        builder
+            .emit_effect(ECodeOpSpec::new(ECodeOpcode::Return, 0), [arg])
+            .unwrap();
+        builder.end_block().unwrap();
 
         let ir = builder.build().unwrap();
         let liveness = ir.analyse::<ECodeLiveness>();

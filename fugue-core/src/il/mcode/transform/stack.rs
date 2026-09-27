@@ -472,8 +472,7 @@ impl MCodeStackModel {
 mod test {
     use super::*;
     use crate::il::common::{
-        IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlError, IlGraph, IlIndexRange,
-        IlMetadata, IlOpId, IlValueId,
+        IlBlockProperties, IlEdgeKinds, IlError, IlMetadata, IlOpId, IlValueId,
     };
     use crate::il::ecode::{ECodeBuilder, ECodeOpSpec};
     use crate::ir::FunctionId;
@@ -486,15 +485,11 @@ mod test {
         spec: ECodeOpSpec,
         operands: impl IntoIterator<Item = IlValueId>,
     ) -> Result<IlValueId, IlError> {
-        let (_, results) = builder.emitter().emit(spec, operands, 1)?;
-        IlValueId::try_from_index(results.start())
+        builder.emit_value(spec, operands)
     }
 
     fn builder() -> ECodeBuilder {
-        ECodeBuilder::new(
-            IlMetadata::new(FunctionId::default(), 0),
-            IlGraph::default(),
-        )
+        ECodeBuilder::new(IlMetadata::new(FunctionId::default(), 0))
     }
 
     fn push_constant(builder: &mut ECodeBuilder, value: u64) -> IlValueId {
@@ -509,7 +504,6 @@ mod test {
     fn push_entry_stack_pointer(builder: &mut ECodeBuilder) -> IlValueId {
         let id = emit_value(builder, ECodeOpSpec::new(ECodeOpcode::Undefined, 64), []).unwrap();
         builder
-            .emitter()
             .set_value_domain(id, ECodeDomain::Register(RegisterId::new(STACK_POINTER)))
             .unwrap();
         id
@@ -527,7 +521,6 @@ mod test {
     fn push_memory(builder: &mut ECodeBuilder, space: AddressSpaceId) -> IlValueId {
         let id = emit_value(builder, ECodeOpSpec::new(ECodeOpcode::Undefined, 0), []).unwrap();
         builder
-            .emitter()
             .set_value_domain(id, ECodeDomain::Memory(space))
             .unwrap();
         id
@@ -549,15 +542,14 @@ mod test {
         value: IlValueId,
         memory: IlValueId,
     ) -> IlOpId {
+        let operation = IlOpId::try_from_index(builder.op_count()).unwrap();
         builder
-            .emitter()
-            .emit(
+            .emit_effect(
                 ECodeOpSpec::new(ECodeOpcode::Store, 0).with_address_space(space),
                 [address, value, memory],
-                0,
             )
-            .map(|(operation, _)| operation)
-            .unwrap()
+            .unwrap();
+        operation
     }
 
     #[test]
@@ -597,7 +589,6 @@ mod test {
         )
         .unwrap();
         builder
-            .emitter()
             .set_value_domain(
                 written,
                 ECodeDomain::Register(RegisterId::new(STACK_POINTER)),
@@ -653,59 +644,54 @@ mod test {
 
     #[test]
     fn conflicting_phi_inputs_are_unknown() {
-        let block = |index| IlBlockId::try_from_index(index).unwrap();
         let mut builder = builder();
-
-        builder.set_graph(IlGraph::new(
-            vec![
-                IlBlock::new(
-                    IlIndexRange::new(0, 5).unwrap(),
-                    IlIndexRange::new(0, 2).unwrap(),
-                    IlBlockProperties::ENTRY,
-                ),
-                IlBlock::new(
-                    IlIndexRange::EMPTY,
-                    IlIndexRange::new(2, 3).unwrap(),
-                    IlBlockProperties::empty(),
-                ),
-                IlBlock::new(
-                    IlIndexRange::EMPTY,
-                    IlIndexRange::new(3, 4).unwrap(),
-                    IlBlockProperties::empty(),
-                ),
-                IlBlock::new(
-                    IlIndexRange::EMPTY,
-                    IlIndexRange::EMPTY,
-                    IlBlockProperties::EXIT,
-                ),
-            ],
-            vec![block(1), block(2), block(3), block(3)],
-            vec![
-                IlEdgeKinds::TAKEN,
-                IlEdgeKinds::FALL_THROUGH,
-                IlEdgeKinds::UNCONDITIONAL,
-                IlEdgeKinds::UNCONDITIONAL,
-            ],
-        ));
+        let entry = builder.add_block(IlBlockProperties::ENTRY).unwrap();
+        let near_block = builder.add_block(IlBlockProperties::empty()).unwrap();
+        let far_block = builder.add_block(IlBlockProperties::empty()).unwrap();
+        let merge = builder.add_block(IlBlockProperties::EXIT).unwrap();
+        let merged = builder.add_block_arg(merge, 64).unwrap();
+        builder
+            .set_value_domain(
+                merged,
+                ECodeDomain::Register(RegisterId::new(STACK_POINTER)),
+            )
+            .unwrap();
+        builder.switch_to_block(entry).unwrap();
+        builder.begin_block().unwrap();
 
         let stack_pointer = push_entry_stack_pointer(&mut builder);
         let low = push_constant(&mut builder, 0x10);
         let near = push_binary(&mut builder, ECodeOpcode::Sub, stack_pointer, low);
         let high = push_constant(&mut builder, 0x20);
         let far = push_binary(&mut builder, ECodeOpcode::Sub, stack_pointer, high);
-
-        let merged = builder.emitter().emit_block_arg(block(3), 64).unwrap();
         builder
-            .emitter()
-            .set_value_domain(
-                merged,
-                ECodeDomain::Register(RegisterId::new(STACK_POINTER)),
-            )
+            .set_value_domain(near, ECodeDomain::Register(RegisterId::new(STACK_POINTER)))
             .unwrap();
-        builder.emitter().emit_edge_args([]).unwrap();
-        builder.emitter().emit_edge_args([]).unwrap();
-        builder.emitter().emit_edge_args([near]).unwrap();
-        builder.emitter().emit_edge_args([far]).unwrap();
+        builder
+            .set_value_domain(far, ECodeDomain::Register(RegisterId::new(STACK_POINTER)))
+            .unwrap();
+        builder
+            .add_successor(near_block, IlEdgeKinds::TAKEN, [])
+            .unwrap();
+        builder
+            .add_successor(far_block, IlEdgeKinds::FALL_THROUGH, [])
+            .unwrap();
+        builder.end_block().unwrap();
+        builder.switch_to_block(near_block).unwrap();
+        builder.begin_block().unwrap();
+        builder
+            .add_successor(merge, IlEdgeKinds::UNCONDITIONAL, [near])
+            .unwrap();
+        builder.end_block().unwrap();
+        builder.switch_to_block(far_block).unwrap();
+        builder.begin_block().unwrap();
+        builder
+            .add_successor(merge, IlEdgeKinds::UNCONDITIONAL, [far])
+            .unwrap();
+        builder.end_block().unwrap();
+        builder.switch_to_block(merge).unwrap();
+        builder.begin_block().unwrap();
+        builder.end_block().unwrap();
 
         let ir = builder.build_unchecked();
         let model = MCodeStackModel::new(&ir, RegisterId::new(STACK_POINTER), []);

@@ -1,6 +1,11 @@
-use super::required::ECodeRequiredDefs;
-use crate::il::common::{IlArtefact, IlCsr, IlIndexMapper, IlRewrite, IlSsaDef, IlValueId};
+use std::ops::Range;
+
+use crate::il::common::{
+    IlArtefact, IlBlockId, IlCsr, IlIndexMapper, IlRewrite, IlSsaDef, IlValueId,
+};
 use crate::il::ecode::{ECodeBuilder, ECodeIr, ECodeOpSpec, ECodeOpcode};
+
+use super::required::ECodeRequiredDefs;
 
 pub(crate) struct ECodeCompaction;
 
@@ -17,12 +22,7 @@ impl IlRewrite<ECodeIr> for ECodeCompaction {
                 IlSsaDef::Op(operation) => required.op_is_required(operation.index()),
             };
         }
-        let value_map = IlIndexMapper::from_kept(ir.values().len(), |index| value_kept[index]);
-
-        let remap_value = |value: IlValueId| {
-            IlValueId::try_from_index(value_map.map_index(value.index()))
-                .expect("remapped value id is representable")
-        };
+        let mut value_map = vec![None; ir.values().len()];
 
         let block_arg_kept = IlCsr::from_entries(
             ir.graph().blocks().len(),
@@ -33,6 +33,23 @@ impl IlRewrite<ECodeIr> for ECodeCompaction {
         );
 
         let edge_targets = ir.graph().successors().to_vec();
+        let edge_kinds = ir.graph().successor_kinds().to_vec();
+        let block_ranges = ir
+            .graph()
+            .blocks()
+            .iter()
+            .map(|block| block.ops())
+            .collect::<Vec<_>>();
+        let block_edge_ranges = ir
+            .graph()
+            .blocks()
+            .iter()
+            .map(|block| block.successors())
+            .collect::<Vec<_>>();
+        let mut block_order = (0..block_ranges.len())
+            .map(|index| IlBlockId::try_from_index(index).expect("ECode block id is representable"))
+            .collect::<Vec<_>>();
+        block_order.sort_unstable_by_key(|block| block_ranges[block.index()].start());
 
         let source_spans = operation_map
             .remap_source_spans(ir.source_spans())
@@ -41,65 +58,44 @@ impl IlRewrite<ECodeIr> for ECodeCompaction {
             .remap_parent_spans(ir.parent_spans())
             .expect("parent spans use the compaction source domain");
 
-        let mut graph = ir.take_graph();
-        graph
-            .remap_op_ranges(&operation_map)
-            .expect("graph operation ranges use the compaction source domain");
+        let graph = ir.take_graph();
 
         let metadata = *ir.metadata();
-        let mut builder = ECodeBuilder::new(metadata, graph)
+        let mut builder = ECodeBuilder::new_with(metadata, graph)
             .with_source_spans(source_spans)
             .with_parent_spans(parent_spans);
 
-        {
-            let mut emitter = builder.emitter();
-            for domain in ir.memory_domains() {
-                emitter.intern_memory_domain(domain.space());
+        for domain in ir.memory_domains() {
+            builder.intern_memory_domain(domain.space());
+        }
+
+        for (index, arg) in ir.block_args().iter().enumerate() {
+            if !required.block_arg_is_required(index) {
+                continue;
             }
+            let value = builder
+                .add_block_arg(arg.block(), arg.width())
+                .expect("compacted block argument is representable");
+            if let Some(domain) = ir.value_domain(arg.value()) {
+                builder
+                    .set_value_domain(value, domain)
+                    .expect("compacted block argument domain is valid");
+            }
+            value_map[arg.value().index()] = Some(value);
+        }
 
-            let mut operations = ir
-                .ops()
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| required.op_is_required(*index))
-                .peekable();
-            let mut block_args = ir
-                .block_args()
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| required.block_arg_is_required(*index))
-                .peekable();
-
-            while operations.peek().is_some() || block_args.peek().is_some() {
-                let emit_block_arg = match (operations.peek(), block_args.peek()) {
-                    (Some((_, operation)), Some((_, arg))) => {
-                        arg.value().index() < operation.results().start()
-                    }
-                    (None, Some(_)) => true,
-                    _ => false,
-                };
-
-                if emit_block_arg {
-                    let (_, arg) = block_args.next().expect("block argument remains");
-                    let value = emitter
-                        .emit_block_arg(arg.block(), arg.width())
-                        .expect("compacted block argument is representable");
-                    if let Some(domain) = ir.value_domain(arg.value()) {
-                        emitter
-                            .set_value_domain(value, domain)
-                            .expect("compacted block argument domain is valid");
-                    }
-                    continue;
-                }
-
-                let (_, operation) = operations.next().expect("operation remains");
+        let emit_operations = |builder: &mut ECodeBuilder,
+                               value_map: &mut [Option<IlValueId>],
+                               range: Range<usize>| {
+            for index in range.filter(|index| required.op_is_required(*index)) {
+                let operation = &ir.ops()[index];
                 let mut spec = ECodeOpSpec::new(operation.opcode(), operation.width())
                     .with_immediate(operation.immediate());
                 if operation.opcode() == ECodeOpcode::Constant
                     && operation.width() > 64
                     && let Some(value) = operation.constant(ir.constant_storage())
                 {
-                    spec.set_immediate(emitter.intern_constant(&value));
+                    spec.set_immediate(builder.intern_constant(&value));
                 }
                 if let Some(address) = operation.address() {
                     spec.set_address(address);
@@ -107,41 +103,69 @@ impl IlRewrite<ECodeIr> for ECodeCompaction {
                 if let Some(address_space) = operation.address_space() {
                     spec.set_address_space(address_space);
                 }
-                let (_, results) = emitter
+                let emitted = builder
                     .emit(
                         spec,
-                        ir.op_operands_for(operation)
-                            .iter()
-                            .copied()
-                            .map(remap_value),
+                        ir.op_operands_for(operation).iter().map(|value| {
+                            value_map[value.index()]
+                                .expect("a compacted operand is defined before its use")
+                        }),
                         operation.results().len(),
                     )
                     .expect("compacted operation is representable");
                 for (old, new) in (operation.results().start()..operation.results().end())
-                    .zip(results.start()..results.end())
+                    .zip(emitted.results().start()..emitted.results().end())
                 {
                     let old = IlValueId::try_from_index(old).expect("value id is representable");
                     let new = IlValueId::try_from_index(new)
                         .expect("compacted value id is representable");
                     if let Some(domain) = ir.value_domain(old) {
-                        emitter
+                        builder
                             .set_value_domain(new, domain)
                             .expect("compacted result domain is valid");
                     }
+                    value_map[old.index()] = Some(new);
                 }
             }
+        };
 
-            for (edge, target) in edge_targets.iter().enumerate() {
-                let kept = block_arg_kept.row(target.index());
-                emitter
-                    .emit_edge_args(
-                        ir.args_for_edge(edge)
-                            .iter()
-                            .enumerate()
-                            .filter(|(position, _)| kept.get(*position).copied().unwrap_or(false))
-                            .map(|(_, &value)| remap_value(value)),
-                    )
-                    .expect("compacted edge arguments are representable");
+        if block_order.is_empty() {
+            emit_operations(&mut builder, &mut value_map, 0..ir.ops().len());
+        } else {
+            for block in block_order {
+                builder
+                    .switch_to_block(block)
+                    .expect("compacted ECode block is representable");
+                builder
+                    .begin_block()
+                    .expect("compacted ECode block can be started");
+                let range = block_ranges[block.index()];
+                emit_operations(&mut builder, &mut value_map, range.start()..range.end());
+
+                let edges = block_edge_ranges[block.index()];
+                for edge in edges.start()..edges.end() {
+                    let target = edge_targets[edge];
+                    let kept = block_arg_kept.row(target.index());
+                    builder
+                        .add_successor(
+                            target,
+                            edge_kinds[edge],
+                            ir.args_for_edge(edge)
+                                .iter()
+                                .enumerate()
+                                .filter(|(position, _)| {
+                                    kept.get(*position).copied().unwrap_or(false)
+                                })
+                                .map(|(_, value)| {
+                                    value_map[value.index()]
+                                        .expect("a compacted edge argument remains defined")
+                                }),
+                        )
+                        .expect("compacted ECode edge is representable");
+                }
+                builder
+                    .end_block()
+                    .expect("compacted ECode block can be ended");
             }
         }
 

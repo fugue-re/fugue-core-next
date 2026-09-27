@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::{iter, mem};
+use std::mem;
 
+use fixedbitset::FixedBitSet;
 use rustc_hash::{FxHashMap, FxHashSet};
+use smallvec::SmallVec;
 
 use super::ECodeToMCodeScratch;
 use super::variables::{
@@ -17,7 +19,7 @@ use crate::il::mcode::transform::{
     ECodeToMCodeAnalysis, MCodeCallArg, MCodeCallOutputComponent, MCodeExitRequirement,
 };
 use crate::il::mcode::{
-    MCodeBuilder, MCodeIr, MCodeOpSpec, MCodeOpcode, MCodeVar, MCodeVarId, MCodeVersion,
+    MCodeBuilder, MCodeIr, MCodeOpSpec, MCodeOpcode, MCodeResultSpec, MCodeVar, MCodeVarId,
 };
 use crate::storage::segments::space::AddressSpaceId;
 
@@ -52,27 +54,6 @@ enum MCodeBlockArgDomain {
 }
 
 #[derive(Debug, Copy, Clone)]
-struct MCodeBlockArgBinding {
-    domain: MCodeBlockArgDomain,
-    origin: MCodeBlockArgOrigin,
-    value: IlValueId,
-}
-
-impl MCodeBlockArgBinding {
-    const fn new(
-        domain: MCodeBlockArgDomain,
-        origin: MCodeBlockArgOrigin,
-        value: IlValueId,
-    ) -> Self {
-        Self {
-            domain,
-            origin,
-            value,
-        }
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
 struct MCodeBlockArgSpec {
     domain: MCodeBlockArgDomain,
     origin: MCodeBlockArgOrigin,
@@ -102,18 +83,30 @@ impl MCodeBlockArgSpec {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+struct MCodeBlockArgBinding {
+    domain: MCodeBlockArgDomain,
+    origin: MCodeBlockArgOrigin,
+    value: IlValueId,
+}
+
+impl MCodeBlockArgBinding {
+    const fn new(spec: MCodeBlockArgSpec, value: IlValueId) -> Self {
+        Self {
+            domain: spec.domain,
+            origin: spec.origin,
+            value,
+        }
+    }
+}
+
 #[derive(Default)]
 struct MCodeBindings {
-    ordered: Vec<(IlValueId, MCodeVarId)>,
     variables: FxHashMap<IlValueId, MCodeVarId>,
     latest: FxHashMap<MCodeVarId, IlValueId>,
 }
 
 impl MCodeBindings {
-    fn iter(&self) -> impl Iterator<Item = (IlValueId, MCodeVarId)> + '_ {
-        self.ordered.iter().copied()
-    }
-
     fn latest(&self, variable: MCodeVarId) -> Option<IlValueId> {
         self.latest.get(&variable).copied()
     }
@@ -130,7 +123,6 @@ impl MCodeBindings {
             )),
             Some(_) => Ok(()),
             None => {
-                self.ordered.push((value, variable));
                 self.latest.insert(variable, value);
                 Ok(())
             }
@@ -308,9 +300,9 @@ pub(crate) struct ECodeToMCodeLifter<'a, 'b> {
     variable_widths: MCodeVariableWidths,
     bindings: MCodeBindings,
     call_output_variables: MCodeCallOutputVariables,
-    block_args: Vec<Vec<MCodeBlockArgBinding>>,
-    blocks: Vec<Option<IlBlock>>,
-    edge_args: Vec<Vec<IlValueId>>,
+    block_arg_specs: Vec<SmallVec<[MCodeBlockArgSpec; 2]>>,
+    block_args: Vec<SmallVec<[MCodeBlockArgBinding; 2]>>,
+    lifted_blocks: FixedBitSet,
     operation_blocks: Vec<Option<IlBlockId>>,
     operation_ranges: IlIndexRangeMap,
 }
@@ -328,7 +320,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             let analysed = MCodeVarId::try_from_index(index)?;
             let representative = call_outputs.representative_for(analysed);
             let variable = analysis.variables().variables()[representative.index()];
-            target_variables.push(builder.emitter().intern_variable(variable)?);
+            target_variables.push(builder.add_variable(variable)?);
         }
         let variable_widths = MCodeVariableWidths::new(ir, analysis, &target_variables)?;
 
@@ -342,9 +334,9 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             variable_widths,
             bindings: MCodeBindings::default(),
             call_output_variables: call_outputs,
-            block_args: vec![Vec::new(); ir.graph().blocks().len()],
-            blocks: vec![None; ir.graph().blocks().len()],
-            edge_args: vec![Vec::new(); ir.graph().successors().len()],
+            block_arg_specs: vec![SmallVec::new(); ir.graph().blocks().len()],
+            block_args: vec![SmallVec::new(); ir.graph().blocks().len()],
+            lifted_blocks: FixedBitSet::with_capacity(ir.graph().blocks().len()),
             operation_blocks: ir.op_blocks(),
             operation_ranges: IlIndexRangeMap::unmapped(ir.ops().len()),
         })
@@ -385,33 +377,36 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "variable binding"))
     }
 
+    fn push_memory_undefined(&mut self, space: AddressSpaceId) -> Result<IlValueId, IlError> {
+        self.builder.intern_memory_domain(space);
+        let immediate = u64::from(space.value());
+        self.builder.emit_value(
+            MCodeOpSpec::new(MCodeOpcode::Undefined, 0).with_immediate(immediate),
+            [],
+            MCodeResultSpec::new(0),
+        )
+    }
+
     pub(crate) fn lift(mut self) -> Result<MCodeIr, IlError> {
         for domain in self.source.memory_domains() {
-            self.builder.emitter().intern_memory_domain(domain.space());
+            self.builder.add_memory_domain(domain.space());
         }
-        self.builder.set_aliased_variables(
-            self.analysis
-                .aliases()
-                .iter()
-                .map(|variable| self.target_variable(variable))
-                .collect(),
-        );
+        for variable in self.analysis.aliases().iter() {
+            self.builder
+                .add_aliased_variable(self.target_variable(variable))?;
+        }
 
         match self.source.graph().entry_block() {
             Some(entry) => self.lift_blocks(entry)?,
             None => self.lift_linear()?,
         }
 
-        let mut versions = FxHashMap::default();
-        for (value, variable) in self.bindings.iter() {
-            let version = versions.entry(variable).or_insert(MCodeVersion::new(0));
-            *version = version
-                .checked_next()
-                .ok_or_else(|| IlError::id_exhausted("MCode version"))?;
-            self.builder
-                .emitter()
-                .bind_value(value, variable, *version)?;
-        }
+        let source_spans = self
+            .operation_ranges
+            .remap_source_spans(self.source.source_spans())?;
+        let parent_spans = self.operation_ranges.parent_spans()?;
+        self.builder.set_source_spans(source_spans);
+        self.builder.set_parent_spans(parent_spans);
 
         self.builder.build()
     }
@@ -421,32 +416,35 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         for index in 0..self.source.ops().len() {
             self.lift_op_at(index, &mut current)?;
         }
-
-        self.lift_graph(self.source.graph().blocks().iter().map(|block| block.ops()))
+        Ok(())
     }
 
     fn lift_blocks(&mut self, entry: IlBlockId) -> Result<(), IlError> {
         let graph = self.source.graph();
+        for (index, source_block) in graph.blocks().iter().enumerate() {
+            let block = IlBlockId::try_from_index(index)?;
+            let added = match graph.block_source(block) {
+                Some(source) => self
+                    .builder
+                    .add_block_with_source(source_block.properties(), source)?,
+                None => self.builder.add_block(source_block.properties())?,
+            };
+            debug_assert_eq!(added, block);
+        }
         let dominance = IlDominance::from_blocks(graph.blocks(), graph.successors(), entry);
         self.place_block_args(&dominance)?;
+        self.declare_block_args()?;
         self.lift_block_tree(entry, &dominance, ECodeToMCodeRenameState::default())?;
 
         for index in 0..graph.blocks().len() {
-            if self.blocks[index].is_some() {
+            if self.lifted_blocks.contains(index) {
                 continue;
             }
             let block = IlBlockId::try_from_index(index)?;
             self.lift_block(block, &mut ECodeToMCodeRenameState::default())?;
         }
 
-        for args in mem::take(&mut self.edge_args) {
-            self.builder.emitter().emit_edge_args(args)?;
-        }
-        let blocks = mem::take(&mut self.blocks)
-            .into_iter()
-            .collect::<Option<Vec<_>>>()
-            .expect("every MCode block is constructed before graph replacement");
-        self.lift_graph(blocks.into_iter().map(|block| block.ops()))
+        Ok(())
     }
 
     fn lift_block_tree(
@@ -480,6 +478,8 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         block: IlBlockId,
         current: &mut ECodeToMCodeRenameState,
     ) -> Result<(), IlError> {
+        self.builder.switch_to_block(block)?;
+        self.builder.begin_block()?;
         for index in 0..self.block_args[block.index()].len() {
             let arg = self.block_args[block.index()][index];
             match arg.domain {
@@ -504,7 +504,6 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         let source_block = *self.source.graph().blocks().get(block.index()).ok_or(
             IlError::range_out_of_bounds(block.index(), self.source.graph().blocks().len()),
         )?;
-        let start = self.builder.emitter().op_count();
         self.allocate_missing_stack_arg_values(source_block, current)?;
 
         let terminator = (source_block.ops().start()..source_block.ops().end())
@@ -529,13 +528,57 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             self.lift_op_at(index, current)?;
         }
 
-        self.lift_edge_args(source_block, current)?;
-        let end = self.builder.emitter().op_count();
-        self.blocks[block.index()] = Some(IlBlock::new(
-            IlIndexRange::new(start, end)?,
-            source_block.successors(),
-            source_block.properties(),
-        ));
+        self.add_block_successors(source_block, current)?;
+        self.builder.end_block()?;
+        self.lifted_blocks.insert(block.index());
+
+        Ok(())
+    }
+
+    fn add_block_successors(
+        &mut self,
+        source_block: IlBlock,
+        current: &mut ECodeToMCodeRenameState,
+    ) -> Result<(), IlError> {
+        let graph = self.source.graph();
+        for (offset, successor) in source_block
+            .successors()
+            .slice(graph.successors())
+            .iter()
+            .enumerate()
+        {
+            let edge = source_block.successors().start() + offset;
+            let source_args = self.source.args_for_edge(edge);
+            self.scratch.edge_args.clear();
+            for index in 0..self.block_args[successor.index()].len() {
+                let arg = self.block_args[successor.index()][index];
+                let value = match arg.origin {
+                    MCodeBlockArgOrigin::Source { position, .. } => {
+                        let source = source_args.get(position).copied().ok_or_else(|| {
+                            IlError::missing_component(MCodeIr::FORM, "edge argument")
+                        })?;
+                        self.target_value(source)?
+                    }
+                    MCodeBlockArgOrigin::Stack(variable) => match current.stack_value(variable) {
+                        Some(value) => value,
+                        None => {
+                            let value = self.push_variable_undefined(
+                                variable,
+                                self.variable_widths.width(variable)?,
+                            )?;
+                            current.insert_stack(variable, value);
+                            value
+                        }
+                    },
+                };
+                self.scratch.edge_args.push(value);
+            }
+            self.builder.add_successor(
+                *successor,
+                graph.successor_kinds()[edge],
+                self.scratch.edge_args.iter().copied(),
+            )?;
+        }
 
         Ok(())
     }
@@ -566,72 +609,12 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         Ok(())
     }
 
-    fn lift_edge_args(
-        &mut self,
-        source_block: IlBlock,
-        current: &mut ECodeToMCodeRenameState,
-    ) -> Result<(), IlError> {
-        for (offset, successor) in source_block
-            .successors()
-            .slice(self.source.graph().successors())
-            .iter()
-            .enumerate()
-        {
-            let edge = source_block.successors().start() + offset;
-            let source_args = self.source.args_for_edge(edge);
-            let mut args = Vec::with_capacity(self.block_args[successor.index()].len());
-            for index in 0..self.block_args[successor.index()].len() {
-                let arg = self.block_args[successor.index()][index];
-                let value = match arg.origin {
-                    MCodeBlockArgOrigin::Source { position, .. } => {
-                        let source = source_args.get(position).copied().ok_or_else(|| {
-                            IlError::missing_component(MCodeIr::FORM, "edge argument")
-                        })?;
-                        self.target_value(source)?
-                    }
-                    MCodeBlockArgOrigin::Stack(variable) => match current.stack_value(variable) {
-                        Some(value) => value,
-                        None => {
-                            let value = self.push_variable_undefined(
-                                variable,
-                                self.variable_widths.width(variable)?,
-                            )?;
-                            current.insert_stack(variable, value);
-                            value
-                        }
-                    },
-                };
-                args.push(value);
-            }
-            self.edge_args[edge] = args;
-        }
-
-        Ok(())
-    }
-
-    fn lift_graph(
-        &mut self,
-        operation_ranges: impl ExactSizeIterator<Item = IlIndexRange>,
-    ) -> Result<(), IlError> {
-        let source = self.source.graph();
-        let graph = source.clone().with_op_ranges(operation_ranges)?;
-        let source_spans = self
-            .operation_ranges
-            .remap_source_spans(self.source.source_spans())?;
-        let parent_spans = self.operation_ranges.parent_spans()?;
-        self.builder.set_graph(graph);
-        self.builder.set_source_spans(source_spans);
-        self.builder.set_parent_spans(parent_spans);
-
-        Ok(())
-    }
-
     fn lift_op_at(
         &mut self,
         index: usize,
         current: &mut ECodeToMCodeRenameState,
     ) -> Result<(), IlError> {
-        let start = self.builder.emitter().op_count();
+        let start = self.builder.op_count();
         let site = IlOpId::try_from_index(index)?;
         let operation = self.source.ops()[index];
 
@@ -690,7 +673,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             _ => self.lift_carried(site, operation, current)?,
         }
 
-        let end = self.builder.emitter().op_count();
+        let end = self.builder.op_count();
         self.operation_ranges
             .set_range(index, IlIndexRange::new(start, end)?)?;
 
@@ -702,27 +685,14 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         variable: MCodeVarId,
         width: u32,
     ) -> Result<IlValueId, IlError> {
-        let (_, results) = self.builder.emitter().emit(
+        let value = self.builder.emit_value(
             MCodeOpSpec::new(MCodeOpcode::Undefined, width),
             [],
-            [width],
+            MCodeResultSpec::new(width).with_variable(variable),
         )?;
-        let value = IlValueId::try_from_index(results.start())?;
         self.bindings.insert(value, variable)?;
 
         Ok(value)
-    }
-
-    fn push_memory_undefined(&mut self, space: AddressSpaceId) -> Result<IlValueId, IlError> {
-        self.builder.emitter().intern_memory_domain(space);
-        let immediate = u64::from(space.value());
-        let (_, results) = self.builder.emitter().emit(
-            MCodeOpSpec::new(MCodeOpcode::Undefined, 0).with_immediate(immediate),
-            [],
-            [0],
-        )?;
-
-        IlValueId::try_from_index(results.start())
     }
 
     fn lift_undefined(
@@ -786,7 +756,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             .copied()
             .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "variable value"))?;
 
-        let (_, results) = match self
+        let operation = match self
             .source
             .defining_op(source_operand)
             .filter(|insert| insert.opcode() == ECodeOpcode::Insert)
@@ -805,37 +775,39 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                     || self.bindings.latest(variable) != Some(previous)
                 {
                     let value = self.target_value(source_operand)?;
-                    self.builder.emitter().emit(
+                    self.builder.emit(
                         MCodeOpSpec::new(MCodeOpcode::SetVar, operation.width())
                             .with_variable(variable),
                         [value],
-                        [operation.width()],
+                        [MCodeResultSpec::new(operation.width()).with_variable(variable)],
                     )?
                 } else {
                     let inserted = self.target_value(inserted_source)?;
                     let width = self.source.value_width(inserted_source).ok_or_else(|| {
                         IlError::missing_component(MCodeIr::FORM, "partial variable width")
                     })?;
-                    self.builder.emitter().emit(
+                    self.builder.emit(
                         MCodeOpSpec::new(MCodeOpcode::SetVarField, width)
                             .with_variable(variable)
                             .with_immediate(insert.immediate()),
                         [previous, inserted],
-                        [operation.width()],
+                        [MCodeResultSpec::new(operation.width()).with_variable(variable)],
                     )?
                 }
             }
             None => {
                 let value = self.target_value(source_operand)?;
-                self.builder.emitter().emit(
+                self.builder.emit(
                     MCodeOpSpec::new(MCodeOpcode::SetVar, operation.width())
                         .with_variable(variable),
                     [value],
-                    [operation.width()],
+                    [MCodeResultSpec::new(operation.width()).with_variable(variable)],
                 )?
             }
         };
-        let value = IlValueId::try_from_index(results.start())?;
+        let value = operation
+            .single_result()
+            .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "single operation result"))?;
         self.bindings.insert(value, variable)?;
         self.target_values[result.index()] = Some(value);
         let domain = self.source.value_domain(result);
@@ -885,11 +857,10 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                 .with_variable(variable)
                 .with_immediate(access.field_offset())
                 .with_address_space(space);
-            let (_, results) = self
-                .builder
-                .emitter()
-                .emit(spec, [memory], [operation.width()])?;
-            self.target_values[result.index()] = Some(IlValueId::try_from_index(results.start())?);
+            let value =
+                self.builder
+                    .emit_value(spec, [memory], MCodeResultSpec::new(operation.width()))?;
+            self.target_values[result.index()] = Some(value);
             return Ok(());
         }
 
@@ -906,13 +877,13 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             return Ok(());
         }
 
-        let (_, results) = self.builder.emitter().emit(
+        let value = self.builder.emit_value(
             MCodeOpSpec::new(MCodeOpcode::Extract, operation.width())
                 .with_immediate(access.field_offset()),
             [previous],
-            [operation.width()],
+            MCodeResultSpec::new(operation.width()),
         )?;
-        self.target_values[result.index()] = Some(IlValueId::try_from_index(results.start())?);
+        self.target_values[result.index()] = Some(value);
 
         Ok(())
     }
@@ -964,10 +935,15 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                 .with_variable(variable)
                 .with_immediate(access.field_offset())
                 .with_address_space(space);
-            let (_, results) =
-                self.builder
-                    .emitter()
-                    .emit(spec, [value, memory], [0, full_width])?;
+            let operation = self.builder.emit(
+                spec,
+                [value, memory],
+                [
+                    MCodeResultSpec::new(0),
+                    MCodeResultSpec::new(full_width).with_variable(variable),
+                ],
+            )?;
+            let results = operation.results();
             let memory_result = IlValueId::try_from_index(results.start())?;
             let variable_result = IlValueId::try_from_index(results.start() + 1)?;
             self.target_values[source_result.index()] = Some(memory_result);
@@ -978,7 +954,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             return Ok(());
         }
 
-        let (_, results) = if field {
+        let operation = if field {
             let previous = match current.stack_value(variable) {
                 Some(value) => value,
                 None => {
@@ -988,35 +964,36 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                 }
             };
             if self.bindings.latest(variable) == Some(previous) {
-                self.builder.emitter().emit(
+                self.builder.emit(
                     MCodeOpSpec::new(MCodeOpcode::SetVarField, width)
                         .with_variable(variable)
                         .with_immediate(access.field_offset()),
                     [previous, value],
-                    [full_width],
+                    [MCodeResultSpec::new(full_width).with_variable(variable)],
                 )?
             } else {
-                let (_, results) = self.builder.emitter().emit(
+                let inserted = self.builder.emit_value(
                     MCodeOpSpec::new(MCodeOpcode::Insert, full_width)
                         .with_immediate(access.field_offset()),
                     [previous, value],
-                    [full_width],
+                    MCodeResultSpec::new(full_width),
                 )?;
-                let inserted = IlValueId::try_from_index(results.start())?;
-                self.builder.emitter().emit(
+                self.builder.emit(
                     MCodeOpSpec::new(MCodeOpcode::SetVar, full_width).with_variable(variable),
                     [inserted],
-                    [full_width],
+                    [MCodeResultSpec::new(full_width).with_variable(variable)],
                 )?
             }
         } else {
-            self.builder.emitter().emit(
+            self.builder.emit(
                 MCodeOpSpec::new(MCodeOpcode::SetVar, full_width).with_variable(variable),
                 [value],
-                [full_width],
+                [MCodeResultSpec::new(full_width).with_variable(variable)],
             )?
         };
-        let variable_result = IlValueId::try_from_index(results.start())?;
+        let variable_result = operation
+            .single_result()
+            .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "single operation result"))?;
         self.bindings.insert(variable_result, variable)?;
         self.target_values[source_result.index()] = Some(memory);
         current.insert_memory(space, memory);
@@ -1026,22 +1003,13 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         Ok(())
     }
 
-    fn materialise_call_output_component(
+    fn materialise_stack_output(
         &mut self,
-        site: IlOpId,
-        location: MCodeStorageLocation,
         component: MCodeCallOutputComponent,
         value: IlValueId,
         space: AddressSpaceId,
         current: &mut ECodeToMCodeRenameState,
     ) -> Result<(), IlError> {
-        if let MCodeCallOutputComponent::Register { register, .. } = component {
-            let variable = self.intern_call_output_variable(site, location, register)?;
-            current.insert_unmatched_call_output(register, value);
-            self.bindings.insert(value, variable)?;
-            return Ok(());
-        }
-
         let MCodeCallOutputComponent::Stack {
             access,
             object_width,
@@ -1056,10 +1024,6 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             .stack_variable(access.object())
             .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "stack variable"))?;
         let variable = self.target_variable(analysed);
-        if self.variable_widths.width(variable)? != object_width {
-            return Err(IlError::width_mismatch(MCodeIr::FORM));
-        }
-
         let field = access.field_offset() != 0 || width != object_width;
         if self.analysis.aliases().contains(analysed) {
             let opcode = if field {
@@ -1074,10 +1038,15 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                 .with_variable(variable)
                 .with_immediate(access.field_offset())
                 .with_address_space(space);
-            let (_, materialised) =
-                self.builder
-                    .emitter()
-                    .emit(spec, [value, memory], [0, object_width])?;
+            let operation = self.builder.emit(
+                spec,
+                [value, memory],
+                [
+                    MCodeResultSpec::new(0),
+                    MCodeResultSpec::new(object_width).with_variable(variable),
+                ],
+            )?;
+            let materialised = operation.results();
             let memory = IlValueId::try_from_index(materialised.start())?;
             let full_value = IlValueId::try_from_index(materialised.start() + 1)?;
             self.bindings.insert(full_value, variable)?;
@@ -1101,29 +1070,30 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                 value
             }
         };
-        let (_, materialised) = if self.bindings.latest(variable) == Some(previous) {
-            self.builder.emitter().emit(
+        let operation = if self.bindings.latest(variable) == Some(previous) {
+            self.builder.emit(
                 MCodeOpSpec::new(MCodeOpcode::SetVarField, width)
                     .with_variable(variable)
                     .with_immediate(access.field_offset()),
                 [previous, value],
-                [object_width],
+                [MCodeResultSpec::new(object_width).with_variable(variable)],
             )?
         } else {
-            let (_, inserted) = self.builder.emitter().emit(
+            let inserted = self.builder.emit_value(
                 MCodeOpSpec::new(MCodeOpcode::Insert, object_width)
                     .with_immediate(access.field_offset()),
                 [previous, value],
-                [object_width],
+                MCodeResultSpec::new(object_width),
             )?;
-            let inserted = IlValueId::try_from_index(inserted.start())?;
-            self.builder.emitter().emit(
+            self.builder.emit(
                 MCodeOpSpec::new(MCodeOpcode::SetVar, object_width).with_variable(variable),
                 [inserted],
-                [object_width],
+                [MCodeResultSpec::new(object_width).with_variable(variable)],
             )?
         };
-        let full_value = IlValueId::try_from_index(materialised.start())?;
+        let full_value = operation
+            .single_result()
+            .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "single operation result"))?;
         self.bindings.insert(full_value, variable)?;
         self.scratch.required_values.push(full_value);
         current.insert_stack(variable, full_value);
@@ -1147,7 +1117,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                 .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "address space"))?,
             _ => unreachable!(),
         };
-        self.builder.emitter().intern_memory_domain(space);
+        self.builder.intern_memory_domain(space);
         let memory = match current.memory_value(space) {
             Some(value) => value,
             None => {
@@ -1190,39 +1160,9 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         }
         operands.push(memory);
 
-        let widths = iter::once(0).chain(
-            self.analysis
-                .abi()
-                .call(site)
-                .into_iter()
-                .flat_map(|call| call.outputs())
-                .flat_map(|output| output.components())
-                .map(MCodeCallOutputComponent::width),
-        );
-        let opcode = match operation.opcode() {
-            ECodeOpcode::Call => MCodeOpcode::Call,
-            ECodeOpcode::CallIndirect => MCodeOpcode::CallIndirect,
-            _ => unreachable!(),
-        };
-        let mut spec = MCodeOpSpec::new(opcode, 0).with_address_space(space);
-        if let Some(address) = operation.address() {
-            spec = spec.with_address(address);
-        }
-        let results = self
-            .builder
-            .emitter()
-            .emit(spec, operands.iter().copied(), widths);
-        operands.clear();
-        self.scratch.operands = operands;
-        let (_, results) = results?;
-        let memory_result = IlValueId::try_from_index(results.start())?;
-        current.clear_memory();
-        current.clear_unmatched_call_memory();
-        current.insert_memory(space, memory_result);
-        current.insert_unmatched_call_memory(space);
-        current.clear_unmatched_call_outputs();
-
-        let mut result_index = results.start() + 1;
+        let mut result_specs = mem::take(&mut self.scratch.result_specs);
+        result_specs.clear();
+        result_specs.push(MCodeResultSpec::new(0));
         let output_count = self
             .analysis
             .abi()
@@ -1245,13 +1185,80 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                     .and_then(|output| output.components().get(component_index))
                     .copied()
                     .expect("the analysed call output component count is stable");
+                let (variable, direct_binding) =
+                    self.call_output_binding(site, location, component)?;
+                let mut result = MCodeResultSpec::new(component.width());
+                if direct_binding {
+                    result.set_variable(variable);
+                }
+                result_specs.push(result);
+            }
+        }
+        let opcode = match operation.opcode() {
+            ECodeOpcode::Call => MCodeOpcode::Call,
+            ECodeOpcode::CallIndirect => MCodeOpcode::CallIndirect,
+            _ => unreachable!(),
+        };
+        let mut spec = MCodeOpSpec::new(opcode, 0).with_address_space(space);
+        if let Some(address) = operation.address() {
+            spec = spec.with_address(address);
+        }
+        let results = self
+            .builder
+            .emit(spec, operands.iter().copied(), &result_specs);
+        operands.clear();
+        self.scratch.operands = operands;
+        let results = results?.results();
+        let memory_result = IlValueId::try_from_index(results.start())?;
+        current.clear_memory();
+        current.clear_unmatched_call_memory();
+        current.insert_memory(space, memory_result);
+        current.insert_unmatched_call_memory(space);
+        current.clear_unmatched_call_outputs();
+
+        let mut result_index = results.start() + 1;
+        for output_index in 0..output_count {
+            let component_count = self
+                .analysis
+                .abi()
+                .call(site)
+                .and_then(|call| call.outputs().get(output_index))
+                .map(|output| output.components().len())
+                .expect("the analysed call output count is stable");
+            for component_index in 0..component_count {
+                let component = self
+                    .analysis
+                    .abi()
+                    .call(site)
+                    .and_then(|call| call.outputs().get(output_index))
+                    .and_then(|output| output.components().get(component_index))
+                    .copied()
+                    .expect("the analysed call output component count is stable");
                 let value = IlValueId::try_from_index(result_index)?;
-                self.materialise_call_output_component(
-                    site, location, component, value, space, current,
-                )?;
+                match component {
+                    MCodeCallOutputComponent::Register { register, .. } => {
+                        let variable = result_specs[result_index - results.start()]
+                            .variable()
+                            .expect("register call outputs are bound directly");
+                        current.insert_unmatched_call_output(register, value);
+                        self.bindings.insert(value, variable)?;
+                    }
+                    MCodeCallOutputComponent::Stack { .. } => {
+                        if let Some(variable) =
+                            result_specs[result_index - results.start()].variable()
+                        {
+                            self.bindings.insert(value, variable)?;
+                            current.insert_stack(variable, value);
+                        } else {
+                            self.materialise_stack_output(component, value, space, current)?;
+                        }
+                    }
+                }
                 result_index += 1;
             }
         }
+        result_specs.clear();
+        self.scratch.result_specs = result_specs;
 
         Ok(())
     }
@@ -1272,7 +1279,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                 .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "address space"))?,
             _ => unreachable!(),
         };
-        self.builder.emitter().intern_memory_domain(space);
+        self.builder.intern_memory_domain(space);
         let memory = match current.memory_value(space) {
             Some(value) => value,
             None => {
@@ -1324,10 +1331,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         if let Some(address) = operation.address() {
             spec = spec.with_address(address);
         }
-        let results = self
-            .builder
-            .emitter()
-            .emit(spec, operands.iter().copied(), []);
+        let results = self.builder.emit_effect(spec, operands.iter().copied());
         operands.clear();
         self.scratch.operands = operands;
         results?;
@@ -1347,13 +1351,11 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                     .and_then(|low| high.checked_add(low))
             })
             .ok_or_else(|| IlError::integer_overflow("split variable width"))?;
-        let (_, results) = self.builder.emitter().emit(
+        self.builder.emit_value(
             MCodeOpSpec::new(MCodeOpcode::VarSplit, width),
             [high_value, low_value],
-            [width],
-        )?;
-
-        IlValueId::try_from_index(results.start())
+            MCodeResultSpec::new(width),
+        )
     }
 
     fn stack_arg_value(
@@ -1387,15 +1389,14 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             } else {
                 MCodeOpcode::VarAliased
             };
-            let (_, results) = self.builder.emitter().emit(
+            return self.builder.emit_value(
                 MCodeOpSpec::new(opcode, width)
                     .with_variable(variable)
                     .with_immediate(access.field_offset())
                     .with_address_space(space),
                 [memory],
-                [width],
-            )?;
-            return IlValueId::try_from_index(results.start());
+                MCodeResultSpec::new(width),
+            );
         }
 
         let value = match current.stack_value(variable) {
@@ -1409,12 +1410,11 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         if access.field_offset() == 0 && width == full_width {
             return Ok(value);
         }
-        let (_, results) = self.builder.emitter().emit(
+        self.builder.emit_value(
             MCodeOpSpec::new(MCodeOpcode::Extract, width).with_immediate(access.field_offset()),
             [value],
-            [width],
-        )?;
-        IlValueId::try_from_index(results.start())
+            MCodeResultSpec::new(width),
+        )
     }
 
     fn intern_call_output_variable(
@@ -1439,9 +1439,41 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             .map(MCodeVar::index)
             .max()
             .map_or(0, |index| index.saturating_add(1));
-        self.builder
-            .emitter()
-            .intern_variable(MCodeVar::register(root, next))
+        self.builder.add_variable(MCodeVar::register(root, next))
+    }
+
+    fn call_output_binding(
+        &mut self,
+        site: IlOpId,
+        location: MCodeStorageLocation,
+        component: MCodeCallOutputComponent,
+    ) -> Result<(MCodeVarId, bool), IlError> {
+        match component {
+            MCodeCallOutputComponent::Register { register, .. } => Ok((
+                self.intern_call_output_variable(site, location, register)?,
+                true,
+            )),
+            MCodeCallOutputComponent::Stack {
+                access,
+                object_width,
+                width,
+            } => {
+                let analysed = self
+                    .analysis
+                    .variables()
+                    .stack_variable(access.object())
+                    .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "stack variable"))?;
+                let variable = self.target_variable(analysed);
+                if self.variable_widths.width(variable)? != object_width {
+                    return Err(IlError::width_mismatch(MCodeIr::FORM));
+                }
+                let field = access.field_offset() != 0 || width != object_width;
+                Ok((
+                    variable,
+                    !field && !self.analysis.aliases().contains(analysed),
+                ))
+            }
+        }
     }
 
     fn lift_carried(
@@ -1483,10 +1515,12 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                     let spec = MCodeOpSpec::new(opcode, operation.width())
                         .with_variable(variable)
                         .with_immediate(access.field_offset());
-                    let (_, results) =
-                        self.builder.emitter().emit(spec, [], [operation.width()])?;
-                    self.target_values[source.index()] =
-                        Some(IlValueId::try_from_index(results.start())?);
+                    let value = self.builder.emit_value(
+                        spec,
+                        [],
+                        MCodeResultSpec::new(operation.width()),
+                    )?;
+                    self.target_values[source.index()] = Some(value);
                     return Ok(());
                 }
             }
@@ -1501,7 +1535,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             let value = operation
                 .constant(self.source.constant_storage())
                 .ok_or_else(|| IlError::missing_component(ECodeIr::FORM, "constant"))?;
-            self.builder.emitter().intern_constant(&value)
+            self.builder.intern_constant(&value)
         } else {
             operation.immediate()
         };
@@ -1512,33 +1546,56 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         if let Some(space) = operation.address_space() {
             spec = spec.with_address_space(space);
             if opcode.requires_memory_domain() {
-                self.builder.emitter().intern_memory_domain(space);
+                self.builder.intern_memory_domain(space);
             }
         }
         let mut operands = mem::take(&mut self.scratch.operands);
-        let result_widths = operation
-            .results()
-            .slice(self.source.values())
-            .iter()
-            .map(|value| value.width());
+        let mut result_specs = mem::take(&mut self.scratch.result_specs);
+        result_specs.clear();
+        for source_index in operation.results().start()..operation.results().end() {
+            let source = IlValueId::try_from_index(source_index)?;
+            let mut result = MCodeResultSpec::new(
+                self.source
+                    .value_width(source)
+                    .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "result width"))?,
+            );
+            if self
+                .source
+                .value_domain(source)
+                .is_some_and(|domain| domain.is_register_or_flag())
+            {
+                result.set_variable(self.target_variable_for_value(source)?);
+            }
+            result_specs.push(result);
+        }
         let results = self
             .builder
-            .emitter()
-            .emit(spec, operands.iter().copied(), result_widths);
+            .emit(spec, operands.iter().copied(), &result_specs);
         operands.clear();
         self.scratch.operands = operands;
-        let (_, results) = results?;
+        let results = results?.results();
         for (offset, source_index) in
             (operation.results().start()..operation.results().end()).enumerate()
         {
             let source = IlValueId::try_from_index(source_index)?;
             let value = IlValueId::try_from_index(results.start() + offset)?;
             self.target_values[source.index()] = Some(value);
-            if let Some(ECodeDomain::Memory(space)) = self.source.value_domain(source) {
-                current.insert_memory(space, value);
-                current.remove_unmatched_call_memory(space);
+            match self.source.value_domain(source) {
+                Some(ECodeDomain::Memory(space)) => {
+                    current.insert_memory(space, value);
+                    current.remove_unmatched_call_memory(space);
+                }
+                Some(domain) if domain.is_register_or_flag() => {
+                    let variable = result_specs[offset]
+                        .variable()
+                        .expect("register and flag results are bound directly");
+                    self.bindings.insert(value, variable)?;
+                }
+                Some(_) | None => {}
             }
         }
+        result_specs.clear();
+        self.scratch.result_specs = result_specs;
 
         Ok(())
     }
@@ -1684,23 +1741,34 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         }
 
         for (block, definitions) in args {
-            let block_args = &mut self.block_args[block.index()];
+            let block_args = &mut self.block_arg_specs[block.index()];
             let mut definitions = definitions;
             definitions.sort_unstable_by_key(|definition| definition.domain);
-            for definition in definitions {
-                let value = self
-                    .builder
-                    .emitter()
-                    .emit_block_arg(block, definition.width)?;
-                if let MCodeBlockArgOrigin::Source { value: source, .. } = definition.origin {
+            block_args.extend(definitions);
+        }
+
+        Ok(())
+    }
+
+    fn declare_block_args(&mut self) -> Result<(), IlError> {
+        for index in 0..self.block_arg_specs.len() {
+            let block = IlBlockId::try_from_index(index)?;
+            let specs = mem::take(&mut self.block_arg_specs[index]);
+            let mut bindings = SmallVec::<[_; 2]>::with_capacity(specs.len());
+            for spec in specs {
+                let result = match spec.domain {
+                    MCodeBlockArgDomain::Memory(_) => MCodeResultSpec::new(spec.width),
+                    MCodeBlockArgDomain::Variable(variable) => {
+                        MCodeResultSpec::new(spec.width).with_variable(variable)
+                    }
+                };
+                let value = self.builder.add_block_arg(block, result)?;
+                if let MCodeBlockArgOrigin::Source { value: source, .. } = spec.origin {
                     self.target_values[source.index()] = Some(value);
                 }
-                block_args.push(MCodeBlockArgBinding::new(
-                    definition.domain,
-                    definition.origin,
-                    value,
-                ));
+                bindings.push(MCodeBlockArgBinding::new(spec, value));
             }
+            self.block_args[index] = bindings;
         }
 
         Ok(())
