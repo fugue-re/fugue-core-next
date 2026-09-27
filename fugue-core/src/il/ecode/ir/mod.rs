@@ -392,7 +392,7 @@ impl SsaIl for ECodeIr {
 }
 
 impl PersistableIl for ECodeIr {
-    const SCHEMA: IlSchemaVersion = IlSchemaVersion::new(2);
+    const SCHEMA: IlSchemaVersion = IlSchemaVersion::new(1);
 
     fn metadata_mut(&mut self) -> &mut IlMetadata {
         &mut self.metadata

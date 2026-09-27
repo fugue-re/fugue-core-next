@@ -30,9 +30,12 @@ mod test {
     use fugue_bv::BitVec;
 
     use super::{MCodeCompaction, MCodeOptimiser};
-    use crate::il::common::{IlArtefact, IlError, IlGraph, IlMetadata, IlValueId, RegisterId};
+    use crate::il::common::{
+        IlArtefact, IlError, IlGraph, IlIndexRange, IlMetadata, IlParentSpan, IlSourceSpan,
+        IlValueId, RegisterId,
+    };
     use crate::il::mcode::{MCodeBuilder, MCodeOpSpec, MCodeOpcode, MCodeVar, MCodeVersion};
-    use crate::ir::FunctionId;
+    use crate::ir::{Address, FunctionId};
     use crate::storage::segments::space::AddressSpaceId;
 
     fn emit_value(
@@ -160,6 +163,48 @@ mod test {
         assert_eq!(ir.ops().len(), 2);
         assert_eq!(ir.ops()[1].opcode(), MCodeOpcode::SetVar);
         assert!(ir.values()[1].variable().is_some());
+    }
+
+    #[test]
+    fn compaction_remaps_supplemental_provenance() {
+        let metadata = IlMetadata::new(FunctionId::default(), 0);
+        let mut builder = MCodeBuilder::new(metadata, IlGraph::default());
+        emit_value(
+            &mut builder,
+            MCodeOpSpec::new(MCodeOpcode::Constant, 64).with_immediate(3),
+            [],
+            64,
+        )
+        .unwrap();
+        let required = emit_value(
+            &mut builder,
+            MCodeOpSpec::new(MCodeOpcode::Constant, 64).with_immediate(7),
+            [],
+            64,
+        )
+        .unwrap();
+        let destination = IlIndexRange::new(1, 2).unwrap();
+        let source = IlSourceSpan::try_new(destination, Address::from(0x1000u64), 4, 1).unwrap();
+        let parent = IlParentSpan::new(destination, IlIndexRange::new(8, 9).unwrap());
+        builder.add_source_span(source);
+        builder.add_parent_span(parent);
+        let mut ir = builder.build_unchecked();
+
+        ir.rewrite(MCodeCompaction::new(&[required]));
+
+        assert_eq!(
+            ir.supplemental_source_spans()[0].destination(),
+            IlIndexRange::new(0, 1).unwrap()
+        );
+        assert_eq!(
+            ir.supplemental_parent_spans()[0].destination(),
+            IlIndexRange::new(0, 1).unwrap()
+        );
+        assert_eq!(
+            ir.supplemental_source_spans()[0].address(),
+            source.address()
+        );
+        assert_eq!(ir.supplemental_parent_spans()[0].source(), parent.source());
     }
 
     #[test]

@@ -81,11 +81,17 @@ impl IlRewrite<MCodeIr> for MCodeCompaction<'_> {
         let edge_targets = ir.graph().successors().to_vec();
 
         let source_spans = operation_map
-            .remap_source_spans(ir.source_spans())
+            .remap_source_spans(ir.primary_source_spans())
             .expect("source spans use the compaction source domain");
+        let supplemental_source_spans = operation_map
+            .remap_source_spans(ir.supplemental_source_spans())
+            .expect("supplemental source spans use the compaction source domain");
         let parent_spans = operation_map
-            .remap_parent_spans(ir.parent_spans())
+            .remap_parent_spans(ir.primary_parent_spans())
             .expect("parent spans use the compaction source domain");
+        let supplemental_parent_spans = operation_map
+            .remap_parent_spans(ir.supplemental_parent_spans())
+            .expect("supplemental parent spans use the compaction source domain");
 
         let mut graph = ir.take_graph();
         graph
@@ -104,6 +110,8 @@ impl IlRewrite<MCodeIr> for MCodeCompaction<'_> {
             .with_source_spans(source_spans)
             .with_parent_spans(parent_spans)
             .with_aliased_variables(aliased_variables);
+        builder.extend_source_spans(supplemental_source_spans);
+        builder.extend_parent_spans(supplemental_parent_spans);
 
         {
             let mut emitter = builder.emitter();

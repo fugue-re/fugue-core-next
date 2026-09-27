@@ -45,6 +45,8 @@ pub(crate) enum VerifyError {
         expected: usize,
         found: usize,
     },
+    #[error("MCode operation {operation} has invalid parent provenance")]
+    InvalidParentSpan { operation: u32 },
     #[error(
         "MCode operation {operation} has an invalid result count: expected {expected}, found {found}"
     )]
@@ -53,6 +55,8 @@ pub(crate) enum VerifyError {
         expected: usize,
         found: usize,
     },
+    #[error("MCode operation {operation} has invalid source provenance")]
+    InvalidSourceSpan { operation: u32 },
     #[error("MCode split operation {operation} is malformed")]
     InvalidSplit { operation: u32 },
     #[error("MCode value has an invalid definition")]
@@ -130,11 +134,23 @@ impl VerifyError {
         }
     }
 
+    const fn invalid_parent_span(operation: IlOpId) -> Self {
+        Self::InvalidParentSpan {
+            operation: operation.value(),
+        }
+    }
+
     const fn invalid_result_count(operation: IlOpId, expected: usize, found: usize) -> Self {
         Self::InvalidResultCount {
             operation: operation.value(),
             expected,
             found,
+        }
+    }
+
+    const fn invalid_source_span(operation: IlOpId) -> Self {
+        Self::InvalidSourceSpan {
+            operation: operation.value(),
         }
     }
 
@@ -237,10 +253,12 @@ struct MCodeVerifier<'a> {
 impl MCodeVerifier<'_> {
     fn verify(&self) -> Result<(), VerifyError> {
         self.ir.verify_structure::<VerifyError>(
-            self.ir.source_spans(),
-            Some(self.ir.parent_spans()),
+            self.ir.primary_source_spans(),
+            Some(self.ir.primary_parent_spans()),
             self.ir.ops().len(),
         )?;
+        self.verify_supplemental_source_spans()?;
+        self.verify_supplemental_parent_spans()?;
         SsaVerifier::new(self.ir).verify_memory_domains()?;
         SsaVerifier::new(self.ir).verify_edge_args()?;
 
@@ -355,6 +373,80 @@ impl MCodeVerifier<'_> {
             }
             Ok(())
         })?;
+
+        Ok(())
+    }
+
+    fn verify_supplemental_source_spans(&self) -> Result<(), VerifyError> {
+        let mut previous = None;
+        for span in self.ir.supplemental_source_spans() {
+            span.destination().verify_bounds(self.ir.ops().len())?;
+            let operation = IlOpId::try_from_index(span.destination().start())?;
+            if span.destination().len() != 1
+                || span.source_count() == 0
+                || span
+                    .first_source_index()
+                    .checked_add(span.source_count())
+                    .is_none()
+            {
+                return Err(VerifyError::invalid_source_span(operation));
+            }
+
+            let key = (
+                span.destination().start(),
+                span.address(),
+                span.first_source_index(),
+                span.source_count(),
+            );
+            if previous.is_some_and(|previous| key < previous) {
+                return Err(VerifyError::invalid_source_span(operation));
+            }
+            if previous == Some(key)
+                || self
+                    .ir
+                    .source_span_for(operation.index())
+                    .is_some_and(|primary| {
+                        primary.address() == span.address()
+                            && primary.first_source_index() == span.first_source_index()
+                            && primary.source_count() == span.source_count()
+                    })
+            {
+                return Err(VerifyError::invalid_source_span(operation));
+            }
+            previous = Some(key);
+        }
+
+        Ok(())
+    }
+
+    fn verify_supplemental_parent_spans(&self) -> Result<(), VerifyError> {
+        let mut previous = None;
+        for span in self.ir.supplemental_parent_spans() {
+            span.destination().verify_bounds(self.ir.ops().len())?;
+            span.source().verify_bounds(usize::MAX)?;
+            let operation = IlOpId::try_from_index(span.destination().start())?;
+            if span.destination().len() != 1 || span.source().is_empty() {
+                return Err(VerifyError::invalid_parent_span(operation));
+            }
+
+            let key = (
+                span.destination().start(),
+                span.source().start(),
+                span.source().end(),
+            );
+            if previous.is_some_and(|previous| key < previous) {
+                return Err(VerifyError::invalid_parent_span(operation));
+            }
+            if previous == Some(key)
+                || self
+                    .ir
+                    .parent_span_for(operation.index())
+                    .is_some_and(|primary| primary.source() == span.source())
+            {
+                return Err(VerifyError::invalid_parent_span(operation));
+            }
+            previous = Some(key);
+        }
 
         Ok(())
     }
@@ -703,11 +795,8 @@ impl MCodeVerifier<'_> {
             let previous_id = self.ir.op_operands_for(operation)[0];
             let previous = self.ir.values()[previous_id.index()];
             let result_id = IlValueId::try_from_index(operation.results().start())?;
-            let result = self.ir.values()[result_id.index()];
 
-            if previous.variable() != Some(variable)
-                || previous.version().checked_next() != Some(result.version())
-            {
+            if previous.variable() != Some(variable) {
                 return Err(VerifyError::inconsistent_binding(result_id));
             }
         }

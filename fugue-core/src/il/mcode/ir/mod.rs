@@ -26,8 +26,10 @@ pub use builder::{MCodeBuilder, MCodeEmitter};
 pub struct MCodeIr {
     metadata: IlMetadata,
     graph: IlGraph,
-    source_spans: Vec<IlSourceSpan>,
-    parent_spans: Vec<IlParentSpan>,
+    primary_source_spans: Vec<IlSourceSpan>,
+    supplemental_source_spans: Vec<IlSourceSpan>,
+    primary_parent_spans: Vec<IlParentSpan>,
+    supplemental_parent_spans: Vec<IlParentSpan>,
     variables: Vec<MCodeVar>,
     aliased_variables: Vec<MCodeVarId>,
     values: Vec<MCodeValue>,
@@ -49,20 +51,74 @@ impl MCodeIr {
         &self.graph
     }
 
-    pub fn source_spans(&self) -> &[IlSourceSpan] {
-        &self.source_spans
+    pub fn source_spans(&self) -> impl Iterator<Item = IlSourceSpan> + '_ {
+        self.primary_source_spans
+            .iter()
+            .chain(&self.supplemental_source_spans)
+            .copied()
     }
 
-    pub fn parent_spans(&self) -> &[IlParentSpan] {
-        &self.parent_spans
+    pub fn primary_source_spans(&self) -> &[IlSourceSpan] {
+        &self.primary_source_spans
+    }
+
+    pub fn supplemental_source_spans(&self) -> &[IlSourceSpan] {
+        &self.supplemental_source_spans
+    }
+
+    pub fn parent_spans(&self) -> impl Iterator<Item = IlParentSpan> + '_ {
+        self.primary_parent_spans
+            .iter()
+            .chain(&self.supplemental_parent_spans)
+            .copied()
+    }
+
+    pub fn primary_parent_spans(&self) -> &[IlParentSpan] {
+        &self.primary_parent_spans
+    }
+
+    pub fn supplemental_parent_spans(&self) -> &[IlParentSpan] {
+        &self.supplemental_parent_spans
     }
 
     pub fn source_span_for(&self, node: usize) -> Option<IlSourceSpan> {
-        IlSourceSpan::find(&self.source_spans, node)
+        IlSourceSpan::find(&self.primary_source_spans, node)
     }
 
     pub fn parent_span_for(&self, node: usize) -> Option<IlParentSpan> {
-        IlParentSpan::find(&self.parent_spans, node)
+        IlParentSpan::find(&self.primary_parent_spans, node)
+    }
+
+    pub fn source_spans_for_op(
+        &self,
+        operation: IlOpId,
+    ) -> impl Iterator<Item = IlSourceSpan> + '_ {
+        let operation_index = operation.index();
+        let start = self
+            .supplemental_source_spans
+            .partition_point(|span| span.destination().start() < operation_index);
+        let end = self
+            .supplemental_source_spans
+            .partition_point(|span| span.destination().start() <= operation_index);
+        self.source_span_for(operation_index)
+            .into_iter()
+            .chain(self.supplemental_source_spans[start..end].iter().copied())
+    }
+
+    pub fn parent_spans_for_op(
+        &self,
+        operation: IlOpId,
+    ) -> impl Iterator<Item = IlParentSpan> + '_ {
+        let operation_index = operation.index();
+        let start = self
+            .supplemental_parent_spans
+            .partition_point(|span| span.destination().start() < operation_index);
+        let end = self
+            .supplemental_parent_spans
+            .partition_point(|span| span.destination().start() <= operation_index);
+        self.parent_span_for(operation_index)
+            .into_iter()
+            .chain(self.supplemental_parent_spans[start..end].iter().copied())
     }
 
     pub fn variables(&self) -> &[MCodeVar] {
@@ -154,7 +210,71 @@ impl MCodeIr {
         &self,
         address: Address,
     ) -> impl Iterator<Item = (IlOpId, &MCodeOp)> + '_ {
-        IlSourceSpan::ops(&self.source_spans, &self.operations, address)
+        let primary = IlSourceSpan::ops(&self.primary_source_spans, &self.operations, address);
+        let mut previous = None;
+        let supplemental = self
+            .supplemental_source_spans
+            .iter()
+            .filter(move |span| span.address() == address)
+            .filter_map(move |span| {
+                let operation_index = span.destination().start();
+                if previous == Some(operation_index) {
+                    return None;
+                }
+                previous = Some(operation_index);
+                if self
+                    .source_span_for(operation_index)
+                    .is_some_and(|primary| primary.address() == address)
+                {
+                    return None;
+                }
+                let operation = self.operations.get(operation_index)?;
+                let operation_id = IlOpId::try_from_index(operation_index).ok()?;
+                Some((operation_id, operation))
+            });
+        primary.chain(supplemental)
+    }
+
+    pub fn ops_for_parent(&self, parent: IlOpId) -> impl Iterator<Item = (IlOpId, &MCodeOp)> + '_ {
+        let parent_index = parent.index();
+        let primary = self
+            .primary_parent_spans
+            .iter()
+            .filter(move |span| span.contains_source(parent_index))
+            .flat_map(|span| {
+                let start = span.destination().start();
+                span.destination()
+                    .slice(&self.operations)
+                    .iter()
+                    .enumerate()
+                    .map(move |(offset, operation)| {
+                        let operation_id = IlOpId::try_from_index(start + offset)
+                            .expect("operation count fits the operation id space");
+                        (operation_id, operation)
+                    })
+            });
+        let mut previous = None;
+        let supplemental = self
+            .supplemental_parent_spans
+            .iter()
+            .filter(move |span| span.contains_source(parent_index))
+            .filter_map(move |span| {
+                let operation_index = span.destination().start();
+                if previous == Some(operation_index) {
+                    return None;
+                }
+                previous = Some(operation_index);
+                if self
+                    .parent_span_for(operation_index)
+                    .is_some_and(|primary| primary.contains_source(parent_index))
+                {
+                    return None;
+                }
+                let operation = self.operations.get(operation_index)?;
+                let operation_id = IlOpId::try_from_index(operation_index).ok()?;
+                Some((operation_id, operation))
+            });
+        primary.chain(supplemental)
     }
 
     pub fn defining_op(&self, value: IlValueId) -> Option<&MCodeOp> {
@@ -190,8 +310,10 @@ impl MCodeIr {
 
     pub fn shrink_to_fit(&mut self) {
         self.graph.shrink_to_fit();
-        self.source_spans.shrink_to_fit();
-        self.parent_spans.shrink_to_fit();
+        self.primary_source_spans.shrink_to_fit();
+        self.supplemental_source_spans.shrink_to_fit();
+        self.primary_parent_spans.shrink_to_fit();
+        self.supplemental_parent_spans.shrink_to_fit();
         self.variables.shrink_to_fit();
         self.aliased_variables.shrink_to_fit();
         self.values.shrink_to_fit();
@@ -402,7 +524,7 @@ impl SsaIl for MCodeIr {
 }
 
 impl PersistableIl for MCodeIr {
-    const SCHEMA: IlSchemaVersion = IlSchemaVersion::new(2);
+    const SCHEMA: IlSchemaVersion = IlSchemaVersion::new(1);
 
     fn metadata_mut(&mut self) -> &mut IlMetadata {
         &mut self.metadata
@@ -413,10 +535,16 @@ impl EstimateSize for MCodeIr {
     fn estimate_size(&self) -> usize {
         [
             self.graph.estimate_size(),
-            self.source_spans
+            self.primary_source_spans
                 .capacity()
                 .saturating_mul(size_of::<IlSourceSpan>()),
-            self.parent_spans
+            self.supplemental_source_spans
+                .capacity()
+                .saturating_mul(size_of::<IlSourceSpan>()),
+            self.primary_parent_spans
+                .capacity()
+                .saturating_mul(size_of::<IlParentSpan>()),
+            self.supplemental_parent_spans
                 .capacity()
                 .saturating_mul(size_of::<IlParentSpan>()),
             self.variables

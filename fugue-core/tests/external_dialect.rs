@@ -569,8 +569,8 @@ fn built_in_dialects_have_target_native_external_build_apis() {
         variable
     );
     assert!(mcode.is_aliased(aliased));
-    assert_eq!(mcode.source_spans().len(), 1);
-    assert_eq!(mcode.parent_spans().len(), 1);
+    assert_eq!(mcode.source_spans().count(), 1);
+    assert_eq!(mcode.parent_spans().count(), 1);
     assert!(mcode.display().to_string().contains("const"));
     assert!(mcode.analyse::<MCodeUses>().uses_for(bound).is_empty());
 }

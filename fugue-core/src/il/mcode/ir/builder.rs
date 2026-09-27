@@ -16,8 +16,10 @@ use crate::storage::segments::space::AddressSpaceId;
 pub struct MCodeBuilder {
     metadata: IlMetadata,
     graph: IlGraph,
-    source_spans: Vec<IlSourceSpan>,
-    parent_spans: Vec<IlParentSpan>,
+    primary_source_spans: Vec<IlSourceSpan>,
+    supplemental_source_spans: Vec<IlSourceSpan>,
+    primary_parent_spans: Vec<IlParentSpan>,
+    supplemental_parent_spans: Vec<IlParentSpan>,
     variables: Vec<MCodeVar>,
     variable_ids: FxHashMap<MCodeVar, MCodeVarId>,
     aliased_variables: Vec<MCodeVarId>,
@@ -37,8 +39,10 @@ impl MCodeBuilder {
         Self {
             metadata,
             graph,
-            source_spans: Vec::new(),
-            parent_spans: Vec::new(),
+            primary_source_spans: Vec::new(),
+            supplemental_source_spans: Vec::new(),
+            primary_parent_spans: Vec::new(),
+            supplemental_parent_spans: Vec::new(),
             variables: Vec::new(),
             variable_ids: FxHashMap::default(),
             aliased_variables: Vec::new(),
@@ -68,7 +72,7 @@ impl MCodeBuilder {
     }
 
     pub fn set_source_spans(&mut self, source_spans: Vec<IlSourceSpan>) {
-        self.source_spans = source_spans;
+        self.primary_source_spans = source_spans;
     }
 
     pub fn with_source_spans(mut self, source_spans: Vec<IlSourceSpan>) -> Self {
@@ -77,7 +81,7 @@ impl MCodeBuilder {
     }
 
     pub fn set_parent_spans(&mut self, parent_spans: Vec<IlParentSpan>) {
-        self.parent_spans = parent_spans;
+        self.primary_parent_spans = parent_spans;
     }
 
     pub fn with_parent_spans(mut self, parent_spans: Vec<IlParentSpan>) -> Self {
@@ -94,6 +98,38 @@ impl MCodeBuilder {
     pub fn with_aliased_variables(mut self, aliased_variables: Vec<MCodeVarId>) -> Self {
         self.set_aliased_variables(aliased_variables);
         self
+    }
+
+    pub(crate) fn add_source_span(&mut self, source_span: IlSourceSpan) {
+        self.supplemental_source_spans.push(source_span);
+    }
+
+    pub(crate) fn extend_source_spans(
+        &mut self,
+        source_spans: impl IntoIterator<Item = IlSourceSpan>,
+    ) {
+        let source_spans = source_spans.into_iter();
+        self.supplemental_source_spans
+            .reserve(source_spans.size_hint().0);
+        for source_span in source_spans {
+            self.add_source_span(source_span);
+        }
+    }
+
+    pub(crate) fn add_parent_span(&mut self, parent_span: IlParentSpan) {
+        self.supplemental_parent_spans.push(parent_span);
+    }
+
+    pub(crate) fn extend_parent_spans(
+        &mut self,
+        parent_spans: impl IntoIterator<Item = IlParentSpan>,
+    ) {
+        let parent_spans = parent_spans.into_iter();
+        self.supplemental_parent_spans
+            .reserve(parent_spans.size_hint().0);
+        for parent_span in parent_spans {
+            self.add_parent_span(parent_span);
+        }
     }
 
     pub fn emitter(&mut self) -> MCodeEmitter<'_> {
@@ -207,8 +243,10 @@ impl MCodeBuilder {
         let mut ir = MCodeIr {
             metadata: self.metadata,
             graph: self.graph,
-            source_spans: self.source_spans,
-            parent_spans: self.parent_spans,
+            primary_source_spans: self.primary_source_spans,
+            supplemental_source_spans: self.supplemental_source_spans,
+            primary_parent_spans: self.primary_parent_spans,
+            supplemental_parent_spans: self.supplemental_parent_spans,
             variables: self.variables,
             aliased_variables: self.aliased_variables,
             values: self.values,

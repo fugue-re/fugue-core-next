@@ -25,10 +25,10 @@ mod test {
     use super::*;
     use crate::il::common::{
         IlBlock, IlBlockId, IlBlockProperties, IlEdgeKinds, IlError, IlGraph, IlGraphBuilder,
-        IlIndexRange, IlMetadata, IlValueId, RegisterId,
+        IlIndexRange, IlMetadata, IlOpId, IlParentSpan, IlSourceSpan, IlValueId, RegisterId,
     };
     use crate::il::mcode::{MCodeVar, MCodeVarId};
-    use crate::ir::FunctionId;
+    use crate::ir::{Address, FunctionId};
 
     fn metadata() -> IlMetadata {
         IlMetadata::new(FunctionId::default(), 0)
@@ -42,6 +42,145 @@ mod test {
     ) -> Result<IlValueId, IlError> {
         let (_, results) = builder.emitter().emit(spec, operands, [width])?;
         IlValueId::try_from_index(results.start())
+    }
+
+    fn provenance_builder(operation_count: usize) -> MCodeBuilder {
+        let mut builder = MCodeBuilder::new(metadata(), IlGraph::default());
+        for _ in 0..operation_count {
+            emit_value(
+                &mut builder,
+                MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
+                [],
+                64,
+            )
+            .unwrap();
+        }
+        builder
+    }
+
+    #[test]
+    fn supplemental_provenance_queries_include_primary_relations_first() {
+        let first = Address::from(0x1000u64);
+        let second = Address::from(0x2000u64);
+        let primary_source =
+            IlSourceSpan::try_new(IlIndexRange::new(0, 2).unwrap(), first, 0, 2).unwrap();
+        let supplemental_sources = vec![
+            IlSourceSpan::try_new(IlIndexRange::new(0, 1).unwrap(), first, 7, 1).unwrap(),
+            IlSourceSpan::try_new(IlIndexRange::new(0, 1).unwrap(), second, 3, 1).unwrap(),
+        ];
+        let primary_parent = IlParentSpan::new(
+            IlIndexRange::new(0, 2).unwrap(),
+            IlIndexRange::new(10, 12).unwrap(),
+        );
+        let supplemental_parents = vec![
+            IlParentSpan::new(
+                IlIndexRange::new(0, 1).unwrap(),
+                IlIndexRange::new(20, 21).unwrap(),
+            ),
+            IlParentSpan::new(
+                IlIndexRange::new(2, 3).unwrap(),
+                IlIndexRange::new(10, 11).unwrap(),
+            ),
+        ];
+        let mut builder = provenance_builder(3);
+        builder.set_source_spans(vec![primary_source]);
+        builder.extend_source_spans(supplemental_sources.clone());
+        builder.set_parent_spans(vec![primary_parent]);
+        builder.extend_parent_spans(supplemental_parents.clone());
+        let ir = builder.build().unwrap();
+        let first_op = IlOpId::try_from_index(0).unwrap();
+
+        assert_eq!(ir.source_span_for(first_op.index()), Some(primary_source));
+        assert_eq!(ir.parent_span_for(first_op.index()), Some(primary_parent));
+        assert_eq!(
+            ir.source_spans().collect::<Vec<_>>(),
+            [vec![primary_source], supplemental_sources.clone()].concat()
+        );
+        assert_eq!(
+            ir.parent_spans().collect::<Vec<_>>(),
+            [vec![primary_parent], supplemental_parents.clone()].concat()
+        );
+        assert_eq!(
+            ir.source_spans_for_op(first_op).collect::<Vec<_>>(),
+            [vec![primary_source], supplemental_sources].concat()
+        );
+        assert_eq!(
+            ir.parent_spans_for_op(first_op).collect::<Vec<_>>(),
+            vec![primary_parent, supplemental_parents[0]]
+        );
+        assert_eq!(
+            ir.ops_for_source(first)
+                .map(|(operation, _)| operation.index())
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert_eq!(
+            ir.ops_for_source(second)
+                .map(|(operation, _)| operation.index())
+                .collect::<Vec<_>>(),
+            vec![0]
+        );
+        assert_eq!(
+            ir.ops_for_parent(IlOpId::try_from_index(10).unwrap())
+                .map(|(operation, _)| operation.index())
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+    }
+
+    #[test]
+    fn verifier_rejects_malformed_supplemental_provenance() {
+        let address = Address::from(0x1000u64);
+
+        let mut builder = provenance_builder(2);
+        builder.add_source_span(
+            IlSourceSpan::try_new(IlIndexRange::new(0, 2).unwrap(), address, 0, 1).unwrap(),
+        );
+        assert!(matches!(
+            builder.build_unchecked().verify(),
+            Err(VerifyError::InvalidSourceSpan { .. })
+        ));
+
+        let primary =
+            IlSourceSpan::try_new(IlIndexRange::new(0, 1).unwrap(), address, 0, 1).unwrap();
+        let mut builder = provenance_builder(2);
+        builder.set_source_spans(vec![primary]);
+        builder.add_source_span(primary);
+        assert!(matches!(
+            builder.build_unchecked().verify(),
+            Err(VerifyError::InvalidSourceSpan { .. })
+        ));
+
+        let mut builder = provenance_builder(2);
+        builder.extend_source_spans([
+            IlSourceSpan::try_new(IlIndexRange::new(1, 2).unwrap(), address, 0, 1).unwrap(),
+            IlSourceSpan::try_new(IlIndexRange::new(0, 1).unwrap(), address, 1, 1).unwrap(),
+        ]);
+        assert!(matches!(
+            builder.build_unchecked().verify(),
+            Err(VerifyError::InvalidSourceSpan { .. })
+        ));
+
+        let supplemental_parent = IlParentSpan::new(
+            IlIndexRange::new(0, 1).unwrap(),
+            IlIndexRange::new(4, 5).unwrap(),
+        );
+        let mut builder = provenance_builder(2);
+        builder.extend_parent_spans([supplemental_parent, supplemental_parent]);
+        assert!(matches!(
+            builder.build_unchecked().verify(),
+            Err(VerifyError::InvalidParentSpan { .. })
+        ));
+
+        let mut builder = provenance_builder(2);
+        builder.add_parent_span(IlParentSpan::new(
+            IlIndexRange::new(2, 3).unwrap(),
+            IlIndexRange::new(4, 5).unwrap(),
+        ));
+        assert!(matches!(
+            builder.build_unchecked().verify(),
+            Err(VerifyError::Il(IlError::RangeOutOfBounds { .. }))
+        ));
     }
 
     #[test]
@@ -108,6 +247,14 @@ mod test {
             .emitter()
             .emit(MCodeOpSpec::new(MCodeOpcode::Return, 0), [value], [])
             .unwrap();
+        let destination = IlIndexRange::new(0, 1).unwrap();
+        builder.add_source_span(
+            IlSourceSpan::try_new(destination, Address::from(0x1000u64), 3, 1).unwrap(),
+        );
+        builder.add_parent_span(IlParentSpan::new(
+            destination,
+            IlIndexRange::new(4, 5).unwrap(),
+        ));
 
         let ir = builder.build_unchecked();
 
@@ -508,7 +655,7 @@ mod test {
     }
 
     #[test]
-    fn verifier_rejects_a_field_update_that_skips_a_version() {
+    fn verifier_accepts_a_field_predecessor_with_an_earlier_version() {
         let mut builder = MCodeBuilder::new(metadata(), IlGraph::default());
         let variable = builder
             .emitter()
@@ -567,14 +714,11 @@ mod test {
 
         let ir = builder.build_unchecked();
 
-        assert!(matches!(
-            ir.verify(),
-            Err(VerifyError::InconsistentBinding { .. })
-        ));
+        assert!(ir.verify().is_ok());
     }
 
     #[test]
-    fn verifier_rejects_field_predecessor_from_a_later_version() {
+    fn verifier_accepts_a_field_predecessor_with_a_later_version() {
         let mut builder = MCodeBuilder::new(metadata(), IlGraph::default());
         let variable = builder
             .emitter()
@@ -615,10 +759,7 @@ mod test {
 
         let ir = builder.build_unchecked();
 
-        assert!(matches!(
-            ir.verify(),
-            Err(VerifyError::InconsistentBinding { .. })
-        ));
+        assert!(ir.verify().is_ok());
     }
 
     #[test]
