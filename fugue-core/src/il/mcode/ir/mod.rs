@@ -19,7 +19,7 @@ use crate::types::EstimateSize;
 mod builder;
 pub(crate) mod verify;
 
-pub use builder::MCodeBuilder;
+pub use builder::{MCodeAliasedWriteResults, MCodeBuilder, MCodeCallResults};
 
 #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(derive(Debug, PartialEq, Eq))]
@@ -139,6 +139,12 @@ impl MCodeIr {
 
     pub fn values(&self) -> &[MCodeValue] {
         &self.values
+    }
+
+    pub fn value_memory_domain(&self, value: IlValueId) -> Option<AddressSpaceId> {
+        self.values
+            .get(value.index())
+            .and_then(MCodeValue::memory_domain)
     }
 
     pub fn binding(&self, value: IlValueId) -> Option<MCodeBinding> {
@@ -662,13 +668,7 @@ mod test {
         let variable = builder
             .add_variable(MCodeVar::register(RegisterId::new(16), 0))
             .unwrap();
-        let previous = builder
-            .emit_value(
-                MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
-                [],
-                MCodeResultSpec::new(64).with_variable(variable),
-            )
-            .unwrap();
+        let previous = builder.emit_variable_undefined(variable, 64).unwrap();
         let source = builder
             .emit_value(
                 MCodeOpSpec::new(MCodeOpcode::Constant, 64),
@@ -697,13 +697,7 @@ mod test {
         let variable = builder
             .add_variable(MCodeVar::register(RegisterId::new(16), 0))
             .unwrap();
-        let value = builder
-            .emit_value(
-                MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
-                [],
-                MCodeResultSpec::new(64).with_variable(variable),
-            )
-            .unwrap();
+        let value = builder.emit_variable_undefined(variable, 64).unwrap();
         let mut ir = builder.build_unchecked();
         ir.values[value.index()].set_binding(variable, MCodeVersion::new(2));
 

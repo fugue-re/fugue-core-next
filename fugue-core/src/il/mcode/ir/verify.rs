@@ -33,6 +33,8 @@ pub(crate) enum VerifyError {
     Il(#[from] IlError),
     #[error("MCode value {value} has an inconsistent variable binding")]
     InconsistentBinding { value: u32 },
+    #[error("MCode value {value} has an inconsistent memory domain")]
+    InconsistentMemoryDomain { value: u32 },
     #[error("MCode call operation {operation} is malformed")]
     InvalidCall { operation: u32 },
     #[error("MCode operation {operation} has invalid block placement")]
@@ -110,6 +112,12 @@ impl VerifyError {
 
     const fn inconsistent_binding(value: IlValueId) -> Self {
         Self::InconsistentBinding {
+            value: value.value(),
+        }
+    }
+
+    const fn inconsistent_memory_domain(value: IlValueId) -> Self {
+        Self::InconsistentMemoryDomain {
             value: value.value(),
         }
     }
@@ -261,6 +269,7 @@ impl MCodeVerifier<'_> {
         self.verify_supplemental_parent_spans()?;
         SsaVerifier::new(self.ir).verify_memory_domains()?;
         SsaVerifier::new(self.ir).verify_edge_args()?;
+        self.verify_value_memory_domains()?;
 
         for (arg_index, arg) in self.ir.block_args().iter().enumerate() {
             let arg_id = IlBlockArgId::try_from_index(arg_index)?;
@@ -371,8 +380,51 @@ impl MCodeVerifier<'_> {
             {
                 return Err(VerifyError::inconsistent_binding(destination));
             }
+            if self.ir.value_memory_domain(incoming) != self.ir.value_memory_domain(destination) {
+                return Err(VerifyError::inconsistent_memory_domain(destination));
+            }
             Ok(())
         })?;
+
+        Ok(())
+    }
+
+    fn verify_value_memory_domains(&self) -> Result<(), VerifyError> {
+        for (index, value) in self.ir.values().iter().enumerate() {
+            let value_id = IlValueId::try_from_index(index)?;
+            let Some(space) = self.ir.value_memory_domain(value_id) else {
+                if value.width() == 0 {
+                    return Err(VerifyError::inconsistent_memory_domain(value_id));
+                }
+                continue;
+            };
+            if self.ir.memory_domain(space).is_none() {
+                return Err(VerifyError::inconsistent_memory_domain(value_id));
+            }
+            let consistent = match value.definition() {
+                IlSsaDef::BlockArg(_) => true,
+                IlSsaDef::Op(operation) => {
+                    let Some(operation) = self.ir.ops().get(operation.index()) else {
+                        return Err(VerifyError::invalid_value_definition());
+                    };
+                    let offset = value_id.index() - operation.results().start();
+                    match operation.opcode() {
+                        MCodeOpcode::Undefined => operation.immediate() == u64::from(space.value()),
+                        MCodeOpcode::Store
+                        | MCodeOpcode::SetVarAliased
+                        | MCodeOpcode::SetVarAliasedField
+                        | MCodeOpcode::Call
+                        | MCodeOpcode::CallIndirect => {
+                            offset == 0 && operation.address_space() == Some(space)
+                        }
+                        _ => false,
+                    }
+                }
+            };
+            if !consistent {
+                return Err(VerifyError::inconsistent_memory_domain(value_id));
+            }
+        }
 
         Ok(())
     }
@@ -518,6 +570,9 @@ impl MCodeVerifier<'_> {
             MCodeOpcode::SetVar | MCodeOpcode::SetVarField => {
                 result_index == 0 && operation.variable() == value.variable()
             }
+            MCodeOpcode::VarAliased => {
+                result_index == 0 && operation.variable() == value.variable()
+            }
             MCodeOpcode::SetVarAliased | MCodeOpcode::SetVarAliasedField => {
                 result_index == 1 && operation.variable() == value.variable()
             }
@@ -627,6 +682,9 @@ impl MCodeVerifier<'_> {
         };
         if self.ir.values()[memory.index()].width() != 0 {
             return Err(IlError::width_mismatch(MCodeIr::FORM).into());
+        }
+        if self.ir.value_memory_domain(memory) != operation.address_space() {
+            return Err(VerifyError::inconsistent_memory_domain(memory));
         }
 
         if matches!(
@@ -746,6 +804,7 @@ impl MCodeVerifier<'_> {
             let expected = match operation.opcode() {
                 MCodeOpcode::Constant | MCodeOpcode::Undefined => result.variable(),
                 MCodeOpcode::SetVar | MCodeOpcode::SetVarField => operation.variable(),
+                MCodeOpcode::VarAliased => operation.variable(),
                 MCodeOpcode::SetVarAliased | MCodeOpcode::SetVarAliasedField if offset == 1 => {
                     operation.variable()
                 }

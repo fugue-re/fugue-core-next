@@ -1,10 +1,11 @@
 use std::ops::Range;
 
-use super::required::MCodeRequiredDefs;
 use crate::il::common::{IlBlockId, IlCsr, IlIndexMapper, IlRewrite, IlSsaDef, IlValueId};
 use crate::il::mcode::{
     MCodeBuilder, MCodeIr, MCodeOpSpec, MCodeOpcode, MCodeResultSpec, MCodeVarId,
 };
+
+use super::required::MCodeRequiredDefs;
 
 pub(crate) struct MCodeCompaction<'a> {
     required_values: &'a [IlValueId],
@@ -159,7 +160,7 @@ impl IlRewrite<MCodeIr> for MCodeCompaction<'_> {
                     },
                 ));
                 let operation = builder
-                    .emit(
+                    .emit_op(
                         spec,
                         ir.op_operands_for(source_operation).iter().map(|value| {
                             value_map[value.index()]
@@ -189,13 +190,19 @@ impl IlRewrite<MCodeIr> for MCodeCompaction<'_> {
                 for &index in block_arg_indices.row(block.index()) {
                     let arg = &ir.block_args()[index];
                     let original = &ir.values()[arg.value().index()];
-                    let mut result = MCodeResultSpec::new(arg.width());
-                    if let Some(variable) = original.variable() {
-                        result.set_variable(remap_variable(variable));
+                    let value = match (ir.value_memory_domain(arg.value()), original.variable()) {
+                        (Some(space), None) => builder.add_memory_block_arg(block, space),
+                        (None, Some(variable)) => builder.add_variable_block_arg(
+                            block,
+                            remap_variable(variable),
+                            arg.width(),
+                        ),
+                        (None, None) => builder.add_block_arg(block, arg.width()),
+                        (Some(_), Some(_)) => {
+                            unreachable!("a memory value cannot have a variable binding")
+                        }
                     }
-                    let value = builder
-                        .add_block_arg(block, result)
-                        .expect("compacted block argument is representable");
+                    .expect("compacted block argument is representable");
                     value_map[arg.value().index()] = Some(value);
                 }
             }

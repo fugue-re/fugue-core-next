@@ -377,16 +377,6 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "variable binding"))
     }
 
-    fn push_memory_undefined(&mut self, space: AddressSpaceId) -> Result<IlValueId, IlError> {
-        self.builder.intern_memory_domain(space);
-        let immediate = u64::from(space.value());
-        self.builder.emit_value(
-            MCodeOpSpec::new(MCodeOpcode::Undefined, 0).with_immediate(immediate),
-            [],
-            MCodeResultSpec::new(0),
-        )
-    }
-
     pub(crate) fn lift(mut self) -> Result<MCodeIr, IlError> {
         for domain in self.source.memory_domains() {
             self.builder.add_memory_domain(domain.space());
@@ -562,7 +552,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                     MCodeBlockArgOrigin::Stack(variable) => match current.stack_value(variable) {
                         Some(value) => value,
                         None => {
-                            let value = self.push_variable_undefined(
+                            let value = self.emit_variable_undefined(
                                 variable,
                                 self.variable_widths.width(variable)?,
                             )?;
@@ -601,7 +591,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                     continue;
                 }
                 let value =
-                    self.push_variable_undefined(variable, self.variable_widths.width(variable)?)?;
+                    self.emit_variable_undefined(variable, self.variable_widths.width(variable)?)?;
                 current.insert_stack(variable, value);
             }
         }
@@ -634,7 +624,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                         Some(value) => value,
                         None => {
                             let width = self.variable_widths.width(variable)?;
-                            let value = self.push_variable_undefined(variable, width)?;
+                            let value = self.emit_variable_undefined(variable, width)?;
                             current.insert_stack(variable, value);
                             value
                         }
@@ -666,7 +656,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             ECodeOpcode::Return => {
                 self.lift_carried(site, operation, current)?;
             }
-            ECodeOpcode::Undefined => self.lift_undefined(site, operation, current)?,
+            ECodeOpcode::Undefined => self.lift_undefined(operation, current)?,
             ECodeOpcode::WriteFlag | ECodeOpcode::WriteRegister => {
                 self.lift_variable_write(operation, current)?;
             }
@@ -680,16 +670,12 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         Ok(())
     }
 
-    fn push_variable_undefined(
+    fn emit_variable_undefined(
         &mut self,
         variable: MCodeVarId,
         width: u32,
     ) -> Result<IlValueId, IlError> {
-        let value = self.builder.emit_value(
-            MCodeOpSpec::new(MCodeOpcode::Undefined, width),
-            [],
-            MCodeResultSpec::new(width).with_variable(variable),
-        )?;
+        let value = self.builder.emit_variable_undefined(variable, width)?;
         self.bindings.insert(value, variable)?;
 
         Ok(value)
@@ -697,7 +683,6 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
 
     fn lift_undefined(
         &mut self,
-        site: IlOpId,
         operation: ECodeOp,
         current: &mut ECodeToMCodeRenameState,
     ) -> Result<(), IlError> {
@@ -721,16 +706,29 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                 self.target_values[source.index()] = Some(value);
             }
             domain => {
-                self.lift_carried(site, operation, current)?;
-                let value = self.target_value(source)?;
+                let value = match domain {
+                    Some(ECodeDomain::Memory(space)) => {
+                        self.builder.emit_memory_undefined(space)?
+                    }
+                    Some(domain) if domain.is_register_or_flag() => {
+                        let variable = self.target_variable_for_value(source)?;
+                        let value = self
+                            .builder
+                            .emit_variable_undefined(variable, operation.width())?;
+                        self.bindings.insert(value, variable)?;
+                        value
+                    }
+                    Some(_) | None => self
+                        .builder
+                        .emit_undefined(operation.immediate(), operation.width())?,
+                };
+                self.target_values[source.index()] = Some(value);
                 match domain {
                     Some(ECodeDomain::Memory(space)) => {
                         current.insert_memory(space, value);
                         current.remove_unmatched_call_memory(space);
                     }
                     Some(domain) if domain.is_register_or_flag() => {
-                        let variable = self.target_variable_for_value(source)?;
-                        self.bindings.insert(value, variable)?;
                         current.clear_unmatched_call_output(Some(domain));
                     }
                     Some(_) | None => {}
@@ -756,7 +754,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             .copied()
             .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "variable value"))?;
 
-        let operation = match self
+        let value = match self
             .source
             .defining_op(source_operand)
             .filter(|insert| insert.opcode() == ECodeOpcode::Insert)
@@ -775,39 +773,21 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                     || self.bindings.latest(variable) != Some(previous)
                 {
                     let value = self.target_value(source_operand)?;
-                    self.builder.emit(
-                        MCodeOpSpec::new(MCodeOpcode::SetVar, operation.width())
-                            .with_variable(variable),
-                        [value],
-                        [MCodeResultSpec::new(operation.width()).with_variable(variable)],
-                    )?
+                    self.builder.emit_variable_assignment(variable, value)?
                 } else {
                     let inserted = self.target_value(inserted_source)?;
-                    let width = self.source.value_width(inserted_source).ok_or_else(|| {
-                        IlError::missing_component(MCodeIr::FORM, "partial variable width")
-                    })?;
-                    self.builder.emit(
-                        MCodeOpSpec::new(MCodeOpcode::SetVarField, width)
-                            .with_variable(variable)
-                            .with_immediate(insert.immediate()),
-                        [previous, inserted],
-                        [MCodeResultSpec::new(operation.width()).with_variable(variable)],
+                    self.builder.emit_variable_field_assignment(
+                        previous,
+                        inserted,
+                        insert.immediate(),
                     )?
                 }
             }
             None => {
                 let value = self.target_value(source_operand)?;
-                self.builder.emit(
-                    MCodeOpSpec::new(MCodeOpcode::SetVar, operation.width())
-                        .with_variable(variable),
-                    [value],
-                    [MCodeResultSpec::new(operation.width()).with_variable(variable)],
-                )?
+                self.builder.emit_variable_assignment(variable, value)?
             }
         };
-        let value = operation
-            .single_result()
-            .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "single operation result"))?;
         self.bindings.insert(value, variable)?;
         self.target_values[result.index()] = Some(value);
         let domain = self.source.value_domain(result);
@@ -840,26 +820,33 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
 
         if self.analysis.aliases().contains(analysed) {
             if !current.contains_stack(variable) {
-                let value = self.push_variable_undefined(variable, full_width)?;
+                let value = self.emit_variable_undefined(variable, full_width)?;
                 current.insert_stack(variable, value);
             }
             let memory = self.mapped_memory_operand(operation)?;
             let field = access.field_offset() != 0 || operation.width() != full_width;
-            let opcode = if field {
-                MCodeOpcode::VarAliasedField
-            } else {
-                MCodeOpcode::VarAliased
-            };
             let space = operation
                 .address_space()
                 .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "address space"))?;
-            let spec = MCodeOpSpec::new(opcode, operation.width())
-                .with_variable(variable)
-                .with_immediate(access.field_offset())
-                .with_address_space(space);
-            let value =
-                self.builder
-                    .emit_value(spec, [memory], MCodeResultSpec::new(operation.width()))?;
+            let value = if field {
+                self.builder.emit_aliased_variable_field_read(
+                    variable,
+                    access.field_offset(),
+                    operation.width(),
+                    memory,
+                    space,
+                )?
+            } else {
+                let value = self.builder.emit_aliased_variable_read(
+                    variable,
+                    operation.width(),
+                    memory,
+                    space,
+                )?;
+                self.bindings.insert(value, variable)?;
+                current.insert_stack(variable, value);
+                value
+            };
             self.target_values[result.index()] = Some(value);
             return Ok(());
         }
@@ -867,7 +854,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         let previous = match current.stack_value(variable) {
             Some(value) => value,
             None => {
-                let value = self.push_variable_undefined(variable, full_width)?;
+                let value = self.emit_variable_undefined(variable, full_width)?;
                 current.insert_stack(variable, value);
                 value
             }
@@ -926,26 +913,21 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         let field = access.field_offset() != 0 || width != full_width;
 
         if self.analysis.aliases().contains(analysed) {
-            let opcode = if field {
-                MCodeOpcode::SetVarAliasedField
+            let results = if field {
+                self.builder.emit_aliased_variable_field_write(
+                    variable,
+                    value,
+                    access.field_offset(),
+                    full_width,
+                    memory,
+                    space,
+                )?
             } else {
-                MCodeOpcode::SetVarAliased
+                self.builder
+                    .emit_aliased_variable_write(variable, value, memory, space)?
             };
-            let spec = MCodeOpSpec::new(opcode, width)
-                .with_variable(variable)
-                .with_immediate(access.field_offset())
-                .with_address_space(space);
-            let operation = self.builder.emit(
-                spec,
-                [value, memory],
-                [
-                    MCodeResultSpec::new(0),
-                    MCodeResultSpec::new(full_width).with_variable(variable),
-                ],
-            )?;
-            let results = operation.results();
-            let memory_result = IlValueId::try_from_index(results.start())?;
-            let variable_result = IlValueId::try_from_index(results.start() + 1)?;
+            let memory_result = results.memory();
+            let variable_result = results.variable();
             self.target_values[source_result.index()] = Some(memory_result);
             self.bindings.insert(variable_result, variable)?;
             current.insert_memory(space, memory_result);
@@ -954,22 +936,20 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             return Ok(());
         }
 
-        let operation = if field {
+        let variable_result = if field {
             let previous = match current.stack_value(variable) {
                 Some(value) => value,
                 None => {
-                    let value = self.push_variable_undefined(variable, full_width)?;
+                    let value = self.emit_variable_undefined(variable, full_width)?;
                     current.insert_stack(variable, value);
                     value
                 }
             };
             if self.bindings.latest(variable) == Some(previous) {
-                self.builder.emit(
-                    MCodeOpSpec::new(MCodeOpcode::SetVarField, width)
-                        .with_variable(variable)
-                        .with_immediate(access.field_offset()),
-                    [previous, value],
-                    [MCodeResultSpec::new(full_width).with_variable(variable)],
+                self.builder.emit_variable_field_assignment(
+                    previous,
+                    value,
+                    access.field_offset(),
                 )?
             } else {
                 let inserted = self.builder.emit_value(
@@ -978,22 +958,11 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                     [previous, value],
                     MCodeResultSpec::new(full_width),
                 )?;
-                self.builder.emit(
-                    MCodeOpSpec::new(MCodeOpcode::SetVar, full_width).with_variable(variable),
-                    [inserted],
-                    [MCodeResultSpec::new(full_width).with_variable(variable)],
-                )?
+                self.builder.emit_variable_assignment(variable, inserted)?
             }
         } else {
-            self.builder.emit(
-                MCodeOpSpec::new(MCodeOpcode::SetVar, full_width).with_variable(variable),
-                [value],
-                [MCodeResultSpec::new(full_width).with_variable(variable)],
-            )?
+            self.builder.emit_variable_assignment(variable, value)?
         };
-        let variable_result = operation
-            .single_result()
-            .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "single operation result"))?;
         self.bindings.insert(variable_result, variable)?;
         self.target_values[source_result.index()] = Some(memory);
         current.insert_memory(space, memory);
@@ -1026,29 +995,24 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         let variable = self.target_variable(analysed);
         let field = access.field_offset() != 0 || width != object_width;
         if self.analysis.aliases().contains(analysed) {
-            let opcode = if field {
-                MCodeOpcode::SetVarAliasedField
-            } else {
-                MCodeOpcode::SetVarAliased
-            };
             let memory = current
                 .memory_value(space)
                 .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "post-call memory"))?;
-            let spec = MCodeOpSpec::new(opcode, width)
-                .with_variable(variable)
-                .with_immediate(access.field_offset())
-                .with_address_space(space);
-            let operation = self.builder.emit(
-                spec,
-                [value, memory],
-                [
-                    MCodeResultSpec::new(0),
-                    MCodeResultSpec::new(object_width).with_variable(variable),
-                ],
-            )?;
-            let materialised = operation.results();
-            let memory = IlValueId::try_from_index(materialised.start())?;
-            let full_value = IlValueId::try_from_index(materialised.start() + 1)?;
+            let results = if field {
+                self.builder.emit_aliased_variable_field_write(
+                    variable,
+                    value,
+                    access.field_offset(),
+                    object_width,
+                    memory,
+                    space,
+                )?
+            } else {
+                self.builder
+                    .emit_aliased_variable_write(variable, value, memory, space)?
+            };
+            let memory = results.memory();
+            let full_value = results.variable();
             self.bindings.insert(full_value, variable)?;
             self.scratch.required_values.push(full_value);
             current.insert_memory(space, memory);
@@ -1065,19 +1029,14 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
         let previous = match current.stack_value(variable) {
             Some(value) => value,
             None => {
-                let value = self.push_variable_undefined(variable, object_width)?;
+                let value = self.emit_variable_undefined(variable, object_width)?;
                 current.insert_stack(variable, value);
                 value
             }
         };
-        let operation = if self.bindings.latest(variable) == Some(previous) {
-            self.builder.emit(
-                MCodeOpSpec::new(MCodeOpcode::SetVarField, width)
-                    .with_variable(variable)
-                    .with_immediate(access.field_offset()),
-                [previous, value],
-                [MCodeResultSpec::new(object_width).with_variable(variable)],
-            )?
+        let full_value = if self.bindings.latest(variable) == Some(previous) {
+            self.builder
+                .emit_variable_field_assignment(previous, value, access.field_offset())?
         } else {
             let inserted = self.builder.emit_value(
                 MCodeOpSpec::new(MCodeOpcode::Insert, object_width)
@@ -1085,15 +1044,8 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                 [previous, value],
                 MCodeResultSpec::new(object_width),
             )?;
-            self.builder.emit(
-                MCodeOpSpec::new(MCodeOpcode::SetVar, object_width).with_variable(variable),
-                [inserted],
-                [MCodeResultSpec::new(object_width).with_variable(variable)],
-            )?
+            self.builder.emit_variable_assignment(variable, inserted)?
         };
-        let full_value = operation
-            .single_result()
-            .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "single operation result"))?;
         self.bindings.insert(full_value, variable)?;
         self.scratch.required_values.push(full_value);
         current.insert_stack(variable, full_value);
@@ -1117,26 +1069,27 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                 .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "address space"))?,
             _ => unreachable!(),
         };
-        self.builder.intern_memory_domain(space);
         let memory = match current.memory_value(space) {
             Some(value) => value,
             None => {
-                let value = self.push_memory_undefined(space)?;
+                let value = self.builder.emit_memory_undefined(space)?;
                 current.insert_memory(space, value);
                 value
             }
         };
         let mut operands = mem::take(&mut self.scratch.operands);
         operands.clear();
-        if operation.opcode() == ECodeOpcode::CallIndirect {
+        let indirect_target = if operation.opcode() == ECodeOpcode::CallIndirect {
             let destination = self
                 .source
                 .op_operands_for(&operation)
                 .first()
                 .copied()
                 .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "call target"))?;
-            operands.push(self.target_value(destination)?);
-        }
+            Some(self.target_value(destination)?)
+        } else {
+            None
+        };
         let arg_count = self
             .analysis
             .abi()
@@ -1158,11 +1111,8 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                 }
             });
         }
-        operands.push(memory);
-
         let mut result_specs = mem::take(&mut self.scratch.result_specs);
         result_specs.clear();
-        result_specs.push(MCodeResultSpec::new(0));
         let output_count = self
             .analysis
             .abi()
@@ -1194,29 +1144,39 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                 result_specs.push(result);
             }
         }
-        let opcode = match operation.opcode() {
-            ECodeOpcode::Call => MCodeOpcode::Call,
-            ECodeOpcode::CallIndirect => MCodeOpcode::CallIndirect,
+        let results = match operation.opcode() {
+            ECodeOpcode::Call => {
+                let target = operation
+                    .address()
+                    .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "call target"))?;
+                self.builder.emit_call(
+                    target,
+                    operands.iter().copied(),
+                    memory,
+                    result_specs.iter().copied(),
+                )
+            }
+            ECodeOpcode::CallIndirect => self.builder.emit_call_indirect(
+                indirect_target.expect("indirect call target was constructed"),
+                operands.iter().copied(),
+                memory,
+                space,
+                result_specs.iter().copied(),
+            ),
             _ => unreachable!(),
         };
-        let mut spec = MCodeOpSpec::new(opcode, 0).with_address_space(space);
-        if let Some(address) = operation.address() {
-            spec = spec.with_address(address);
-        }
-        let results = self
-            .builder
-            .emit(spec, operands.iter().copied(), &result_specs);
         operands.clear();
         self.scratch.operands = operands;
-        let results = results?.results();
-        let memory_result = IlValueId::try_from_index(results.start())?;
+        let results = results?;
+        let memory_result = results.memory();
         current.clear_memory();
         current.clear_unmatched_call_memory();
         current.insert_memory(space, memory_result);
         current.insert_unmatched_call_memory(space);
         current.clear_unmatched_call_outputs();
 
-        let mut result_index = results.start() + 1;
+        let outputs = results.outputs();
+        let mut result_index = outputs.start();
         for output_index in 0..output_count {
             let component_count = self
                 .analysis
@@ -1237,7 +1197,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                 let value = IlValueId::try_from_index(result_index)?;
                 match component {
                     MCodeCallOutputComponent::Register { register, .. } => {
-                        let variable = result_specs[result_index - results.start()]
+                        let variable = result_specs[result_index - outputs.start()]
                             .variable()
                             .expect("register call outputs are bound directly");
                         current.insert_unmatched_call_output(register, value);
@@ -1245,7 +1205,7 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                     }
                     MCodeCallOutputComponent::Stack { .. } => {
                         if let Some(variable) =
-                            result_specs[result_index - results.start()].variable()
+                            result_specs[result_index - outputs.start()].variable()
                         {
                             self.bindings.insert(value, variable)?;
                             current.insert_stack(variable, value);
@@ -1279,26 +1239,27 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                 .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "address space"))?,
             _ => unreachable!(),
         };
-        self.builder.intern_memory_domain(space);
         let memory = match current.memory_value(space) {
             Some(value) => value,
             None => {
-                let value = self.push_memory_undefined(space)?;
+                let value = self.builder.emit_memory_undefined(space)?;
                 current.insert_memory(space, value);
                 value
             }
         };
         let mut operands = mem::take(&mut self.scratch.operands);
         operands.clear();
-        if operation.opcode() == ECodeOpcode::BranchIndirect {
+        let indirect_target = if operation.opcode() == ECodeOpcode::BranchIndirect {
             let destination = self
                 .source
                 .op_operands_for(&operation)
                 .first()
                 .copied()
                 .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "tail-call target"))?;
-            operands.push(self.target_value(destination)?);
-        }
+            Some(self.target_value(destination)?)
+        } else {
+            None
+        };
         let arg_count = self
             .analysis
             .abi()
@@ -1320,18 +1281,22 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                 }
             });
         }
-        operands.push(memory);
-
-        let opcode = match operation.opcode() {
-            ECodeOpcode::Branch => MCodeOpcode::TailCall,
-            ECodeOpcode::BranchIndirect => MCodeOpcode::TailCallIndirect,
+        let results = match operation.opcode() {
+            ECodeOpcode::Branch => {
+                let target = operation
+                    .address()
+                    .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "tail-call target"))?;
+                self.builder
+                    .emit_tail_call(target, operands.iter().copied(), memory)
+            }
+            ECodeOpcode::BranchIndirect => self.builder.emit_tail_call_indirect(
+                indirect_target.expect("indirect tail-call target was constructed"),
+                operands.iter().copied(),
+                memory,
+                space,
+            ),
             _ => unreachable!(),
         };
-        let mut spec = MCodeOpSpec::new(opcode, 0).with_address_space(space);
-        if let Some(address) = operation.address() {
-            spec = spec.with_address(address);
-        }
-        let results = self.builder.emit_effect(spec, operands.iter().copied());
         operands.clear();
         self.scratch.operands = operands;
         results?;
@@ -1381,28 +1346,30 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
 
         if self.analysis.aliases().contains(analysed) {
             if !current.contains_stack(variable) {
-                let value = self.push_variable_undefined(variable, full_width)?;
+                let value = self.emit_variable_undefined(variable, full_width)?;
                 current.insert_stack(variable, value);
             }
-            let opcode = if access.field_offset() != 0 || width != full_width {
-                MCodeOpcode::VarAliasedField
-            } else {
-                MCodeOpcode::VarAliased
-            };
-            return self.builder.emit_value(
-                MCodeOpSpec::new(opcode, width)
-                    .with_variable(variable)
-                    .with_immediate(access.field_offset())
-                    .with_address_space(space),
-                [memory],
-                MCodeResultSpec::new(width),
-            );
+            if access.field_offset() != 0 || width != full_width {
+                return self.builder.emit_aliased_variable_field_read(
+                    variable,
+                    access.field_offset(),
+                    width,
+                    memory,
+                    space,
+                );
+            }
+            let value = self
+                .builder
+                .emit_aliased_variable_read(variable, width, memory, space)?;
+            self.bindings.insert(value, variable)?;
+            current.insert_stack(variable, value);
+            return Ok(value);
         }
 
         let value = match current.stack_value(variable) {
             Some(value) => value,
             None => {
-                let value = self.push_variable_undefined(variable, full_width)?;
+                let value = self.emit_variable_undefined(variable, full_width)?;
                 current.insert_stack(variable, value);
                 value
             }
@@ -1500,30 +1467,76 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
                 if self.analysis.aliases().contains(analysed) {
                     let variable = self.target_variable(analysed);
                     if !current.contains_stack(variable) {
-                        let value = self.push_variable_undefined(
+                        let value = self.emit_variable_undefined(
                             variable,
                             self.variable_widths.width(variable)?,
                         )?;
                         current.insert_stack(variable, value);
                     }
                     let field = access.field_offset() != 0;
-                    let opcode = if field {
-                        MCodeOpcode::AddressOfField
+                    let value = if field {
+                        self.builder.emit_variable_field_address(
+                            variable,
+                            access.field_offset(),
+                            operation.width(),
+                        )?
                     } else {
-                        MCodeOpcode::AddressOf
+                        self.builder
+                            .emit_variable_address(variable, operation.width())?
                     };
-                    let spec = MCodeOpSpec::new(opcode, operation.width())
-                        .with_variable(variable)
-                        .with_immediate(access.field_offset());
-                    let value = self.builder.emit_value(
-                        spec,
-                        [],
-                        MCodeResultSpec::new(operation.width()),
-                    )?;
                     self.target_values[source.index()] = Some(value);
                     return Ok(());
                 }
             }
+        }
+
+        if operation.opcode() == ECodeOpcode::Constant {
+            let source = operation.single_result().ok_or_else(|| {
+                IlError::missing_component(MCodeIr::FORM, "single operation result")
+            })?;
+            let constant = operation
+                .constant(self.source.constant_storage())
+                .ok_or_else(|| IlError::missing_component(ECodeIr::FORM, "constant"))?;
+            let value = self.builder.emit_constant(&constant)?;
+            self.target_values[source.index()] = Some(value);
+            return Ok(());
+        }
+
+        if matches!(operation.opcode(), ECodeOpcode::Load | ECodeOpcode::Store) {
+            let source_operands = self.source.op_operands_for(&operation);
+            let pointer = source_operands
+                .first()
+                .copied()
+                .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "pointer"))?;
+            let pointer = self.target_value(pointer)?;
+            let memory = self.mapped_memory_operand(operation)?;
+            let space = operation
+                .address_space()
+                .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "address space"))?;
+            let value = match operation.opcode() {
+                ECodeOpcode::Load => {
+                    self.builder
+                        .emit_load(pointer, operation.width(), memory, space)?
+                }
+                ECodeOpcode::Store => {
+                    let stored = source_operands
+                        .get(1)
+                        .copied()
+                        .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "stored value"))?;
+                    self.builder
+                        .emit_store(pointer, self.target_value(stored)?, memory, space)?
+                }
+                _ => unreachable!(),
+            };
+            let source = operation.single_result().ok_or_else(|| {
+                IlError::missing_component(MCodeIr::FORM, "single operation result")
+            })?;
+            self.target_values[source.index()] = Some(value);
+            if operation.opcode() == ECodeOpcode::Store {
+                current.insert_memory(space, value);
+                current.remove_unmatched_call_memory(space);
+            }
+            return Ok(());
         }
 
         self.scratch.operands.clear();
@@ -1531,23 +1544,13 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             self.scratch.operands.push(self.target_value(*operand)?);
         }
         let opcode = self.lift_opcode(site, operation.opcode())?;
-        let immediate = if operation.opcode() == ECodeOpcode::Constant && operation.width() > 64 {
-            let value = operation
-                .constant(self.source.constant_storage())
-                .ok_or_else(|| IlError::missing_component(ECodeIr::FORM, "constant"))?;
-            self.builder.intern_constant(&value)
-        } else {
-            operation.immediate()
-        };
-        let mut spec = MCodeOpSpec::new(opcode, operation.width()).with_immediate(immediate);
+        let mut spec =
+            MCodeOpSpec::new(opcode, operation.width()).with_immediate(operation.immediate());
         if let Some(address) = operation.address() {
             spec = spec.with_address(address);
         }
         if let Some(space) = operation.address_space() {
             spec = spec.with_address_space(space);
-            if opcode.requires_memory_domain() {
-                self.builder.intern_memory_domain(space);
-            }
         }
         let mut operands = mem::take(&mut self.scratch.operands);
         let mut result_specs = mem::take(&mut self.scratch.result_specs);
@@ -1568,12 +1571,25 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             }
             result_specs.push(result);
         }
-        let results = self
-            .builder
-            .emit(spec, operands.iter().copied(), &result_specs);
+        let results = match result_specs.as_slice() {
+            [] => self
+                .builder
+                .emit_effect(spec, operands.iter().copied())?
+                .results(),
+            [result] => {
+                let value = self
+                    .builder
+                    .emit_value(spec, operands.iter().copied(), *result)?;
+                let end = value
+                    .index()
+                    .checked_add(1)
+                    .ok_or_else(|| IlError::integer_overflow("MCode result range"))?;
+                IlIndexRange::new(value.index(), end)?
+            }
+            _ => return Err(IlError::invalid_artefact(MCodeIr::FORM)),
+        };
         operands.clear();
         self.scratch.operands = operands;
-        let results = results?.results();
         for (offset, source_index) in
             (operation.results().start()..operation.results().end()).enumerate()
         {
@@ -1602,10 +1618,8 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
 
     fn lift_opcode(&self, site: IlOpId, opcode: ECodeOpcode) -> Result<MCodeOpcode, IlError> {
         let opcode = match opcode {
-            ECodeOpcode::Constant => MCodeOpcode::Constant,
             ECodeOpcode::Address => MCodeOpcode::Address,
             ECodeOpcode::Undefined => MCodeOpcode::Undefined,
-            ECodeOpcode::Load => MCodeOpcode::Load,
             ECodeOpcode::Copy => MCodeOpcode::Copy,
             ECodeOpcode::Add => MCodeOpcode::Add,
             ECodeOpcode::Sub => MCodeOpcode::Sub,
@@ -1662,7 +1676,6 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             ECodeOpcode::IntToFloat => MCodeOpcode::IntToFloat,
             ECodeOpcode::IntrinsicResult => MCodeOpcode::IntrinsicResult,
             ECodeOpcode::Intrinsic => MCodeOpcode::Intrinsic,
-            ECodeOpcode::Store => MCodeOpcode::Store,
             ECodeOpcode::Branch => MCodeOpcode::Branch,
             ECodeOpcode::ConditionalBranch => MCodeOpcode::ConditionalBranch,
             ECodeOpcode::BranchIndirect if self.is_switch(site) => MCodeOpcode::Switch,
@@ -1671,6 +1684,9 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             ECodeOpcode::Trap => MCodeOpcode::Trap,
             ECodeOpcode::Call
             | ECodeOpcode::CallIndirect
+            | ECodeOpcode::Constant
+            | ECodeOpcode::Load
+            | ECodeOpcode::Store
             | ECodeOpcode::WriteRegister
             | ECodeOpcode::WriteFlag => {
                 return Err(IlError::unsupported_opcode(MCodeIr::FORM));
@@ -1756,13 +1772,14 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             let specs = mem::take(&mut self.block_arg_specs[index]);
             let mut bindings = SmallVec::<[_; 2]>::with_capacity(specs.len());
             for spec in specs {
-                let result = match spec.domain {
-                    MCodeBlockArgDomain::Memory(_) => MCodeResultSpec::new(spec.width),
-                    MCodeBlockArgDomain::Variable(variable) => {
-                        MCodeResultSpec::new(spec.width).with_variable(variable)
+                let value = match spec.domain {
+                    MCodeBlockArgDomain::Memory(space) => {
+                        self.builder.add_memory_block_arg(block, space)?
                     }
+                    MCodeBlockArgDomain::Variable(variable) => self
+                        .builder
+                        .add_variable_block_arg(block, variable, spec.width)?,
                 };
-                let value = self.builder.add_block_arg(block, result)?;
                 if let MCodeBlockArgOrigin::Source { value: source, .. } = spec.origin {
                     self.target_values[source.index()] = Some(value);
                 }

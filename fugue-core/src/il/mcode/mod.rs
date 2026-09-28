@@ -10,7 +10,7 @@ mod value;
 mod variable;
 
 pub use format::{MCodeIrDisplay, MCodeSourceDisplay};
-pub use ir::{MCodeBuilder, MCodeIr};
+pub use ir::{MCodeAliasedWriteResults, MCodeBuilder, MCodeCallResults, MCodeIr};
 pub use memory::MCodeMemoryDomain;
 pub use opcode::MCodeOpcode;
 pub use operation::{MCodeOp, MCodeOpSpec, MCodeResultSpec};
@@ -21,6 +21,8 @@ pub use variable::{MCodeVar, MCodeVarId, MCodeVarKind};
 
 #[cfg(test)]
 mod test {
+    use std::mem::size_of;
+
     use super::ir::verify::VerifyError;
     use super::*;
     use crate::il::common::{
@@ -55,15 +57,14 @@ mod test {
     fn provenance_builder(operation_count: usize) -> MCodeBuilder {
         let mut builder = MCodeBuilder::new(metadata());
         for _ in 0..operation_count {
-            emit_value(
-                &mut builder,
-                MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
-                [],
-                64,
-            )
-            .unwrap();
+            builder.emit_undefined(0, 64).unwrap();
         }
         builder
+    }
+
+    #[test]
+    fn mcode_value_stays_compact() {
+        assert_eq!(size_of::<MCodeValue>(), 20);
     }
 
     #[test]
@@ -194,30 +195,18 @@ mod test {
     #[test]
     fn rewriter_preserves_result_identity_across_algebraic_replacements() {
         let mut builder = MCodeBuilder::new(metadata());
-        let left = emit_value(
-            &mut builder,
-            MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
-            [],
-            64,
-        )
-        .unwrap();
-        let right = emit_value(
-            &mut builder,
-            MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
-            [],
-            64,
-        )
-        .unwrap();
+        let left = builder.emit_undefined(0, 64).unwrap();
+        let right = builder.emit_undefined(0, 64).unwrap();
         let operation = IlOpId::try_from_index(builder.op_count()).unwrap();
-        let emitted = builder
-            .emit(
+        let result = builder
+            .emit_value(
                 MCodeOpSpec::new(MCodeOpcode::Not, 64),
                 [left],
-                [MCodeResultSpec::new(64)],
+                MCodeResultSpec::new(64),
             )
             .unwrap();
-        let results = emitted.results();
-        let result = emitted.single_result().unwrap();
+        let results =
+            IlIndexRange::new(result.index(), result.index().checked_add(1).unwrap()).unwrap();
         builder
             .emit_effect(MCodeOpSpec::new(MCodeOpcode::Return, 0), [result])
             .unwrap();
@@ -320,13 +309,7 @@ mod test {
             .add_variable(MCodeVar::register(RegisterId::new(16), 0))
             .unwrap();
 
-        let previous = emit_result(
-            &mut builder,
-            MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
-            [],
-            MCodeResultSpec::new(64).with_variable(variable),
-        )
-        .unwrap();
+        let previous = builder.emit_variable_undefined(variable, 64).unwrap();
 
         let source = emit_value(
             &mut builder,
@@ -390,11 +373,7 @@ mod test {
         }
         let mut block_args = Vec::with_capacity(BLOCK_COUNT - 1);
         for &block in &blocks[1..] {
-            block_args.push(
-                builder
-                    .add_block_arg(block, MCodeResultSpec::new(64))
-                    .unwrap(),
-            );
+            block_args.push(builder.add_block_arg(block, 64).unwrap());
         }
 
         builder.switch_to_block(blocks[0]).unwrap();
@@ -433,10 +412,10 @@ mod test {
         )
         .unwrap();
         builder
-            .emit(
+            .emit_value(
                 MCodeOpSpec::new(MCodeOpcode::SetVar, 64),
                 [source],
-                [MCodeResultSpec::new(64)],
+                MCodeResultSpec::new(64),
             )
             .unwrap();
 
@@ -453,10 +432,10 @@ mod test {
         let mut builder = MCodeBuilder::new(metadata());
         let unknown = MCodeVarId::try_from_index(3).unwrap();
         builder
-            .emit(
+            .emit_value(
                 MCodeOpSpec::new(MCodeOpcode::AddressOf, 64).with_variable(unknown),
                 [],
-                [MCodeResultSpec::new(64)],
+                MCodeResultSpec::new(64),
             )
             .unwrap();
 
@@ -510,21 +489,9 @@ mod test {
             .add_variable(MCodeVar::register(RegisterId::new(16), 0))
             .unwrap();
 
-        let previous = emit_result(
-            &mut builder,
-            MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
-            [],
-            MCodeResultSpec::new(64).with_variable(variable),
-        )
-        .unwrap();
+        let previous = builder.emit_variable_undefined(variable, 64).unwrap();
 
-        let source = emit_value(
-            &mut builder,
-            MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
-            [],
-            64,
-        )
-        .unwrap();
+        let source = builder.emit_undefined(0, 64).unwrap();
 
         let _ = emit_result(
             &mut builder,
@@ -551,13 +518,7 @@ mod test {
             .add_variable(MCodeVar::register(RegisterId::new(16), 0))
             .unwrap();
 
-        let previous = emit_result(
-            &mut builder,
-            MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
-            [],
-            MCodeResultSpec::new(64).with_variable(variable),
-        )
-        .unwrap();
+        let previous = builder.emit_variable_undefined(variable, 64).unwrap();
 
         let source = emit_value(
             &mut builder,
@@ -589,21 +550,9 @@ mod test {
             .add_variable(MCodeVar::register(RegisterId::new(16), 0))
             .unwrap();
 
-        let first = emit_result(
-            &mut builder,
-            MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
-            [],
-            MCodeResultSpec::new(64).with_variable(variable),
-        )
-        .unwrap();
+        let first = builder.emit_variable_undefined(variable, 64).unwrap();
 
-        let second_source = emit_value(
-            &mut builder,
-            MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
-            [],
-            64,
-        )
-        .unwrap();
+        let second_source = builder.emit_undefined(0, 64).unwrap();
         let _ = emit_result(
             &mut builder,
             MCodeOpSpec::new(MCodeOpcode::SetVar, 64).with_variable(variable),
@@ -612,13 +561,7 @@ mod test {
         )
         .unwrap();
 
-        let field = emit_value(
-            &mut builder,
-            MCodeOpSpec::new(MCodeOpcode::Undefined, 8),
-            [],
-            8,
-        )
-        .unwrap();
+        let field = builder.emit_undefined(0, 8).unwrap();
         let _ = emit_result(
             &mut builder,
             MCodeOpSpec::new(MCodeOpcode::SetVarField, 8).with_variable(variable),
@@ -793,7 +736,7 @@ mod test {
         builder.begin_block().unwrap();
 
         assert!(matches!(
-            builder.add_block_arg(block, MCodeResultSpec::new(64)),
+            builder.add_block_arg(block, 64),
             Err(IlError::InvalidArtefact { .. })
         ));
     }
@@ -807,11 +750,7 @@ mod test {
         builder.switch_to_block(block).unwrap();
 
         assert!(matches!(
-            builder.emit_value(
-                MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
-                [],
-                MCodeResultSpec::new(64),
-            ),
+            builder.emit_undefined(0, 64),
             Err(IlError::InvalidArtefact { .. })
         ));
     }
@@ -827,11 +766,7 @@ mod test {
         builder.end_block().unwrap();
 
         assert!(matches!(
-            builder.emit_value(
-                MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
-                [],
-                MCodeResultSpec::new(64),
-            ),
+            builder.emit_undefined(0, 64),
             Err(IlError::InvalidArtefact { .. })
         ));
     }
@@ -923,9 +858,7 @@ mod test {
         let entry = builder.add_block(IlBlockProperties::ENTRY).unwrap();
         let successor = builder.add_block(IlBlockProperties::EXIT).unwrap();
         builder.switch_to_block(entry).unwrap();
-        builder
-            .add_block_arg(successor, MCodeResultSpec::new(64))
-            .unwrap();
+        builder.add_block_arg(successor, 64).unwrap();
         builder.begin_block().unwrap();
         assert!(matches!(
             builder.add_successor(successor, IlEdgeKinds::UNCONDITIONAL, []),
@@ -981,25 +914,11 @@ mod test {
         let mut builder = MCodeBuilder::new(metadata());
         let entry = builder.add_block(IlBlockProperties::ENTRY).unwrap();
         let successor = builder.add_block(IlBlockProperties::EXIT).unwrap();
-        builder
-            .add_block_arg(successor, MCodeResultSpec::new(64))
-            .unwrap();
+        builder.add_block_arg(successor, 64).unwrap();
         builder.switch_to_block(entry).unwrap();
         builder.begin_block().unwrap();
-        let left = builder
-            .emit_value(
-                MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
-                [],
-                MCodeResultSpec::new(64),
-            )
-            .unwrap();
-        let right = builder
-            .emit_value(
-                MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
-                [],
-                MCodeResultSpec::new(64),
-            )
-            .unwrap();
+        let left = builder.emit_undefined(0, 64).unwrap();
+        let right = builder.emit_undefined(0, 64).unwrap();
         builder
             .add_successor(successor, IlEdgeKinds::FALL_THROUGH, [left])
             .unwrap();
@@ -1022,17 +941,11 @@ mod test {
             .add_variable(MCodeVar::register(RegisterId::new(24), 0))
             .unwrap();
         builder
-            .add_block_arg(successor, MCodeResultSpec::new(64).with_variable(right))
+            .add_variable_block_arg(successor, right, 64)
             .unwrap();
         builder.switch_to_block(entry).unwrap();
         builder.begin_block().unwrap();
-        let left_value = builder
-            .emit_value(
-                MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
-                [],
-                MCodeResultSpec::new(64).with_variable(left),
-            )
-            .unwrap();
+        let left_value = builder.emit_variable_undefined(left, 64).unwrap();
         assert!(matches!(
             builder.add_successor(successor, IlEdgeKinds::UNCONDITIONAL, [left_value],),
             Err(IlError::InvalidArtefact { .. })
@@ -1045,9 +958,7 @@ mod test {
         let entry = builder.add_block(IlBlockProperties::ENTRY).unwrap();
         let unreachable = builder.add_block(IlBlockProperties::empty()).unwrap();
         let successor = builder.add_block(IlBlockProperties::EXIT).unwrap();
-        builder
-            .add_block_arg(successor, MCodeResultSpec::new(64))
-            .unwrap();
+        builder.add_block_arg(successor, 64).unwrap();
         builder.switch_to_block(entry).unwrap();
         builder.switch_to_block(unreachable).unwrap();
         builder.begin_block().unwrap();

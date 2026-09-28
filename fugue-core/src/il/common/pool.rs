@@ -1,3 +1,5 @@
+use std::iter::FusedIterator;
+
 use super::span::{IlParentSpan, IlSourceSpan};
 use crate::il::common::IlError;
 
@@ -65,6 +67,29 @@ impl IlIndexRange {
         Ok(())
     }
 }
+
+impl Iterator for IlIndexRange {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if IlIndexRange::is_empty(self) {
+            return None;
+        }
+
+        let index = self.start;
+        self.start += 1;
+        Some(index as usize)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.len();
+        (len, Some(len))
+    }
+}
+
+impl ExactSizeIterator for IlIndexRange {}
+
+impl FusedIterator for IlIndexRange {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IlIndexMapper {

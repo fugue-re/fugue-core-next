@@ -1,5 +1,46 @@
 use crate::il::common::{IlBlockArgId, IlBlockId, IlOpId, IlSsaDef, IlValueId};
 use crate::il::mcode::MCodeVarId;
+use crate::storage::segments::space::AddressSpaceId;
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[rkyv(derive(Debug, PartialEq, Eq))]
+#[repr(transparent)]
+struct MCodeValueType(u32);
+
+impl MCodeValueType {
+    const MEMORY_TAG: u32 = 1 << 31;
+
+    const fn bits(width: u32) -> Option<Self> {
+        if width & Self::MEMORY_TAG == 0 {
+            Some(Self(width))
+        } else {
+            None
+        }
+    }
+
+    const fn memory(space: AddressSpaceId) -> Self {
+        Self(Self::MEMORY_TAG | space.value() as u32)
+    }
+
+    const fn memory_domain(&self) -> Option<AddressSpaceId> {
+        if self.0 & Self::MEMORY_TAG == 0 {
+            return None;
+        }
+        let value = self.0 & !Self::MEMORY_TAG;
+        if value > u16::MAX as u32 {
+            return None;
+        }
+        Some(AddressSpaceId::new(value as usize))
+    }
+
+    const fn width(&self) -> u32 {
+        if self.0 & Self::MEMORY_TAG == 0 {
+            self.0
+        } else {
+            0
+        }
+    }
+}
 
 #[derive(
     Debug,
@@ -39,27 +80,30 @@ impl MCodeVersion {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[rkyv(derive(Debug, PartialEq, Eq))]
 pub struct MCodeValue {
-    width: u32,
+    value_type: MCodeValueType,
     definition: IlSsaDef,
     variable: Option<MCodeVarId>,
     version: MCodeVersion,
 }
 
 impl MCodeValue {
-    pub(crate) const fn new(definition: IlSsaDef, width: u32) -> Self {
-        Self {
-            width,
+    const fn new(definition: IlSsaDef, width: u32) -> Option<Self> {
+        let Some(value_type) = MCodeValueType::bits(width) else {
+            return None;
+        };
+        Some(Self {
+            value_type,
             definition,
             variable: None,
             version: MCodeVersion::new(0),
-        }
+        })
     }
 
-    pub const fn op_result(operation: IlOpId, width: u32) -> Self {
+    pub(crate) const fn op_result(operation: IlOpId, width: u32) -> Option<Self> {
         Self::new(IlSsaDef::Op(operation), width)
     }
 
-    pub const fn block_arg(arg: IlBlockArgId, width: u32) -> Self {
+    pub(crate) const fn block_arg(arg: IlBlockArgId, width: u32) -> Option<Self> {
         Self::new(IlSsaDef::BlockArg(arg), width)
     }
 
@@ -68,8 +112,16 @@ impl MCodeValue {
         self.version = version;
     }
 
+    pub(crate) fn set_memory_domain(&mut self, space: AddressSpaceId) {
+        self.value_type = MCodeValueType::memory(space);
+    }
+
     pub const fn width(&self) -> u32 {
-        self.width
+        self.value_type.width()
+    }
+
+    pub(crate) const fn memory_domain(&self) -> Option<AddressSpaceId> {
+        self.value_type.memory_domain()
     }
 
     pub const fn definition(&self) -> IlSsaDef {

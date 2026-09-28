@@ -213,13 +213,7 @@ mod test {
         for index in 0..256 {
             let variable = builder.add_variable(MCodeVar::stack(index)).unwrap();
             aliased_variables.push(variable);
-            let _ = builder
-                .emit_value(
-                    MCodeOpSpec::new(MCodeOpcode::Undefined, 64),
-                    [],
-                    MCodeResultSpec::new(64).with_variable(variable),
-                )
-                .unwrap();
+            let _ = builder.emit_variable_undefined(variable, 64).unwrap();
             let address = emit_value(
                 &mut builder,
                 MCodeOpSpec::new(MCodeOpcode::AddressOf, 64).with_variable(variable),

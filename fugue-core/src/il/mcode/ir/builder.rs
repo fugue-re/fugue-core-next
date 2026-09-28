@@ -1,5 +1,6 @@
 use fixedbitset::FixedBitSet;
 use fugue_bv::BitVec;
+use itertools::Itertools;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
@@ -10,8 +11,8 @@ use crate::il::common::{
 };
 use crate::il::mcode::ir::MCodeIr;
 use crate::il::mcode::{
-    MCodeBlockArg, MCodeMemoryDomain, MCodeOp, MCodeOpSpec, MCodeResultSpec, MCodeValue, MCodeVar,
-    MCodeVarId, MCodeVarKind, MCodeVersion,
+    MCodeBlockArg, MCodeMemoryDomain, MCodeOp, MCodeOpSpec, MCodeOpcode, MCodeResultSpec,
+    MCodeValue, MCodeVar, MCodeVarId, MCodeVarKind, MCodeVersion,
 };
 use crate::ir::Address;
 use crate::storage::segments::space::AddressSpaceId;
@@ -220,6 +221,58 @@ impl MCodeBlockSuccessor {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct MCodeAliasedWriteResults {
+    memory: IlValueId,
+    variable: IlValueId,
+}
+
+impl MCodeAliasedWriteResults {
+    fn new(results: IlIndexRange) -> Result<Self, IlError> {
+        let Some((memory, variable)) = results.collect_tuple() else {
+            return Err(IlError::invalid_artefact(MCodeIr::FORM));
+        };
+        Ok(Self {
+            memory: IlValueId::try_from_index(memory)?,
+            variable: IlValueId::try_from_index(variable)?,
+        })
+    }
+
+    pub const fn memory(&self) -> IlValueId {
+        self.memory
+    }
+
+    pub const fn variable(&self) -> IlValueId {
+        self.variable
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct MCodeCallResults {
+    memory: IlValueId,
+    outputs: IlIndexRange,
+}
+
+impl MCodeCallResults {
+    fn new(mut outputs: IlIndexRange) -> Result<Self, IlError> {
+        let Some(memory) = outputs.next() else {
+            return Err(IlError::invalid_artefact(MCodeIr::FORM));
+        };
+        Ok(Self {
+            memory: IlValueId::try_from_index(memory)?,
+            outputs,
+        })
+    }
+
+    pub const fn memory(&self) -> IlValueId {
+        self.memory
+    }
+
+    pub const fn outputs(&self) -> IlIndexRange {
+        self.outputs
+    }
+}
+
 #[derive(Debug)]
 pub struct MCodeBuilder {
     metadata: IlMetadata,
@@ -296,8 +349,25 @@ impl MCodeBuilder {
         builder
     }
 
+    fn is_aliased(&self, variable: MCodeVarId) -> bool {
+        self.aliased_variables.binary_search(&variable).is_ok()
+    }
+
     pub fn op_count(&self) -> usize {
         self.operations.len()
+    }
+
+    fn value(&self, value: IlValueId) -> Result<&MCodeValue, IlError> {
+        self.values
+            .get(value.index())
+            .ok_or_else(|| IlError::range_out_of_bounds(value.index(), self.values.len()))
+    }
+
+    fn variable_width(&self, variable: MCodeVarId) -> Result<Option<u32>, IlError> {
+        self.variable_widths
+            .get(variable.index())
+            .copied()
+            .ok_or_else(|| IlError::range_out_of_bounds(variable.index(), self.variables.len()))
     }
 
     pub fn set_source_spans(&mut self, source_spans: Vec<IlSourceSpan>) {
@@ -427,11 +497,7 @@ impl MCodeBuilder {
         blocks[block.index()].end(self.operations.len())
     }
 
-    pub fn add_block_arg(
-        &mut self,
-        block: IlBlockId,
-        result: MCodeResultSpec,
-    ) -> Result<IlValueId, IlError> {
+    pub fn add_block_arg(&mut self, block: IlBlockId, width: u32) -> Result<IlValueId, IlError> {
         let blocks = self
             .blocks
             .as_ref()
@@ -442,36 +508,48 @@ impl MCodeBuilder {
         if !definition.is_pending() {
             return Err(IlError::invalid_artefact(MCodeIr::FORM));
         }
-        let binding = match result.variable() {
-            Some(variable) => {
-                let width = self.variable_widths.get(variable.index()).ok_or_else(|| {
-                    IlError::range_out_of_bounds(variable.index(), self.variables.len())
-                })?;
-                if width.is_some_and(|width| width != result.width()) {
-                    return Err(IlError::width_mismatch(MCodeIr::FORM));
-                }
-                let version = self.variable_versions[variable.index()]
-                    .checked_next()
-                    .ok_or_else(|| IlError::id_exhausted("MCode version"))?;
-                Some((variable, version))
-            }
-            None => None,
-        };
         let arg = IlBlockArgId::try_from_index(self.block_args.len())?;
         let value = IlValueId::try_from_index(self.values.len())?;
-        let mut result_value = MCodeValue::block_arg(arg, result.width());
-        if let Some((variable, version)) = binding {
-            result_value.set_binding(variable, version);
-            self.variable_versions[variable.index()] = version;
-            self.variable_widths[variable.index()] = Some(result.width());
-        }
-        self.values.push(result_value);
+        let value_record = MCodeValue::block_arg(arg, width)
+            .ok_or_else(|| IlError::width_mismatch(MCodeIr::FORM))?;
+        self.values.push(value_record);
         self.block_args
-            .push(MCodeBlockArg::new(block, value, result.width()));
+            .push(MCodeBlockArg::new(block, value, width));
         self.blocks
             .as_mut()
             .expect("block construction was checked before block-argument emission")[block.index()]
         .add_block_arg(value)?;
+        Ok(value)
+    }
+
+    pub fn add_variable_block_arg(
+        &mut self,
+        block: IlBlockId,
+        variable: MCodeVarId,
+        width: u32,
+    ) -> Result<IlValueId, IlError> {
+        let variable_width = self.variable_width(variable)?;
+        if variable_width.is_some_and(|variable_width| variable_width != width) {
+            return Err(IlError::width_mismatch(MCodeIr::FORM));
+        }
+        let version = self.variable_versions[variable.index()]
+            .checked_next()
+            .ok_or_else(|| IlError::id_exhausted("MCode version"))?;
+        let value = self.add_block_arg(block, width)?;
+        self.values[value.index()].set_binding(variable, version);
+        self.variable_versions[variable.index()] = version;
+        self.variable_widths[variable.index()] = Some(width);
+        Ok(value)
+    }
+
+    pub fn add_memory_block_arg(
+        &mut self,
+        block: IlBlockId,
+        space: AddressSpaceId,
+    ) -> Result<IlValueId, IlError> {
+        let value = self.add_block_arg(block, 0)?;
+        self.values[value.index()].set_memory_domain(space);
+        self.intern_memory_domain(space);
         Ok(value)
     }
 
@@ -510,6 +588,7 @@ impl MCodeBuilder {
             let destination_value = &self.values[destination_value_id.index()];
             if source_value.width() != destination_value.width()
                 || source_value.variable() != destination_value.variable()
+                || source_value.memory_domain() != destination_value.memory_domain()
             {
                 return Err(IlError::invalid_artefact(MCodeIr::FORM));
             }
@@ -550,7 +629,432 @@ impl MCodeBuilder {
         source_block.add_successor(successor, kinds, args)
     }
 
-    pub fn emit(
+    pub fn emit_constant(&mut self, value: &BitVec) -> Result<IlValueId, IlError> {
+        let immediate = self.intern_constant(value);
+        self.emit_value(
+            MCodeOpSpec::new(MCodeOpcode::Constant, value.bits()).with_immediate(immediate),
+            [],
+            MCodeResultSpec::new(value.bits()),
+        )
+    }
+
+    pub fn emit_undefined(&mut self, discriminant: u64, width: u32) -> Result<IlValueId, IlError> {
+        if width == 0 {
+            return Err(IlError::width_mismatch(MCodeIr::FORM));
+        }
+        self.emit_op(
+            MCodeOpSpec::new(MCodeOpcode::Undefined, width).with_immediate(discriminant),
+            [],
+            [MCodeResultSpec::new(width)],
+        )?
+        .single_result()
+        .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "single operation result"))
+    }
+
+    pub fn emit_variable_undefined(
+        &mut self,
+        variable: MCodeVarId,
+        width: u32,
+    ) -> Result<IlValueId, IlError> {
+        if width == 0 {
+            return Err(IlError::width_mismatch(MCodeIr::FORM));
+        }
+        self.emit_op(
+            MCodeOpSpec::new(MCodeOpcode::Undefined, width),
+            [],
+            [MCodeResultSpec::new(width).with_variable(variable)],
+        )?
+        .single_result()
+        .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "single operation result"))
+    }
+
+    pub fn emit_memory_undefined(&mut self, space: AddressSpaceId) -> Result<IlValueId, IlError> {
+        self.emit_op(
+            MCodeOpSpec::new(MCodeOpcode::Undefined, 0).with_immediate(u64::from(space.value())),
+            [],
+            [MCodeResultSpec::new(0)],
+        )?
+        .single_result()
+        .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "single operation result"))
+    }
+
+    pub fn emit_variable_assignment(
+        &mut self,
+        variable: MCodeVarId,
+        value: IlValueId,
+    ) -> Result<IlValueId, IlError> {
+        if self.is_aliased(variable) {
+            return Err(IlError::invalid_artefact(MCodeIr::FORM));
+        }
+        let width = self.value(value)?.width();
+        self.emit_value(
+            MCodeOpSpec::new(MCodeOpcode::SetVar, width).with_variable(variable),
+            [value],
+            MCodeResultSpec::new(width).with_variable(variable),
+        )
+    }
+
+    pub fn emit_variable_field_assignment(
+        &mut self,
+        previous: IlValueId,
+        value: IlValueId,
+        field_offset: u64,
+    ) -> Result<IlValueId, IlError> {
+        let previous_value = self.value(previous)?;
+        let variable = previous_value
+            .variable()
+            .ok_or_else(|| IlError::invalid_artefact(MCodeIr::FORM))?;
+        let full_width = previous_value.width();
+        if self.is_aliased(variable) {
+            return Err(IlError::invalid_artefact(MCodeIr::FORM));
+        }
+        let width = self.value(value)?.width();
+        if !field_offset
+            .checked_add(u64::from(width))
+            .is_some_and(|end| end <= u64::from(full_width))
+        {
+            return Err(IlError::invalid_artefact(MCodeIr::FORM));
+        }
+        self.emit_value(
+            MCodeOpSpec::new(MCodeOpcode::SetVarField, width)
+                .with_variable(variable)
+                .with_immediate(field_offset),
+            [previous, value],
+            MCodeResultSpec::new(full_width).with_variable(variable),
+        )
+    }
+
+    pub fn emit_aliased_variable_read(
+        &mut self,
+        variable: MCodeVarId,
+        width: u32,
+        memory: IlValueId,
+        space: AddressSpaceId,
+    ) -> Result<IlValueId, IlError> {
+        self.variable_width(variable)?;
+        if !self.is_aliased(variable) {
+            return Err(IlError::invalid_artefact(MCodeIr::FORM));
+        }
+        let memory_value = self.value(memory)?;
+        if memory_value.width() != 0 {
+            return Err(IlError::width_mismatch(MCodeIr::FORM));
+        }
+        if memory_value.memory_domain() != Some(space) {
+            return Err(IlError::invalid_artefact(MCodeIr::FORM));
+        }
+        self.emit_value(
+            MCodeOpSpec::new(MCodeOpcode::VarAliased, width)
+                .with_variable(variable)
+                .with_address_space(space),
+            [memory],
+            MCodeResultSpec::new(width).with_variable(variable),
+        )
+    }
+
+    pub fn emit_aliased_variable_field_read(
+        &mut self,
+        variable: MCodeVarId,
+        field_offset: u64,
+        width: u32,
+        memory: IlValueId,
+        space: AddressSpaceId,
+    ) -> Result<IlValueId, IlError> {
+        let full_width = self
+            .variable_width(variable)?
+            .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "variable width"))?;
+        if !self.is_aliased(variable) {
+            return Err(IlError::invalid_artefact(MCodeIr::FORM));
+        }
+        let memory_value = self.value(memory)?;
+        if memory_value.width() != 0 {
+            return Err(IlError::width_mismatch(MCodeIr::FORM));
+        }
+        if memory_value.memory_domain() != Some(space) {
+            return Err(IlError::invalid_artefact(MCodeIr::FORM));
+        }
+        if !field_offset
+            .checked_add(u64::from(width))
+            .is_some_and(|end| end <= u64::from(full_width))
+        {
+            return Err(IlError::invalid_artefact(MCodeIr::FORM));
+        }
+        self.emit_value(
+            MCodeOpSpec::new(MCodeOpcode::VarAliasedField, width)
+                .with_variable(variable)
+                .with_immediate(field_offset)
+                .with_address_space(space),
+            [memory],
+            MCodeResultSpec::new(width),
+        )
+    }
+
+    pub fn emit_aliased_variable_write(
+        &mut self,
+        variable: MCodeVarId,
+        value: IlValueId,
+        memory: IlValueId,
+        space: AddressSpaceId,
+    ) -> Result<MCodeAliasedWriteResults, IlError> {
+        self.variable_width(variable)?;
+        if !self.is_aliased(variable) {
+            return Err(IlError::invalid_artefact(MCodeIr::FORM));
+        }
+        let width = self.value(value)?.width();
+        let memory_value = self.value(memory)?;
+        if memory_value.width() != 0 {
+            return Err(IlError::width_mismatch(MCodeIr::FORM));
+        }
+        if memory_value.memory_domain() != Some(space) {
+            return Err(IlError::invalid_artefact(MCodeIr::FORM));
+        }
+        let operation = self.emit_op(
+            MCodeOpSpec::new(MCodeOpcode::SetVarAliased, width)
+                .with_variable(variable)
+                .with_address_space(space),
+            [value, memory],
+            [
+                MCodeResultSpec::new(0),
+                MCodeResultSpec::new(width).with_variable(variable),
+            ],
+        )?;
+        let results = MCodeAliasedWriteResults::new(operation.results())?;
+        Ok(results)
+    }
+
+    pub fn emit_aliased_variable_field_write(
+        &mut self,
+        variable: MCodeVarId,
+        value: IlValueId,
+        field_offset: u64,
+        full_width: u32,
+        memory: IlValueId,
+        space: AddressSpaceId,
+    ) -> Result<MCodeAliasedWriteResults, IlError> {
+        let existing_width = self.variable_width(variable)?;
+        if !self.is_aliased(variable) {
+            return Err(IlError::invalid_artefact(MCodeIr::FORM));
+        }
+        let width = self.value(value)?.width();
+        let memory_value = self.value(memory)?;
+        if memory_value.width() != 0 {
+            return Err(IlError::width_mismatch(MCodeIr::FORM));
+        }
+        if memory_value.memory_domain() != Some(space) {
+            return Err(IlError::invalid_artefact(MCodeIr::FORM));
+        }
+        if existing_width.is_some_and(|existing_width| existing_width != full_width) {
+            return Err(IlError::width_mismatch(MCodeIr::FORM));
+        }
+        if !field_offset
+            .checked_add(u64::from(width))
+            .is_some_and(|end| end <= u64::from(full_width))
+        {
+            return Err(IlError::invalid_artefact(MCodeIr::FORM));
+        }
+        let operation = self.emit_op(
+            MCodeOpSpec::new(MCodeOpcode::SetVarAliasedField, width)
+                .with_variable(variable)
+                .with_immediate(field_offset)
+                .with_address_space(space),
+            [value, memory],
+            [
+                MCodeResultSpec::new(0),
+                MCodeResultSpec::new(full_width).with_variable(variable),
+            ],
+        )?;
+        let results = MCodeAliasedWriteResults::new(operation.results())?;
+        Ok(results)
+    }
+
+    pub fn emit_variable_address(
+        &mut self,
+        variable: MCodeVarId,
+        pointer_width: u32,
+    ) -> Result<IlValueId, IlError> {
+        self.variable_width(variable)?;
+        if !self.is_aliased(variable) {
+            return Err(IlError::invalid_artefact(MCodeIr::FORM));
+        }
+        self.emit_value(
+            MCodeOpSpec::new(MCodeOpcode::AddressOf, pointer_width).with_variable(variable),
+            [],
+            MCodeResultSpec::new(pointer_width),
+        )
+    }
+
+    pub fn emit_variable_field_address(
+        &mut self,
+        variable: MCodeVarId,
+        field_offset: u64,
+        pointer_width: u32,
+    ) -> Result<IlValueId, IlError> {
+        let full_width = self
+            .variable_width(variable)?
+            .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "variable width"))?;
+        if !self.is_aliased(variable) {
+            return Err(IlError::invalid_artefact(MCodeIr::FORM));
+        }
+        if field_offset >= u64::from(full_width) {
+            return Err(IlError::invalid_artefact(MCodeIr::FORM));
+        }
+        self.emit_value(
+            MCodeOpSpec::new(MCodeOpcode::AddressOfField, pointer_width)
+                .with_variable(variable)
+                .with_immediate(field_offset),
+            [],
+            MCodeResultSpec::new(pointer_width),
+        )
+    }
+
+    pub fn emit_load(
+        &mut self,
+        pointer: IlValueId,
+        width: u32,
+        memory: IlValueId,
+        space: AddressSpaceId,
+    ) -> Result<IlValueId, IlError> {
+        self.value(pointer)?;
+        let memory_value = self.value(memory)?;
+        if memory_value.width() != 0 {
+            return Err(IlError::width_mismatch(MCodeIr::FORM));
+        }
+        if memory_value.memory_domain() != Some(space) {
+            return Err(IlError::invalid_artefact(MCodeIr::FORM));
+        }
+        self.emit_value(
+            MCodeOpSpec::new(MCodeOpcode::Load, width).with_address_space(space),
+            [pointer, memory],
+            MCodeResultSpec::new(width),
+        )
+    }
+
+    pub fn emit_store(
+        &mut self,
+        pointer: IlValueId,
+        value: IlValueId,
+        memory: IlValueId,
+        space: AddressSpaceId,
+    ) -> Result<IlValueId, IlError> {
+        self.value(pointer)?;
+        self.value(value)?;
+        let memory_value = self.value(memory)?;
+        if memory_value.width() != 0 {
+            return Err(IlError::width_mismatch(MCodeIr::FORM));
+        }
+        if memory_value.memory_domain() != Some(space) {
+            return Err(IlError::invalid_artefact(MCodeIr::FORM));
+        }
+        let value = self.emit_value(
+            MCodeOpSpec::new(MCodeOpcode::Store, 0).with_address_space(space),
+            [pointer, value, memory],
+            MCodeResultSpec::new(0),
+        )?;
+        Ok(value)
+    }
+
+    pub fn emit_call(
+        &mut self,
+        target: Address,
+        args: impl IntoIterator<Item = IlValueId>,
+        memory: IlValueId,
+        outputs: impl IntoIterator<Item = MCodeResultSpec>,
+    ) -> Result<MCodeCallResults, IlError> {
+        let space = target.space();
+        let memory_value = self.value(memory)?;
+        if memory_value.width() != 0 {
+            return Err(IlError::width_mismatch(MCodeIr::FORM));
+        }
+        if memory_value.memory_domain() != Some(space) {
+            return Err(IlError::invalid_artefact(MCodeIr::FORM));
+        }
+        let mut results = SmallVec::<[_; 4]>::new();
+        results.push(MCodeResultSpec::new(0));
+        results.extend(outputs);
+        let operation = self.emit_op(
+            MCodeOpSpec::new(MCodeOpcode::Call, 0)
+                .with_address(target)
+                .with_address_space(space),
+            args.into_iter().chain([memory]),
+            &results,
+        )?;
+        let results = MCodeCallResults::new(operation.results())?;
+        Ok(results)
+    }
+
+    pub fn emit_call_indirect(
+        &mut self,
+        target: IlValueId,
+        args: impl IntoIterator<Item = IlValueId>,
+        memory: IlValueId,
+        space: AddressSpaceId,
+        outputs: impl IntoIterator<Item = MCodeResultSpec>,
+    ) -> Result<MCodeCallResults, IlError> {
+        self.value(target)?;
+        let memory_value = self.value(memory)?;
+        if memory_value.width() != 0 {
+            return Err(IlError::width_mismatch(MCodeIr::FORM));
+        }
+        if memory_value.memory_domain() != Some(space) {
+            return Err(IlError::invalid_artefact(MCodeIr::FORM));
+        }
+        let mut results = SmallVec::<[_; 4]>::new();
+        results.push(MCodeResultSpec::new(0));
+        results.extend(outputs);
+        let operation = self.emit_op(
+            MCodeOpSpec::new(MCodeOpcode::CallIndirect, 0).with_address_space(space),
+            [target].into_iter().chain(args).chain([memory]),
+            &results,
+        )?;
+        let results = MCodeCallResults::new(operation.results())?;
+        Ok(results)
+    }
+
+    pub fn emit_tail_call(
+        &mut self,
+        target: Address,
+        args: impl IntoIterator<Item = IlValueId>,
+        memory: IlValueId,
+    ) -> Result<MCodeOp, IlError> {
+        let space = target.space();
+        let memory_value = self.value(memory)?;
+        if memory_value.width() != 0 {
+            return Err(IlError::width_mismatch(MCodeIr::FORM));
+        }
+        if memory_value.memory_domain() != Some(space) {
+            return Err(IlError::invalid_artefact(MCodeIr::FORM));
+        }
+        self.emit_op(
+            MCodeOpSpec::new(MCodeOpcode::TailCall, 0)
+                .with_address(target)
+                .with_address_space(space),
+            args.into_iter().chain([memory]),
+            [],
+        )
+    }
+
+    pub fn emit_tail_call_indirect(
+        &mut self,
+        target: IlValueId,
+        args: impl IntoIterator<Item = IlValueId>,
+        memory: IlValueId,
+        space: AddressSpaceId,
+    ) -> Result<MCodeOp, IlError> {
+        self.value(target)?;
+        let memory_value = self.value(memory)?;
+        if memory_value.width() != 0 {
+            return Err(IlError::width_mismatch(MCodeIr::FORM));
+        }
+        if memory_value.memory_domain() != Some(space) {
+            return Err(IlError::invalid_artefact(MCodeIr::FORM));
+        }
+        self.emit_op(
+            MCodeOpSpec::new(MCodeOpcode::TailCallIndirect, 0).with_address_space(space),
+            [target].into_iter().chain(args).chain([memory]),
+            [],
+        )
+    }
+
+    pub(crate) fn emit_op(
         &mut self,
         spec: MCodeOpSpec,
         operands: impl IntoIterator<Item = IlValueId>,
@@ -571,9 +1075,38 @@ impl MCodeBuilder {
             .ok_or_else(|| IlError::integer_overflow("MCode result range"))?;
         let result_range = IlIndexRange::new(result_start, result_end)?;
         let operation = IlOpId::try_from_index(self.operations.len())?;
+        let memory_result_domain = match spec.opcode() {
+            MCodeOpcode::Undefined if spec.width() == 0 => {
+                let space = u16::try_from(spec.immediate())
+                    .map(AddressSpaceId::from)
+                    .map_err(|_| IlError::invalid_artefact(MCodeIr::FORM))?;
+                Some(space)
+            }
+            MCodeOpcode::Store
+            | MCodeOpcode::SetVarAliased
+            | MCodeOpcode::SetVarAliasedField
+            | MCodeOpcode::Call
+            | MCodeOpcode::CallIndirect => spec.address_space(),
+            _ => None,
+        };
+        let memory_domain = if spec.opcode().requires_memory_domain() {
+            spec.address_space()
+        } else {
+            memory_result_domain
+        };
+        if memory_result_domain.is_some()
+            && results.first().is_some_and(|result| result.width() != 0)
+        {
+            return Err(IlError::width_mismatch(MCodeIr::FORM));
+        }
         match results {
             [] => {}
             [result] => {
+                let mut value = MCodeValue::op_result(operation, result.width())
+                    .ok_or_else(|| IlError::width_mismatch(MCodeIr::FORM))?;
+                if let Some(space) = memory_result_domain {
+                    value.set_memory_domain(space);
+                }
                 let binding = match result.variable() {
                     Some(variable) => {
                         let width =
@@ -590,7 +1123,6 @@ impl MCodeBuilder {
                     }
                     None => None,
                 };
-                let mut value = MCodeValue::op_result(operation, result.width());
                 if let Some((variable, version)) = binding {
                     value.set_binding(variable, version);
                     self.variable_versions[variable.index()] = version;
@@ -599,6 +1131,11 @@ impl MCodeBuilder {
                 self.values.push(value);
             }
             _ => {
+                for result in results {
+                    if MCodeValue::op_result(operation, result.width()).is_none() {
+                        return Err(IlError::width_mismatch(MCodeIr::FORM));
+                    }
+                }
                 let mut bindings = results
                     .iter()
                     .filter_map(|result| {
@@ -632,8 +1169,14 @@ impl MCodeBuilder {
                     binding_start = binding_end;
                 }
                 self.values.reserve(results.len());
-                for result in results {
-                    let mut value = MCodeValue::op_result(operation, result.width());
+                for (offset, result) in results.iter().enumerate() {
+                    let mut value = MCodeValue::op_result(operation, result.width())
+                        .expect("MCode result widths were validated before emission");
+                    if offset == 0
+                        && let Some(space) = memory_result_domain
+                    {
+                        value.set_memory_domain(space);
+                    }
                     if let Some(variable) = result.variable() {
                         let version = self.variable_versions[variable.index()]
                             .checked_next()
@@ -647,6 +1190,9 @@ impl MCodeBuilder {
             }
         }
         let operands = self.push_value_operands(operands)?;
+        if let Some(space) = memory_domain {
+            self.intern_memory_domain(space);
+        }
         let mut record = MCodeOp::new(spec.opcode(), result_range, operands, spec.width());
         if let Some(variable) = spec.variable() {
             record.set_variable(variable);
@@ -656,9 +1202,6 @@ impl MCodeBuilder {
             record.set_address(address);
         }
         if let Some(address_space) = spec.address_space() {
-            if spec.opcode().requires_memory_domain() {
-                self.intern_memory_domain(address_space);
-            }
             record.set_address_space(address_space);
         }
         self.push_op(record)?;
@@ -672,7 +1215,10 @@ impl MCodeBuilder {
         operands: impl IntoIterator<Item = IlValueId>,
         result: MCodeResultSpec,
     ) -> Result<IlValueId, IlError> {
-        self.emit(spec, operands, [result])?
+        if spec.opcode() == MCodeOpcode::Undefined {
+            return Err(IlError::invalid_artefact(MCodeIr::FORM));
+        }
+        self.emit_op(spec, operands, [result])?
             .single_result()
             .ok_or_else(|| IlError::missing_component(MCodeIr::FORM, "single operation result"))
     }
@@ -682,7 +1228,7 @@ impl MCodeBuilder {
         spec: MCodeOpSpec,
         operands: impl IntoIterator<Item = IlValueId>,
     ) -> Result<MCodeOp, IlError> {
-        self.emit(spec, operands, [])
+        self.emit_op(spec, operands, [])
     }
 
     pub(crate) fn add_source_span(&mut self, source_span: IlSourceSpan) {
