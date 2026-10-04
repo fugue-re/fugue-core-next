@@ -6,8 +6,8 @@ use smallvec::SmallVec;
 use ustr::Ustr;
 
 use crate::ir::{
-    Address, CodeBlock, CodeBlockId, CodeBlockTable, FlowKind, FlowTarget, Id, IdSet, Reference,
-    ReferenceKey, ReferenceOrigin, ReferenceProperties,
+    Address, AddressWithContext, CodeBlock, CodeBlockId, CodeBlockTable, FlowKind, FlowTarget, Id,
+    IdSet, Reference, ReferenceKey, ReferenceOrigin, ReferenceProperties,
 };
 use crate::storage::entities::schema::{ENTITY_FUNCTION_ID, ENTITY_KEY_FUNCTION_ID};
 use crate::storage::entities::{Entity, EntityId, EntityKey, EntityKeyId, MutableEntity};
@@ -315,7 +315,7 @@ impl Function {
         })
     }
 
-    pub fn thunk_target(&self, blocks: &CodeBlockTable) -> Option<Address> {
+    pub fn thunk_target(&self, blocks: &CodeBlockTable) -> Option<AddressWithContext> {
         if !self.is_thunk() || self.blocks.len() != 1 {
             return None;
         }
@@ -324,7 +324,7 @@ impl Function {
             .filter(|target| !target.kind().is_fall_through());
         let target = targets.next()?;
         (targets.next().is_none() && target.kind() == FlowKind::TailCallBranch)
-            .then_some(target.to())
+            .then(|| target.into_parts().1)
     }
 
     pub fn clear_name(&mut self) {
@@ -375,9 +375,9 @@ impl Function {
                 .expect("function block must exist in the code block table");
             sites.extend(block.flow_targets().filter_map(|target| {
                 self.tail_call_sites
-                    .binary_search(&target.from())
+                    .binary_search(&target.from().address())
                     .is_ok()
-                    .then_some(target.from())
+                    .then(|| target.from().address())
             }));
         }
         sites.sort_unstable();
@@ -398,9 +398,12 @@ impl Function {
                 .expect("function block must exist in the code block table");
             sources.extend(block.flow_targets().filter_map(|flow| {
                 (flow.kind() == FlowKind::Branch
-                    && flow.to() == target
-                    && self.tail_call_sites.binary_search(&flow.from()).is_ok())
-                .then_some((id, flow.from()))
+                    && flow.to().address() == target
+                    && self
+                        .tail_call_sites
+                        .binary_search(&flow.from().address())
+                        .is_ok())
+                .then(|| (id, flow.from().address()))
             }));
         }
         sources.sort_unstable();
@@ -477,7 +480,8 @@ impl Function {
                     .expect("function block must exist in the code block table");
                 let before = sites.len();
                 sites.extend(block.flow_targets().filter_map(|flow| {
-                    (flow.kind() == FlowKind::Branch && flow.to() == target).then_some(flow.from())
+                    (flow.kind() == FlowKind::Branch && flow.to().address() == target)
+                        .then(|| flow.from().address())
                 }));
                 if sites.len() == before {
                     return None;
@@ -552,9 +556,13 @@ impl Function {
 
     pub(crate) fn classify_flow_target(&self, mut target: FlowTarget) -> FlowTarget {
         if matches!(target.kind(), FlowKind::Branch | FlowKind::IBranch)
-            && self.tail_call_sites.binary_search(&target.from()).is_ok()
+            && self
+                .tail_call_sites
+                .binary_search(&target.from().address())
+                .is_ok()
         {
-            target = FlowTarget::new(target.from(), target.to(), FlowKind::TailCallBranch);
+            let (from, to, _) = target.into_parts();
+            target = FlowTarget::new(from, to, FlowKind::TailCallBranch);
         }
         target
     }
@@ -570,7 +578,8 @@ impl Function {
             .into_iter()
             .filter(|target| target.kind().is_global())
         {
-            let reference = Reference::from_flow(target.from(), target.to(), target.kind());
+            let (from, to, kind) = target.into_parts();
+            let reference = Reference::from_flow(from.address(), to.address(), kind);
             let key = reference.key();
             coalesced
                 .entry(key)

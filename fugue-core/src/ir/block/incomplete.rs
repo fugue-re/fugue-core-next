@@ -4,8 +4,8 @@ use smallvec::SmallVec;
 
 use crate::ir::block::CodeBlockFlowTarget;
 use crate::ir::{
-    Address, AddressRange, CodeBlock, CodeBlockId, CodeBlockProperties, FlowTarget, Id, IdSet,
-    Insn, InsnId,
+    Address, AddressRange, AddressWithContext, CodeBlock, CodeBlockId, CodeBlockProperties,
+    FlowTarget, Id, IdSet, Insn, InsnId,
 };
 use crate::lifter::ContextSet;
 
@@ -115,11 +115,12 @@ impl CodeBlockRecord {
         let mut terminator = None;
         for insn in insns {
             targets.extend(
-                insn.flow_targets()
-                    .filter(|target| {
-                        !target.kind().is_fall_through()
-                            || target.to() == address + usize::from(size.get())
+                insn.iter_targets()
+                    .filter(|(target, _, destination)| {
+                        !target.is_fall_through()
+                            || destination.address() == address + usize::from(size.get())
                     })
+                    .filter_map(|(target, _, _)| FlowTarget::from_insn_target(insn, target))
                     .map(|target| {
                         CodeBlockFlowTarget::from_flow(address, usize::from(size.get()), target)
                     }),
@@ -165,9 +166,11 @@ impl CodeBlockRecord {
     }
 
     pub(crate) fn flow_targets(&self) -> impl Iterator<Item = FlowTarget> + '_ {
-        self.targets
-            .iter()
-            .map(|target| target.to_flow(self.address))
+        self.targets.iter().map(|target| {
+            let source = self.address + usize::from(target.source_offset);
+            let source = AddressWithContext::new(source, self.context.clone());
+            FlowTarget::new(source, target.target.clone(), target.kind)
+        })
     }
 
     pub(crate) fn matches(&self, block: &CodeBlock) -> bool {

@@ -13,8 +13,8 @@ use crate::analysis::function::recovery::executor::{
     FunctionCandidateBatch, FunctionRecoveryExecutor,
 };
 use crate::analysis::function::recovery::{
-    FunctionBuilderContext, FunctionCommitContext, FunctionCommitPolicy, FunctionRecoveryConfig,
-    FunctionRecoveryError, StructuredFunctionContext,
+    FunctionBuilderContext, FunctionCandidate, FunctionCommitContext, FunctionCommitPolicy,
+    FunctionRecoveryConfig, FunctionRecoveryError, StructuredFunctionContext,
 };
 use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
 use crate::engine::{
@@ -101,7 +101,7 @@ impl FunctionRecoveryContext {
 pub struct FunctionRecovery {
     boundaries: Option<FunctionBoundaries>,
     boundary_update_pending: bool,
-    candidates: VecDeque<AddressWithContext>,
+    candidates: VecDeque<FunctionCandidate>,
     builder: FunctionBuilder,
     candidate_discovery_passes: AnalysisGroup<FunctionDiscoveryContext>,
     inter_function_structuring_passes: AnalysisGroup<InterFunctionStructuringContext>,
@@ -165,7 +165,7 @@ extension::collect!(FunctionRecoveryExtension);
 #[derive(Default)]
 pub struct FunctionDiscoveryContext {
     config: FunctionRecoveryConfig,
-    candidates: VecDeque<AddressWithContext>,
+    candidates: VecDeque<FunctionCandidate>,
     avoids: AddressRangeSet,
     coverage: FunctionCoverage,
     functions: FunctionConfidenceMap,
@@ -175,7 +175,7 @@ pub struct FunctionDiscoveryContext {
 pub struct FunctionDiscoveryRanges<'a, Ranges> {
     ranges: Ranges,
     avoids: &'a AddressRangeSet,
-    candidates: &'a mut VecDeque<AddressWithContext>,
+    candidates: &'a mut VecDeque<FunctionCandidate>,
 }
 
 impl<Ranges> FunctionDiscoveryRanges<'_, Ranges> {
@@ -183,7 +183,7 @@ impl<Ranges> FunctionDiscoveryRanges<'_, Ranges> {
         self.avoids.contains(address.into())
     }
 
-    pub fn add_candidate(&mut self, candidate: impl Into<AddressWithContext>) {
+    pub fn add_candidate(&mut self, candidate: impl Into<FunctionCandidate>) {
         self.candidates.push_back(candidate.into());
     }
 }
@@ -315,7 +315,7 @@ struct FunctionBoundaryChanges {
 pub struct InterFunctionStructuringContext {
     config: FunctionRecoveryConfig,
     avoids: AddressRangeSet,
-    candidates: VecDeque<AddressWithContext>,
+    candidates: VecDeque<FunctionCandidate>,
     functions: FunctionConfidenceMap,
     new_functions: FunctionConfidenceMap,
     pending_functions: BTreeMap<Address, IncompleteFunction>,
@@ -329,7 +329,7 @@ impl FunctionDiscoveryContext {
         &self.config
     }
 
-    pub fn candidates(&self) -> &VecDeque<AddressWithContext> {
+    pub fn candidates(&self) -> &VecDeque<FunctionCandidate> {
         &self.candidates
     }
 
@@ -364,13 +364,13 @@ impl FunctionDiscoveryContext {
         }
     }
 
-    pub fn add_candidate(&mut self, candidate: impl Into<AddressWithContext>) {
+    pub fn add_candidate(&mut self, candidate: impl Into<FunctionCandidate>) {
         self.candidates.push_back(candidate.into());
     }
 
     pub fn add_candidates(
         &mut self,
-        candidates: impl IntoIterator<Item = impl Into<AddressWithContext>>,
+        candidates: impl IntoIterator<Item = impl Into<FunctionCandidate>>,
     ) {
         self.candidates
             .extend(candidates.into_iter().map(|candidate| candidate.into()));
@@ -599,7 +599,7 @@ impl InterFunctionStructuringContext {
         &self.pending_functions
     }
 
-    pub fn add_candidate(&mut self, candidate: impl Into<AddressWithContext>) {
+    pub fn add_candidate(&mut self, candidate: impl Into<FunctionCandidate>) {
         self.candidates.push_back(candidate.into());
     }
 
@@ -675,9 +675,9 @@ impl InterFunctionStructuringContext {
         }
     }
 
-    pub fn reanalyse_function(&mut self, candidate: impl Into<AddressWithContext>) {
+    pub fn reanalyse_function(&mut self, candidate: impl Into<FunctionCandidate>) {
         let candidate = candidate.into();
-        self.remove_function(candidate.address());
+        self.remove_function(candidate.entry().address());
         self.add_candidate(candidate);
     }
 
@@ -770,13 +770,13 @@ impl FunctionRecovery {
         self.commit_policy = Some(Box::new(policy));
     }
 
-    pub fn add_candidate(&mut self, candidate: impl Into<AddressWithContext>) {
+    pub fn add_candidate(&mut self, candidate: impl Into<FunctionCandidate>) {
         self.candidates.push_back(candidate.into());
     }
 
     pub fn add_candidates(
         &mut self,
-        candidates: impl IntoIterator<Item = impl Into<AddressWithContext>>,
+        candidates: impl IntoIterator<Item = impl Into<FunctionCandidate>>,
     ) {
         self.candidates
             .extend(candidates.into_iter().map(|candidate| candidate.into()));
@@ -845,7 +845,6 @@ impl FunctionRecovery {
             }
         }
 
-        let arch = project.arch();
         let blocks = project.blocks();
         let functions = project.functions();
         for function in functions.iter() {
@@ -853,14 +852,10 @@ impl FunctionRecovery {
                 .flow_targets(blocks)
                 .filter(|target| target.kind().is_global())
             {
-                let target = target.to();
-                let Some((address, context)) = arch.canonicalise_address(target.raw_address())
-                else {
-                    continue;
-                };
-                let address = Address::new(target.space(), address);
+                let target = target.into_parts().1;
+                let address = target.address();
                 if functions.get_by_address(address).is_none() {
-                    candidates.insert(AddressWithContext::new(address, context));
+                    candidates.insert(target.into());
                 }
             }
         }
@@ -1113,25 +1108,21 @@ impl FunctionRecovery {
                     break;
                 };
 
+                let (candidate, confidence) = candidate.into_parts();
                 let original_address = candidate.address();
                 let replacing = self.reanalysis_candidates.contains(&original_address);
 
                 budget.consume_candidate();
                 let at_limit = !self.candidates.is_empty() && budget.is_exhausted();
 
-                let candidate = match resolver_slot.as_mut() {
-                    Some(resolver) => {
-                        let confidence = candidate.confidence();
-                        let (address, context) = candidate.into_parts();
-                        self.builder
-                            .context_mut()
-                            .resolve_insn_after_alignment(&analysis.project, resolver, address)
-                            .map(|address| {
-                                AddressWithContext::new_with(address, context, confidence)
-                            })
-                    }
-                    None => Some(candidate),
-                };
+                let resolver = resolver_slot
+                    .as_mut()
+                    .expect("function recovery resolver must be available");
+                let candidate = self.builder.resolve_insn_after_alignment(
+                    &analysis.project,
+                    resolver,
+                    candidate,
+                );
 
                 let Some(candidate) = candidate else {
                     tracing::trace!("skipping {original_address}: invalid instruction");
@@ -1177,7 +1168,7 @@ impl FunctionRecovery {
                     if replacing {
                         replacements.insert(address, original_address);
                     }
-                    batch.push(candidate);
+                    batch.push(FunctionCandidate::new_with(candidate, confidence));
                 }
 
                 if at_limit {
@@ -1290,7 +1281,7 @@ impl FunctionRecovery {
                 batch,
                 |analysis, outcome| {
                     let budget_reached = process_candidate(analysis, outcome, discovered_targets)?;
-                    candidates.extend(discovered_targets.drain(..));
+                    candidates.extend(discovered_targets.drain(..).map(FunctionCandidate::from));
                     Ok(budget_reached)
                 },
             )?;

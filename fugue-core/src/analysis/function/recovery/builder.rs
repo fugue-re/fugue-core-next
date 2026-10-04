@@ -9,7 +9,9 @@ use smallvec::SmallVec;
 
 use crate::analysis::function::recovery::analysis::FunctionRecoveryContext;
 use crate::analysis::function::recovery::structuring::FunctionStructurer;
-use crate::analysis::function::recovery::{FunctionRecoveryConfig, FunctionRecoveryError};
+use crate::analysis::function::recovery::{
+    FunctionCandidate, FunctionRecoveryConfig, FunctionRecoveryError,
+};
 use crate::analysis::{AnalysisGroup, AnalysisPass};
 use crate::arch::Arch;
 use crate::engine::{AnalysisContext, ProjectView};
@@ -284,7 +286,79 @@ impl FunctionBuilder {
     }
 
     pub fn avoids_mut(&mut self) -> &mut AddressRangeSet {
-        &mut self.context.avoids
+        self.context_mut().avoids_mut()
+    }
+
+    pub(crate) fn resolve_insn_after_alignment(
+        &mut self,
+        project: &ProjectView<'_>,
+        resolver: &mut InsnResolver,
+        candidate: AddressWithContext,
+    ) -> Option<AddressWithContext> {
+        resolver.reset();
+
+        let arch = project.arch();
+        let segments = project.segments();
+        let (candidate_address, mut context) = candidate.into_parts();
+
+        let candidate_view = self
+            .context
+            .mapping_cache
+            .view_containing(segments, candidate_address)?;
+        if !candidate_view.properties().is_executable() {
+            return None;
+        }
+        if self.config.segment_mapping_hints()
+            && let Some((hint_address, hint)) = candidate_view
+                .mapping_hints()
+                .range(..=candidate_address)
+                .next_back()
+        {
+            if hint_address == candidate_address && hint.is_data() {
+                return None;
+            }
+            if let Some(hinted) = hint.context() {
+                context.merge(hinted);
+            }
+        }
+
+        context.apply(candidate_address, resolver.context_mut());
+
+        let address_space = candidate_address.space();
+        let (canonical, derived) =
+            arch.canonicalise_address_with(candidate_address, resolver.context())?;
+        let canonical = Address::new(address_space, canonical);
+        context.merge(&derived);
+
+        let view = if canonical == candidate_address {
+            candidate_view
+        } else {
+            let view = self
+                .context
+                .mapping_cache
+                .view_containing(segments, canonical)?;
+            if !view.properties().is_executable() {
+                return None;
+            }
+            view
+        };
+        context.apply(canonical, resolver.context_mut());
+
+        let bytes_view = view.bytes_from(canonical)?;
+        let bytes = bytes_view.as_contiguous()?;
+        if bytes.is_empty() {
+            return None;
+        }
+
+        let (size, properties) =
+            arch.classify_contiguous_bytes(canonical.raw_address(), resolver.context(), bytes);
+        let size = if properties.is_alignment() { size } else { 0 };
+        let address = canonical + size;
+        let bytes = bytes.get(size..).filter(|bytes| !bytes.is_empty())?;
+
+        resolver.resolve(address, bytes).ok()?;
+
+        Some(AddressWithContext::new(address, context))
     }
 
     fn analyse(
@@ -294,6 +368,10 @@ impl FunctionBuilder {
         resolver_slot: &mut Option<InsnResolver>,
         candidate: impl Into<AddressWithContext>,
     ) -> Result<IncompleteFunction, FunctionRecoveryError> {
+        resolver_slot
+            .as_mut()
+            .expect("function builder resolver must be available")
+            .reset();
         self.context.analyse(FunctionCandidateAnalysis {
             analysis,
             context,
@@ -310,10 +388,10 @@ impl FunctionBuilder {
         analysis: &mut AnalysisContext<'_, '_>,
         context: &FunctionRecoveryContext,
         resolver_slot: &mut Option<InsnResolver>,
-        candidate: AddressWithContext,
+        candidate: FunctionCandidate,
     ) -> FunctionCandidateOutcome {
+        let (candidate, confidence) = candidate.into_parts();
         let address = candidate.address();
-        let confidence = candidate.confidence();
         let result = self.analyse(analysis, context, resolver_slot, candidate);
         FunctionCandidateOutcome::from_result(
             address,
@@ -383,6 +461,10 @@ impl FunctionBuilderContext {
 
     pub fn entry(&self) -> Address {
         self.entry
+    }
+
+    pub fn avoids_mut(&mut self) -> &mut AddressRangeSet {
+        &mut self.avoids
     }
 
     pub fn candidates(&self) -> impl ExactSizeIterator<Item = &AddressWithContext> {
@@ -473,10 +555,9 @@ impl FunctionBuilderContext {
         kind: FlowKind,
     ) {
         let from = from.into();
-        let address = to.address();
         if self
             .local_targets
-            .insert(FlowTarget::new(from, address, kind))
+            .insert(FlowTarget::new(from, to.clone(), kind))
         {
             self.add_candidate(to);
         }
@@ -489,44 +570,6 @@ impl FunctionBuilderContext {
         self.local_targets.clear();
         self.global_targets.clear();
         self.structurer.clear();
-    }
-
-    pub(crate) fn resolve_insn_after_alignment(
-        &mut self,
-        project: &ProjectView<'_>,
-        resolver: &mut InsnResolver,
-        address: Address,
-    ) -> Option<Address> {
-        let arch = project.arch();
-        let segments = project.segments();
-
-        let view = self.mapping_cache.view_containing(segments, address)?;
-        if !view.properties().is_executable() {
-            return None;
-        }
-
-        let bytes_view = view.bytes_from(address)?;
-        let bytes = bytes_view.as_contiguous()?;
-
-        if bytes.is_empty() {
-            return None;
-        }
-
-        let (size, properties) =
-            arch.classify_contiguous_bytes(address.raw_address(), resolver.context(), bytes);
-
-        let size = if properties.is_alignment() { size } else { 0 };
-
-        let address = address + size;
-        let bytes = bytes.get(size..)?;
-
-        if bytes.is_empty() {
-            return None;
-        }
-
-        resolver.resolve(address, bytes).ok()?;
-
-        Some(address)
     }
 
     fn resolve_insns(
@@ -559,32 +602,26 @@ impl FunctionBuilderContext {
             .expect("function entry is valid");
 
         'outer: while let Some(candidate) = self.candidates.pop_front() {
-            let (block, mut context) = candidate.into_parts();
+            let (candidate_block, mut context) = candidate.into_parts();
 
-            // This ensures correct alignment, to address is correctly wrapped with respect to
-            // the address space, and also extracts context updates indicated by the address,
-            // e.g., if we are in Thumb context or not for ARM.
-            let block_space = block.space();
-            let Some((block, ncontext)) = arch.canonicalise_address_with(block, resolver.context())
+            let Some(candidate_view) = self
+                .mapping_cache
+                .view_containing(segments, candidate_block)
             else {
-                tracing::trace!("skipping {block}: not a viable block start address");
+                tracing::trace!("skipping {candidate_block}: not mapped in any segment");
                 continue 'outer;
             };
-            let block = Address::new(block_space, block);
-
-            if block != self.entry && function_entries.binary_search(&block).is_ok() {
-                tracing::trace!("stopping at function boundary {block}");
+            if !candidate_view.properties().is_executable() {
+                tracing::trace!("skipping {candidate_block}: not in an executable segment");
                 continue 'outer;
             }
-
-            let Some(view) = self.mapping_cache.view_containing(segments, block) else {
-                tracing::trace!("skipping {block}: not mapped in any segment");
-                continue 'outer;
-            };
-
-            if use_mapping_hints && let Some(hint) = view.mapping_hint_at(block) {
+            if use_mapping_hints
+                && let Some(hint) = candidate_view.mapping_hints().get(candidate_block)
+            {
                 if hint.is_data() {
-                    tracing::trace!("skipping {block}: marked as data in segment mapping hints");
+                    tracing::trace!(
+                        "skipping {candidate_block}: marked as data in segment mapping hints"
+                    );
                     continue 'outer;
                 }
                 if let Some(hinted) = hint.context() {
@@ -592,18 +629,50 @@ impl FunctionBuilderContext {
                 }
             }
 
+            context.apply(candidate_block, resolver.context_mut());
+
+            // This ensures correct alignment, wraps the address with respect to the address
+            // space, and extracts context updates indicated by the address, e.g., whether the
+            // address selects Thumb mode on ARM.
+            let block_space = candidate_block.space();
+            let Some((block, derived)) =
+                arch.canonicalise_address_with(candidate_block, resolver.context())
+            else {
+                tracing::trace!("skipping {candidate_block}: not a viable block start address");
+                continue 'outer;
+            };
+            let block = Address::new(block_space, block);
+
+            // Merge the context updates with the specified context taking precedence.
+            context.merge(&derived);
+
+            // Applies the context updates to the lifter context.
+            context.apply(block, resolver.context_mut());
+
+            if block != self.entry && function_entries.binary_search(&block).is_ok() {
+                tracing::trace!("stopping at function boundary {block}");
+                continue 'outer;
+            }
+
+            let view = if block == candidate_block {
+                candidate_view
+            } else {
+                let Some(view) = self.mapping_cache.view_containing(segments, block) else {
+                    tracing::trace!("skipping {block}: not mapped in any segment");
+                    continue 'outer;
+                };
+                if !view.properties().is_executable() {
+                    tracing::trace!("skipping {block}: not in an executable segment");
+                    continue 'outer;
+                }
+                view
+            };
             if is_avoided(&self.avoids, block) {
                 tracing::trace!("skipping {block}: in avoidance set");
                 continue 'outer;
             }
 
             tracing::trace!("resolving new block {block}");
-
-            // Merge the context updates with the specified context taking precedence.
-            context.merge(&ncontext);
-
-            // Applies the context updates to the lifter context.
-            context.apply(block, resolver.context_mut());
 
             // Save the context so we can associate it with a block later.
             self.block_contexts.insert(block, &context);
@@ -625,7 +694,7 @@ impl FunctionBuilderContext {
             let bytes = &bytes[..bytes.len().min(remaining)];
             let mut insn_bytes = [0u8; MAX_INSN_BYTES];
             let mut offset = 0usize;
-            let mut mapping_hints = view.mapping_hints_from(block);
+            let mut mapping_hints = view.mapping_hints().range(block..);
             let mut next_mapping_hint = mapping_hints.next();
             let next_function_entry = function_entries
                 .get(function_entries.partition_point(|entry| *entry <= block))
@@ -728,12 +797,17 @@ impl FunctionBuilderContext {
                                 self.entry, num_insns, max_insns,
                             ));
                         }
-                        if let Some(target) = indirect_target {
+                        if let Some(target) = indirect_target
+                            && let Some((target, target_context)) =
+                                arch.canonicalise_address_with(target, resolver.context())
+                        {
                             f.insn_mut(insn_id)
                                 .expect("inserted instruction must exist")
-                                .set_indirect_target(target);
+                                .set_indirect_target(AddressWithContext::new(
+                                    Address::new(address.space(), target),
+                                    target_context,
+                                ));
                         }
-
                         let insn = f.insn(insn_id).expect("inserted instruction must exist");
 
                         if let Some(slot) = insn.delay_slot()
@@ -748,15 +822,18 @@ impl FunctionBuilderContext {
 
                         let orphaned_fall_through = if config.non_returning_analysis()
                             && insn.call_target().is_some_and(|target| {
-                                non_returning_targets.binary_search(&target).is_ok()
+                                non_returning_targets
+                                    .binary_search(&target.address())
+                                    .is_ok()
                             }) {
                             tracing::trace!(
                                 "suppressing fall-through of non-returning call at {address}"
                             );
 
-                            let fall_through = insn.iter_targets().find_map(|(target, _, addr)| {
-                                target.is_fall_through().then_some(addr)
-                            });
+                            let fall_through =
+                                insn.iter_targets().find_map(|(target, _, address)| {
+                                    target.is_fall_through().then(|| address.clone())
+                                });
 
                             f.insn_mut(insn_id)
                                 .expect("inserted instruction must exist")
@@ -767,14 +844,9 @@ impl FunctionBuilderContext {
                             None
                         };
 
-                        if let Some(fall_through) = orphaned_fall_through
-                            && let Some((fall_through, context)) =
-                                arch.canonicalise_address(fall_through)
-                        {
-                            let fall_through = Address::new(address.space(), fall_through);
-                            if !is_avoided(&self.avoids, fall_through) {
-                                self.global_targets
-                                    .insert(AddressWithContext::new(fall_through, context));
+                        if let Some(fall_through) = orphaned_fall_through {
+                            if !is_avoided(&self.avoids, fall_through.address()) {
+                                self.global_targets.insert(fall_through);
                             }
                         }
 
@@ -788,49 +860,36 @@ impl FunctionBuilderContext {
                             // instruction's PCode branch operations--we will miss things like PC
                             // relative jumps; these constructs will be handled in post-structuring
                             // passes.
-                            for (target, kind, addr) in insn.iter_targets() {
-                                let addr_space = addr.space();
-                                let Some((addr, context)) = arch.canonicalise_address(addr) else {
-                                    tracing::trace!(
-                                        "skipping target {target} of instruction at {address}: \
-                                         not a viable target address"
-                                    );
+                            for (target, _, target_with_context) in insn.iter_targets() {
+                                let Some(kind) = FlowKind::from_insn_target(insn, target) else {
                                     continue;
                                 };
-                                let addr = Address::new(addr_space, addr);
+                                let addr = target_with_context.address();
 
-                                let tail_call = kind.is_local()
+                                let tail_call = !kind.is_global()
                                     && addr != self.entry
                                     && !insn.is_call()
                                     && function_entries.binary_search(&addr).is_ok();
 
                                 if tail_call {
-                                    if let Some(target) =
-                                        FlowTarget::from_insn_target(insn, target, addr)
-                                    {
-                                        self.local_targets.insert(FlowTarget::new(
-                                            target.from(),
-                                            addr,
-                                            FlowKind::TailCallBranch,
-                                        ));
-                                    }
+                                    self.local_targets.insert(FlowTarget::new(
+                                        address,
+                                        target_with_context.clone(),
+                                        FlowKind::TailCallBranch,
+                                    ));
                                     if !is_avoided(&self.avoids, addr) {
-                                        self.global_targets
-                                            .insert(AddressWithContext::new(addr, context));
+                                        self.global_targets.insert(target_with_context.clone());
                                     }
-                                } else if kind.is_local() && view.contains(addr) {
-                                    let Some(target) =
-                                        FlowTarget::from_insn_target(insn, target, addr)
-                                    else {
-                                        continue;
-                                    };
-
-                                    if self.local_targets.insert(target) {
-                                        self.add_candidate(AddressWithContext::new(addr, context));
+                                } else if !kind.is_global() && view.contains(addr) {
+                                    if self.local_targets.insert(FlowTarget::new(
+                                        address,
+                                        target_with_context.clone(),
+                                        kind,
+                                    )) {
+                                        self.add_candidate(target_with_context.clone());
                                     }
                                 } else if !is_avoided(&self.avoids, addr) {
-                                    self.global_targets
-                                        .insert(AddressWithContext::new(addr, context));
+                                    self.global_targets.insert(target_with_context.clone());
                                 }
                             }
 
@@ -856,7 +915,16 @@ impl FunctionBuilderContext {
             }
 
             let boundary = block + offset;
-            self.add_candidate(AddressWithContext::new(boundary, context));
+            let boundary_space = boundary.space();
+            if let Some((boundary, derived)) =
+                arch.canonicalise_address_with(boundary, resolver.context())
+            {
+                context.merge(&derived);
+                self.add_candidate(AddressWithContext::new(
+                    Address::new(boundary_space, boundary),
+                    context,
+                ));
+            }
         }
 
         Ok(())
@@ -894,35 +962,11 @@ impl FunctionBuilderContext {
         // Stage 1 and 3 are hookable; we may register analysis passes to be run prior to the
         // main loop and after each block discovery pass has completed within the main loop.
         //
-        let mut candidate = analysis.candidate;
+        let candidate = analysis.candidate;
         tracing::debug!("exploring from {candidate}");
 
         self.clear();
         self.entry = candidate.address();
-
-        if analysis.config.segment_mapping_hints() {
-            // NOTE: this expect is safe because the entry address must be valid to reach this
-            // point under normal usage.
-            let view = analysis
-                .analysis
-                .project
-                .segments()
-                .view_containing(self.entry)
-                .expect("valid entry");
-
-            if let Some(hint) = view.mapping_hint_at(self.entry) {
-                if hint.is_data() {
-                    tracing::debug!(
-                        "entry {candidate} is marked as data in segment mapping hints; skipping"
-                    );
-                    return Err(FunctionRecoveryError::InvalidFunction);
-                }
-
-                if let Some(ctxt) = hint.context() {
-                    candidate.merge_context(ctxt);
-                }
-            }
-        }
 
         self.add_candidate(candidate);
 
@@ -971,7 +1015,7 @@ impl FunctionBuilderContext {
                 self.local_targets
                     .iter()
                     .filter(|target| target.kind() == FlowKind::TailCallBranch)
-                    .map(|target| target.from()),
+                    .map(|target| target.from().address()),
             );
 
             let mut structured = StructuredFunctionContext {
@@ -1007,32 +1051,12 @@ impl FunctionBuilderContext {
 }
 
 impl<'p> FunctionCandidateState<'p> {
-    pub(crate) fn new(
-        view: ProjectView<'p>,
-        mut candidate: AddressWithContext,
-        config: &FunctionRecoveryConfig,
-    ) -> Self {
+    pub(crate) fn new(view: ProjectView<'p>, candidate: FunctionCandidate) -> Self {
+        let (candidate, confidence) = candidate.into_parts();
         let mut context = FunctionBuilderContext::new();
         context.entry = candidate.address();
-        let confidence = candidate.confidence();
 
-        let mut phase = FunctionCandidatePhase::Resolving;
-        if config.segment_mapping_hints() {
-            let mapping = view
-                .segments()
-                .view_containing(context.entry)
-                .expect("valid function entry");
-            if let Some(hint) = mapping.mapping_hint_at(context.entry) {
-                if hint.is_data() {
-                    phase = FunctionCandidatePhase::Failed(FunctionRecoveryError::InvalidFunction);
-                } else if let Some(hinted) = hint.context() {
-                    candidate.merge_context(hinted);
-                }
-            }
-        }
-        if matches!(phase, FunctionCandidatePhase::Resolving) {
-            context.add_candidate(candidate.clone());
-        }
+        context.add_candidate(candidate.clone());
 
         let function = IncompleteFunction::new(context.entry);
         Self {
@@ -1041,7 +1065,7 @@ impl<'p> FunctionCandidateState<'p> {
             confidence,
             context,
             function,
-            phase,
+            phase: FunctionCandidatePhase::Resolving,
             view,
         }
     }
@@ -1067,6 +1091,7 @@ impl<'p> FunctionCandidateState<'p> {
         if !matches!(self.phase, FunctionCandidatePhase::Resolving) {
             return;
         }
+        resolver.reset();
         if let Err(error) = self.context.resolve_insns(
             &InsnResolution {
                 avoidance_baseline: Some(avoidance_baseline),
@@ -1107,7 +1132,7 @@ impl<'p> FunctionCandidateState<'p> {
                 .local_targets
                 .iter()
                 .filter(|target| target.kind() == FlowKind::TailCallBranch)
-                .map(|target| target.from()),
+                .map(|target| target.from().address()),
         );
         let mut structured = StructuredFunctionContext {
             config: *config,
@@ -1156,7 +1181,7 @@ impl<'p> FunctionCandidateState<'p> {
         }
     }
 
-    pub(crate) fn into_candidate(self) -> AddressWithContext {
-        self.candidate
+    pub(crate) fn into_candidate(self) -> FunctionCandidate {
+        FunctionCandidate::new_with(self.candidate, self.confidence)
     }
 }
