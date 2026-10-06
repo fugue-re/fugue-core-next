@@ -11,6 +11,7 @@ pub mod operand;
 pub mod partmap;
 pub mod pattern;
 pub mod pcode;
+pub mod processor;
 pub mod resolve;
 pub mod space;
 pub mod symbol;
@@ -18,8 +19,14 @@ pub mod template;
 
 pub use constructor::Constructor;
 pub use context::ContextDatabase;
-pub use convention::{Convention, Prototype, PrototypeEntry, PrototypeOperand, ReturnAddress};
+pub use convention::{
+    BitfieldPacking, CallFixup, Convention, DataOrganisation, DatatypeFilter, DatatypeKind,
+    HiddenReturnStrategy, InjectParameter, InjectPayload, JoinPiece, Prototype, PrototypeEntry,
+    PrototypeOperand, PrototypeRule, PrototypeRuleAction, PrototypeRuleCondition, ReturnAddress,
+    RuleStorage, UserOpFixup,
+};
 pub use format::InstructionFormatter;
+pub use fugue_sleigh_language::float_format::FloatFormat;
 pub use input::{ContextCommit, FixedHandle, ParserInput, ParserInputs};
 pub use language::{Language, LanguageId};
 pub use lifter::Lifter;
@@ -29,6 +36,10 @@ pub use operand::{
 };
 pub use pcode::{
     LiftingContext, LiftingContextState, Op, PCodeBuilder, PCodeBuilderContext, PCodeOp, Varnode,
+};
+pub use processor::{
+    ContextSet, ContextUpdate, DefaultSymbol, DefaultSymbolAddress, DefaultSymbolKind,
+    RegisterLanes, StorageLocation, TrackedSet, TrackedSetUpdate, VolatileRange,
 };
 
 const UMASKS: [u64; 9] = [

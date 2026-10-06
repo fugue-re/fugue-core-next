@@ -4,6 +4,7 @@ use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::str::FromStr;
 
+use fugue_sleigh_language::float_format::FloatFormat;
 use thiserror::Error;
 
 use crate::constructor::Constructor;
@@ -14,6 +15,7 @@ use crate::format::InstructionFormatter;
 use crate::operand::{OperandFilter, Operands, OperandsContext};
 use crate::pattern::PatternOp;
 use crate::pcode::{LiftingContext, PCodeBuilderContext, PCodeOp, Varnode};
+use crate::processor::{ContextSet, DefaultSymbol, RegisterLanes, TrackedSet, VolatileRange};
 use crate::resolve::DecisionNode;
 use crate::space::{AddressSpace, AddressSpaceKind};
 use crate::symbol::Symbol;
@@ -219,6 +221,13 @@ pub trait LanguageImpl {
     const CALL_PRESERVED_REGISTERS: &'static [(&'static str, &'static [Varnode])] = &[];
     const CONVENTIONS: &'static [(&'static str, Convention)] = &[];
 
+    const CONTEXT_SETS: &'static [ContextSet] = &[];
+    const TRACKED_SETS: &'static [TrackedSet] = &[];
+    const VOLATILE_RANGES: &'static [VolatileRange] = &[];
+    const REGISTER_LANES: &'static [RegisterLanes] = &[];
+    const DEFAULT_SYMBOLS: &'static [DefaultSymbol] = &[];
+    const FLOAT_FORMATS: &'static [FloatFormat] = &[];
+
     const DATA: &'static LanguageData;
 }
 
@@ -250,6 +259,12 @@ pub struct Language {
     pub(crate) context_defaults: &'static [(&'static str, u32)],
     pub(crate) call_preserved_registers: &'static [(&'static str, &'static [Varnode])],
     pub(crate) conventions: &'static [(&'static str, Convention)],
+    pub(crate) context_sets: &'static [ContextSet],
+    pub(crate) tracked_sets: &'static [TrackedSet],
+    pub(crate) volatile_ranges: &'static [VolatileRange],
+    pub(crate) register_lanes: &'static [RegisterLanes],
+    pub(crate) default_symbols: &'static [DefaultSymbol],
+    pub(crate) float_formats: &'static [FloatFormat],
     pub(crate) data: &'static LanguageData,
 }
 
@@ -350,8 +365,44 @@ impl Language {
             call_preserved_registers: L::CALL_PRESERVED_REGISTERS,
             conventions: L::CONVENTIONS,
 
+            context_sets: L::CONTEXT_SETS,
+            tracked_sets: L::TRACKED_SETS,
+            volatile_ranges: L::VOLATILE_RANGES,
+            register_lanes: L::REGISTER_LANES,
+            default_symbols: L::DEFAULT_SYMBOLS,
+            float_formats: L::FLOAT_FORMATS,
             data: L::DATA,
         }
+    }
+
+    pub const fn context_sets(&self) -> &'static [ContextSet] {
+        self.context_sets
+    }
+
+    pub const fn tracked_sets(&self) -> &'static [TrackedSet] {
+        self.tracked_sets
+    }
+
+    pub const fn volatile_ranges(&self) -> &'static [VolatileRange] {
+        self.volatile_ranges
+    }
+
+    pub const fn register_lanes(&self) -> &'static [RegisterLanes] {
+        self.register_lanes
+    }
+
+    pub const fn default_symbols(&self) -> &'static [DefaultSymbol] {
+        self.default_symbols
+    }
+
+    pub const fn float_formats(&self) -> &'static [FloatFormat] {
+        self.float_formats
+    }
+
+    pub fn float_format(&self, bits: u32) -> Option<&'static FloatFormat> {
+        self.float_formats
+            .iter()
+            .find(|format| format.bits() == bits as _)
     }
 
     #[inline(always)]

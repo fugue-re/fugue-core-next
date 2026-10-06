@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{self, Cursor, Read};
 use std::path::{Path, PathBuf};
@@ -8,18 +7,17 @@ use std::sync::Arc;
 use ahash::AHashMap as Map;
 use fugue_arch::{ArchDefParseError, ArchitectureDef};
 use fugue_bytes::Endian;
-use fugue_sleigh_marshal::sla::*;
 use fugue_sleigh_marshal::Decoder;
+use fugue_sleigh_marshal::sla::*;
 use itertools::Itertools;
+use roxmltree::{Document, Node};
 use thiserror::Error;
 use ustr::Ustr;
 use walkdir::WalkDir;
 
-use crate::compiler::CompilerSpec;
-use crate::convention::{Convention, PrototypeOperand};
+use crate::convention::Convention;
 use crate::deserialise::{DeserialiseError, XmlExt};
 use crate::float_format::{FloatFormat, FloatFormats};
-use crate::processor::ProcessorSpec;
 use crate::register::RegisterNames;
 use crate::spaces::AddressSpaces;
 use crate::symbol::{Symbol, SymbolScope, SymbolTable};
@@ -140,25 +138,9 @@ impl Language {
         &self.compiler_conventions
     }
 
-    pub fn call_preserved_registers(&self, compiler: &str) -> Option<Vec<VarnodeData>> {
+    pub fn call_preserved_registers(&self, compiler: &str) -> Option<&[VarnodeData]> {
         let convention = self.compiler_conventions.get(compiler)?;
-        let mut registers = BTreeSet::new();
-        for operand in convention.default_prototype().unaffected() {
-            match operand {
-                PrototypeOperand::Register { varnode, .. } => {
-                    registers.insert(*varnode);
-                }
-                PrototypeOperand::RegisterJoin {
-                    first_varnode,
-                    second_varnode,
-                    ..
-                } => {
-                    registers.extend([*first_varnode, *second_varnode]);
-                }
-                PrototypeOperand::StackRelative(_) => {}
-            }
-        }
-        Some(registers.into_iter().collect())
+        Some(convention.call_preserved_registers())
     }
 
     pub fn source_files(&self) -> &Map<String, usize> {
@@ -168,7 +150,7 @@ impl Language {
     pub fn from_file(
         program_counter: impl AsRef<str>,
         architecture: &ArchitectureDef,
-        compiler_specs: &Map<String, CompilerSpec>,
+        compiler_defs: &Map<String, CompilerDef>,
         path: impl AsRef<Path>,
     ) -> Result<Self, LanguageError> {
         let path = path.as_ref();
@@ -178,12 +160,12 @@ impl Language {
         })?;
 
         if matches!(is_sla_format(&mut Cursor::new(&input)), Ok(true)) {
-            Self::from_bytes(program_counter, architecture, compiler_specs, input)
+            Self::from_bytes(program_counter, architecture, compiler_defs, input)
         } else {
             str::from_utf8(&input)
-                .map_err(DeserialiseError::from)
+                .map_err(DeserialiseError::utf8_expected)
                 .and_then(|input| {
-                    Self::from_str(program_counter, architecture, compiler_specs, input)
+                    Self::from_str(program_counter, architecture, compiler_defs, input)
                 })
         }
         .map_err(|error| LanguageError::DeserialiseFile {
@@ -195,25 +177,25 @@ impl Language {
     pub fn from_bytes(
         program_counter: impl AsRef<str>,
         architecture: &ArchitectureDef,
-        compiler_specs: &Map<String, CompilerSpec>,
+        compiler_defs: &Map<String, CompilerDef>,
         input: impl AsRef<[u8]>,
     ) -> Result<Self, DeserialiseError> {
         let mut decoder = FormatDecoder::new_with(input.as_ref())?;
-        Self::from_decoder(program_counter, architecture, compiler_specs, &mut decoder)
+        Self::from_decoder(program_counter, architecture, compiler_defs, &mut decoder)
     }
 
     pub fn from_str(
         program_counter: impl AsRef<str>,
         architecture: &ArchitectureDef,
-        compiler_specs: &Map<String, CompilerSpec>,
+        compiler_defs: &Map<String, CompilerDef>,
         input: impl AsRef<str>,
     ) -> Result<Self, DeserialiseError> {
-        let document = xml::Document::parse(input.as_ref()).map_err(DeserialiseError::Xml)?;
+        let document = xml::Document::parse(input.as_ref()).map_err(DeserialiseError::xml)?;
 
         Self::from_xml(
             program_counter,
             architecture,
-            compiler_specs,
+            compiler_defs,
             document.root_element(),
         )
     }
@@ -221,7 +203,7 @@ impl Language {
     fn build_xrefs(
         &mut self,
         program_counter: impl AsRef<str>,
-        compiler_specs: &Map<String, CompilerSpec>,
+        compiler_defs: &Map<String, CompilerDef>,
     ) -> Result<(), DeserialiseError> {
         let registers = Arc::<RegisterNames>::get_mut(&mut self.registers)
             .expect("unique access to RegisterNames");
@@ -234,26 +216,23 @@ impl Language {
 
         for sym_id in self.global_scope.iter() {
             match self.symbol_table.symbol(*sym_id) {
-                None => return Err(DeserialiseError::Invariant("invalid symbol")),
+                None => return Err(DeserialiseError::invariant("invalid symbol")),
                 Some(Symbol::Varnode {
-                    name,
-                    ref offset,
-                    ref size,
-                    ..
+                    name, offset, size, ..
                 }) => {
                     registers.insert(*offset, *size, *name);
 
                     if let Some(size) = size.checked_add(*offset as usize) {
                         registers_size = registers_size.max(size);
                     } else {
-                        return Err(DeserialiseError::Invariant(
+                        return Err(DeserialiseError::invariant(
                             "offset with size of varnode overflows",
                         ));
                     }
 
                     if pc_name == name {
                         if pc.is_some() {
-                            return Err(DeserialiseError::Invariant(
+                            return Err(DeserialiseError::invariant(
                                 "duplicate definition of program counter",
                             ));
                         }
@@ -274,15 +253,16 @@ impl Language {
             self.program_counter.offset = pc_offset;
             self.program_counter.size = pc_size as _;
         } else {
-            return Err(DeserialiseError::Invariant(
+            return Err(DeserialiseError::invariant(
                 "program counter not defined as a register",
             ));
         }
 
         self.registers_size = registers_size;
 
-        for (name, spec) in compiler_specs.iter() {
-            let conv = Convention::from_spec(spec, &self.registers, &self.spaces)?;
+        for (name, spec) in compiler_defs.iter() {
+            let conv = Convention::from_file(self, spec.name(), spec.spec_file())
+                .map_err(|error| DeserialiseError::deserialise_depends(spec.spec_file(), error))?;
             #[cfg(feature = "tracing")]
             tracing::debug!("loaded compiler convention `{}`", name);
             self.compiler_conventions.insert(name.clone(), conv);
@@ -294,7 +274,7 @@ impl Language {
     pub fn from_decoder<D: Decoder>(
         program_counter: impl AsRef<str>,
         architecture: &ArchitectureDef,
-        compiler_specs: &Map<String, CompilerSpec>,
+        compiler_defs: &Map<String, CompilerDef>,
         input: &mut D,
     ) -> Result<Self, DeserialiseError> {
         #[cfg(feature = "tracing")]
@@ -366,16 +346,16 @@ impl Language {
         let global_scope = Arc::new(
             symbol_table
                 .global_scope()
-                .ok_or(DeserialiseError::Invariant("global scope not defined"))?
+                .ok_or(DeserialiseError::invariant("global scope not defined"))?
                 .to_owned(),
         );
 
         let root = Arc::new(
             symbol_table
                 .global_scope()
-                .ok_or(DeserialiseError::Invariant("global scope not defined"))?
+                .ok_or(DeserialiseError::invariant("global scope not defined"))?
                 .find("instruction", &symbol_table)
-                .ok_or(DeserialiseError::Invariant(
+                .ok_or(DeserialiseError::invariant(
                     "instruction root symbol not defined",
                 ))?
                 .to_owned(),
@@ -402,7 +382,7 @@ impl Language {
             source_files,
         };
 
-        slf.build_xrefs(program_counter, compiler_specs)?;
+        slf.build_xrefs(program_counter, compiler_defs)?;
 
         Ok(slf)
     }
@@ -410,13 +390,11 @@ impl Language {
     pub fn from_xml(
         program_counter: impl AsRef<str>,
         architecture: &ArchitectureDef,
-        compiler_specs: &Map<String, CompilerSpec>,
+        compiler_defs: &Map<String, CompilerDef>,
         input: xml::Node,
     ) -> Result<Self, DeserialiseError> {
         if input.tag_name().name() != "sleigh" {
-            return Err(DeserialiseError::TagUnexpected(
-                input.tag_name().name().to_owned(),
-            ));
+            return Err(DeserialiseError::tag_unexpected(input.tag_name().name()));
         }
 
         let alignment = input.attribute_int("align")?;
@@ -466,14 +444,14 @@ impl Language {
         let spaces = AddressSpaces::from_xml(
             children
                 .next()
-                .ok_or(DeserialiseError::Invariant("spaces not defined"))?,
+                .ok_or(DeserialiseError::invariant("spaces not defined"))?,
         )?;
 
         let symbol_table = SymbolTable::from_xml(
             &spaces,
             children
                 .next()
-                .ok_or(DeserialiseError::Invariant("symbol table not defined"))?,
+                .ok_or(DeserialiseError::invariant("symbol table not defined"))?,
         )?;
 
         let register_space = spaces.register_space();
@@ -482,16 +460,16 @@ impl Language {
         let global_scope = Arc::new(
             symbol_table
                 .global_scope()
-                .ok_or(DeserialiseError::Invariant("global scope not defined"))?
+                .ok_or(DeserialiseError::invariant("global scope not defined"))?
                 .to_owned(),
         );
 
         let root = Arc::new(
             symbol_table
                 .global_scope()
-                .ok_or(DeserialiseError::Invariant("global scope not defined"))?
+                .ok_or(DeserialiseError::invariant("global scope not defined"))?
                 .find("instruction", &symbol_table)
-                .ok_or(DeserialiseError::Invariant(
+                .ok_or(DeserialiseError::invariant(
                     "instruction root symbol not defined",
                 ))?
                 .to_owned(),
@@ -518,7 +496,7 @@ impl Language {
             source_files,
         };
 
-        slf.build_xrefs(program_counter, compiler_specs)?;
+        slf.build_xrefs(program_counter, compiler_defs)?;
 
         Ok(slf)
     }
@@ -553,13 +531,40 @@ impl TruncatedSpace {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompilerDef {
+    name: String,
+    spec_file: PathBuf,
+}
+
+impl CompilerDef {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn spec_file(&self) -> &Path {
+        &self.spec_file
+    }
+
+    pub fn from_xml(root: impl AsRef<Path>, input: Node) -> Result<Self, DeserialiseError> {
+        if input.tag_name().name() != "compiler" {
+            return Err(DeserialiseError::tag_unexpected(input.tag_name().name()));
+        }
+        Ok(Self {
+            name: input.attribute_string("name")?,
+            spec_file: root.as_ref().join(input.attribute_str("spec")?),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LanguageDef {
     id: String,
     architecture: ArchitectureDef,
     version: String,
     sla_file: PathBuf,
-    processor_spec: ProcessorSpec,
-    compiler_specs: Map<String, CompilerSpec>,
+    processor_spec_file: PathBuf,
+    program_counter: Ustr,
+    compiler_defs: Map<String, CompilerDef>,
     truncated_spaces: Vec<TruncatedSpace>,
 }
 
@@ -580,12 +585,16 @@ impl LanguageDef {
         &self.sla_file
     }
 
-    pub fn processor_spec(&self) -> &ProcessorSpec {
-        &self.processor_spec
+    pub fn processor_spec_file(&self) -> &Path {
+        &self.processor_spec_file
     }
 
-    pub fn compiler_specs(&self) -> &Map<String, CompilerSpec> {
-        &self.compiler_specs
+    pub fn program_counter(&self) -> Ustr {
+        self.program_counter
+    }
+
+    pub fn compiler_defs(&self) -> &Map<String, CompilerDef> {
+        &self.compiler_defs
     }
 
     pub fn truncated_spaces(&self) -> &[TruncatedSpace] {
@@ -608,9 +617,7 @@ impl LanguageDef {
     ) -> Result<Self, DeserialiseError> {
         // Check the correctness of the tag name
         if input.tag_name().name() != "language" {
-            return Err(DeserialiseError::TagUnexpected(
-                input.tag_name().name().to_owned(),
-            ));
+            return Err(DeserialiseError::tag_unexpected(input.tag_name().name()));
         }
 
         // Read path to the processor spec (.pspec) file
@@ -618,58 +625,57 @@ impl LanguageDef {
         let pspec_path = input.attribute_string("processorspec")?;
         path.push(pspec_path);
 
-        // Build processor spec from .pspec file
-        let processor_spec =
-            ProcessorSpec::from_file(&path).map_err(|e| DeserialiseError::DeserialiseDepends {
-                path,
-                error: Box::new(e),
+        let processor_spec_file = path;
+        let source = fs::read_to_string(&processor_spec_file).map_err(|error| {
+            DeserialiseError::deserialise_depends(
+                &processor_spec_file,
+                LanguageError::ParseFile {
+                    path: processor_spec_file.clone(),
+                    error,
+                },
+            )
+        })?;
+        let program_counter = Document::parse(&source)
+            .map_err(DeserialiseError::xml)
+            .and_then(|document| {
+                let processor = document.root_element();
+                if processor.tag_name().name() != "processor_spec" {
+                    return Err(DeserialiseError::tag_unexpected(
+                        processor.tag_name().name(),
+                    ));
+                }
+                processor
+                    .children()
+                    .filter(Node::is_element)
+                    .rfind(|node| node.tag_name().name() == "programcounter")
+                    .ok_or(DeserialiseError::invariant(
+                        "processor specification must define a program counter",
+                    ))?
+                    .attribute_str("register")
+                    .map(Ustr::from)
+            })
+            .map_err(|error| {
+                DeserialiseError::deserialise_depends(
+                    &processor_spec_file,
+                    LanguageError::DeserialiseFile {
+                        path: processor_spec_file.clone(),
+                        error,
+                    },
+                )
             })?;
-
-        // Read path to the compiler spec (.cspec) file
-        // Each language can have several .cspec file
-        let compiler_specs_it = input
+        let compiler_defs = input
             .children()
-            .filter(|e| e.is_element() && e.tag_name().name() == "compiler")
-            .map(|compiler| {
-                let id = compiler.attribute_string("id")?;
-                let name = compiler.attribute_string("name")?;
-
-                let mut path = root.as_ref().to_path_buf();
-                let cspec_path = compiler.attribute_string("spec")?;
-
-                #[cfg(feature = "tracing")]
-                tracing::debug!("loading compiler specification `{}`", cspec_path);
-
-                path.push(cspec_path);
-
-                Ok((id, name, path))
-            });
-
-        // Build compiler specs from .cspec file
-        let compiler_specs = if ignore_errors {
-            compiler_specs_it
-                .filter_map_ok(|(id, name, path)| {
-                    #[cfg(feature = "tracing")]
-                    tracing::debug!("id: {}, name: {}, path: {:?}", id, name, path);
-                    CompilerSpec::named_from_file(name, &path)
-                        .ok()
-                        .map(|cspec| (id, cspec))
-                })
-                .collect::<Result<Map<_, _>, DeserialiseError>>()
-        } else {
-            compiler_specs_it
-                .map(|res| {
-                    res.and_then(|(id, name, path)| {
-                        CompilerSpec::named_from_file(name, &path)
-                            .map(|cspec| (id, cspec))
-                            .map_err(|e| DeserialiseError::DeserialiseDepends {
-                                path,
-                                error: Box::new(e),
-                            })
-                    })
-                })
-                .collect::<Result<Map<_, _>, DeserialiseError>>()
-        }?;
+            .filter(|node| node.is_element() && node.tag_name().name() == "compiler")
+            .map(|node| {
+                Ok((
+                    node.attribute_string("id")?,
+                    CompilerDef::from_xml(&root, node)?,
+                ))
+            })
+            .filter_map_ok(|(id, compiler)| {
+                (!ignore_errors || compiler.spec_file().is_file()).then_some((id, compiler))
+            })
+            .collect::<Result<Map<_, _>, DeserialiseError>>()?;
 
         // Obtain architecture information, enaian, word size, variant etc
         let architecture = ArchitectureDef::new(
@@ -682,7 +688,7 @@ impl LanguageDef {
         #[cfg(feature = "tracing")]
         tracing::debug!(
             "loaded {} compiler conventions for {}",
-            compiler_specs.len(),
+            compiler_defs.len(),
             architecture
         );
 
@@ -707,18 +713,11 @@ impl LanguageDef {
             architecture,
             version: input.attribute_string("version")?,
             sla_file: path,
-            processor_spec,
-            compiler_specs,
+            processor_spec_file,
+            program_counter,
+            compiler_defs,
             truncated_spaces,
         })
-    }
-
-    pub fn context_set(&self) -> impl Iterator<Item = (&str, u32)> {
-        self.processor_spec.context_set()
-    }
-
-    pub fn tracked_set(&self) -> impl Iterator<Item = (&str, u32)> {
-        self.processor_spec.tracked_set()
     }
 }
 
@@ -735,9 +734,9 @@ impl<'a> LanguageDefBuilder<'a> {
 
     pub fn build_with_sla(&self, sla: impl AsRef<Path>) -> Result<Language, LanguageError> {
         Language::from_file(
-            self.language.processor_spec.program_counter(),
+            self.language.program_counter.as_str(),
             &self.language.architecture,
-            &self.language.compiler_specs,
+            &self.language.compiler_defs,
             sla,
         )
     }
@@ -849,9 +848,7 @@ impl LanguageDB {
         //  </language>
         // </language_definitions>
         if input.tag_name().name() != "language_definitions" {
-            return Err(DeserialiseError::TagUnexpected(
-                input.tag_name().name().to_owned(),
-            ));
+            return Err(DeserialiseError::tag_unexpected(input.tag_name().name()));
         }
 
         let root = root.as_ref().to_path_buf();
@@ -905,7 +902,7 @@ impl LanguageDB {
         // Obtain the folder that the spec is in
         let root = path
             .parent()
-            .ok_or(DeserialiseError::Invariant(
+            .ok_or(DeserialiseError::invariant(
                 "cannot obtain parent directory of language defintions",
             ))
             .map_err(|error| LanguageError::DeserialiseFile {
@@ -939,7 +936,7 @@ impl LanguageDB {
         input: S,
         ignore_errors: bool,
     ) -> Result<Self, DeserialiseError> {
-        let document = xml::Document::parse(input.as_ref()).map_err(DeserialiseError::Xml)?;
+        let document = xml::Document::parse(input.as_ref()).map_err(DeserialiseError::xml)?;
 
         Self::from_xml_with(root, document.root_element(), ignore_errors)
     }
@@ -980,8 +977,8 @@ mod test {
     use std::path::PathBuf;
 
     use fugue_arch::ArchitectureDef;
-    use fugue_sleigh_marshal::sla::FormatDecoder;
     use fugue_sleigh_marshal::Decoder;
+    use fugue_sleigh_marshal::sla::FormatDecoder;
     use fugue_sleighc::SleighCompiler;
     use tempfile::TempDir;
     use tracing_subscriber::prelude::*;
@@ -1009,12 +1006,13 @@ mod test {
         assert_eq!(truncated[0].address_bits(), 32);
         assert_eq!(truncated[0].upper_bound(), 0xffff_ffff);
 
-        assert!(db
-            .lookup_str("PowerPC:BE:64:default")?
-            .expect("resolved by attributes")
-            .language()
-            .truncated_spaces()
-            .is_empty());
+        assert!(
+            db.lookup_str("PowerPC:BE:64:default")?
+                .expect("resolved by attributes")
+                .language()
+                .truncated_spaces()
+                .is_empty()
+        );
 
         Ok(())
     }

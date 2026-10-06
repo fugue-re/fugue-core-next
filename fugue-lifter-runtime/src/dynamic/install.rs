@@ -1,4 +1,8 @@
+use fugue_sleigh_language::compiler::PrototypeRuleAction;
+use fugue_sleigh_language::float_format::FloatFormat;
+
 use crate::context::{ContextBitRange, ContextPostAction, ContextPreAction};
+use crate::convention::JoinPiece;
 use crate::operand::Operand;
 use crate::pattern::PatternOp;
 use crate::pcode::Varnode;
@@ -69,6 +73,9 @@ macro_rules! install_identity {
 }
 
 install_identity!(
+    FloatFormat,
+    JoinPiece,
+    PrototypeRuleAction,
     u16,
     u32,
     u64,

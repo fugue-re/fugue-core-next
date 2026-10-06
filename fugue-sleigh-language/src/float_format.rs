@@ -7,7 +7,18 @@ use crate::deserialise::{DeserialiseError, XmlExt};
 pub type FloatFormats = Map<usize, Arc<FloatFormat>>;
 
 #[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Deserialize,
+    serde::Serialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
 )]
 pub struct FloatFormat {
     pub size: usize,
@@ -74,7 +85,7 @@ impl FloatFormat {
             frac_pos: 0,
             frac_size: 64,
             bias: 16383,
-            j_bit_implied: true,
+            j_bit_implied: false,
         }
     }
 
@@ -110,7 +121,7 @@ impl FloatFormat {
         let exp_max = (1i32 << exp_size) - 1;
 
         let bias = input.attribute_int("bias")?;
-        let j_bit_implied = input.attribute_bool("jbitimpled")?;
+        let j_bit_implied = input.attribute_bool("jbitimplied")?;
 
         Ok(FloatFormat {
             size,

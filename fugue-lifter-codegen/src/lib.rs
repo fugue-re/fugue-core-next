@@ -5,7 +5,10 @@ use std::process::{Command, Stdio};
 use std::str::FromStr;
 
 use fugue_arch::ArchitectureDef;
-use fugue_sleigh_language::{LanguageDB, TruncatedSpace};
+use fugue_sleigh_language::convention::Convention;
+use fugue_sleigh_language::deserialise::DeserialiseError;
+use fugue_sleigh_language::processor::Processor;
+use fugue_sleigh_language::{Language, LanguageDB, LanguageDef, TruncatedSpace};
 #[cfg(feature = "bundled-compiler")]
 use fugue_sleighc::{SleighCompiler, SleighCompilerError};
 use quote::ToTokens;
@@ -174,19 +177,40 @@ pub struct LanguageVariant {
     name: String,
     context_defaults: Vec<(String, u32)>,
     truncated_spaces: Vec<TruncatedSpace>,
+    processor: Processor,
+    conventions: Vec<(String, Convention)>,
 }
 
 impl LanguageVariant {
     pub fn new(
         name: impl Into<String>,
-        context_defaults: Vec<(String, u32)>,
-        truncated_spaces: Vec<TruncatedSpace>,
-    ) -> Self {
-        Self {
+        language: &Language,
+        definition: &LanguageDef,
+    ) -> Result<Self, DeserialiseError> {
+        let mut conventions = definition
+            .compiler_defs()
+            .iter()
+            .map(|(name, spec)| {
+                Convention::from_file(language, spec.name(), spec.spec_file())
+                    .map(|convention| (name.clone(), convention))
+                    .map_err(|error| DeserialiseError::deserialise_depends(spec.spec_file(), error))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        conventions.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        let processor =
+            Processor::from_file(language, definition.processor_spec_file()).map_err(|error| {
+                DeserialiseError::deserialise_depends(definition.processor_spec_file(), error)
+            })?;
+        Ok(Self {
             name: name.into(),
-            context_defaults,
-            truncated_spaces,
-        }
+            context_defaults: processor
+                .context_defaults()
+                .map(|(name, value)| (name.to_owned(), value))
+                .collect(),
+            truncated_spaces: definition.truncated_spaces().to_vec(),
+            processor,
+            conventions,
+        })
     }
 }
 
@@ -221,18 +245,33 @@ pub fn build_with(
 
     let primary_arch = ArchitectureDef::from_str(language_def).unwrap();
 
-    let primary_context_defaults = primary_def
-        .language()
-        .context_set()
-        .map(|(name, value)| (name.to_owned(), value))
-        .collect::<Vec<(String, u32)>>();
+    let sla_file = primary_def.language().sla_file();
+
+    let language = if sla_file.exists() {
+        primary_def.build()
+    } else {
+        #[cfg(not(feature = "bundled-compiler"))]
+        return Err(CodegenError::language_build_with(
+            language_def,
+            "no compiler available",
+        ));
+        #[cfg(feature = "bundled-compiler")]
+        {
+            let slaf = util::out_or_temp_dir().join(sla_file.file_name().expect("sla file name"));
+            let spec = sla_file.with_extension("");
+            let slac = SleighCompiler::new()?
+                .build_with(spec, slaf)?
+                .expect("compiled sla file name");
+            primary_def.build_with_sla(slac)
+        }
+    };
+
+    let language = language.map_err(|e| CodegenError::language_build(language_def, e))?;
 
     let primary_sla = primary_def.language().sla_file();
-    let primary_variant = LanguageVariant::new(
-        primary_arch.variant(),
-        primary_context_defaults,
-        primary_def.language().truncated_spaces().to_vec(),
-    );
+    let primary_variant =
+        LanguageVariant::new(primary_arch.variant(), &language, primary_def.language())
+            .map_err(|e| CodegenError::language_build(language_def, e))?;
 
     let mut extra_variants = Vec::with_capacity(options.variants.len());
 
@@ -263,41 +302,11 @@ pub fn build_with(
                 extra_sla.to_path_buf(),
             ));
         }
-        let extra_context_defaults = extra_def
-            .language()
-            .context_set()
-            .map(|(name, value)| (name.to_owned(), value))
-            .collect::<Vec<(String, u32)>>();
-
-        extra_variants.push(LanguageVariant::new(
-            variant.clone(),
-            extra_context_defaults,
-            extra_def.language().truncated_spaces().to_vec(),
-        ));
+        extra_variants.push(
+            LanguageVariant::new(variant.clone(), &language, extra_def.language())
+                .map_err(|e| CodegenError::language_build(&extra_id, e))?,
+        );
     }
-
-    let sla_file = primary_def.language().sla_file();
-
-    let language = if sla_file.exists() {
-        primary_def.build()
-    } else {
-        #[cfg(not(feature = "bundled-compiler"))]
-        return Err(CodegenError::language_build_with(
-            language_def,
-            "no compiler available",
-        ));
-        #[cfg(feature = "bundled-compiler")]
-        {
-            let slaf = util::out_or_temp_dir().join(sla_file.file_name().expect("sla file name"));
-            let spec = sla_file.with_extension("");
-            let slac = SleighCompiler::new()?
-                .build_with(spec, slaf)?
-                .expect("compiled sla file name");
-            primary_def.build_with_sla(slac)
-        }
-    };
-
-    let language = language.map_err(|e| CodegenError::language_build(language_def, e))?;
 
     let tokens = LifterGenerator::new_with(&language, primary_variant, extra_variants)
         .map(ToTokens::into_token_stream)
