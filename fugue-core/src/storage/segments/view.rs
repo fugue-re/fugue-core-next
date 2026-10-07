@@ -1,7 +1,6 @@
 use crate::ir::{Address, AddressRange};
-use crate::lifter::ContextHint;
 use crate::storage::segments::mapping::{
-    SegmentMapping, SegmentMappingKind, SegmentMappingProvenance, SegmentMappingRef,
+    MappingHints, SegmentMapping, SegmentMappingKind, SegmentMappingProvenance, SegmentMappingRef,
     SegmentSubMapping,
 };
 use crate::storage::segments::provider::{SegmentStorageDescriptor, SegmentView};
@@ -101,33 +100,12 @@ impl<'a> SegmentMappingView<'a> {
         self.mapping_ref
     }
 
-    pub fn mapping_hint_at(&self, addr: impl Into<Address>) -> Option<&ContextHint> {
-        let addr = addr.into();
-        self.contains(addr).then(|| {
-            self.mapping
-                .mapping_hint_at(Address::new(self.mapping.space(), addr.raw_address()))
-        })?
-    }
-
     pub fn is_valid(&self) -> bool {
         self.mapping.revision() == self.mapping_revision
     }
 
-    pub fn mapping_hints(&self) -> impl Iterator<Item = (Address, &ContextHint)> + '_ {
-        self.mapping.mapping_hints().filter_map(|(address, hint)| {
-            let mapped = Address::new(self.space(), address.raw_address());
-            self.contains(mapped).then_some((mapped, hint))
-        })
-    }
-
-    pub(crate) fn mapping_hints_from(
-        &self,
-        address: Address,
-    ) -> impl Iterator<Item = (Address, &ContextHint)> + '_ {
-        self.mapping
-            .mapping_hints_from(address.raw_address())
-            .map(|(address, hint)| (Address::new(self.space(), address.raw_address()), hint))
-            .take_while(|(address, _)| self.contains(*address))
+    pub fn mapping_hints(&self) -> MappingHints<'a> {
+        MappingHints::new(self.mapping, self.range)
     }
 
     pub fn function_hints(&self) -> impl Iterator<Item = Address> + '_ {

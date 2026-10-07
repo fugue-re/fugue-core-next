@@ -404,7 +404,7 @@ mod test {
         CodeBlockTable, FunctionId, FunctionTable, FunctionTableStaging, IncompleteCodeBlock,
         IncompleteFunction, Insn, InsnEntry,
     };
-    use crate::lifter::{ContextSet, Language, Op, RawPCodeOp, Varnode, resolve_language};
+    use crate::lifter::{ContextSet, Language, Lifter, Op, RawPCodeOp, Varnode, resolve_language};
     use crate::storage::EntityStorage;
     use crate::storage::entities::{
         Entity, EntityKeyPrefix, InMemoryEntityStorage, WriteBackWorker,
@@ -441,7 +441,7 @@ mod test {
                     output: Varnode::INVALID,
                 }];
 
-                Insn::from_resolved_flow(language, entry + offset, 1, &operations)
+                Insn::from_resolved_flow(&Lifter::new(language), entry + offset, 1, &operations)
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -903,7 +903,8 @@ mod test {
                 output: Varnode::INVALID,
             },
         ];
-        let read_modify_write = Insn::from_resolved_flow(language, insn_address, 1, &operations)?;
+        let read_modify_write =
+            Insn::from_resolved_flow(&Lifter::new(language), insn_address, 1, &operations)?;
 
         let mut functions = FunctionTable::new_transient();
         let mut blocks = CodeBlockTable::new_transient();

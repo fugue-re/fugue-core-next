@@ -1,18 +1,21 @@
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Display, LowerHex, UpperHex};
+use std::mem::ManuallyDrop;
 use std::num::ParseIntError;
 use std::ops::{Add, AddAssign, Bound, Range, RangeBounds, RangeInclusive, Sub, SubAssign};
 use std::str::FromStr;
-use std::{fmt, iter, mem};
+use std::{fmt, iter, mem, ptr};
 
 use rangemap::{RangeInclusiveMap, RangeInclusiveSet};
 use serde::{Deserialize, Serialize};
 
-use crate::lifter::{ContextSet, Language, Varnode};
+use crate::lifter::{
+    ContextBitRange, ContextSet, ContextUpdate, Language, MAX_CONTEXT_UPDATES, Varnode,
+};
 use crate::storage::entities::schema::{ENTITY_KEY_ADDRESS_ID, ENTITY_KEY_RAW_ADDRESS_ID};
 use crate::storage::entities::{EntityKey, EntityKeyCodec, EntityKeyId};
 use crate::storage::segments::space::AddressSpaceId;
-use crate::types::Confidence;
+use crate::types::EstimateSize;
 
 #[derive(
     Copy,
@@ -471,32 +474,147 @@ impl ToRawAddress for Varnode {
     }
 }
 
-#[derive(
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AddressWithContext {
     address: Address,
     context: ContextSet,
-    confidence: Confidence,
+}
+
+#[derive(rkyv::Portable)]
+#[repr(C)]
+pub struct ArchivedAddressWithContext {
+    offset: rkyv::Archived<u64>,
+    context: ArchivedContextValue,
+    space: rkyv::Archived<u16>,
+    start: u8,
+    end: u8,
+}
+
+#[derive(rkyv::Portable)]
+#[repr(C)]
+union ArchivedContextValue {
+    value: rkyv::Archived<u32>,
+    updates: ManuallyDrop<
+        rkyv::boxed::ArchivedBox<rkyv::Archived<[ContextUpdate; MAX_CONTEXT_UPDATES]>>,
+    >,
+}
+
+unsafe impl<C> rkyv::bytecheck::CheckBytes<C> for ArchivedAddressWithContext
+where
+    C: rkyv::rancor::Fallible + rkyv::validation::ArchiveContext + ?Sized,
+    C::Error: rkyv::rancor::Source,
+{
+    unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
+        // SAFETY: the range bytes select the active union field; all other inline fields accept any bits.
+        let (start, end) = unsafe { ((*value).start, (*value).end) };
+        match end {
+            0 => Ok(()),
+            1..=32 if start & 31 < end => Ok(()),
+            u8::MAX => unsafe {
+                <rkyv::boxed::ArchivedBox<rkyv::Archived<[ContextUpdate; MAX_CONTEXT_UPDATES]>> as rkyv::bytecheck::CheckBytes<C>>::check_bytes(
+                    ptr::addr_of!((*value).context.updates).cast(),
+                    context,
+                )
+            },
+            _ => rkyv::rancor::fail!(rkyv::bytecheck::InvalidEnumDiscriminantError {
+                enum_name: "ArchivedAddressWithContext",
+                invalid_discriminant: u16::from_be_bytes([start, end]),
+            }),
+        }
+    }
+}
+
+impl rkyv::Archive for AddressWithContext {
+    type Archived = ArchivedAddressWithContext;
+    type Resolver = Option<rkyv::boxed::BoxResolver>;
+
+    fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        rkyv::munge::munge!(let ArchivedAddressWithContext { offset, context, space, start, end } = out);
+        self.address.offset().resolve((), offset);
+        self.address.space().value().resolve((), space);
+        if let Some(resolver) = resolver {
+            start.write(0);
+            end.write(u8::MAX);
+            // SAFETY: repr(C) union fields share an offset and the union provides their alignment.
+            let updates = unsafe { context.cast_unchecked() };
+            rkyv::boxed::ArchivedBox::<rkyv::Archived<[ContextUpdate; MAX_CONTEXT_UPDATES]>>::resolve_from_raw_parts(resolver, (), updates);
+            return;
+        }
+
+        // SAFETY: the inline branch selects the u32 field of the repr(C) union.
+        let value = unsafe { context.cast_unchecked::<rkyv::Archived<u32>>() };
+        if let Some(update) = self.context.iter().next() {
+            let bits = update.bits();
+            start.write((bits.word() * 32 + bits.start_bit()) as u8);
+            end.write(bits.end_bit() as u8 + 1);
+            update.value().resolve((), value);
+        } else {
+            start.write(0);
+            end.write(0);
+            0u32.resolve((), value);
+        }
+    }
+}
+
+impl<S> rkyv::Serialize<S> for AddressWithContext
+where
+    S: rkyv::rancor::Fallible + rkyv::ser::Allocator + rkyv::ser::Writer + ?Sized,
+{
+    fn serialize(&self, serialiser: &mut S) -> Result<Self::Resolver, S::Error> {
+        let mut updates = self.context.iter();
+        let (Some(first), Some(second)) = (updates.next(), updates.next()) else {
+            return Ok(None);
+        };
+        rkyv::boxed::ArchivedBox::serialize_from_ref(&[first.clone(), second.clone()], serialiser)
+            .map(Some)
+    }
+}
+
+impl<D> rkyv::Deserialize<AddressWithContext, D> for ArchivedAddressWithContext
+where
+    D: rkyv::rancor::Fallible + ?Sized,
+{
+    fn deserialize(&self, deserialiser: &mut D) -> Result<AddressWithContext, D::Error> {
+        let address = Address::new(
+            AddressSpaceId::from(self.space.to_native()),
+            RawAddress::from(self.offset.to_native()),
+        );
+        if self.end == 0 {
+            return Ok(AddressWithContext::from(address));
+        }
+        if self.end == u8::MAX {
+            // SAFETY: this tag selects the relative pointer, validated by CheckBytes.
+            let updates = unsafe { self.context.updates.get() };
+            let updates =
+                rkyv::Deserialize::<[ContextUpdate; MAX_CONTEXT_UPDATES], D>::deserialize(
+                    updates,
+                    deserialiser,
+                )?;
+            return Ok(AddressWithContext::new(
+                address,
+                ContextSet::from_iter(updates),
+            ));
+        }
+        let start = usize::from(self.start);
+        let end = (start & !31) | usize::from(self.end - 1);
+        // SAFETY: the inline tag selects the u32 field.
+        let value = unsafe { self.context.value }.to_native();
+        Ok(AddressWithContext::new(
+            address,
+            ContextSet::single(ContextBitRange::new(start, end), value),
+        ))
+    }
+}
+
+impl EstimateSize for AddressWithContext {
+    fn estimate_size(&self) -> usize {
+        size_of::<Self>()
+    }
 }
 
 impl Display for AddressWithContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} (context: {}, confidence: {})",
-            self.address, self.context, self.confidence
-        )
+        write!(f, "{} (context: {})", self.address, self.context)
     }
 }
 
@@ -518,29 +636,11 @@ where
     }
 }
 
-impl<A> From<(A, ContextSet, Confidence)> for AddressWithContext
-where
-    A: Into<Address>,
-{
-    fn from(parts: (A, ContextSet, Confidence)) -> Self {
-        Self::new_with(parts.0.into(), parts.1, parts.2)
-    }
-}
-
 impl AddressWithContext {
     pub fn new(address: impl Into<Address>, context: ContextSet) -> Self {
-        Self::new_with(address.into(), context, Confidence::certain())
-    }
-
-    pub fn new_with(
-        address: impl Into<Address>,
-        context: ContextSet,
-        confidence: Confidence,
-    ) -> Self {
         Self {
             address: address.into(),
             context,
-            confidence,
         }
     }
 
@@ -552,22 +652,12 @@ impl AddressWithContext {
         &self.context
     }
 
-    pub fn confidence(&self) -> Confidence {
-        self.confidence
-    }
-
     pub fn context_mut(&mut self) -> &mut ContextSet {
         &mut self.context
     }
 
     pub fn merge_context(&mut self, other: &ContextSet) {
         self.context.merge(other);
-    }
-
-    pub fn merge_max_confidence(&mut self, other: Confidence) {
-        if other > self.confidence {
-            self.confidence = other;
-        }
     }
 
     pub fn into_parts(self) -> (Address, ContextSet) {
@@ -1084,6 +1174,7 @@ impl<V> RawAddressMap<V>
 where
     V: Clone + Ord,
 {
+    #[inline(never)]
     pub fn max_in_range(&self, range: impl Into<RangeInclusive<RawAddress>>) -> Option<V> {
         let range = range.into();
         let start = range.start().offset();

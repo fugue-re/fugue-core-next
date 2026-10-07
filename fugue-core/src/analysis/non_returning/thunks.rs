@@ -22,7 +22,7 @@ impl AnalysisPass<StructuredFunctionContext> for NonReturningThunk {
             return Ok(());
         };
 
-        if !project.is_non_returning_at(target) {
+        if !project.is_non_returning_at(target.address()) {
             return Ok(());
         }
 

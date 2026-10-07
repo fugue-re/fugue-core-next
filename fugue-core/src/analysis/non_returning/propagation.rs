@@ -22,7 +22,7 @@ impl BlockExit {
 
         match terminator
             .flow_targets()
-            .find_map(|target| target.kind().is_call().then_some(target.to()))
+            .find_map(|target| target.kind().is_call().then(|| target.to().address()))
         {
             Some(target) => Self::Via(target),
             None => Self::Unknown,
@@ -35,7 +35,7 @@ impl BlockExit {
         }
 
         match block.call_target() {
-            Some(target) => Self::Via(target),
+            Some(target) => Self::Via(target.address()),
             None => Self::Unknown,
         }
     }
@@ -189,7 +189,10 @@ impl ExitGraph {
             && !block.is_branch()
             && let Some(target) = block.call_target()
         {
-            self.calls.insert(StaleCall { caller, target });
+            self.calls.insert(StaleCall {
+                caller,
+                target: target.address(),
+            });
         }
     }
 
@@ -213,7 +216,10 @@ impl ExitGraph {
             && !terminator.is_branch()
             && let Some(target) = terminator.call_target()
         {
-            self.calls.insert(StaleCall { caller, target });
+            self.calls.insert(StaleCall {
+                caller,
+                target: target.address(),
+            });
         }
     }
 }

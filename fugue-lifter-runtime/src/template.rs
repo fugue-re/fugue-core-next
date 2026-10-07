@@ -259,7 +259,7 @@ impl ConstTpl {
                     } else {
                         let mut ninput = input.next_input()?;
                         data.resolve_instruction(&mut ninput)?;
-                        ninput.next_address()
+                        ninput.input().next_address()
                     }
                 }
                 ConstTpl::CurrentSpaceSize => data.address_size as u64,

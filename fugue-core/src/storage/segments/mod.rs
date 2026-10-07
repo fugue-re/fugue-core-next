@@ -31,7 +31,7 @@ pub(crate) mod view;
 
 pub use cache::SegmentMappingCache;
 pub use mapping::{
-    SegmentMapping, SegmentMappingBuilder, SegmentMappingFlags, SegmentMappingId,
+    MappingHints, SegmentMapping, SegmentMappingBuilder, SegmentMappingFlags, SegmentMappingId,
     SegmentMappingKind, SegmentMappingProvenance, SegmentMappingRef, SegmentSubMapping,
 };
 pub use properties::SegmentProperties;
@@ -870,7 +870,11 @@ impl SegmentStorage {
                 kind: m.kind(),
                 provenance: m.provenance(),
                 flags: m.flags(),
-                mapping_hints: m.mapping_hint_offsets().clone(),
+                mapping_hints: m
+                    .mapping_hints()
+                    .iter()
+                    .map(|(address, hint)| (address.raw_address(), hint.clone()))
+                    .collect(),
                 function_hints: m.function_hint_offsets().clone(),
                 provider_id: m.provider_id(),
             })
@@ -2368,6 +2372,56 @@ mod test {
     }
 
     #[test]
+    fn mapping_hint_ranges_follow_visible_bounds_and_space() -> Result<(), SegmentStorageError> {
+        let mut storage = SegmentStorage::empty();
+        let provider = storage.open_provider(
+            InMemorySegmentStorage::from_bytes(vec![0; 16]),
+            SegmentProperties::PERM_ALL,
+        );
+        let mapping = storage.create_mapping_from_builder(
+            SegmentMappingBuilder::new(0x1000u64, 16, 0, provider).with_mapping_hints([
+                (RawAddress::from(0x1000u64), ContextHint::data()),
+                (RawAddress::from(0x1008u64), ContextHint::code()),
+                (RawAddress::from(0x100cu64), ContextHint::data()),
+            ]),
+        )?;
+        let covering = storage
+            .create_mapping_from_builder(SegmentMappingBuilder::new(0x1000u64, 8, 0, provider))?;
+        let space = storage.create_space()?;
+        storage.add_mapping_to_space_bottom(space, mapping)?;
+        storage.add_mapping_to_space_top(space, covering)?;
+
+        let address = Address::new(space, 0x1009u64);
+        let view = storage.view_containing(address)?;
+        let hints = view.mapping_hints();
+        assert_eq!(
+            hints.iter().map(|(address, _)| address).collect::<Vec<_>>(),
+            vec![
+                Address::new(space, 0x1008u64),
+                Address::new(space, 0x100cu64)
+            ],
+        );
+        assert_eq!(
+            hints.range(..=address).next_back(),
+            Some((Address::new(space, 0x1008u64), &ContextHint::code())),
+        );
+        assert!(
+            hints
+                .range(..Address::new(space, 0x1008u64))
+                .next()
+                .is_none()
+        );
+        assert!(hints.get(Address::in_default_space(0x1008u64)).is_none());
+        assert!(
+            hints
+                .range(..=Address::in_default_space(0x100cu64))
+                .next()
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_prioritise_brings_mapping_to_top() -> Result<(), SegmentStorageError> {
         let mut storage = SegmentStorage::empty();
 
@@ -2590,7 +2644,7 @@ mod test {
         );
 
         assert_eq!(
-            view.mapping_hint_at(0x1040u64),
+            view.mapping_hints().get(0x1040u64),
             Some(&ContextHint::data()),
             "relocation-discovered mapping hint should reach the covering mapping",
         );

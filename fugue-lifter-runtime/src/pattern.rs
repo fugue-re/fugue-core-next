@@ -428,7 +428,7 @@ impl PatternExpression {
                             || {
                                 let mut ninput = input.next_input()?;
                                 data.resolve_instruction(&mut ninput)?;
-                                Some(ninput.next_address() as i64)
+                                Some(ninput.input().next_address() as i64)
                             },
                             |v| Some(v as i64),
                         )?;

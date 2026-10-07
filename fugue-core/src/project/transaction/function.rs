@@ -462,7 +462,9 @@ mod test {
         assert_eq!(
             parent
                 .flow_targets(project.blocks())
-                .filter(|target| target.from() == left && target.to() == split)
+                .filter(|target| {
+                    target.from().address() == left && target.to().address() == split
+                })
                 .map(|target| target.kind())
                 .collect::<Vec<_>>(),
             vec![FlowKind::TailCallBranch],
@@ -525,7 +527,9 @@ mod test {
         assert_eq!(
             merged
                 .flow_targets(project.blocks())
-                .filter(|target| target.from() == left && target.to() == split)
+                .filter(|target| {
+                    target.from().address() == left && target.to().address() == split
+                })
                 .map(|target| target.kind())
                 .collect::<Vec<_>>(),
             vec![FlowKind::Branch],
@@ -621,7 +625,9 @@ mod test {
         assert_eq!(
             parent
                 .flow_targets(project.blocks())
-                .filter(|target| target.from() == entry && target.to() == shared)
+                .filter(|target| {
+                    target.from().address() == entry && target.to().address() == shared
+                })
                 .map(|target| target.kind())
                 .collect::<Vec<_>>(),
             vec![FlowKind::Branch],
