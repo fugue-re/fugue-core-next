@@ -3,13 +3,16 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
+use ahash::AHashMap as Map;
+use itertools::Itertools;
 use roxmltree::{Document, Node};
 use ustr::Ustr;
 
 use crate::compiler::{CallFixup, DataOrganisation, UserOpFixup};
 use crate::deserialise::{DeserialiseError, XmlExt, parse_int_radix};
 use crate::language::{Language, LanguageError};
-use crate::spaces::{AddressSpace, AddressSpaceId};
+use crate::processor::{SegmentOp, StorageLocation};
+use crate::spaces::AddressSpace;
 use crate::varnode::VarnodeData;
 
 pub use crate::compiler::{
@@ -96,16 +99,21 @@ impl PrototypeOperand {
             }
             "addr" | "varnode" => match input.attribute_str("space")? {
                 "join" => {
-                    let mut indexed = input
+                    let indexed = input
                         .attributes()
                         .filter_map(|attr| {
                             attr.name()
                                 .strip_prefix("piece")
                                 .map(|index| (index, attr.value()))
                         })
-                        .map(|(index, value)| Ok((parse_int_radix::<usize>(index)?, value)))
-                        .collect::<Result<Vec<_>, DeserialiseError>>()?;
-                    indexed.sort_unstable_by_key(|(index, _)| *index);
+                        .map(|(index, value)| {
+                            parse_int_radix::<usize>(index).map(|index| (index, value))
+                        })
+                        .process_results(|pieces| {
+                            pieces
+                                .sorted_unstable_by_key(|(index, _)| *index)
+                                .collect::<Vec<_>>()
+                        })?;
                     if indexed.is_empty()
                         || indexed
                             .iter()
@@ -262,6 +270,8 @@ pub struct Prototype {
     unaffected: Vec<PrototypeOperand>,
     killed_by_call: Vec<PrototypeOperand>,
     likely_trashed: Vec<PrototypeOperand>,
+    local_ranges: Vec<StorageLocation>,
+    internal_storage: Vec<VarnodeData>,
 }
 
 impl Prototype {
@@ -285,6 +295,8 @@ impl Prototype {
         let mut unaffected = Vec::new();
         let mut killed_by_call = Vec::new();
         let mut likely_trashed = Vec::new();
+        let mut local_ranges = Vec::new();
+        let mut internal_storage = Vec::new();
         let mut next_group = 0u32;
 
         for child in input.children().filter(Node::is_element) {
@@ -344,6 +356,19 @@ impl Prototype {
                         .collect::<Result<Vec<_>, _>>()?;
                     likely_trashed.append(&mut values);
                 }
+                "localrange" => {
+                    for node in child.children().filter(Node::is_element) {
+                        if node.tag_name().name() != "range" {
+                            return Err(DeserialiseError::tag_unexpected(node.tag_name().name()));
+                        }
+                        local_ranges.push(StorageLocation::from_xml(language, node)?);
+                    }
+                }
+                "internal_storage" => {
+                    for node in child.children().filter(Node::is_element) {
+                        internal_storage.push(VarnodeData::from_xml(language, node)?);
+                    }
+                }
                 _ => (),
             }
         }
@@ -359,6 +384,8 @@ impl Prototype {
             unaffected,
             killed_by_call,
             likely_trashed,
+            local_ranges,
+            internal_storage,
         })
     }
 
@@ -400,6 +427,162 @@ impl Prototype {
 
     pub fn likely_trashed(&self) -> &[PrototypeOperand] {
         &self.likely_trashed
+    }
+
+    pub fn local_ranges(&self) -> &[StorageLocation] {
+        &self.local_ranges
+    }
+
+    pub fn internal_storage(&self) -> &[VarnodeData] {
+        &self.internal_storage
+    }
+}
+
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Deserialize,
+    serde::Serialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+pub enum PrototypeReference {
+    Alias(u32),
+    Prototype(u32),
+    Resolution(u32),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct PrototypeAlias {
+    name: String,
+    parent: u32,
+}
+
+impl PrototypeAlias {
+    pub fn from_xml(convention: &Convention, input: Node) -> Result<Self, DeserialiseError> {
+        if !input.has_tag_name("modelalias") {
+            return Err(DeserialiseError::tag_unexpected(input.tag_name().name()));
+        }
+        let name = input.attribute_string("name")?;
+        if convention.prototype_reference(&name).is_some() {
+            return Err(DeserialiseError::invariant(
+                "prototype alias name is already defined",
+            ));
+        }
+        let parent = input.attribute_str("parent")?;
+        let parent = convention
+            .prototypes()
+            .position(|prototype| prototype.name() == parent)
+            .ok_or(DeserialiseError::invariant(
+                "prototype alias parent is invalid",
+            ))?;
+        Ok(Self {
+            name,
+            parent: u32::try_from(parent).expect("prototype index fits in u32"),
+        })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn parent(&self) -> u32 {
+        self.parent
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct PrototypeResolution {
+    name: String,
+    prototypes: Vec<PrototypeReference>,
+}
+
+impl PrototypeResolution {
+    pub fn from_xml(convention: &Convention, input: Node) -> Result<Self, DeserialiseError> {
+        if !input.has_tag_name("resolveprototype") {
+            return Err(DeserialiseError::tag_unexpected(input.tag_name().name()));
+        }
+        let name = input.attribute_string("name")?;
+        if convention.prototype_reference(&name).is_some() {
+            return Err(DeserialiseError::invariant(
+                "prototype resolution name is already defined",
+            ));
+        }
+        let prototypes = input
+            .children()
+            .filter(Node::is_element)
+            .map(|node| {
+                if node.tag_name().name() != "model" {
+                    return Err(DeserialiseError::tag_unexpected(node.tag_name().name()));
+                }
+                let reference = convention
+                    .prototype_reference(node.attribute_str("name")?)
+                    .ok_or(DeserialiseError::invariant(
+                        "prototype resolution model is invalid",
+                    ))?;
+                if matches!(reference, PrototypeReference::Resolution(_)) {
+                    return Err(DeserialiseError::invariant(
+                        "prototype resolution model cannot be a resolution",
+                    ));
+                }
+                Ok(reference)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if prototypes.is_empty() {
+            return Err(DeserialiseError::invariant(
+                "prototype resolution requires a model",
+            ));
+        }
+        Ok(Self { name, prototypes })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn prototypes(&self) -> &[PrototypeReference] {
+        &self.prototypes
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct PreferredVarnodeSplit {
+    storage: VarnodeData,
+    split_offset: u16,
+}
+
+impl PreferredVarnodeSplit {
+    pub fn from_xml(language: &Language, input: Node) -> Result<Self, DeserialiseError> {
+        let parent = input
+            .parent()
+            .ok_or(DeserialiseError::invariant("preferred split has no parent"))?;
+        if !parent.has_tag_name("prefersplit") {
+            return Err(DeserialiseError::tag_unexpected(parent.tag_name().name()));
+        }
+        if parent.attribute_str("style")? != "inhalf" {
+            return Err(DeserialiseError::invariant(
+                "preferred split style is invalid",
+            ));
+        }
+        let storage = VarnodeData::from_xml(language, input)?;
+        let split_offset = u16::try_from(storage.size() / 2)
+            .map_err(|_| DeserialiseError::invariant("preferred split offset exceeds u16"))?;
+        Ok(Self {
+            storage,
+            split_offset,
+        })
+    }
+
+    pub fn storage(&self) -> &VarnodeData {
+        &self.storage
+    }
+
+    pub fn split_offset(&self) -> u16 {
+        self.split_offset
     }
 }
 
@@ -487,6 +670,14 @@ pub struct Convention {
     call_fixups: Vec<CallFixup>,
     user_op_fixups: Vec<UserOpFixup>,
     function_pointer_alignment: Option<u64>,
+    global_ranges: Vec<StorageLocation>,
+    aggressive_trim: bool,
+    preferred_varnode_splits: Vec<PreferredVarnodeSplit>,
+    prototype_aliases: Vec<PrototypeAlias>,
+    prototype_resolutions: Vec<PrototypeResolution>,
+    eval_current_prototype: Option<PrototypeReference>,
+    properties: Map<String, String>,
+    segment_ops: Vec<SegmentOp>,
 }
 
 impl Convention {
@@ -523,9 +714,38 @@ impl Convention {
         let mut call_fixups = Vec::new();
         let mut user_op_fixups = Vec::new();
         let mut function_pointer_alignment = None;
+        let mut global_ranges = Vec::new();
+        let mut aggressive_trim = false;
+        let mut preferred_varnode_splits = Vec::new();
+        let mut properties = Map::default();
+        let mut segment_ops = Vec::new();
 
         for child in input.children().filter(Node::is_element) {
             match child.tag_name().name() {
+                "global" => {
+                    for node in child.children().filter(Node::is_element) {
+                        global_ranges.push(StorageLocation::from_xml(language, node)?);
+                    }
+                }
+                "aggressivetrim" => aggressive_trim = child.attribute_bool_opt("signext", false)?,
+                "prefersplit" => {
+                    for node in child.children().filter(Node::is_element) {
+                        preferred_varnode_splits
+                            .push(PreferredVarnodeSplit::from_xml(language, node)?);
+                    }
+                }
+                "properties" => {
+                    for node in child.children().filter(Node::is_element) {
+                        if !node.has_tag_name("property") {
+                            return Err(DeserialiseError::tag_unexpected(node.tag_name().name()));
+                        }
+                        properties.insert(
+                            node.attribute_string("key")?,
+                            node.attribute_string("value")?,
+                        );
+                    }
+                }
+                "segmentop" => segment_ops.push(SegmentOp::from_xml(language, child)?),
                 "data_organization" => {
                     data_organisation = Some(DataOrganisation::from_xml(child)?);
                 }
@@ -558,23 +778,103 @@ impl Convention {
         let stack_pointer = stack_pointer.ok_or(DeserialiseError::invariant(
             "compiler specification does not define stack pointer configuration",
         ))?;
-        let call_preserved_registers = collect_call_preserved_registers(
-            &default_prototype,
-            language.spaces().register_space_id(),
-        );
+        let register_space = language.spaces().register_space_id();
+        let mut call_preserved_registers = BTreeSet::new();
+        for operand in default_prototype.unaffected() {
+            match operand {
+                PrototypeOperand::Register { varnode, .. } => {
+                    call_preserved_registers.insert(*varnode);
+                }
+                PrototypeOperand::RegisterJoin {
+                    first_varnode,
+                    second_varnode,
+                    ..
+                } => {
+                    call_preserved_registers.extend([*first_varnode, *second_varnode]);
+                }
+                PrototypeOperand::Join { pieces, .. } => {
+                    call_preserved_registers.extend(pieces.iter().filter_map(
+                        |piece| match piece {
+                            JoinPiece::Location(varnode) if varnode.space() == register_space => {
+                                Some(*varnode)
+                            }
+                            _ => None,
+                        },
+                    ));
+                }
+                PrototypeOperand::Address {
+                    space,
+                    offset,
+                    size: Some(size),
+                } if space.id() == register_space => {
+                    call_preserved_registers.insert(VarnodeData::new(
+                        space,
+                        *offset,
+                        usize::from(*size),
+                    ));
+                }
+                PrototypeOperand::Address { .. } | PrototypeOperand::StackRelative { .. } => {}
+            }
+        }
 
-        Ok(Self {
+        let mut convention = Self {
             name: name.into(),
             data_organisation,
             stack_pointer,
             return_address,
             default_prototype,
-            call_preserved_registers,
+            call_preserved_registers: call_preserved_registers.into_iter().collect(),
             additional_prototypes,
             call_fixups,
             user_op_fixups,
             function_pointer_alignment,
-        })
+            global_ranges,
+            aggressive_trim,
+            preferred_varnode_splits,
+            prototype_aliases: Vec::new(),
+            prototype_resolutions: Vec::new(),
+            eval_current_prototype: None,
+            properties,
+            segment_ops,
+        };
+        let mut names = BTreeSet::new();
+        if convention
+            .prototypes()
+            .any(|prototype| !names.insert(prototype.name()))
+        {
+            return Err(DeserialiseError::invariant(
+                "prototype name is already defined",
+            ));
+        }
+        for child in input
+            .children()
+            .filter(|node| node.has_tag_name("modelalias"))
+        {
+            convention
+                .prototype_aliases
+                .push(PrototypeAlias::from_xml(&convention, child)?);
+        }
+        for child in input
+            .children()
+            .filter(|node| node.has_tag_name("resolveprototype"))
+        {
+            convention
+                .prototype_resolutions
+                .push(PrototypeResolution::from_xml(&convention, child)?);
+        }
+        for child in input
+            .children()
+            .filter(|node| node.has_tag_name("eval_current_prototype"))
+        {
+            convention.eval_current_prototype = Some(
+                convention
+                    .prototype_reference(child.attribute_str("name")?)
+                    .ok_or(DeserialiseError::invariant(
+                        "current evaluation prototype is invalid",
+                    ))?,
+            );
+        }
+        Ok(convention)
     }
 
     pub fn from_str(
@@ -629,42 +929,94 @@ impl Convention {
     pub fn call_fixups(&self) -> &[CallFixup] {
         &self.call_fixups
     }
-}
 
-fn collect_call_preserved_registers(
-    prototype: &Prototype,
-    register_space: AddressSpaceId,
-) -> Vec<VarnodeData> {
-    let mut registers = BTreeSet::new();
-    for operand in prototype.unaffected() {
-        match operand {
-            PrototypeOperand::Register { varnode, .. } => {
-                registers.insert(*varnode);
+    pub fn global_ranges(&self) -> &[StorageLocation] {
+        &self.global_ranges
+    }
+
+    pub fn aggressive_trim(&self) -> bool {
+        self.aggressive_trim
+    }
+
+    pub fn preferred_varnode_splits(&self) -> &[PreferredVarnodeSplit] {
+        &self.preferred_varnode_splits
+    }
+
+    pub fn prototype_aliases(&self) -> &[PrototypeAlias] {
+        &self.prototype_aliases
+    }
+
+    pub fn prototype_resolutions(&self) -> &[PrototypeResolution] {
+        &self.prototype_resolutions
+    }
+
+    pub fn eval_current_prototype(&self) -> Option<PrototypeReference> {
+        self.eval_current_prototype
+    }
+
+    pub fn prototype_reference(&self, name: &str) -> Option<PrototypeReference> {
+        if let Some(index) = self
+            .prototypes()
+            .position(|prototype| prototype.name() == name)
+        {
+            return Some(PrototypeReference::Prototype(
+                u32::try_from(index).expect("prototype index fits in u32"),
+            ));
+        }
+        if let Some(index) = self
+            .prototype_aliases
+            .iter()
+            .position(|alias| alias.name() == name)
+        {
+            return Some(PrototypeReference::Alias(
+                u32::try_from(index).expect("prototype alias index fits in u32"),
+            ));
+        }
+        self.prototype_resolutions
+            .iter()
+            .position(|resolution| resolution.name() == name)
+            .map(|index| {
+                PrototypeReference::Resolution(
+                    u32::try_from(index).expect("prototype resolution index fits in u32"),
+                )
+            })
+    }
+
+    pub fn prototype(&self, index: u32) -> Option<&Prototype> {
+        self.prototypes().nth(index as _)
+    }
+
+    pub fn prototype_resolution(&self, index: u32) -> Option<&PrototypeResolution> {
+        self.prototype_resolutions.get(index as usize)
+    }
+
+    pub fn prototype_alias(&self, index: u32) -> Option<&PrototypeAlias> {
+        self.prototype_aliases.get(index as usize)
+    }
+
+    pub fn prototype_by_reference(&self, reference: PrototypeReference) -> Option<&Prototype> {
+        match reference {
+            PrototypeReference::Alias(index) => {
+                self.prototype(self.prototype_alias(index)?.parent())
             }
-            PrototypeOperand::RegisterJoin {
-                first_varnode,
-                second_varnode,
-                ..
-            } => {
-                registers.extend([*first_varnode, *second_varnode]);
-            }
-            PrototypeOperand::Join { pieces, .. } => {
-                registers.extend(pieces.iter().filter_map(|piece| match piece {
-                    JoinPiece::Location(varnode) if varnode.space() == register_space => {
-                        Some(*varnode)
-                    }
-                    _ => None,
-                }));
-            }
-            PrototypeOperand::Address {
-                space,
-                offset,
-                size: Some(size),
-            } if space.id() == register_space => {
-                registers.insert(VarnodeData::new(space, *offset, usize::from(*size)));
-            }
-            PrototypeOperand::Address { .. } | PrototypeOperand::StackRelative { .. } => {}
+            PrototypeReference::Prototype(index) => self.prototype(index),
+            PrototypeReference::Resolution(_) => None,
         }
     }
-    registers.into_iter().collect()
+
+    pub fn prototype_by_name(&self, name: &str) -> Option<&Prototype> {
+        self.prototype_by_reference(self.prototype_reference(name)?)
+    }
+
+    pub fn properties(&self) -> &Map<String, String> {
+        &self.properties
+    }
+
+    pub fn property(&self, key: &str) -> Option<&str> {
+        self.properties.get(key).map(String::as_str)
+    }
+
+    pub fn segment_ops(&self) -> &[SegmentOp] {
+        &self.segment_ops
+    }
 }

@@ -3,17 +3,20 @@ use std::ops::RangeInclusive;
 use fugue_sleigh_language::processor::{
     ContextSet as SleighContextSet, ContextUpdate as SleighContextUpdate,
     DefaultSymbol as SleighDefaultSymbol, DefaultSymbolAddress as SleighDefaultSymbolAddress,
-    DefaultSymbolKind, RegisterLanes as SleighRegisterLanes,
-    StorageLocation as SleighStorageLocation, TrackedSet as SleighTrackedSet,
-    TrackedSetUpdate as SleighTrackedSetUpdate, VolatileRange as SleighVolatileRange,
+    DefaultSymbolKind, RegisterLanes as SleighRegisterLanes, SegmentOp as SleighSegmentOp,
+    SegmentedAddressSpace as SleighSegmentedAddressSpace, StorageLocation as SleighStorageLocation,
+    TrackedSet as SleighTrackedSet, TrackedSetUpdate as SleighTrackedSetUpdate,
+    VolatileRange as SleighVolatileRange,
 };
 
+use crate::dynamic::convention::InjectPayload;
 use crate::dynamic::install::Install;
 use crate::pcode::Varnode;
 use crate::processor::{
     ContextSet as StaticContextSet, ContextUpdate as StaticContextUpdate,
     DefaultSymbol as StaticDefaultSymbol, DefaultSymbolAddress as StaticDefaultSymbolAddress,
-    RegisterLanes as StaticRegisterLanes, StorageLocation as StaticStorageLocation,
+    RegisterLanes as StaticRegisterLanes, SegmentOp as StaticSegmentOp,
+    SegmentedAddressSpace as StaticSegmentedAddressSpace, StorageLocation as StaticStorageLocation,
     TrackedSet as StaticTrackedSet, TrackedSetUpdate as StaticTrackedSetUpdate,
     VolatileRange as StaticVolatileRange,
 };
@@ -221,6 +224,9 @@ pub(crate) enum StorageLocation {
         range: Option<RangeInclusive<u64>>,
     },
     Register(Varnode),
+    StackRelative {
+        range: Option<RangeInclusive<u64>>,
+    },
 }
 
 impl From<&SleighStorageLocation> for StorageLocation {
@@ -231,6 +237,9 @@ impl From<&SleighStorageLocation> for StorageLocation {
                 range: range.clone(),
             },
             SleighStorageLocation::Register(register) => Self::Register(register.into()),
+            SleighStorageLocation::StackRelative { range } => Self::StackRelative {
+                range: range.clone(),
+            },
         }
     }
 }
@@ -242,6 +251,7 @@ impl Install for StorageLocation {
         match self {
             Self::Range { space, range } => Self::Target::Range { space, range },
             Self::Register(register) => Self::Target::Register(register),
+            Self::StackRelative { range } => Self::Target::StackRelative { range },
         }
     }
 }
@@ -272,5 +282,46 @@ impl Install for DefaultSymbolAddress {
             Self::Absolute { space, offset } => Self::Target::Absolute { space, offset },
             Self::Next => Self::Target::Next,
         }
+    }
+}
+
+impl From<&SleighSegmentedAddressSpace> for StaticSegmentedAddressSpace {
+    fn from(address: &SleighSegmentedAddressSpace) -> Self {
+        Self::new(
+            u8::try_from(address.space().index()).expect("address-space identifier fits in u8"),
+            address.kind(),
+        )
+    }
+}
+
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub(crate) struct SegmentOp {
+    space: u8,
+    user_op: Box<str>,
+    payload: InjectPayload,
+    far_pointer: bool,
+    constant_resolver: Option<Varnode>,
+}
+
+impl From<&SleighSegmentOp> for SegmentOp {
+    fn from(operation: &SleighSegmentOp) -> Self {
+        Self {
+            space: u8::try_from(operation.space().index())
+                .expect("address-space identifier fits in u8"),
+            user_op: Box::<str>::from(operation.user_op().as_str()),
+            payload: operation.payload().into(),
+            far_pointer: operation.far_pointer(),
+            constant_resolver: operation.constant_resolver().map(Into::into),
+        }
+    }
+}
+
+impl Install for SegmentOp {
+    type Target = StaticSegmentOp;
+
+    fn install(self) -> Self::Target {
+        Self::Target::new(self.space, self.user_op.install(), self.payload.install())
+            .with_far_pointer(self.far_pointer)
+            .with_constant_resolver(self.constant_resolver)
     }
 }

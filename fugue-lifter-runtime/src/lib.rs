@@ -21,12 +21,15 @@ pub use constructor::Constructor;
 pub use context::ContextDatabase;
 pub use convention::{
     BitfieldPacking, CallFixup, Convention, DataOrganisation, DatatypeFilter, DatatypeKind,
-    HiddenReturnStrategy, InjectParameter, InjectPayload, JoinPiece, Prototype, PrototypeEntry,
-    PrototypeOperand, PrototypeRule, PrototypeRuleAction, PrototypeRuleCondition, ReturnAddress,
-    RuleStorage, UserOpFixup,
+    HiddenReturnStrategy, InjectParameter, InjectPayload, JoinPiece, PreferredVarnodeSplit,
+    Prototype, PrototypeAlias, PrototypeEntry, PrototypeOperand, PrototypeResolution,
+    PrototypeRule, PrototypeRuleAction, PrototypeRuleCondition, ReturnAddress, RuleStorage,
+    UserOpFixup,
 };
 pub use format::InstructionFormatter;
+pub use fugue_sleigh_language::convention::PrototypeReference;
 pub use fugue_sleigh_language::float_format::FloatFormat;
+pub use fugue_sleigh_language::processor::SegmentedAddressSpaceKind;
 pub use input::{ContextCommit, FixedHandle, ParserInput, ParserInputs};
 pub use language::{Language, LanguageId};
 pub use lifter::Lifter;
@@ -39,7 +42,8 @@ pub use pcode::{
 };
 pub use processor::{
     ContextSet, ContextUpdate, DefaultSymbol, DefaultSymbolAddress, DefaultSymbolKind,
-    RegisterLanes, StorageLocation, TrackedSet, TrackedSetUpdate, VolatileRange,
+    RegisterLanes, SegmentOp, SegmentedAddressSpace, StorageLocation, TrackedSet, TrackedSetUpdate,
+    VolatileRange,
 };
 
 const UMASKS: [u64; 9] = [

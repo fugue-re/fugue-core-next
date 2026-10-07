@@ -1,7 +1,8 @@
 use std::ops::RangeInclusive;
 
-pub use fugue_sleigh_language::processor::DefaultSymbolKind;
+pub use fugue_sleigh_language::processor::{DefaultSymbolKind, SegmentedAddressSpaceKind};
 
+use crate::convention::InjectPayload;
 use crate::pcode::Varnode;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11,6 +12,9 @@ pub enum StorageLocation {
         range: Option<RangeInclusive<u64>>,
     },
     Register(Varnode),
+    StackRelative {
+        range: Option<RangeInclusive<u64>>,
+    },
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -325,4 +329,83 @@ impl DefaultSymbol {
 pub enum DefaultSymbolAddress {
     Absolute { space: u8, offset: u64 },
     Next,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct SegmentedAddressSpace {
+    space: u8,
+    kind: SegmentedAddressSpaceKind,
+}
+
+impl SegmentedAddressSpace {
+    pub const fn new(space: u8, kind: SegmentedAddressSpaceKind) -> Self {
+        Self { space, kind }
+    }
+
+    pub const fn space(&self) -> u8 {
+        self.space
+    }
+
+    pub const fn kind(&self) -> SegmentedAddressSpaceKind {
+        self.kind
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct SegmentOp {
+    space: u8,
+    user_op: &'static str,
+    payload: InjectPayload,
+    far_pointer: bool,
+    constant_resolver: Option<Varnode>,
+}
+
+impl SegmentOp {
+    pub const fn new(space: u8, user_op: &'static str, payload: InjectPayload) -> Self {
+        Self {
+            space,
+            user_op,
+            payload,
+            far_pointer: false,
+            constant_resolver: None,
+        }
+    }
+
+    pub const fn space(&self) -> u8 {
+        self.space
+    }
+
+    pub const fn user_op(&self) -> &'static str {
+        self.user_op
+    }
+
+    pub const fn payload(&self) -> &InjectPayload {
+        &self.payload
+    }
+
+    pub const fn far_pointer(&self) -> bool {
+        self.far_pointer
+    }
+
+    pub const fn set_far_pointer(&mut self, far_pointer: bool) {
+        self.far_pointer = far_pointer;
+    }
+
+    pub const fn with_far_pointer(mut self, far_pointer: bool) -> Self {
+        self.set_far_pointer(far_pointer);
+        self
+    }
+
+    pub const fn constant_resolver(&self) -> Option<Varnode> {
+        self.constant_resolver
+    }
+
+    pub const fn set_constant_resolver(&mut self, constant_resolver: Option<Varnode>) {
+        self.constant_resolver = constant_resolver;
+    }
+
+    pub const fn with_constant_resolver(mut self, constant_resolver: Option<Varnode>) -> Self {
+        self.set_constant_resolver(constant_resolver);
+        self
+    }
 }

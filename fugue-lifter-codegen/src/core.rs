@@ -8,6 +8,7 @@ use fugue_sleigh_language::symbol::sub_table::{
 };
 use fugue_sleigh_language::symbol::{Constructor, DecisionNode, Symbol};
 use indexmap::IndexMap;
+use itertools::Itertools;
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::{ToTokens, TokenStreamExt, quote};
 
@@ -1048,10 +1049,11 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 const FLOAT_FORMATS: &'static [fugue_lifter_runtime::FloatFormat] = FLOAT_FORMATS;
             }
         };
-        let mut float_formats = self.language.float_formats().values().collect::<Vec<_>>();
-        float_formats.sort_unstable_by_key(|format| format.size());
-        let float_formats = float_formats
-            .iter()
+        let float_formats = self
+            .language
+            .float_formats()
+            .values()
+            .sorted_unstable_by_key(|format| format.size())
             .map(|format| FloatFormatAdaptor::new(format).float_format_tokens());
 
         let language_id = self.language.architecture().to_string();

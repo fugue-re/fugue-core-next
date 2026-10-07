@@ -4,11 +4,15 @@ use fugue_sleigh_language::compiler::{
     RuleStorage, UserOpFixup,
 };
 use fugue_sleigh_language::convention::{
-    Convention, JoinPiece, Prototype, PrototypeEntry, PrototypeOperand, ReturnAddress,
+    Convention, JoinPiece, PreferredVarnodeSplit, Prototype, PrototypeAlias, PrototypeEntry,
+    PrototypeOperand, PrototypeReference, PrototypeResolution, ReturnAddress,
 };
 use fugue_sleigh_language::varnode::VarnodeData;
+use itertools::Itertools;
 use proc_macro2::TokenStream;
 use quote::quote;
+
+use crate::types::processor::ProcessorAdaptor;
 
 pub(crate) struct ConventionAdaptor<'a, T> {
     source: &'a T,
@@ -523,6 +527,14 @@ impl<'a> ConventionAdaptor<'a, Prototype> {
             .likely_trashed()
             .iter()
             .map(|operand| ConventionAdaptor::new(operand).tokens());
+        let local_ranges = prototype
+            .local_ranges()
+            .iter()
+            .map(|location| ProcessorAdaptor::new(location).tokens());
+        let internal_storage = prototype
+            .internal_storage()
+            .iter()
+            .map(|storage| ConventionAdaptor::new(storage).tokens());
         quote! {
             fugue_lifter_runtime::convention::Prototype::new(#name, #extra_pop, #stack_shift)
                 .with_inputs(&[#(#inputs),*])
@@ -532,6 +544,8 @@ impl<'a> ConventionAdaptor<'a, Prototype> {
                 .with_unaffected(&[#(#unaffected),*])
                 .with_killed_by_call(&[#(#killed),*])
                 .with_likely_trashed(&[#(#trashed),*])
+                .with_local_ranges(&[#(#local_ranges),*])
+                .with_internal_storage(&[#(#internal_storage),*])
         }
     }
 }
@@ -559,11 +573,10 @@ impl<'a> ConventionAdaptor<'a, DataOrganisation> {
         let use_ms_convention = packing.use_ms_convention();
         let type_alignment_enabled = packing.type_alignment_enabled();
         let zero_length_boundary = packing.zero_length_boundary();
-        let mut entries = data.alignments().collect::<Vec<_>>();
-        entries.sort_unstable_by_key(|(size, _)| *size);
-        let entries = entries.iter().map(|(size, alignment)| {
-            quote! { (#size, #alignment) }
-        });
+        let entries = data
+            .alignments()
+            .sorted_unstable_by_key(|(size, _)| *size)
+            .map(|(size, alignment)| quote! { (#size, #alignment) });
         quote! {
             fugue_lifter_runtime::convention::DataOrganisation::new(&[#(#entries),*])
                 .with_absolute_max_alignment(#absolute_max_alignment)
@@ -624,12 +637,11 @@ impl<'a> ConventionAdaptor<'a, CallFixup> {
     pub(crate) fn tokens(&self) -> TokenStream {
         let fixup = self.source;
         let name = fixup.name();
-        let mut targets = fixup
+        let targets = fixup
             .targets()
             .iter()
             .map(|target| target.as_str())
-            .collect::<Vec<_>>();
-        targets.sort_unstable();
+            .sorted_unstable();
         let payload = ConventionAdaptor::new(fixup.payload()).tokens();
         quote! { fugue_lifter_runtime::convention::CallFixup::new(#name, &[#(#targets),*], #payload) }
     }
@@ -671,13 +683,54 @@ impl<'a> ConventionAdaptor<'a, Convention> {
             .user_op_fixups()
             .iter()
             .map(|fixup| ConventionAdaptor::new(fixup).tokens());
+        let global_ranges = convention
+            .global_ranges()
+            .iter()
+            .map(|location| ProcessorAdaptor::new(location).tokens());
+        let aggressive_trim = convention.aggressive_trim();
+        let preferred_varnode_splits = convention
+            .preferred_varnode_splits()
+            .iter()
+            .map(|split| ConventionAdaptor::new(split).tokens());
+        let aliases = convention
+            .prototype_aliases()
+            .iter()
+            .map(|alias| ConventionAdaptor::new(alias).tokens());
+        let resolutions = convention
+            .prototype_resolutions()
+            .iter()
+            .map(|resolution| ConventionAdaptor::new(resolution).tokens());
+        let eval_current = convention.eval_current_prototype().map_or_else(
+            || quote! { None },
+            |reference| {
+                let reference = ConventionAdaptor::new(&reference).tokens();
+                quote! { Some(#reference) }
+            },
+        );
+        let properties = convention
+            .properties()
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .sorted_unstable_by_key(|(key, _)| *key)
+            .map(|(key, value)| quote! { (#key, #value) });
+        let segment_ops = convention
+            .segment_ops()
+            .iter()
+            .map(|operation| ProcessorAdaptor::new(operation).tokens());
         let mut convention_tokens = quote! {
-            fugue_lifter_runtime::convention::Convention::new(#name, #stack_pointer)
+            fugue_lifter_runtime::convention::Convention::new_with(#name, #stack_pointer, &[#(#properties),*])
                 .with_prototypes(&[#(#prototypes),*])
                 .with_data_organisation(#data)
                 .with_function_pointer_alignment(#alignment)
                 .with_call_fixups(&[#(#fixups),*])
                 .with_user_op_fixups(&[#(#user_ops),*])
+                .with_global_ranges(&[#(#global_ranges),*])
+                .with_aggressive_trim(#aggressive_trim)
+                .with_preferred_varnode_splits(&[#(#preferred_varnode_splits),*])
+                .with_prototype_aliases(&[#(#aliases),*])
+                .with_prototype_resolutions(&[#(#resolutions),*])
+                .with_eval_current_prototype(#eval_current)
+                .with_segment_ops(&[#(#segment_ops),*])
         };
         if let Some(address) = convention.return_address() {
             let address = match address {
@@ -697,5 +750,51 @@ impl<'a> ConventionAdaptor<'a, Convention> {
             convention_tokens = quote! { #convention_tokens.with_return_address(#address) };
         }
         convention_tokens
+    }
+}
+
+impl<'a> ConventionAdaptor<'a, PreferredVarnodeSplit> {
+    pub(crate) fn tokens(&self) -> TokenStream {
+        let split = self.source;
+        let storage = ConventionAdaptor::new(split.storage()).tokens();
+        let split_offset = split.split_offset();
+        quote! { fugue_lifter_runtime::convention::PreferredVarnodeSplit::new(#storage, #split_offset) }
+    }
+}
+
+impl<'a> ConventionAdaptor<'a, PrototypeAlias> {
+    pub(crate) fn tokens(&self) -> TokenStream {
+        let alias = self.source;
+        let name = alias.name();
+        let parent = alias.parent();
+        quote! { fugue_lifter_runtime::convention::PrototypeAlias::new(#name, #parent) }
+    }
+}
+
+impl<'a> ConventionAdaptor<'a, PrototypeResolution> {
+    pub(crate) fn tokens(&self) -> TokenStream {
+        let resolution = self.source;
+        let name = resolution.name();
+        let prototypes = resolution
+            .prototypes()
+            .iter()
+            .map(|reference| ConventionAdaptor::new(reference).tokens());
+        quote! { fugue_lifter_runtime::convention::PrototypeResolution::new(#name, &[#(#prototypes),*]) }
+    }
+}
+
+impl<'a> ConventionAdaptor<'a, PrototypeReference> {
+    pub(crate) fn tokens(&self) -> TokenStream {
+        match self.source {
+            PrototypeReference::Alias(index) => {
+                quote! { fugue_lifter_runtime::convention::PrototypeReference::Alias(#index) }
+            }
+            PrototypeReference::Prototype(index) => {
+                quote! { fugue_lifter_runtime::convention::PrototypeReference::Prototype(#index) }
+            }
+            PrototypeReference::Resolution(index) => {
+                quote! { fugue_lifter_runtime::convention::PrototypeReference::Resolution(#index) }
+            }
+        }
     }
 }

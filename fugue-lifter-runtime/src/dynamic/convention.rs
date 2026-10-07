@@ -6,21 +6,27 @@ use fugue_sleigh_language::compiler::{
     UserOpFixup as SleighUserOpFixup,
 };
 use fugue_sleigh_language::convention::{
-    Convention as SleighConvention, JoinPiece as SleighJoinPiece, Prototype as SleighPrototype,
-    PrototypeEntry as SleighPrototypeEntry, PrototypeOperand as SleighPrototypeOperand,
-    ReturnAddress as SleighReturnAddress,
+    Convention as SleighConvention, JoinPiece as SleighJoinPiece,
+    PreferredVarnodeSplit as SleighPreferredVarnodeSplit, Prototype as SleighPrototype,
+    PrototypeAlias as SleighPrototypeAlias, PrototypeEntry as SleighPrototypeEntry,
+    PrototypeOperand as SleighPrototypeOperand, PrototypeReference,
+    PrototypeResolution as SleighPrototypeResolution, ReturnAddress as SleighReturnAddress,
 };
+use itertools::Itertools;
 
 use crate::convention::{
     CallFixup as StaticCallFixup, Convention as StaticConvention,
     DataOrganisation as StaticDataOrganisation, DatatypeFilter as StaticDatatypeFilter,
     InjectParameter as StaticInjectParameter, InjectPayload as StaticInjectPayload,
-    JoinPiece as StaticJoinPiece, Prototype as StaticPrototype,
+    JoinPiece as StaticJoinPiece, PreferredVarnodeSplit as StaticPreferredVarnodeSplit,
+    Prototype as StaticPrototype, PrototypeAlias as StaticPrototypeAlias,
     PrototypeEntry as StaticPrototypeEntry, PrototypeOperand as StaticPrototypeOperand,
-    PrototypeRule as StaticPrototypeRule, PrototypeRuleCondition as StaticPrototypeRuleCondition,
-    ReturnAddress as StaticReturnAddress, UserOpFixup as StaticUserOpFixup,
+    PrototypeResolution as StaticPrototypeResolution, PrototypeRule as StaticPrototypeRule,
+    PrototypeRuleCondition as StaticPrototypeRuleCondition, ReturnAddress as StaticReturnAddress,
+    UserOpFixup as StaticUserOpFixup,
 };
 use crate::dynamic::install::Install;
+use crate::dynamic::processor::{SegmentOp, StorageLocation};
 use crate::pcode::Varnode;
 
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -62,6 +68,14 @@ pub(crate) struct Convention {
     call_fixups: Box<[CallFixup]>,
     user_op_fixups: Box<[UserOpFixup]>,
     function_pointer_alignment: Option<u64>,
+    global_ranges: Box<[StorageLocation]>,
+    aggressive_trim: bool,
+    preferred_varnode_splits: Box<[StaticPreferredVarnodeSplit]>,
+    prototype_aliases: Box<[PrototypeAlias]>,
+    prototype_resolutions: Box<[PrototypeResolution]>,
+    eval_current_prototype: Option<PrototypeReference>,
+    properties: Box<[(Box<str>, Box<str>)]>,
+    segment_ops: Box<[SegmentOp]>,
 }
 
 impl From<&SleighConvention> for Convention {
@@ -75,6 +89,36 @@ impl From<&SleighConvention> for Convention {
             call_fixups: convention.call_fixups().iter().map(Into::into).collect(),
             user_op_fixups: convention.user_op_fixups().iter().map(Into::into).collect(),
             function_pointer_alignment: convention.function_pointer_alignment(),
+            global_ranges: convention.global_ranges().iter().map(Into::into).collect(),
+            aggressive_trim: convention.aggressive_trim(),
+            preferred_varnode_splits: convention
+                .preferred_varnode_splits()
+                .iter()
+                .map(Into::into)
+                .collect(),
+            prototype_aliases: convention
+                .prototype_aliases()
+                .iter()
+                .map(Into::into)
+                .collect(),
+            prototype_resolutions: convention
+                .prototype_resolutions()
+                .iter()
+                .map(Into::into)
+                .collect(),
+            eval_current_prototype: convention.eval_current_prototype(),
+            properties: convention
+                .properties()
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        Box::<str>::from(key.as_str()),
+                        Box::<str>::from(value.as_str()),
+                    )
+                })
+                .sorted_unstable_by(|(a, _), (b, _)| a.cmp(b))
+                .collect(),
+            segment_ops: convention.segment_ops().iter().map(Into::into).collect(),
         }
     }
 }
@@ -88,7 +132,15 @@ impl Install for Convention {
             .with_data_organisation(self.data_organisation.install())
             .with_call_fixups(self.call_fixups.install())
             .with_user_op_fixups(self.user_op_fixups.install())
-            .with_function_pointer_alignment(self.function_pointer_alignment);
+            .with_function_pointer_alignment(self.function_pointer_alignment)
+            .with_global_ranges(self.global_ranges.install())
+            .with_aggressive_trim(self.aggressive_trim)
+            .with_preferred_varnode_splits(self.preferred_varnode_splits.install())
+            .with_prototype_aliases(self.prototype_aliases.install())
+            .with_prototype_resolutions(self.prototype_resolutions.install())
+            .with_eval_current_prototype(self.eval_current_prototype)
+            .with_properties(self.properties.install())
+            .with_segment_ops(self.segment_ops.install());
         if let Some(return_address) = self.return_address {
             convention = convention.with_return_address(return_address.install());
         }
@@ -256,6 +308,8 @@ pub(crate) struct Prototype {
     unaffected: Box<[PrototypeOperand]>,
     killed_by_call: Box<[PrototypeOperand]>,
     likely_trashed: Box<[PrototypeOperand]>,
+    local_ranges: Box<[StorageLocation]>,
+    internal_storage: Box<[Varnode]>,
 }
 
 impl From<&SleighPrototype> for Prototype {
@@ -271,6 +325,12 @@ impl From<&SleighPrototype> for Prototype {
             unaffected: prototype.unaffected().iter().map(Into::into).collect(),
             killed_by_call: prototype.killed_by_call().iter().map(Into::into).collect(),
             likely_trashed: prototype.likely_trashed().iter().map(Into::into).collect(),
+            local_ranges: prototype.local_ranges().iter().map(Into::into).collect(),
+            internal_storage: prototype
+                .internal_storage()
+                .iter()
+                .map(Into::into)
+                .collect(),
         }
     }
 }
@@ -287,6 +347,8 @@ impl Install for Prototype {
             .with_unaffected(self.unaffected.install())
             .with_killed_by_call(self.killed_by_call.install())
             .with_likely_trashed(self.likely_trashed.install())
+            .with_local_ranges(self.local_ranges.install())
+            .with_internal_storage(self.internal_storage.install())
     }
 }
 
@@ -332,11 +394,10 @@ impl From<&SleighDataOrganisation> for DataOrganisation {
             double_size: organisation.double_size(),
             long_double_size: organisation.long_double_size(),
             bitfield_packing: organisation.bitfield_packing(),
-            alignments: {
-                let mut entries = organisation.alignments().collect::<Vec<_>>();
-                entries.sort_unstable_by_key(|(size, _)| *size);
-                entries.into_boxed_slice()
-            },
+            alignments: organisation
+                .alignments()
+                .sorted_unstable_by_key(|(size, _)| *size)
+                .collect(),
         }
     }
 }
@@ -505,15 +566,12 @@ impl From<&SleighCallFixup> for CallFixup {
     fn from(fixup: &SleighCallFixup) -> Self {
         Self {
             name: Box::<str>::from(fixup.name()),
-            targets: {
-                let mut targets = fixup
-                    .targets()
-                    .iter()
-                    .map(|name| Box::<str>::from(name.as_str()))
-                    .collect::<Vec<_>>();
-                targets.sort_unstable();
-                targets.into_boxed_slice()
-            },
+            targets: fixup
+                .targets()
+                .iter()
+                .map(|name| Box::<str>::from(name.as_str()))
+                .sorted_unstable()
+                .collect(),
             payload: fixup.payload().into(),
         }
     }
@@ -600,5 +658,57 @@ impl Install for PrototypeRuleCondition {
             Self::Position { index } => Self::Target::Position { index },
             Self::Varargs { first, last } => Self::Target::Varargs { first, last },
         }
+    }
+}
+
+impl From<&SleighPreferredVarnodeSplit> for StaticPreferredVarnodeSplit {
+    fn from(split: &SleighPreferredVarnodeSplit) -> Self {
+        Self::new(split.storage().into(), split.split_offset())
+    }
+}
+
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub(crate) struct PrototypeAlias {
+    name: Box<str>,
+    parent: u32,
+}
+
+impl From<&SleighPrototypeAlias> for PrototypeAlias {
+    fn from(alias: &SleighPrototypeAlias) -> Self {
+        Self {
+            name: Box::<str>::from(alias.name()),
+            parent: alias.parent(),
+        }
+    }
+}
+
+impl Install for PrototypeAlias {
+    type Target = StaticPrototypeAlias;
+
+    fn install(self) -> Self::Target {
+        Self::Target::new(self.name.install(), self.parent)
+    }
+}
+
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub(crate) struct PrototypeResolution {
+    name: Box<str>,
+    prototypes: Box<[PrototypeReference]>,
+}
+
+impl From<&SleighPrototypeResolution> for PrototypeResolution {
+    fn from(resolution: &SleighPrototypeResolution) -> Self {
+        Self {
+            name: Box::<str>::from(resolution.name()),
+            prototypes: resolution.prototypes().into(),
+        }
+    }
+}
+
+impl Install for PrototypeResolution {
+    type Target = StaticPrototypeResolution;
+
+    fn install(self) -> Self::Target {
+        Self::Target::new(self.name.install(), self.prototypes.install())
     }
 }

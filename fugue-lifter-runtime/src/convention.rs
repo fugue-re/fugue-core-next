@@ -1,8 +1,11 @@
 pub use fugue_sleigh_language::compiler::{
     BitfieldPacking, DatatypeKind, HiddenReturnStrategy, PrototypeRuleAction, RuleStorage,
 };
+pub use fugue_sleigh_language::convention::PrototypeReference;
+use itertools::Itertools;
 
 use crate::pcode::Varnode;
+use crate::processor::{SegmentOp, StorageLocation};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ReturnAddress {
@@ -20,10 +23,26 @@ pub struct Convention {
     call_fixups: &'static [CallFixup],
     user_op_fixups: &'static [UserOpFixup],
     function_pointer_alignment: Option<u64>,
+    global_ranges: &'static [StorageLocation],
+    aggressive_trim: bool,
+    preferred_varnode_splits: &'static [PreferredVarnodeSplit],
+    prototype_aliases: &'static [PrototypeAlias],
+    prototype_resolutions: &'static [PrototypeResolution],
+    eval_current_prototype: Option<PrototypeReference>,
+    properties: &'static [(&'static str, &'static str)],
+    segment_ops: &'static [SegmentOp],
 }
 
 impl Convention {
     pub const fn new(name: &'static str, stack_pointer: Varnode) -> Self {
+        Self::new_with(name, stack_pointer, &[])
+    }
+
+    pub const fn new_with(
+        name: &'static str,
+        stack_pointer: Varnode,
+        properties: &'static [(&'static str, &'static str)],
+    ) -> Self {
         Self {
             name,
             stack_pointer,
@@ -33,6 +52,14 @@ impl Convention {
             call_fixups: &[],
             user_op_fixups: &[],
             function_pointer_alignment: None,
+            global_ranges: &[],
+            aggressive_trim: false,
+            preferred_varnode_splits: &[],
+            prototype_aliases: &[],
+            prototype_resolutions: &[],
+            eval_current_prototype: None,
+            properties,
+            segment_ops: &[],
         }
     }
 
@@ -129,6 +156,206 @@ impl Convention {
 
     pub const fn function_pointer_alignment(&self) -> Option<u64> {
         self.function_pointer_alignment
+    }
+
+    pub const fn global_ranges(&self) -> &'static [StorageLocation] {
+        self.global_ranges
+    }
+
+    pub const fn set_global_ranges(&mut self, global_ranges: &'static [StorageLocation]) {
+        self.global_ranges = global_ranges;
+    }
+
+    pub const fn with_global_ranges(mut self, global_ranges: &'static [StorageLocation]) -> Self {
+        self.set_global_ranges(global_ranges);
+        self
+    }
+
+    pub const fn aggressive_trim(&self) -> bool {
+        self.aggressive_trim
+    }
+
+    pub const fn set_aggressive_trim(&mut self, aggressive_trim: bool) {
+        self.aggressive_trim = aggressive_trim;
+    }
+
+    pub const fn with_aggressive_trim(mut self, aggressive_trim: bool) -> Self {
+        self.set_aggressive_trim(aggressive_trim);
+        self
+    }
+
+    pub const fn preferred_varnode_splits(&self) -> &'static [PreferredVarnodeSplit] {
+        self.preferred_varnode_splits
+    }
+
+    pub const fn set_preferred_varnode_splits(
+        &mut self,
+        preferred_varnode_splits: &'static [PreferredVarnodeSplit],
+    ) {
+        self.preferred_varnode_splits = preferred_varnode_splits;
+    }
+
+    pub const fn with_preferred_varnode_splits(
+        mut self,
+        preferred_varnode_splits: &'static [PreferredVarnodeSplit],
+    ) -> Self {
+        self.set_preferred_varnode_splits(preferred_varnode_splits);
+        self
+    }
+
+    pub const fn prototype_aliases(&self) -> &'static [PrototypeAlias] {
+        self.prototype_aliases
+    }
+
+    pub const fn set_prototype_aliases(&mut self, prototype_aliases: &'static [PrototypeAlias]) {
+        self.prototype_aliases = prototype_aliases;
+    }
+
+    pub const fn with_prototype_aliases(
+        mut self,
+        prototype_aliases: &'static [PrototypeAlias],
+    ) -> Self {
+        self.set_prototype_aliases(prototype_aliases);
+        self
+    }
+
+    pub const fn prototype_resolutions(&self) -> &'static [PrototypeResolution] {
+        self.prototype_resolutions
+    }
+
+    pub const fn set_prototype_resolutions(
+        &mut self,
+        prototype_resolutions: &'static [PrototypeResolution],
+    ) {
+        self.prototype_resolutions = prototype_resolutions;
+    }
+
+    pub const fn with_prototype_resolutions(
+        mut self,
+        prototype_resolutions: &'static [PrototypeResolution],
+    ) -> Self {
+        self.set_prototype_resolutions(prototype_resolutions);
+        self
+    }
+
+    pub const fn eval_current_prototype(&self) -> Option<PrototypeReference> {
+        self.eval_current_prototype
+    }
+
+    pub const fn set_eval_current_prototype(
+        &mut self,
+        eval_current_prototype: Option<PrototypeReference>,
+    ) {
+        self.eval_current_prototype = eval_current_prototype;
+    }
+
+    pub const fn with_eval_current_prototype(
+        mut self,
+        eval_current_prototype: Option<PrototypeReference>,
+    ) -> Self {
+        self.set_eval_current_prototype(eval_current_prototype);
+        self
+    }
+
+    pub const fn properties(&self) -> &'static [(&'static str, &'static str)] {
+        self.properties
+    }
+
+    pub fn property(&self, key: &str) -> Option<&'static str> {
+        self.properties
+            .binary_search_by_key(&key, |(name, _)| *name)
+            .ok()
+            .map(|index| self.properties[index].1)
+    }
+
+    pub fn set_properties(&mut self, properties: &'static [(&'static str, &'static str)]) {
+        self.properties = if properties.is_sorted_by_key(|(key, _)| *key) {
+            properties
+        } else {
+            Box::leak(
+                properties
+                    .iter()
+                    .copied()
+                    .sorted_unstable_by_key(|(key, _)| *key)
+                    .collect::<Box<[_]>>(),
+            )
+        };
+    }
+
+    pub fn with_properties(mut self, properties: &'static [(&'static str, &'static str)]) -> Self {
+        self.set_properties(properties);
+        self
+    }
+
+    pub const fn segment_ops(&self) -> &'static [SegmentOp] {
+        self.segment_ops
+    }
+
+    pub const fn set_segment_ops(&mut self, segment_ops: &'static [SegmentOp]) {
+        self.segment_ops = segment_ops;
+    }
+
+    pub const fn with_segment_ops(mut self, segment_ops: &'static [SegmentOp]) -> Self {
+        self.set_segment_ops(segment_ops);
+        self
+    }
+
+    pub fn prototype_reference(&self, name: &str) -> Option<PrototypeReference> {
+        if let Some(index) = self
+            .prototypes
+            .iter()
+            .position(|prototype| prototype.name() == name)
+        {
+            return Some(PrototypeReference::Prototype(
+                u32::try_from(index).expect("prototype index fits in u32"),
+            ));
+        }
+        if let Some(index) = self
+            .prototype_aliases
+            .iter()
+            .position(|alias| alias.name() == name)
+        {
+            return Some(PrototypeReference::Alias(
+                u32::try_from(index).expect("prototype alias index fits in u32"),
+            ));
+        }
+        self.prototype_resolutions
+            .iter()
+            .position(|resolution| resolution.name() == name)
+            .map(|index| {
+                PrototypeReference::Resolution(
+                    u32::try_from(index).expect("prototype resolution index fits in u32"),
+                )
+            })
+    }
+
+    pub fn prototype(&self, index: u32) -> Option<&'static Prototype> {
+        self.prototypes.get(index as usize)
+    }
+
+    pub fn prototype_resolution(&self, index: u32) -> Option<&'static PrototypeResolution> {
+        self.prototype_resolutions.get(index as usize)
+    }
+
+    pub fn prototype_alias(&self, index: u32) -> Option<&'static PrototypeAlias> {
+        self.prototype_aliases.get(index as usize)
+    }
+
+    pub fn prototype_by_reference(
+        &self,
+        reference: PrototypeReference,
+    ) -> Option<&'static Prototype> {
+        match reference {
+            PrototypeReference::Alias(index) => {
+                self.prototype(self.prototype_alias(index)?.parent())
+            }
+            PrototypeReference::Prototype(index) => self.prototype(index),
+            PrototypeReference::Resolution(_) => None,
+        }
+    }
+
+    pub fn prototype_by_name(&self, name: &str) -> Option<&'static Prototype> {
+        self.prototype_by_reference(self.prototype_reference(name)?)
     }
 
     pub const fn default_prototype(&self) -> Option<&'static Prototype> {
@@ -296,6 +523,8 @@ pub struct Prototype {
     unaffected: &'static [PrototypeOperand],
     killed_by_call: &'static [PrototypeOperand],
     likely_trashed: &'static [PrototypeOperand],
+    local_ranges: &'static [StorageLocation],
+    internal_storage: &'static [Varnode],
 }
 
 impl Prototype {
@@ -311,7 +540,35 @@ impl Prototype {
             unaffected: &[],
             killed_by_call: &[],
             likely_trashed: &[],
+            local_ranges: &[],
+            internal_storage: &[],
         }
+    }
+
+    pub const fn local_ranges(&self) -> &'static [StorageLocation] {
+        self.local_ranges
+    }
+
+    pub const fn set_local_ranges(&mut self, local_ranges: &'static [StorageLocation]) {
+        self.local_ranges = local_ranges;
+    }
+
+    pub const fn with_local_ranges(mut self, local_ranges: &'static [StorageLocation]) -> Self {
+        self.set_local_ranges(local_ranges);
+        self
+    }
+
+    pub const fn internal_storage(&self) -> &'static [Varnode] {
+        self.internal_storage
+    }
+
+    pub const fn set_internal_storage(&mut self, internal_storage: &'static [Varnode]) {
+        self.internal_storage = internal_storage;
+    }
+
+    pub const fn with_internal_storage(mut self, internal_storage: &'static [Varnode]) -> Self {
+        self.set_internal_storage(internal_storage);
+        self
     }
 
     pub const fn set_inputs(&mut self, inputs: &'static [PrototypeEntry]) {
@@ -1007,5 +1264,68 @@ impl UserOpFixup {
 
     pub const fn payload(&self) -> InjectPayload {
         self.payload
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct PrototypeAlias {
+    name: &'static str,
+    parent: u32,
+}
+
+impl PrototypeAlias {
+    pub const fn new(name: &'static str, parent: u32) -> Self {
+        Self { name, parent }
+    }
+
+    pub const fn name(&self) -> &'static str {
+        self.name
+    }
+
+    pub const fn parent(&self) -> u32 {
+        self.parent
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct PrototypeResolution {
+    name: &'static str,
+    prototypes: &'static [PrototypeReference],
+}
+
+impl PrototypeResolution {
+    pub const fn new(name: &'static str, prototypes: &'static [PrototypeReference]) -> Self {
+        Self { name, prototypes }
+    }
+
+    pub const fn name(&self) -> &'static str {
+        self.name
+    }
+
+    pub const fn prototypes(&self) -> &'static [PrototypeReference] {
+        self.prototypes
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub struct PreferredVarnodeSplit {
+    storage: Varnode,
+    split_offset: u16,
+}
+
+impl PreferredVarnodeSplit {
+    pub const fn new(storage: Varnode, split_offset: u16) -> Self {
+        Self {
+            storage,
+            split_offset,
+        }
+    }
+
+    pub const fn storage(&self) -> Varnode {
+        self.storage
+    }
+
+    pub const fn split_offset(&self) -> u16 {
+        self.split_offset
     }
 }

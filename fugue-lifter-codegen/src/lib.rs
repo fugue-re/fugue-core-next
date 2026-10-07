@@ -11,6 +11,7 @@ use fugue_sleigh_language::processor::Processor;
 use fugue_sleigh_language::{Language, LanguageDB, LanguageDef, TruncatedSpace};
 #[cfg(feature = "bundled-compiler")]
 use fugue_sleighc::{SleighCompiler, SleighCompilerError};
+use itertools::Itertools;
 use quote::ToTokens;
 use thiserror::Error;
 
@@ -187,7 +188,7 @@ impl LanguageVariant {
         language: &Language,
         definition: &LanguageDef,
     ) -> Result<Self, DeserialiseError> {
-        let mut conventions = definition
+        let conventions = definition
             .compiler_defs()
             .iter()
             .map(|(name, spec)| {
@@ -195,8 +196,11 @@ impl LanguageVariant {
                     .map(|convention| (name.clone(), convention))
                     .map_err(|error| DeserialiseError::deserialise_depends(spec.spec_file(), error))
             })
-            .collect::<Result<Vec<_>, _>>()?;
-        conventions.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            .process_results(|conventions| {
+                conventions
+                    .sorted_unstable_by(|(a, _), (b, _)| a.cmp(b))
+                    .collect::<Vec<_>>()
+            })?;
         let processor =
             Processor::from_file(language, definition.processor_spec_file()).map_err(|error| {
                 DeserialiseError::deserialise_depends(definition.processor_spec_file(), error)

@@ -15,7 +15,10 @@ use crate::format::InstructionFormatter;
 use crate::operand::{OperandFilter, Operands, OperandsContext};
 use crate::pattern::PatternOp;
 use crate::pcode::{LiftingContext, PCodeBuilderContext, PCodeOp, Varnode};
-use crate::processor::{ContextSet, DefaultSymbol, RegisterLanes, TrackedSet, VolatileRange};
+use crate::processor::{
+    ContextSet, DefaultSymbol, RegisterLanes, SegmentOp, SegmentedAddressSpace, TrackedSet,
+    VolatileRange,
+};
 use crate::resolve::DecisionNode;
 use crate::space::{AddressSpace, AddressSpaceKind};
 use crate::symbol::Symbol;
@@ -227,6 +230,9 @@ pub trait LanguageImpl {
     const REGISTER_LANES: &'static [RegisterLanes] = &[];
     const DEFAULT_SYMBOLS: &'static [DefaultSymbol] = &[];
     const FLOAT_FORMATS: &'static [FloatFormat] = &[];
+    const PROPERTIES: &'static [(&'static str, &'static str)] = &[];
+    const SEGMENT_OPS: &'static [SegmentOp] = &[];
+    const SEGMENTED_ADDRESS_SPACE: Option<SegmentedAddressSpace> = None;
 
     const DATA: &'static LanguageData;
 }
@@ -265,6 +271,9 @@ pub struct Language {
     pub(crate) register_lanes: &'static [RegisterLanes],
     pub(crate) default_symbols: &'static [DefaultSymbol],
     pub(crate) float_formats: &'static [FloatFormat],
+    pub(crate) properties: &'static [(&'static str, &'static str)],
+    pub(crate) segment_ops: &'static [SegmentOp],
+    pub(crate) segmented_address_space: Option<SegmentedAddressSpace>,
     pub(crate) data: &'static LanguageData,
 }
 
@@ -371,6 +380,9 @@ impl Language {
             register_lanes: L::REGISTER_LANES,
             default_symbols: L::DEFAULT_SYMBOLS,
             float_formats: L::FLOAT_FORMATS,
+            properties: L::PROPERTIES,
+            segment_ops: L::SEGMENT_OPS,
+            segmented_address_space: L::SEGMENTED_ADDRESS_SPACE,
             data: L::DATA,
         }
     }
@@ -393,6 +405,25 @@ impl Language {
 
     pub const fn default_symbols(&self) -> &'static [DefaultSymbol] {
         self.default_symbols
+    }
+
+    pub const fn properties(&self) -> &'static [(&'static str, &'static str)] {
+        self.properties
+    }
+
+    pub fn property(&self, key: &str) -> Option<&'static str> {
+        self.properties
+            .binary_search_by_key(&key, |(name, _)| *name)
+            .ok()
+            .map(|index| self.properties[index].1)
+    }
+
+    pub const fn segment_ops(&self) -> &'static [SegmentOp] {
+        self.segment_ops
+    }
+
+    pub const fn segmented_address_space(&self) -> Option<SegmentedAddressSpace> {
+        self.segmented_address_space
     }
 
     pub const fn float_formats(&self) -> &'static [FloatFormat] {

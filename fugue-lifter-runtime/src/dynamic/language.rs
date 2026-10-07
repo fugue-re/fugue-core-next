@@ -6,6 +6,7 @@ use flate2::read::GzDecoder;
 use fugue_sleigh_language::float_format::FloatFormat;
 use fugue_sleigh_language::processor::Processor as SleighProcessor;
 use fugue_sleigh_language::{Language as SleighLanguage, LanguageDB, LanguageDef, LanguageError};
+use itertools::Itertools;
 use rkyv::rancor::Error as RkyvError;
 use thiserror::Error;
 
@@ -16,7 +17,7 @@ use crate::dynamic::convention::Convention;
 use crate::dynamic::install::Install;
 use crate::dynamic::operand::OperandFilter;
 use crate::dynamic::processor::{
-    ContextSet, DefaultSymbol, RegisterLanes, TrackedSet, VolatileRange,
+    ContextSet, DefaultSymbol, RegisterLanes, SegmentOp, TrackedSet, VolatileRange,
 };
 use crate::dynamic::resolve::DecisionNode;
 use crate::dynamic::space::AddressSpace;
@@ -27,6 +28,7 @@ use crate::dynamic::{LanguageLoadError, registry};
 use crate::language::Language as StaticLanguage;
 use crate::pattern::PatternOp;
 use crate::pcode::Varnode;
+use crate::processor::SegmentedAddressSpace;
 use crate::template::{ConstTpl, HandleTpl, VarnodeTpl};
 
 #[derive(Debug, Error)]
@@ -99,6 +101,9 @@ pub struct Language {
     pub(crate) register_lanes: Box<[RegisterLanes]>,
     pub(crate) default_symbols: Box<[DefaultSymbol]>,
     pub(crate) float_formats: Box<[FloatFormat]>,
+    pub(crate) properties: Box<[(Box<str>, Box<str>)]>,
+    pub(crate) segment_ops: Box<[SegmentOp]>,
+    pub(crate) segmented_address_space: Option<SegmentedAddressSpace>,
     pub(crate) space_names: Box<[Box<str>]>,
 }
 
@@ -186,6 +191,9 @@ impl Language {
             register_lanes,
             default_symbols,
             float_formats,
+            properties,
+            segment_ops,
+            segmented_address_space,
             space_names,
         } = self;
 
@@ -253,6 +261,9 @@ impl Language {
             register_lanes: register_lanes.install(),
             default_symbols: default_symbols.install(),
             float_formats: float_formats.install(),
+            properties: properties.install(),
+            segment_ops: segment_ops.install(),
+            segmented_address_space,
             data: language_data,
         }))
     }
@@ -441,15 +452,25 @@ impl Language {
             volatile_ranges: processor.volatile_ranges().iter().map(Into::into).collect(),
             register_lanes: processor.register_lanes().iter().map(Into::into).collect(),
             default_symbols: processor.default_symbols().iter().map(Into::into).collect(),
-            float_formats: {
-                let mut formats = sleigh
-                    .float_formats()
-                    .values()
-                    .map(|format| (**format).clone())
-                    .collect::<Vec<_>>();
-                formats.sort_unstable_by_key(FloatFormat::size);
-                formats.into_boxed_slice()
-            },
+            properties: processor
+                .properties()
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        Box::<str>::from(key.as_str()),
+                        Box::<str>::from(value.as_str()),
+                    )
+                })
+                .sorted_unstable_by(|(a, _), (b, _)| a.cmp(b))
+                .collect(),
+            segment_ops: processor.segment_ops().iter().map(Into::into).collect(),
+            segmented_address_space: processor.segmented_address_space().map(Into::into),
+            float_formats: sleigh
+                .float_formats()
+                .values()
+                .map(|format| (**format).clone())
+                .sorted_unstable_by_key(FloatFormat::size)
+                .collect(),
             space_names,
         }
     }
