@@ -410,8 +410,8 @@ impl<'a> LiftingContextState<'a> {
             self.resolve_relatives();
 
             self.context.inputs_count = 0;
+            self.context.labels[..self.context.label_count as usize].fill(INVALID_LABEL);
             self.context.label_count = 0;
-            self.context.labels.fill(INVALID_LABEL);
             self.context.label_refs.clear();
 
             Some(())
