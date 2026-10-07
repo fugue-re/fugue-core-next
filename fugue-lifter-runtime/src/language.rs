@@ -609,6 +609,19 @@ impl Language {
                 db.set_variable_default_by_bits(bits, *value);
             }
         }
+        for tracked in self
+            .tracked_sets
+            .iter()
+            .filter(|tracked| tracked.space() == self.default_space)
+        {
+            let set = match tracked.range() {
+                Some(range) => db.new_tracked_set(*range.start(), range.end().checked_add(1)),
+                None => db.tracked_default_mut(),
+            };
+            for update in tracked.updates() {
+                set.insert(*update.context());
+            }
+        }
         db
     }
 

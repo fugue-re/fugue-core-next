@@ -10,8 +10,8 @@ use rkyv::rancor::Error as RkyvError;
 use smallvec::SmallVec;
 use thiserror::Error;
 
-use crate::ir::{Address, AddressRange, AddressRangeExt, RawAddress};
-use crate::lifter::ContextHint;
+use crate::ir::{Address, AddressRange, AddressRangeExt, RawAddress, RawAddressMap};
+use crate::lifter::{ContextHint, TrackedSet};
 use crate::loader::{
     ImageAddress, ImageBankHandle, ImageResolution, ImageSpaceHandle, ImageSpaceKind, Loadable,
     LoaderError,
@@ -138,6 +138,7 @@ struct MappingMetadata {
     flags: SegmentMappingFlags,
     mapping_hints: BTreeMap<RawAddress, ContextHint>,
     function_hints: BTreeSet<RawAddress>,
+    tracked_sets: RawAddressMap<TrackedSet>,
     provider_id: SegmentStorageProviderId,
 }
 
@@ -359,7 +360,7 @@ impl SegmentStorage {
             let size = segment.size();
             let properties = segment.properties();
             let provenance = segment.provenance();
-            let (name, segment_mapping_hints, segment_function_hints) =
+            let (name, segment_mapping_hints, segment_function_hints, tracked_sets) =
                 segment.into_name_and_hints();
 
             let start = address.raw_address();
@@ -378,7 +379,8 @@ impl SegmentStorage {
                     .with_mapping_hints(
                         segment_mapping_hints.into_iter().chain(extra_mapping_hints),
                     )
-                    .with_function_hints(segment_function_hints.into_iter().chain(extra_hints)),
+                    .with_function_hints(segment_function_hints.into_iter().chain(extra_hints))
+                    .with_tracked_sets(tracked_sets),
             )?;
 
             storage.add_mapping_to_space(address.space(), mapping_id)?;
@@ -528,7 +530,8 @@ impl SegmentStorage {
                 .with_provenance(mapping_meta.provenance)
                 .with_flags(mapping_meta.flags)
                 .with_mapping_hints(mapping_meta.mapping_hints.clone())
-                .with_function_hints(mapping_meta.function_hints.clone()),
+                .with_function_hints(mapping_meta.function_hints.clone())
+                .with_tracked_sets(mapping_meta.tracked_sets.clone()),
             )?;
 
             mapping_map.insert(mapping_meta.id, mapping_id);
@@ -872,6 +875,7 @@ impl SegmentStorage {
                 flags: m.flags(),
                 mapping_hints: m.mapping_hint_offsets().clone(),
                 function_hints: m.function_hint_offsets().clone(),
+                tracked_sets: m.tracked_set_offsets().clone(),
                 provider_id: m.provider_id(),
             })
             .collect::<Vec<_>>();

@@ -76,7 +76,7 @@ impl Install for ContextSet {
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub(crate) struct TrackedSetUpdate {
     register: Varnode,
-    value: u32,
+    value: u64,
     description: Option<Box<str>>,
 }
 

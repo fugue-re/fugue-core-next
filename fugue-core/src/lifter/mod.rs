@@ -2,6 +2,7 @@ use std::fmt::{self, Display};
 use std::path::PathBuf;
 
 use arrayvec::ArrayVec;
+pub use fugue_lifter::runtime::context::{TrackedContext, TrackedSet};
 use fugue_lifter::runtime::dynamic::LanguageLoadError;
 use fugue_lifter::runtime::language::LanguageParseError;
 pub use fugue_lifter::runtime::operand;

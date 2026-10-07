@@ -514,8 +514,10 @@ impl PrototypeEntry {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct Prototype {
     name: &'static str,
-    extra_pop: u64,
+    extra_pop: Option<u64>,
     stack_shift: u64,
+    pointer_max: Option<u64>,
+    this_before_ret_pointer: bool,
     inputs: &'static [PrototypeEntry],
     outputs: &'static [PrototypeEntry],
     input_rules: &'static [PrototypeRule],
@@ -528,11 +530,13 @@ pub struct Prototype {
 }
 
 impl Prototype {
-    pub const fn new(name: &'static str, extra_pop: u64, stack_shift: u64) -> Self {
+    pub const fn new(name: &'static str, extra_pop: Option<u64>, stack_shift: u64) -> Self {
         Self {
             name,
             extra_pop,
             stack_shift,
+            pointer_max: None,
+            this_before_ret_pointer: false,
             inputs: &[],
             outputs: &[],
             input_rules: &[],
@@ -543,6 +547,32 @@ impl Prototype {
             local_ranges: &[],
             internal_storage: &[],
         }
+    }
+
+    pub const fn pointer_max(&self) -> Option<u64> {
+        self.pointer_max
+    }
+
+    pub const fn set_pointer_max(&mut self, pointer_max: Option<u64>) {
+        self.pointer_max = pointer_max;
+    }
+
+    pub const fn with_pointer_max(mut self, pointer_max: Option<u64>) -> Self {
+        self.set_pointer_max(pointer_max);
+        self
+    }
+
+    pub const fn this_before_ret_pointer(&self) -> bool {
+        self.this_before_ret_pointer
+    }
+
+    pub const fn set_this_before_ret_pointer(&mut self, this_before_ret_pointer: bool) {
+        self.this_before_ret_pointer = this_before_ret_pointer;
+    }
+
+    pub const fn with_this_before_ret_pointer(mut self, this_before_ret_pointer: bool) -> Self {
+        self.set_this_before_ret_pointer(this_before_ret_pointer);
+        self
     }
 
     pub const fn local_ranges(&self) -> &'static [StorageLocation] {
@@ -644,7 +674,7 @@ impl Prototype {
         self.name
     }
 
-    pub const fn extra_pop(&self) -> u64 {
+    pub const fn extra_pop(&self) -> Option<u64> {
         self.extra_pop
     }
 

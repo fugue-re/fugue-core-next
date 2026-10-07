@@ -14,10 +14,11 @@ use crate::lifter::{Language, LanguageError};
 use crate::platform::Platform;
 use crate::types::{AttributeMap, BytesOrMapping};
 
-pub(crate) mod elf;
+pub mod elf;
 pub use elf::extensions::{
     ArchResolver as ElfArchResolver, ImageContext as ElfImageContext,
     RelocationContext as ElfRelocationContext, RelocationExtension as ElfRelocationExtension,
+    TrackedSetContext as ElfTrackedSetContext, TrackedSetExtension as ElfTrackedSetExtension,
 };
 pub use elf::{
     ATTRIBUTE_LOAD_HEADERS as ATTRIBUTE_ELF_LOAD_HEADERS,
@@ -37,10 +38,11 @@ pub(crate) use image::{ImageBankLayout, ImageCoveredRegions, ImageRegionBankMap}
 // pub mod macho
 // pub use macho::Macho;
 
-pub(crate) mod pe;
+pub mod pe;
 pub use pe::extensions::{
     ArchResolver as PeArchResolver, ImageContext as PeImageContext,
     RelocationContext as PeRelocationContext, RelocationExtension as PeRelocationExtension,
+    TrackedSetContext as PeTrackedSetContext, TrackedSetExtension as PeTrackedSetExtension,
 };
 pub use pe::{
     ATTRIBUTE_LOAD_HEADERS as ATTRIBUTE_PE_LOAD_HEADERS, ATTRIBUTE_PERMISSIVE, PE_EXPORT_SELECTOR,

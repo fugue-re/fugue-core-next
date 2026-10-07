@@ -146,14 +146,49 @@ impl<'a> ParserInputs<'a> {
         self.input.initialise(address, self.bytes, self.context);
     }
 
+    pub fn set_delay_slot_length(&mut self, size: usize) {
+        self.input.set_delay_slot_length(size);
+        if let Some(slot) = self.inputs.first_mut() {
+            slot.context.constructors[0] = Default::default();
+        }
+    }
+
+    pub fn delay_slots(&self) -> &[ParserInput] {
+        let delay_slot_length = self.input.delay_slot_length();
+        let mut address = self.input.next_address();
+        let mut length = 0;
+        let mut count = 0;
+
+        while length < delay_slot_length {
+            let Some(slot) = self.inputs.get(count) else {
+                return &[];
+            };
+            if slot.address() != address || slot.is_empty() {
+                return &[];
+            }
+            address = slot.next_address();
+            length += slot.len();
+            count += 1;
+        }
+
+        &self.inputs[..count]
+    }
+
+    pub fn next_address(&self) -> u64 {
+        self.delay_slots()
+            .last()
+            .map_or_else(|| self.input.next_address(), ParserInput::next_address)
+    }
+
     pub fn next_input<'b>(&'b mut self) -> Option<ParserInputs<'b>> {
-        let address = self.input.address();
-        let offset = self.input.len();
+        let index = self.delay_slots().len();
+        let address = self.next_address();
+        let offset = usize::try_from(address.checked_sub(self.input.address())?).ok()?;
         let bytes = self.bytes.get(offset..)?;
 
-        let (input, inputs) = self.inputs.split_first_mut()?;
+        let (input, inputs) = self.inputs.get_mut(index..)?.split_first_mut()?;
 
-        input.initialise(address + offset as u64, bytes, self.context);
+        input.initialise(address, bytes, self.context);
 
         Some(ParserInputs {
             bytes,
@@ -164,12 +199,11 @@ impl<'a> ParserInputs<'a> {
     }
 
     pub fn next2_address(&self) -> Option<u64> {
-        let address = self.input.address();
-        let offset = self.input.len();
+        let naddress = self.next_address();
+        let ninput = self.inputs.get(self.delay_slots().len())?;
 
-        let naddress = address + offset as u64;
-        let ninput = self.inputs.first()?;
-
+        // NOTE: an input already decoded at `naddress` is trusted as the instruction there,
+        // even if it was decoded by an earlier lift.
         if ninput.address() == naddress {
             Some(ninput.next_address())
         } else {

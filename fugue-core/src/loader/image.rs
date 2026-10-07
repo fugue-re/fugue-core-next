@@ -8,8 +8,8 @@ use fallible_iterator::FallibleIterator;
 use fugue_bytes::{BE, ByteCast, LE};
 use smallvec::{SmallVec, smallvec};
 
-use crate::ir::{Address, Endian, RawAddress, RawAddressRangeSet};
-use crate::lifter::ContextHint;
+use crate::ir::{Address, Endian, RawAddress, RawAddressMap, RawAddressRangeSet};
+use crate::lifter::{ContextHint, TrackedSet};
 use crate::loader::LoaderError;
 use crate::storage::segments::mapping::SegmentMappingProvenance;
 use crate::storage::segments::space::AddressSpaceId;
@@ -526,6 +526,7 @@ pub struct ImageSegment<'a> {
     properties: SegmentProperties,
     provenance: SegmentMappingProvenance,
     size: u64,
+    tracked_sets: RawAddressMap<TrackedSet>,
 }
 
 impl<'a> ImageSegment<'a> {
@@ -544,6 +545,7 @@ impl<'a> ImageSegment<'a> {
             properties,
             provenance: SegmentMappingProvenance::default(),
             size,
+            tracked_sets: RawAddressMap::new(),
         }
     }
 
@@ -615,6 +617,14 @@ impl<'a> ImageSegment<'a> {
         self.size
     }
 
+    pub fn tracked_sets(&self) -> &RawAddressMap<TrackedSet> {
+        &self.tracked_sets
+    }
+
+    pub fn set_tracked_sets(&mut self, tracked_sets: RawAddressMap<TrackedSet>) {
+        self.tracked_sets = tracked_sets;
+    }
+
     pub fn with_backing(mut self, backing: impl Into<Option<ImageBacking>>) -> Self {
         self.set_backing(backing);
         self
@@ -638,14 +648,25 @@ impl<'a> ImageSegment<'a> {
         self
     }
 
+    pub fn with_tracked_sets(mut self, tracked_sets: RawAddressMap<TrackedSet>) -> Self {
+        self.set_tracked_sets(tracked_sets);
+        self
+    }
+
     pub(crate) fn into_name_and_hints(
         self,
     ) -> (
         Cow<'a, str>,
         BTreeMap<RawAddress, ContextHint>,
         BTreeSet<RawAddress>,
+        RawAddressMap<TrackedSet>,
     ) {
-        (self.name, self.mapping_hints, self.function_hints)
+        (
+            self.name,
+            self.mapping_hints,
+            self.function_hints,
+            self.tracked_sets,
+        )
     }
 }
 

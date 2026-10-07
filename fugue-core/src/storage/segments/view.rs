@@ -1,5 +1,5 @@
 use crate::ir::{Address, AddressRange};
-use crate::lifter::ContextHint;
+use crate::lifter::{ContextHint, TrackedSet};
 use crate::storage::segments::mapping::{
     SegmentMapping, SegmentMappingKind, SegmentMappingProvenance, SegmentMappingRef,
     SegmentSubMapping,
@@ -106,6 +106,14 @@ impl<'a> SegmentMappingView<'a> {
         self.contains(addr).then(|| {
             self.mapping
                 .mapping_hint_at(Address::new(self.mapping.space(), addr.raw_address()))
+        })?
+    }
+
+    pub fn tracked_set_at(&self, addr: impl Into<Address>) -> Option<&TrackedSet> {
+        let addr = addr.into();
+        self.contains(addr).then(|| {
+            self.mapping
+                .tracked_set_at(Address::new(self.mapping.space(), addr.raw_address()))
         })?
     }
 

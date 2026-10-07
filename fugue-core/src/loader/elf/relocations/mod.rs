@@ -142,19 +142,6 @@ where
         origin: RawAddress,
         bytes: &mut ImageSegmentContents<'data>,
     ) -> Result<(), LoaderError> {
-        let Some(drels) = self.elf.dynamic_relocations() else {
-            tracing::trace!("no dynamic relocations");
-            return Ok(());
-        };
-
-        tracing::trace!(
-            "attempting to apply {} dynamic relocations",
-            self.elf
-                .dynamic_relocations()
-                .map(|d| d.count())
-                .unwrap_or_default()
-        );
-
         let Some(origin_offset) = origin.offset().checked_sub(self.base.offset()) else {
             tracing::warn!(
                 "dynamic relocation origin {origin} is below image base {}",
@@ -167,14 +154,33 @@ where
             return Err(LoaderError::address_overflow(origin));
         };
 
-        for (off, rel) in
-            drels.filter(|(off, _)| *off >= origin_offset && *off <= origin_last_offset)
-        {
-            tracing::trace!("applying dynamic relocation at {}", RawAddress::from(off));
+        if let Some(drels) = self.elf.dynamic_relocations() {
+            tracing::trace!(
+                "attempting to apply {} dynamic relocations",
+                self.elf
+                    .dynamic_relocations()
+                    .map(|d| d.count())
+                    .unwrap_or_default()
+            );
 
-            let off = off - origin_offset;
+            for (off, rel) in
+                drels.filter(|(off, _)| *off >= origin_offset && *off <= origin_last_offset)
+            {
+                tracing::trace!("applying dynamic relocation at {}", RawAddress::from(off));
 
-            self.apply_relocation(bytes, off, &rel, true)?;
+                let off = off - origin_offset;
+
+                self.apply_relocation(bytes, off, &rel, true)?;
+            }
+        } else {
+            tracing::trace!("no dynamic relocations");
+        }
+
+        if matches!(
+            self.elf.architecture(),
+            Architecture::Mips | Architecture::Mips64
+        ) {
+            self.apply_mips_global_got(origin_offset..=origin_last_offset, bytes);
         }
 
         Ok(())

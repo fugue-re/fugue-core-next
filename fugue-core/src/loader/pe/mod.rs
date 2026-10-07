@@ -23,11 +23,12 @@ use smallvec::{SmallVec, smallvec};
 use crate::AnalysisData;
 use crate::arch::Arch;
 use crate::ir::{
-    Endian, RawAddress, RawAddressRangeSet, Symbol, SymbolIndex, SymbolProperties,
+    Endian, RawAddress, RawAddressMap, RawAddressRangeSet, Symbol, SymbolIndex, SymbolProperties,
     SymbolTableSelector, TransientSymbolTable,
 };
-use crate::lifter::ContextHint;
-use crate::loader::pe::extensions::ImageContext;
+use crate::lifter::{ContextHint, TrackedSet};
+use crate::loader::pe::extensions::{ImageContext, TrackedSetContext};
+use crate::loader::pe::read::permissive;
 use crate::loader::{
     ExternalThunkLayout, ImageAddress, ImageBacking, ImageBank, ImageBankHandle, ImageBankLayout,
     ImageCoveredRegions, ImageLayout, ImageRegionBankMap, ImageSegment, ImageSegmentContents,
@@ -42,10 +43,13 @@ use crate::types::{AttributeMap, BytesOrMapping};
 
 pub mod extensions;
 
-mod permissive;
+pub mod read;
 
 mod relocations;
 pub use relocations::PeSegmentRelocator;
+
+mod tracked;
+use tracked::PeTrackedSetResolver;
 
 pub const PE_EXPORT_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(0);
 pub const PE_IMPORT_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(1);
@@ -145,6 +149,8 @@ impl<'this, 'data> PeFileRepr<'this, 'data> {
     }
 }
 
+type PeRecoverError<'a> = Box<(BytesOrMapping<'a>, LoaderError)>;
+
 impl<'a> PeInner<'a> {
     fn from_bytes(
         data: BytesOrMapping<'a>,
@@ -158,11 +164,9 @@ impl<'a> PeInner<'a> {
         attributes: &AttributeMap,
     ) -> Result<Self, PeRecoverError<'a>> {
         Self::try_new_or_recover(data, |data| PeLoadedRepr::parse(data, attributes))
-            .map_err(|(error, heads)| Box::new((heads.data, error)))
+            .map_err(|(error, heads)| PeRecoverError::new((heads.data, error)))
     }
 }
-
-type PeRecoverError<'a> = Box<(BytesOrMapping<'a>, LoaderError)>;
 
 #[derive(AnalysisData)]
 pub struct Pe<'a> {
@@ -209,8 +213,9 @@ impl<'a> Pe<'a> {
             attributes,
         };
 
-        if let Some(entry) = slf.entry() {
-            slf.attributes.set_attr(ATTRIBUTE_ENTRY_POINT, entry);
+        if let Some(entry) = slf.object.borrow_loaded().state.entry {
+            slf.attributes
+                .set_attr(ATTRIBUTE_ENTRY_POINT, entry.offset());
         }
 
         slf
@@ -276,6 +281,7 @@ struct PeLoadState {
     entry: Option<ImageAddress>,
     layout: ImageLayout,
     mapping_hints: BTreeMap<RawAddress, ContextHint>,
+    tracked_sets: RawAddressMap<TrackedSet>,
     symbols: TransientSymbolTable<ImageAddress>,
     external_thunks: ExternalThunkLayout,
     import_slots: BTreeMap<RawAddress, RawAddress>,
@@ -323,9 +329,23 @@ impl PeLoadState {
         } else {
             None
         };
-        let image_entry = entry.map(|entry| ImageAddress::in_default_space(entry.offset()));
         let context = ImageContext::new(view, base, preferred_base, entry, attributes);
         let architecture = context.resolve_architecture()?;
+
+        let mut tracked_sets = RawAddressMap::new();
+        if !TrackedSetContext::new(
+            view,
+            &architecture,
+            base - preferred_base,
+            &mut tracked_sets,
+        )
+        .apply_tracked_sets()?
+        {
+            with_pe!(
+                view,
+                pe | PeTrackedSetResolver::new(pe).apply(&mut tracked_sets)
+            );
+        }
 
         let symbols = with_pe!(
             view,
@@ -334,11 +354,21 @@ impl PeLoadState {
 
         let PeSymbolLayout {
             bounds,
-            mapping_hints,
+            mut mapping_hints,
             symbols,
             external_thunks,
             import_slots,
         } = symbols;
+
+        let image_entry = entry
+            .map(|entry| match architecture.canonicalise_address(entry) {
+                Some((canonical, context)) if canonical != entry => {
+                    mapping_hints.insert(canonical, ContextHint::code().with_context(context));
+                    canonical
+                }
+                _ => entry,
+            })
+            .map(|entry| ImageAddress::in_default_space(entry.offset()));
         let bank_base = if config.load_headers() {
             base.min(*bounds.start())
         } else {
@@ -422,6 +452,7 @@ impl PeLoadState {
             entry: image_entry,
             layout,
             mapping_hints,
+            tracked_sets,
             symbols: image_symbols,
             external_thunks,
             import_slots,
@@ -1252,6 +1283,7 @@ struct PeImageSegments<'a> {
     segments: slice::Iter<'a, PeImageSegment>,
     image_symbols: &'a TransientSymbolTable<ImageAddress>,
     mapping_hints: &'a BTreeMap<RawAddress, ContextHint>,
+    tracked_sets: &'a RawAddressMap<TrackedSet>,
 }
 
 impl<'a> PeImageSegments<'a> {
@@ -1259,11 +1291,13 @@ impl<'a> PeImageSegments<'a> {
         segments: &'a [PeImageSegment],
         image_symbols: &'a TransientSymbolTable<ImageAddress>,
         mapping_hints: &'a BTreeMap<RawAddress, ContextHint>,
+        tracked_sets: &'a RawAddressMap<TrackedSet>,
     ) -> Self {
         Self {
             segments: segments.iter(),
             image_symbols,
             mapping_hints,
+            tracked_sets,
         }
     }
 
@@ -1307,6 +1341,7 @@ impl<'a> PeImageSegments<'a> {
         .with_provenance(segment.provenance)
         .with_mapping_hints(mapping_hints)
         .with_function_hints(function_hints)
+        .with_tracked_sets(self.tracked_sets.clone())
     }
 }
 
@@ -1394,6 +1429,7 @@ impl Loadable for Pe<'_> {
             &state.segments,
             &state.symbols,
             &state.mapping_hints,
+            &state.tracked_sets,
         )) as ImageSegmentIterator<'b>
     }
 

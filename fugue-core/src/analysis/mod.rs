@@ -7,6 +7,7 @@ mod pass;
 pub mod function;
 pub mod non_returning;
 pub mod switch;
+pub mod thunk;
 pub mod value;
 
 pub use combinator::{ConditionalAnalysis, IteratedAnalysis, OneShotAnalysis, StatefulAnalysis};

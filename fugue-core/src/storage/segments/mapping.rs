@@ -4,8 +4,8 @@ use std::fmt;
 
 use bitflags::bitflags;
 
-use crate::ir::{Address, AddressRange, RawAddress};
-use crate::lifter::ContextHint;
+use crate::ir::{Address, AddressRange, RawAddress, RawAddressMap};
+use crate::lifter::{ContextHint, TrackedSet};
 use crate::storage::schema::bitflags::archived_bitflags;
 use crate::storage::segments::provider::SegmentStorageProviderId;
 use crate::storage::segments::space::AddressSpaceId;
@@ -132,6 +132,7 @@ pub struct SegmentMapping {
     name: String,
     mapping_hints: BTreeMap<RawAddress, ContextHint>,
     function_hints: BTreeSet<RawAddress>,
+    tracked_sets: RawAddressMap<TrackedSet>,
 }
 
 impl SegmentMapping {
@@ -159,6 +160,7 @@ impl SegmentMapping {
             name: String::new(),
             mapping_hints: BTreeMap::new(),
             function_hints: BTreeSet::new(),
+            tracked_sets: RawAddressMap::new(),
         })
     }
 
@@ -182,6 +184,7 @@ impl SegmentMapping {
         mapping.name = builder.name;
         mapping.mapping_hints = builder.mapping_hints;
         mapping.function_hints = builder.function_hints;
+        mapping.tracked_sets = builder.tracked_sets;
         Ok(mapping)
     }
 
@@ -290,6 +293,17 @@ impl SegmentMapping {
 
     pub(crate) fn function_hint_offsets(&self) -> &BTreeSet<RawAddress> {
         &self.function_hints
+    }
+
+    pub(crate) fn tracked_set_offsets(&self) -> &RawAddressMap<TrackedSet> {
+        &self.tracked_sets
+    }
+
+    pub fn tracked_set_at(&self, addr: impl Into<Address>) -> Option<&TrackedSet> {
+        let addr = addr.into();
+        (addr.space() == self.space() && self.range.contains(addr.raw_address()))
+            .then(|| self.tracked_sets.get(addr.raw_address()))
+            .flatten()
     }
 
     pub fn mapping_hint_at(&self, addr: impl Into<Address>) -> Option<&ContextHint> {
@@ -522,6 +536,7 @@ pub struct SegmentMappingBuilder {
     name: String,
     mapping_hints: BTreeMap<RawAddress, ContextHint>,
     function_hints: BTreeSet<RawAddress>,
+    tracked_sets: RawAddressMap<TrackedSet>,
 }
 
 impl SegmentMappingBuilder {
@@ -543,6 +558,7 @@ impl SegmentMappingBuilder {
             name: String::new(),
             mapping_hints: BTreeMap::new(),
             function_hints: BTreeSet::new(),
+            tracked_sets: RawAddressMap::new(),
         }
     }
 
@@ -697,6 +713,19 @@ impl SegmentMappingBuilder {
         function_hints: impl IntoIterator<Item = RawAddress>,
     ) -> Self {
         self.set_function_hints(function_hints);
+        self
+    }
+
+    pub fn tracked_sets(&self) -> &RawAddressMap<TrackedSet> {
+        &self.tracked_sets
+    }
+
+    pub fn set_tracked_sets(&mut self, tracked_sets: RawAddressMap<TrackedSet>) {
+        self.tracked_sets = tracked_sets;
+    }
+
+    pub fn with_tracked_sets(mut self, tracked_sets: RawAddressMap<TrackedSet>) -> Self {
+        self.set_tracked_sets(tracked_sets);
         self
     }
 

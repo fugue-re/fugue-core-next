@@ -299,8 +299,10 @@ impl Install for PrototypeEntry {
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub(crate) struct Prototype {
     name: Box<str>,
-    extra_pop: u64,
+    extra_pop: Option<u64>,
     stack_shift: u64,
+    pointer_max: Option<u64>,
+    this_before_ret_pointer: bool,
     inputs: Box<[PrototypeEntry]>,
     outputs: Box<[PrototypeEntry]>,
     input_rules: Box<[PrototypeRule]>,
@@ -318,6 +320,8 @@ impl From<&SleighPrototype> for Prototype {
             name: Box::<str>::from(prototype.name()),
             extra_pop: prototype.extra_pop(),
             stack_shift: prototype.stack_shift(),
+            pointer_max: prototype.pointer_max(),
+            this_before_ret_pointer: prototype.this_before_ret_pointer(),
             inputs: prototype.inputs().iter().map(Into::into).collect(),
             outputs: prototype.outputs().iter().map(Into::into).collect(),
             input_rules: prototype.input_rules().iter().map(Into::into).collect(),
@@ -349,6 +353,8 @@ impl Install for Prototype {
             .with_likely_trashed(self.likely_trashed.install())
             .with_local_ranges(self.local_ranges.install())
             .with_internal_storage(self.internal_storage.install())
+            .with_pointer_max(self.pointer_max)
+            .with_this_before_ret_pointer(self.this_before_ret_pointer)
     }
 }
 

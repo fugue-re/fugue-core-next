@@ -1,6 +1,5 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap as Map;
-use std::ops::{Deref, DerefMut};
 use std::{array, mem};
 
 use itertools::Itertools;
@@ -215,26 +214,31 @@ impl ContextBitRange {
     }
 }
 
-#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(
+    Debug, Copy, Clone, PartialEq, Eq, Hash, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TrackedContext {
     location: Varnode,
-    value: u32,
+    value: u64,
 }
 
 impl TrackedContext {
-    pub fn location(&self) -> &Varnode {
+    pub const fn new(location: Varnode, value: u64) -> Self {
+        Self { location, value }
+    }
+
+    pub const fn location(&self) -> &Varnode {
         &self.location
     }
 
-    pub fn value(&self) -> u32 {
+    pub const fn value(&self) -> u64 {
         self.value
     }
 }
 
-#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[repr(transparent)]
 pub struct TrackedSet(Vec<TrackedContext>);
 
 impl Default for TrackedSet {
@@ -243,17 +247,35 @@ impl Default for TrackedSet {
     }
 }
 
-impl Deref for TrackedSet {
-    type Target = Vec<TrackedContext>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
+impl TrackedSet {
+    pub fn iter(&self) -> impl Iterator<Item = &TrackedContext> {
+        self.0.iter()
     }
-}
 
-impl DerefMut for TrackedSet {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn value(&self, location: &Varnode) -> Option<u64> {
+        self.0
+            .iter()
+            .find(|tracked| tracked.location() == location)
+            .map(TrackedContext::value)
+    }
+
+    pub fn insert(&mut self, tracked: TrackedContext) {
+        match self
+            .0
+            .iter_mut()
+            .find(|existing| existing.location() == tracked.location())
+        {
+            Some(existing) => *existing = tracked,
+            None => self.0.push(tracked),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
     }
 }
 
@@ -410,7 +432,7 @@ impl ContextDatabase {
         self.size
     }
 
-    pub fn new_tracked_set(&mut self, addr1: u64, addr2: u64) -> &mut TrackedSet {
+    pub fn new_tracked_set(&mut self, addr1: u64, addr2: Option<u64>) -> &mut TrackedSet {
         let range = self.trackbase.clear_range(addr1, addr2);
         range.clear();
         range

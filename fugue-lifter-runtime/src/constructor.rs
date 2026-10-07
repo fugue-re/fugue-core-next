@@ -94,7 +94,7 @@ impl Constructor {
                 state.input().pop_operand();
 
                 if self.delay_slot_length > 0 {
-                    state.input().set_delay_slot_length(self.delay_slot_length);
+                    state.inputs.set_delay_slot_length(self.delay_slot_length);
                 }
 
                 return Some(());
@@ -146,7 +146,7 @@ impl Constructor {
                 state.input().pop_operand();
 
                 if ctor.delay_slot_length > 0 {
-                    state.input().set_delay_slot_length(ctor.delay_slot_length);
+                    state.inputs.set_delay_slot_length(ctor.delay_slot_length);
                 }
             }
 

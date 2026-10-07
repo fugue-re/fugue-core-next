@@ -788,7 +788,7 @@ mod test {
             },
         )];
         let convention = MCodeCallingConvention::from_prototype(
-            &Prototype::new("test", 0, 0).with_inputs(ENTRIES),
+            &Prototype::new("test", Some(0), 0).with_inputs(ENTRIES),
             32,
             |_| unreachable!(),
         )
@@ -1568,7 +1568,7 @@ mod test {
             PrototypeOperand::RegisterJoin(HIGH, LOW),
         )];
 
-        let prototype = Prototype::new("joined", 0, 0).with_outputs(&OUTPUTS);
+        let prototype = Prototype::new("joined", Some(0), 0).with_outputs(&OUTPUTS);
         let convention = MCodeCallingConvention::from_prototype(&prototype, 64, |varnode| {
             Ok(RegisterId::new(varnode.offset()))
         })
@@ -1604,8 +1604,8 @@ mod test {
             PrototypeOperand::RegisterJoin(HIGH, LOW),
         )];
 
-        let input_prototype = Prototype::new("joined", 0, 0).with_inputs(&INPUTS);
-        let output_prototype = Prototype::new("joined", 0, 0).with_outputs(&OUTPUTS);
+        let input_prototype = Prototype::new("joined", Some(0), 0).with_inputs(&INPUTS);
+        let output_prototype = Prototype::new("joined", Some(0), 0).with_outputs(&OUTPUTS);
         let missing_root =
             || IlError::missing_component(ECodeIr::FORM, "call-convention register root");
 

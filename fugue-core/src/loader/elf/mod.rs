@@ -24,11 +24,12 @@ use smallvec::{SmallVec, smallvec};
 use crate::AnalysisData;
 use crate::arch::Arch;
 use crate::ir::{
-    RawAddress, RawAddressRangeSet, Symbol, SymbolIndex, SymbolProperties, SymbolTableSelector,
-    TransientSymbolTable,
+    RawAddress, RawAddressMap, RawAddressRangeSet, Symbol, SymbolIndex, SymbolProperties,
+    SymbolTableSelector, TransientSymbolTable,
 };
-use crate::lifter::ContextHint;
-use crate::loader::elf::extensions::ImageContext;
+use crate::lifter::{ContextHint, TrackedSet};
+use crate::loader::elf::extensions::{ImageContext, TrackedSetContext};
+use crate::loader::elf::read::permissive;
 use crate::loader::{
     ExternalThunkLayout, ImageAddress, ImageBacking, ImageBank, ImageBankHandle, ImageBankLayout,
     ImageCoveredRegions, ImageLayout, ImageRegionBankMap, ImageSegment, ImageSegmentContents,
@@ -41,12 +42,17 @@ use crate::storage::segments::mapping::SegmentMappingProvenance;
 use crate::types::attributes::{ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE};
 use crate::types::{AttributeMap, BytesOrMapping};
 
-mod function_recovery;
+mod functions;
 
 pub mod extensions;
 
+pub mod read;
+
 mod relocations;
 pub use relocations::ElfSegmentRelocator;
+
+mod tracked;
+use tracked::ElfTrackedSetResolver;
 
 const STT_GNU_UNIQUE: u8 = STT_LOOS;
 
@@ -58,6 +64,7 @@ pub const ATTRIBUTE_SKIP_NOTE_SECTIONS: &str = "loader.elf.skip_note_sections";
 pub const ATTRIBUTE_PRESERVE_RELOCATABLE_SECTION_ADDRESSES: &str =
     "loader.elf.preserve_relocatable_section_addresses";
 pub const ATTRIBUTE_LOAD_HEADERS: &str = "loader.elf.load_headers";
+pub const ATTRIBUTE_PERMISSIVE: &str = "loader.elf.permissive";
 
 #[ouroboros::self_referencing]
 struct ElfInner<'a> {
@@ -70,6 +77,19 @@ struct ElfInner<'a> {
 pub enum ElfFileRepr<'this, 'data> {
     Elf32(ElfFile<'this, FileHeader32<Endianness>, &'this BytesOrMapping<'data>>),
     Elf64(ElfFile<'this, FileHeader64<Endianness>, &'this BytesOrMapping<'data>>),
+}
+
+type ElfRecoverError<'a> = Box<(BytesOrMapping<'a>, LoaderError)>;
+
+impl<'a> ElfInner<'a> {
+    fn from_bytes(data: BytesOrMapping<'a>) -> Result<Self, LoaderError> {
+        Self::try_new(data, |data| ElfFileRepr::parse(data))
+    }
+
+    fn from_bytes_or_recover(data: BytesOrMapping<'a>) -> Result<Self, ElfRecoverError<'a>> {
+        Self::try_new_or_recover(data, |data| ElfFileRepr::parse(data))
+            .map_err(|(error, heads)| ElfRecoverError::new((heads.data, error)))
+    }
 }
 
 macro_rules! with_elf {
@@ -126,6 +146,7 @@ pub struct Elf<'a> {
     layout: ImageLayout,
     image_symbols: TransientSymbolTable<ImageAddress>,
     mapping_hints: BTreeMap<RawAddress, ContextHint>,
+    tracked_sets: RawAddressMap<TrackedSet>,
     segments: Vec<ElfImageSegment>,
     region_bank: ElfRegionBankMap,
     sections: ElfSectionMap,
@@ -142,9 +163,26 @@ impl<'a> Elf<'a> {
         data: impl Into<BytesOrMapping<'a>>,
         attributes: impl Into<AttributeMap>,
     ) -> Result<Self, LoaderError> {
-        let object = ElfInner::try_new(data.into(), |data| ElfFileRepr::parse(data))?;
-
         let attributes = attributes.into();
+        let config = ElfLoaderProperties::new(&attributes);
+
+        let object = match ElfInner::from_bytes_or_recover(data.into()) {
+            Ok(object) => object,
+            Err(failed) => {
+                let (data, error) = *failed;
+
+                if !config.is_permissive() {
+                    return Err(error);
+                }
+
+                let Some(repaired) = permissive::try_repair(data)? else {
+                    return Err(error);
+                };
+
+                ElfInner::from_bytes(repaired)?
+            }
+        };
+
         let view = object.borrow_view();
 
         let preferred_base = with_elf!(
@@ -173,18 +211,40 @@ impl<'a> Elf<'a> {
         let context = ImageContext::new(view, base, preferred_base, entry, &attributes);
         let architecture = context.resolve_architecture()?;
 
-        let config = ElfLoaderProperties::new(&attributes);
-
         let ElfSymbolLayout {
             bounds,
             symbols,
             sections,
-            mapping_hints,
+            mut mapping_hints,
             external_thunks,
         } = with_elf!(
             view,
             elf | ElfSymbolLayout::from_elf(elf, &architecture, base, preferred_base, config)?
         );
+
+        let mut tracked_sets = RawAddressMap::new();
+        if !TrackedSetContext::new(
+            view,
+            &architecture,
+            base - preferred_base,
+            &mut tracked_sets,
+        )
+        .apply_tracked_sets()?
+        {
+            with_elf!(
+                view,
+                elf | ElfTrackedSetResolver::new(elf, &architecture, base - preferred_base)
+                    .apply(&mut tracked_sets)
+            );
+        }
+
+        let entry = entry.map(|entry| match architecture.canonicalise_address(entry) {
+            Some((canonical, context)) if canonical != entry => {
+                mapping_hints.insert(canonical, ContextHint::code().with_context(context));
+                canonical
+            }
+            _ => entry,
+        });
 
         let header_last = config
             .load_headers()
@@ -263,11 +323,12 @@ impl<'a> Elf<'a> {
         let mut image_symbols = TransientSymbolTable::<ImageAddress>::new();
         for (index, symbol) in symbols {
             let space = space_by_index.get(&index).copied().unwrap_or_default();
-            image_symbols.insert(
+            image_symbols.insert_with(
                 index,
                 ImageAddress::new(space, symbol.address),
                 symbol.symbol,
                 symbol.properties,
+                symbol.size,
             );
         }
 
@@ -286,6 +347,7 @@ impl<'a> Elf<'a> {
             image_symbols,
             layout,
             mapping_hints,
+            tracked_sets,
             segments: placements,
             region_bank,
             sections,
@@ -293,8 +355,9 @@ impl<'a> Elf<'a> {
             attributes,
         };
 
-        if let Some(entry) = slf.entry() {
-            slf.attributes.set_attr(ATTRIBUTE_ENTRY_POINT, entry);
+        if let Some(entry) = slf.entry {
+            slf.attributes
+                .set_attr(ATTRIBUTE_ENTRY_POINT, entry.offset());
         }
 
         Ok(slf)
@@ -1065,6 +1128,7 @@ where
 struct ElfImageSegments<'a> {
     segments: slice::Iter<'a, ElfImageSegment>,
     mapping_hints: &'a BTreeMap<RawAddress, ContextHint>,
+    tracked_sets: &'a RawAddressMap<TrackedSet>,
     image_symbols: &'a TransientSymbolTable<ImageAddress>,
 }
 
@@ -1073,10 +1137,12 @@ impl<'a> ElfImageSegments<'a> {
         segments: &'a [ElfImageSegment],
         image_symbols: &'a TransientSymbolTable<ImageAddress>,
         mapping_hints: &'a BTreeMap<RawAddress, ContextHint>,
+        tracked_sets: &'a RawAddressMap<TrackedSet>,
     ) -> Self {
         Self {
             segments: segments.iter(),
             mapping_hints,
+            tracked_sets,
             image_symbols,
         }
     }
@@ -1121,6 +1187,7 @@ impl<'a> ElfImageSegments<'a> {
         .with_provenance(segment.provenance)
         .with_mapping_hints(mapping_hints)
         .with_function_hints(function_hints)
+        .with_tracked_sets(self.tracked_sets.clone())
     }
 }
 
@@ -1140,6 +1207,7 @@ struct RawElfSymbol {
     address: RawAddress,
     symbol: Symbol,
     properties: SymbolProperties,
+    size: Option<u64>,
 }
 
 struct ElfSymbolLayout {
@@ -1285,6 +1353,7 @@ impl ElfSymbolLayout {
                     address,
                     symbol: symbol.name().ok().unwrap_or_default().into(),
                     properties,
+                    size: (!properties.is_extern() && symbol.size() != 0).then_some(symbol.size()),
                 },
             );
         }
@@ -1368,6 +1437,7 @@ impl ElfSymbolLayout {
                     address,
                     symbol,
                     properties,
+                    size: (!properties.is_extern() && sym.size() != 0).then_some(sym.size()),
                 },
             );
         }
@@ -1557,10 +1627,11 @@ bitflags! {
         const SKIP_NOTE_SECTIONS = 0b0000_0010;
         const PRESERVE_RELOCATABLE_SECTION_ADDRESSES = 0b0000_0100;
         const LOAD_HEADERS = 0b0000_1000;
+        const PERMISSIVE = 0b0001_0000;
 
         // loader state tracking
-        const HAS_LOADED_SECTIONS = 0b0001_0000;
-        const IS_OBJECT = 0b0010_0000;
+        const HAS_LOADED_SECTIONS = 0b0010_0000;
+        const IS_OBJECT = 0b0100_0000;
 
         // derived configuration
         const IGNORE_SEGMENT_EXEC_PERMISSION =
@@ -1600,6 +1671,13 @@ impl ElfLoaderProperties {
             config.insert(Self::LOAD_HEADERS);
         }
 
+        if attrs
+            .get_attr::<bool>(ATTRIBUTE_PERMISSIVE)
+            .unwrap_or_default()
+        {
+            config.insert(Self::PERMISSIVE);
+        }
+
         config
     }
 
@@ -1621,6 +1699,10 @@ impl ElfLoaderProperties {
 
     pub(crate) fn load_headers(&self) -> bool {
         self.contains(Self::LOAD_HEADERS)
+    }
+
+    pub(crate) fn is_permissive(&self) -> bool {
+        self.contains(Self::PERMISSIVE)
     }
 }
 
@@ -2139,6 +2221,7 @@ impl Loadable for Elf<'_> {
             &self.segments,
             &self.image_symbols,
             &self.mapping_hints,
+            &self.tracked_sets,
         )) as ImageSegmentIterator<'b>
     }
 
