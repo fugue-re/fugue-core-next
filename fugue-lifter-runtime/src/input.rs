@@ -81,8 +81,6 @@ pub struct ParserContext {
     pub address: u64,
     pub delay_slot_length: u8,
     pub alloc: u8,
-    next_address: Option<u64>,
-    next_input: u8,
 }
 
 #[derive(Clone)]
@@ -148,13 +146,47 @@ impl<'a> ParserInputs<'a> {
         self.input.initialise(address, self.bytes, self.context);
     }
 
+    pub fn set_delay_slot_length(&mut self, size: usize) {
+        self.input.set_delay_slot_length(size);
+        if let Some(slot) = self.inputs.first_mut() {
+            slot.context.constructors[0] = Default::default();
+        }
+    }
+
+    pub fn delay_slots(&self) -> &[ParserInput] {
+        let delay_slot_length = self.input.delay_slot_length();
+        let mut address = self.input.next_address();
+        let mut length = 0;
+        let mut count = 0;
+
+        while length < delay_slot_length {
+            let Some(slot) = self.inputs.get(count) else {
+                return &[];
+            };
+            if slot.address() != address || slot.is_empty() {
+                return &[];
+            }
+            address = slot.next_address();
+            length += slot.len();
+            count += 1;
+        }
+
+        &self.inputs[..count]
+    }
+
+    pub fn next_address(&self) -> u64 {
+        self.delay_slots()
+            .last()
+            .map_or_else(|| self.input.next_address(), ParserInput::next_address)
+    }
+
     pub fn next_input<'b>(&'b mut self) -> Option<ParserInputs<'b>> {
-        let address = self.input.next_address();
+        let index = self.delay_slots().len();
+        let address = self.next_address();
         let offset = usize::try_from(address.checked_sub(self.input.address())?).ok()?;
         let bytes = self.bytes.get(offset..)?;
-        let next_input = usize::from(self.input.context.next_input);
 
-        let (input, inputs) = self.inputs.get_mut(next_input..)?.split_first_mut()?;
+        let (input, inputs) = self.inputs.get_mut(index..)?.split_first_mut()?;
 
         input.initialise(address, bytes, self.context);
 
@@ -167,11 +199,11 @@ impl<'a> ParserInputs<'a> {
     }
 
     pub fn next2_address(&self) -> Option<u64> {
-        let naddress = self.input.next_address();
-        let ninput = self
-            .inputs
-            .get(usize::from(self.input.context.next_input))?;
+        let naddress = self.next_address();
+        let ninput = self.inputs.get(self.delay_slots().len())?;
 
+        // NOTE: an input already decoded at `naddress` is trusted as the instruction there,
+        // even if it was decoded by an earlier lift.
         if ninput.address() == naddress {
             Some(ninput.next_address())
         } else {
@@ -190,8 +222,6 @@ impl ParserInput {
             address,
             delay_slot_length: 0,
             alloc: 1,
-            next_address: None,
-            next_input: 0,
         };
 
         let mut input = Self {
@@ -215,8 +245,6 @@ impl ParserInput {
             address: 0,
             delay_slot_length: 0,
             alloc: 1,
-            next_address: None,
-            next_input: 0,
         };
 
         Self {
@@ -230,8 +258,6 @@ impl ParserInput {
     pub(crate) fn reset(&mut self) {
         self.context.address = 0;
         self.context.delay_slot_length = 0;
-        self.context.next_address = None;
-        self.context.next_input = 0;
         self.context.alloc = 1;
         self.context.constructors[0] = Default::default();
         self.context.commits.clear();
@@ -242,8 +268,6 @@ impl ParserInput {
     pub fn initialise(&mut self, address: u64, bytes: &[u8], db: &ContextDatabase) {
         self.context.address = address;
         self.context.delay_slot_length = 0;
-        self.context.next_address = None;
-        self.context.next_input = 0;
 
         self.context.alloc = 1;
         self.context.constructors[0] = Default::default();
@@ -268,16 +292,7 @@ impl ParserInput {
 
     #[inline(always)]
     pub fn next_address(&self) -> u64 {
-        self.context
-            .next_address
-            .unwrap_or(self.context.address + self.context.constructors[0].length as u64)
-    }
-
-    #[inline(always)]
-    pub(crate) fn set_next_address(&mut self, address: u64, next_input: usize) {
-        self.context.next_address = Some(address);
-        self.context.next_input =
-            u8::try_from(next_input).expect("delay slot context index fits in u8");
+        self.context.address + self.context.constructors[0].length as u64
     }
 
     #[inline(always)]

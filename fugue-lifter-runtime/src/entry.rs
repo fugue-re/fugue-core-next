@@ -281,9 +281,6 @@ pub fn lift(
             index += 1;
         }
 
-        state
-            .input()
-            .set_next_address(address + fall_offset as u64, index + 1);
         state.emit(data)?;
 
         Some(fall_offset)

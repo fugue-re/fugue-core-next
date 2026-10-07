@@ -427,32 +427,20 @@ impl<'a> LiftingContextState<'a> {
         unsafe {
             let unique_offset = self.unique_offset;
 
-            let delay_slot_bytes = self.delay_slot_length();
+            let delay_slots = self.inputs.delay_slots().len();
 
-            let mut bytes = 0usize;
-            let mut index = 0usize;
+            if delay_slots == 0 {
+                return None;
+            }
 
-            loop {
-                let length = {
-                    let mut nself = self.nth_delay_slot(index)?;
-                    let length = nself.len();
+            for index in 0..delay_slots {
+                let mut nself = self.nth_delay_slot(index)?;
 
-                    nself.inputs.input.base_state();
+                nself.inputs.input.base_state();
 
-                    if let Some(builder) = nself.inputs.input.constructor().build_action {
-                        construct_tpl(data, builder).build(data, &mut nself)?;
-                    }
-
-                    length
-                };
-
-                bytes += length;
-
-                if bytes >= delay_slot_bytes {
-                    break;
+                if let Some(builder) = nself.inputs.input.constructor().build_action {
+                    construct_tpl(data, builder).build(data, &mut nself)?;
                 }
-
-                index += 1;
             }
 
             self.unique_offset = unique_offset;
