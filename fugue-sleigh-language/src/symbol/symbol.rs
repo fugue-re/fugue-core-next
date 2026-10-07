@@ -160,21 +160,21 @@ impl Symbol {
 
     pub fn name(&self) -> &str {
         match self {
-            Self::UserOp { ref name, .. }
-            | Self::Epsilon { ref name, .. }
-            | Self::Value { ref name, .. }
-            | Self::ValueMap { ref name, .. }
-            | Self::Name { ref name, .. }
-            | Self::Varnode { ref name, .. }
-            | Self::Context { ref name, .. }
-            | Self::VarnodeList { ref name, .. }
-            | Self::Operand { ref name, .. }
-            | Self::Start { ref name, .. }
-            | Self::End { ref name, .. }
-            | Self::Next2 { ref name, .. }
-            | Self::Subtable { ref name, .. }
-            | Self::FlowDest { ref name, .. }
-            | Self::FlowRef { ref name, .. } => name,
+            Self::UserOp { name, .. }
+            | Self::Epsilon { name, .. }
+            | Self::Value { name, .. }
+            | Self::ValueMap { name, .. }
+            | Self::Name { name, .. }
+            | Self::Varnode { name, .. }
+            | Self::Context { name, .. }
+            | Self::VarnodeList { name, .. }
+            | Self::Operand { name, .. }
+            | Self::Start { name, .. }
+            | Self::End { name, .. }
+            | Self::Next2 { name, .. }
+            | Self::Subtable { name, .. }
+            | Self::FlowDest { name, .. }
+            | Self::FlowRef { name, .. } => name,
         }
     }
 
@@ -290,7 +290,7 @@ impl SymbolBuilder {
         Ok(match self.kind {
             SymbolKind::UserOp => {
                 if symbol_id != ELEM_USEROP_ID {
-                    return Err(DeserialiseError::ElementUnexpected(symbol_id));
+                    return Err(DeserialiseError::element_unexpected(symbol_id));
                 }
                 Symbol::UserOp {
                     id: self.id,
@@ -301,7 +301,7 @@ impl SymbolBuilder {
             }
             SymbolKind::Epsilon => {
                 if symbol_id != ELEM_EPSILON_SYM_ID {
-                    return Err(DeserialiseError::ElementUnexpected(symbol_id));
+                    return Err(DeserialiseError::element_unexpected(symbol_id));
                 }
                 Symbol::Epsilon {
                     id: self.id,
@@ -311,7 +311,7 @@ impl SymbolBuilder {
             }
             SymbolKind::Value => {
                 if symbol_id != ELEM_VALUE_SYM_ID {
-                    return Err(DeserialiseError::ElementUnexpected(symbol_id));
+                    return Err(DeserialiseError::element_unexpected(symbol_id));
                 }
                 let pattern_value = PatternExpression::from_decoder(input)?;
 
@@ -324,7 +324,7 @@ impl SymbolBuilder {
             }
             SymbolKind::ValueMap => {
                 if symbol_id != ELEM_VALUEMAP_SYM_ID {
-                    return Err(DeserialiseError::ElementUnexpected(symbol_id));
+                    return Err(DeserialiseError::element_unexpected(symbol_id));
                 }
 
                 let pattern_value = PatternExpression::from_decoder(input)?;
@@ -341,10 +341,10 @@ impl SymbolBuilder {
 
                 let min = pattern_value
                     .min_value()
-                    .ok_or(DeserialiseError::Invariant("invalid pattern"))?;
+                    .ok_or(DeserialiseError::invariant("invalid pattern"))?;
                 let max = pattern_value
                     .max_value()
-                    .ok_or(DeserialiseError::Invariant("invalid pattern"))?;
+                    .ok_or(DeserialiseError::invariant("invalid pattern"))?;
 
                 let table_is_filled =
                     min >= 0 && max < value_table.len() as i64 && !value_table.contains(&0xbadbeef);
@@ -360,7 +360,7 @@ impl SymbolBuilder {
             }
             SymbolKind::Name => {
                 if symbol_id != ELEM_NAME_SYM_ID {
-                    return Err(DeserialiseError::ElementUnexpected(symbol_id));
+                    return Err(DeserialiseError::element_unexpected(symbol_id));
                 }
 
                 let pattern_value = PatternExpression::from_decoder(input)?;
@@ -383,10 +383,10 @@ impl SymbolBuilder {
 
                 let min = pattern_value
                     .min_value()
-                    .ok_or(DeserialiseError::Invariant("invalid pattern"))?;
+                    .ok_or(DeserialiseError::invariant("invalid pattern"))?;
                 let max = pattern_value
                     .max_value()
-                    .ok_or(DeserialiseError::Invariant("invalid pattern"))?;
+                    .ok_or(DeserialiseError::invariant("invalid pattern"))?;
 
                 let table_is_filled = min >= 0
                     && max < name_table.len() as i64
@@ -403,17 +403,17 @@ impl SymbolBuilder {
             }
             SymbolKind::Varnode => {
                 if symbol_id != ELEM_VARNODE_SYM_ID {
-                    return Err(DeserialiseError::ElementUnexpected(symbol_id));
+                    return Err(DeserialiseError::element_unexpected(symbol_id));
                 }
 
                 let AddressSpaceRef::Other(space_id) = input.read_space_with_id(&ATTRIB_SPACE)?
                 else {
-                    return Err(DeserialiseError::Invariant("varnode space not supported"));
+                    return Err(DeserialiseError::invariant("varnode space not supported"));
                 };
 
                 let space = spaces
                     .get(space_id as usize)
-                    .ok_or(DeserialiseError::Invariant("varnode space not defined"))?;
+                    .ok_or(DeserialiseError::invariant("varnode space not defined"))?;
 
                 let offset = input.read_unsigned_integer_with_id(&ATTRIB_OFF)?;
                 let size = input.read_signed_integer_with_id(&ATTRIB_SIZE)? as usize;
@@ -429,7 +429,7 @@ impl SymbolBuilder {
             }
             SymbolKind::Context => {
                 if symbol_id != ELEM_CONTEXT_SYM_ID {
-                    return Err(DeserialiseError::ElementUnexpected(symbol_id));
+                    return Err(DeserialiseError::element_unexpected(symbol_id));
                 }
 
                 let varnode_id = input.read_unsigned_integer_with_id(&ATTRIB_VARNODE)? as usize;
@@ -452,7 +452,7 @@ impl SymbolBuilder {
             }
             SymbolKind::VarnodeList => {
                 if symbol_id != ELEM_VARLIST_SYM_ID {
-                    return Err(DeserialiseError::ElementUnexpected(symbol_id));
+                    return Err(DeserialiseError::element_unexpected(symbol_id));
                 }
 
                 let pattern_value = PatternExpression::from_decoder(input)?;
@@ -474,10 +474,10 @@ impl SymbolBuilder {
 
                 let min = pattern_value
                     .min_value()
-                    .ok_or(DeserialiseError::Invariant("invalid pattern"))?;
+                    .ok_or(DeserialiseError::invariant("invalid pattern"))?;
                 let max = pattern_value
                     .max_value()
-                    .ok_or(DeserialiseError::Invariant("invalid pattern"))?;
+                    .ok_or(DeserialiseError::invariant("invalid pattern"))?;
 
                 let table_is_filled = min >= 0
                     && max < varnode_table.len() as i64
@@ -494,18 +494,14 @@ impl SymbolBuilder {
             }
             SymbolKind::Operand => {
                 if symbol_id != ELEM_OPERAND_SYM_ID {
-                    return Err(DeserialiseError::ElementUnexpected(symbol_id));
+                    return Err(DeserialiseError::element_unexpected(symbol_id));
                 }
 
                 let handle_index = input.read_signed_integer_with_id(&ATTRIB_INDEX)? as usize;
                 let offset = input.read_signed_integer_with_id(&ATTRIB_OFF)? as usize;
-                let base = input.read_signed_integer_with_id(&ATTRIB_BASE).map(|v| {
-                    if v < 0 {
-                        None
-                    } else {
-                        Some(v as usize)
-                    }
-                })?;
+                let base = input
+                    .read_signed_integer_with_id(&ATTRIB_BASE)
+                    .map(|v| if v < 0 { None } else { Some(v as usize) })?;
 
                 let min_length = input.read_signed_integer_with_id(&ATTRIB_MINLEN)? as usize;
 
@@ -539,7 +535,7 @@ impl SymbolBuilder {
             }
             SymbolKind::Start => {
                 if symbol_id != ELEM_START_SYM_ID {
-                    return Err(DeserialiseError::ElementUnexpected(symbol_id));
+                    return Err(DeserialiseError::element_unexpected(symbol_id));
                 }
 
                 Symbol::Start {
@@ -551,7 +547,7 @@ impl SymbolBuilder {
             }
             SymbolKind::End => {
                 if symbol_id != ELEM_END_SYM_ID {
-                    return Err(DeserialiseError::ElementUnexpected(symbol_id));
+                    return Err(DeserialiseError::element_unexpected(symbol_id));
                 }
 
                 Symbol::End {
@@ -563,7 +559,7 @@ impl SymbolBuilder {
             }
             SymbolKind::Next2 => {
                 if symbol_id != ELEM_NEXT2_SYM_ID {
-                    return Err(DeserialiseError::ElementUnexpected(symbol_id));
+                    return Err(DeserialiseError::element_unexpected(symbol_id));
                 }
 
                 Symbol::Next2 {
@@ -575,7 +571,7 @@ impl SymbolBuilder {
             }
             SymbolKind::Subtable => {
                 if symbol_id != ELEM_SUBTABLE_SYM_ID {
-                    return Err(DeserialiseError::ElementUnexpected(symbol_id));
+                    return Err(DeserialiseError::element_unexpected(symbol_id));
                 }
 
                 let mut constructors = Vec::new();
@@ -597,7 +593,7 @@ impl SymbolBuilder {
                             if decision_root.is_none() {
                                 decision_root = Some(DecisionNode::from_decoder(input)?);
                             } else {
-                                return Err(DeserialiseError::Invariant(
+                                return Err(DeserialiseError::invariant(
                                     "redefintion of root decision tree node",
                                 ));
                             }
@@ -616,12 +612,12 @@ impl SymbolBuilder {
                     name: self.name,
                     constructors,
                     decision_tree: decision_root.ok_or({
-                        DeserialiseError::Invariant("missing decision tree for subtable")
+                        DeserialiseError::invariant("missing decision tree for subtable")
                     })?,
                 }
             }
             _ => {
-                return Err(DeserialiseError::Invariant(
+                return Err(DeserialiseError::invariant(
                     "flowdest/flowref are not supported symbol kinds",
                 ));
             }
@@ -636,9 +632,7 @@ impl SymbolBuilder {
         Ok(match self.kind {
             SymbolKind::UserOp => {
                 if input.tag_name().name() != "userop" {
-                    return Err(DeserialiseError::TagUnexpected(
-                        input.tag_name().name().to_owned(),
-                    ));
+                    return Err(DeserialiseError::tag_unexpected(input.tag_name().name()));
                 }
                 Symbol::UserOp {
                     id: self.id,
@@ -649,9 +643,7 @@ impl SymbolBuilder {
             }
             SymbolKind::Epsilon => {
                 if input.tag_name().name() != "epsilon" {
-                    return Err(DeserialiseError::TagUnexpected(
-                        input.tag_name().name().to_owned(),
-                    ));
+                    return Err(DeserialiseError::tag_unexpected(input.tag_name().name()));
                 }
                 Symbol::Epsilon {
                     id: self.id,
@@ -661,13 +653,11 @@ impl SymbolBuilder {
             }
             SymbolKind::Value => {
                 if input.tag_name().name() != "value_sym" {
-                    return Err(DeserialiseError::TagUnexpected(
-                        input.tag_name().name().to_owned(),
-                    ));
+                    return Err(DeserialiseError::tag_unexpected(input.tag_name().name()));
                 }
                 let pattern_value = PatternExpression::from_xml(
                     input.children().find(xml::Node::is_element).ok_or({
-                        DeserialiseError::Invariant("missing pattern expression for value")
+                        DeserialiseError::invariant("missing pattern expression for value")
                     })?,
                 )?;
 
@@ -680,13 +670,11 @@ impl SymbolBuilder {
             }
             SymbolKind::ValueMap => {
                 if input.tag_name().name() != "valuemap_sym" {
-                    return Err(DeserialiseError::TagUnexpected(
-                        input.tag_name().name().to_owned(),
-                    ));
+                    return Err(DeserialiseError::tag_unexpected(input.tag_name().name()));
                 }
                 let mut children = input.children().filter(xml::Node::is_element);
                 let pattern_value = PatternExpression::from_xml(children.next().ok_or({
-                    DeserialiseError::Invariant("missing pattern expression for name")
+                    DeserialiseError::invariant("missing pattern expression for name")
                 })?)?;
 
                 let value_table = children
@@ -695,10 +683,10 @@ impl SymbolBuilder {
 
                 let min = pattern_value
                     .min_value()
-                    .ok_or(DeserialiseError::Invariant("invalid pattern"))?;
+                    .ok_or(DeserialiseError::invariant("invalid pattern"))?;
                 let max = pattern_value
                     .max_value()
-                    .ok_or(DeserialiseError::Invariant("invalid pattern"))?;
+                    .ok_or(DeserialiseError::invariant("invalid pattern"))?;
 
                 let table_is_filled =
                     min >= 0 && max < value_table.len() as i64 && !value_table.contains(&0xbadbeef);
@@ -714,13 +702,11 @@ impl SymbolBuilder {
             }
             SymbolKind::Name => {
                 if input.tag_name().name() != "name_sym" {
-                    return Err(DeserialiseError::TagUnexpected(
-                        input.tag_name().name().to_owned(),
-                    ));
+                    return Err(DeserialiseError::tag_unexpected(input.tag_name().name()));
                 }
                 let mut children = input.children().filter(xml::Node::is_element);
                 let pattern_value = PatternExpression::from_xml(children.next().ok_or({
-                    DeserialiseError::Invariant("missing pattern expression for value")
+                    DeserialiseError::invariant("missing pattern expression for value")
                 })?)?;
 
                 let name_table = children
@@ -735,10 +721,10 @@ impl SymbolBuilder {
 
                 let min = pattern_value
                     .min_value()
-                    .ok_or(DeserialiseError::Invariant("invalid pattern"))?;
+                    .ok_or(DeserialiseError::invariant("invalid pattern"))?;
                 let max = pattern_value
                     .max_value()
-                    .ok_or(DeserialiseError::Invariant("invalid pattern"))?;
+                    .ok_or(DeserialiseError::invariant("invalid pattern"))?;
 
                 let table_is_filled = min >= 0
                     && max < name_table.len() as i64
@@ -755,18 +741,16 @@ impl SymbolBuilder {
             }
             SymbolKind::Varnode => {
                 if input.tag_name().name() != "varnode_sym" {
-                    return Err(DeserialiseError::TagUnexpected(
-                        input.tag_name().name().to_owned(),
-                    ));
+                    return Err(DeserialiseError::tag_unexpected(input.tag_name().name()));
                 }
 
                 let space_name = input
                     .attribute("space")
-                    .ok_or(DeserialiseError::AttributeExpected("space"))?;
+                    .ok_or(DeserialiseError::attribute_expected("space"))?;
 
                 let space = spaces
                     .space_by_name(space_name)
-                    .ok_or(DeserialiseError::Invariant("varnode space not defined"))?;
+                    .ok_or(DeserialiseError::invariant("varnode space not defined"))?;
 
                 let offset = input.attribute_int_or("offset", "off")?;
                 let size = input.attribute_int("size")?;
@@ -782,14 +766,12 @@ impl SymbolBuilder {
             }
             SymbolKind::Context => {
                 if input.tag_name().name() != "context_sym" {
-                    return Err(DeserialiseError::TagUnexpected(
-                        input.tag_name().name().to_owned(),
-                    ));
+                    return Err(DeserialiseError::tag_unexpected(input.tag_name().name()));
                 }
 
                 let pattern_value = PatternExpression::from_xml(
                     input.children().find(xml::Node::is_element).ok_or({
-                        DeserialiseError::Invariant("missing pattern expression for context")
+                        DeserialiseError::invariant("missing pattern expression for context")
                     })?,
                 )?;
 
@@ -811,13 +793,11 @@ impl SymbolBuilder {
             }
             SymbolKind::VarnodeList => {
                 if input.tag_name().name() != "varlist_sym" {
-                    return Err(DeserialiseError::TagUnexpected(
-                        input.tag_name().name().to_owned(),
-                    ));
+                    return Err(DeserialiseError::tag_unexpected(input.tag_name().name()));
                 }
                 let mut children = input.children().filter(xml::Node::is_element);
                 let pattern_value = PatternExpression::from_xml(children.next().ok_or({
-                    DeserialiseError::Invariant("missing pattern expression for varnodelist")
+                    DeserialiseError::invariant("missing pattern expression for varnodelist")
                 })?)?;
 
                 let varnode_table = children
@@ -832,10 +812,10 @@ impl SymbolBuilder {
 
                 let min = pattern_value
                     .min_value()
-                    .ok_or(DeserialiseError::Invariant("invalid pattern"))?;
+                    .ok_or(DeserialiseError::invariant("invalid pattern"))?;
                 let max = pattern_value
                     .max_value()
-                    .ok_or(DeserialiseError::Invariant("invalid pattern"))?;
+                    .ok_or(DeserialiseError::invariant("invalid pattern"))?;
 
                 let table_is_filled = min >= 0
                     && max < varnode_table.len() as i64
@@ -852,20 +832,14 @@ impl SymbolBuilder {
             }
             SymbolKind::Operand => {
                 if input.tag_name().name() != "operand_sym" {
-                    return Err(DeserialiseError::TagUnexpected(
-                        input.tag_name().name().to_owned(),
-                    ));
+                    return Err(DeserialiseError::tag_unexpected(input.tag_name().name()));
                 }
 
                 let handle_index = input.attribute_int("index")?;
                 let offset = input.attribute_int("off")?;
-                let base = input.attribute_int::<i64>("base").map(|v| {
-                    if v < 0 {
-                        None
-                    } else {
-                        Some(v as usize)
-                    }
-                })?;
+                let base = input
+                    .attribute_int::<i64>("base")
+                    .map(|v| if v < 0 { None } else { Some(v as usize) })?;
 
                 let min_length = input.attribute_int("minlen")?;
 
@@ -883,7 +857,7 @@ impl SymbolBuilder {
 
                 let mut children = input.children().filter(xml::Node::is_element);
                 let local_expr = PatternExpression::from_xml(children.next().ok_or({
-                    DeserialiseError::Invariant("missing local expression for operand")
+                    DeserialiseError::invariant("missing local expression for operand")
                 })?)?;
 
                 let def_expr = children
@@ -907,9 +881,7 @@ impl SymbolBuilder {
             }
             SymbolKind::Start => {
                 if input.tag_name().name() != "start_sym" {
-                    return Err(DeserialiseError::TagUnexpected(
-                        input.tag_name().name().to_owned(),
-                    ));
+                    return Err(DeserialiseError::tag_unexpected(input.tag_name().name()));
                 }
 
                 Symbol::Start {
@@ -921,9 +893,7 @@ impl SymbolBuilder {
             }
             SymbolKind::End => {
                 if input.tag_name().name() != "end_sym" {
-                    return Err(DeserialiseError::TagUnexpected(
-                        input.tag_name().name().to_owned(),
-                    ));
+                    return Err(DeserialiseError::tag_unexpected(input.tag_name().name()));
                 }
 
                 Symbol::End {
@@ -935,9 +905,7 @@ impl SymbolBuilder {
             }
             SymbolKind::Next2 => {
                 if input.tag_name().name() != "next2_sym" {
-                    return Err(DeserialiseError::TagUnexpected(
-                        input.tag_name().name().to_owned(),
-                    ));
+                    return Err(DeserialiseError::tag_unexpected(input.tag_name().name()));
                 }
 
                 Symbol::Next2 {
@@ -949,9 +917,7 @@ impl SymbolBuilder {
             }
             SymbolKind::FlowDest => {
                 if input.tag_name().name() != "flowdest_sym" {
-                    return Err(DeserialiseError::TagUnexpected(
-                        input.tag_name().name().to_owned(),
-                    ));
+                    return Err(DeserialiseError::tag_unexpected(input.tag_name().name()));
                 }
 
                 Symbol::FlowDest {
@@ -962,9 +928,7 @@ impl SymbolBuilder {
             }
             SymbolKind::FlowRef => {
                 if input.tag_name().name() != "flowref_sym" {
-                    return Err(DeserialiseError::TagUnexpected(
-                        input.tag_name().name().to_owned(),
-                    ));
+                    return Err(DeserialiseError::tag_unexpected(input.tag_name().name()));
                 }
 
                 Symbol::FlowDest {
@@ -975,9 +939,7 @@ impl SymbolBuilder {
             }
             SymbolKind::Subtable => {
                 if input.tag_name().name() != "subtable_sym" {
-                    return Err(DeserialiseError::TagUnexpected(
-                        input.tag_name().name().to_owned(),
-                    ));
+                    return Err(DeserialiseError::tag_unexpected(input.tag_name().name()));
                 }
 
                 let mut constructors = Vec::new();
@@ -991,7 +953,7 @@ impl SymbolBuilder {
                             if decision_root.is_none() {
                                 decision_root = Some(DecisionNode::from_xml(input)?);
                             } else {
-                                return Err(DeserialiseError::Invariant(
+                                return Err(DeserialiseError::invariant(
                                     "redefintion of root decision tree node",
                                 ));
                             }
@@ -1006,7 +968,7 @@ impl SymbolBuilder {
                     name: self.name,
                     constructors,
                     decision_tree: decision_root.ok_or({
-                        DeserialiseError::Invariant("missing decision tree for subtable")
+                        DeserialiseError::invariant("missing decision tree for subtable")
                     })?,
                 }
             }

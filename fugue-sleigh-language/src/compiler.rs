@@ -1,30 +1,97 @@
-use std::fs::File;
-use std::io::Read;
-use std::iter::FromIterator;
-use std::path::Path;
-
 use ahash::AHashMap as Map;
+use roxmltree::Node;
 use ustr::UstrSet;
 
-use crate::deserialise::{parse_int_radix, DeserialiseError, XmlExt};
-use crate::language::LanguageError;
+use crate::deserialise::{DeserialiseError, XmlExt, parse_int_radix};
+use crate::language::UserOpStr;
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Deserialize,
+    serde::Serialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+pub struct BitfieldPacking {
+    use_ms_convention: bool,
+    type_alignment_enabled: bool,
+    zero_length_boundary: u16,
+}
+
+impl Default for BitfieldPacking {
+    fn default() -> Self {
+        Self::new(false, true, 0)
+    }
+}
+
+impl BitfieldPacking {
+    pub const fn new(
+        use_ms_convention: bool,
+        type_alignment_enabled: bool,
+        zero_length_boundary: u16,
+    ) -> Self {
+        Self {
+            use_ms_convention,
+            type_alignment_enabled,
+            zero_length_boundary,
+        }
+    }
+
+    pub const fn use_ms_convention(&self) -> bool {
+        self.use_ms_convention
+    }
+
+    pub const fn type_alignment_enabled(&self) -> bool {
+        self.type_alignment_enabled
+    }
+
+    pub const fn zero_length_boundary(&self) -> u16 {
+        self.zero_length_boundary
+    }
+
+    pub fn from_xml(input: Node) -> Result<Self, DeserialiseError> {
+        let mut packing = Self::default();
+        for child in input.children().filter(Node::is_element) {
+            match child.tag_name().name() {
+                "use_MS_convention" => packing.use_ms_convention = child.attribute_bool("value")?,
+                "type_alignment_enabled" => {
+                    packing.type_alignment_enabled = child.attribute_bool("value")?
+                }
+                "zero_length_boundary" => {
+                    packing.zero_length_boundary = child.attribute_int("value")?
+                }
+                tag => return Err(DeserialiseError::tag_unexpected(tag)),
+            }
+        }
+        Ok(packing)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct DataOrganisation {
-    pub(crate) absolute_max_alignment: u64,
-    pub(crate) machine_alignment: u64,
-    pub(crate) default_alignment: u64,
-    pub(crate) default_pointer_alignment: u64,
-    pub(crate) pointer_size: usize,
-    pub(crate) wchar_size: usize,
-    pub(crate) short_size: usize,
-    pub(crate) integer_size: usize,
-    pub(crate) long_size: usize,
-    pub(crate) long_long_size: usize,
-    pub(crate) float_size: usize,
-    pub(crate) double_size: usize,
-    pub(crate) long_double_size: usize,
-    pub(crate) size_alignment_map: Map<usize, u64>,
+    absolute_max_alignment: u64,
+    machine_alignment: u64,
+    default_alignment: u64,
+    default_pointer_alignment: u64,
+    pointer_size: u16,
+    pointer_shift: u32,
+    char_size: u16,
+    char_signed: bool,
+    wchar_size: u16,
+    short_size: u16,
+    integer_size: u16,
+    long_size: u16,
+    long_long_size: u16,
+    float_size: u16,
+    double_size: u16,
+    long_double_size: u16,
+    bitfield_packing: BitfieldPacking,
+    alignments: Map<u16, u64>,
 }
 
 impl Default for DataOrganisation {
@@ -35,6 +102,9 @@ impl Default for DataOrganisation {
             default_alignment: 1,
             default_pointer_alignment: 4,
             pointer_size: 4,
+            pointer_shift: 0,
+            char_size: 1,
+            char_signed: true,
             wchar_size: 2,
             short_size: 2,
             integer_size: 4,
@@ -43,22 +113,21 @@ impl Default for DataOrganisation {
             float_size: 4,
             double_size: 8,
             long_double_size: 12,
-            size_alignment_map: Map::from_iter(vec![(1, 1), (2, 2), (4, 4), (8, 8)]),
+            bitfield_packing: BitfieldPacking::new(false, true, 0),
+            alignments: Map::from_iter([(1, 1), (2, 2), (4, 4), (8, 8)]),
         }
     }
 }
 
 impl DataOrganisation {
-    pub fn from_xml(input: xml::Node) -> Result<Self, DeserialiseError> {
+    pub fn from_xml(input: Node) -> Result<Self, DeserialiseError> {
         if input.tag_name().name() != "data_organization" {
-            return Err(DeserialiseError::TagUnexpected(
-                input.tag_name().name().to_owned(),
-            ));
+            return Err(DeserialiseError::tag_unexpected(input.tag_name().name()));
         }
 
         let mut data = Self::default();
 
-        for child in input.children().filter(xml::Node::is_element) {
+        for child in input.children().filter(Node::is_element) {
             match child.tag_name().name() {
                 "absolute_max_alignment" => {
                     data.absolute_max_alignment = child.attribute_int("value")?;
@@ -75,6 +144,10 @@ impl DataOrganisation {
                 "pointer_size" => {
                     data.pointer_size = child.attribute_int("value")?;
                 }
+                "pointer_shift" => data.pointer_shift = child.attribute_int("value")?,
+                "char_size" => data.char_size = child.attribute_int("value")?,
+                "char_type" => data.char_signed = child.attribute_bool("signed")?,
+                "bitfield_packing" => data.bitfield_packing = BitfieldPacking::from_xml(child)?,
                 "wchar_size" => {
                     data.wchar_size = child.attribute_int("value")?;
                 }
@@ -104,10 +177,9 @@ impl DataOrganisation {
                         .children()
                         .filter(|e| e.is_element() && e.tag_name().name() == "entry")
                     {
-                        data.size_alignment_map.insert(
-                            entry.attribute_int("size")?,
-                            entry.attribute_int("alignment")?,
-                        );
+                        let size = entry.attribute_int("size")?;
+                        let alignment = entry.attribute_int("alignment")?;
+                        data.alignments.insert(size, alignment);
                     }
                 }
                 _ => (),
@@ -133,259 +205,198 @@ impl DataOrganisation {
         self.default_pointer_alignment
     }
 
-    pub fn pointer_size(&self) -> usize {
+    pub fn pointer_size(&self) -> u16 {
         self.pointer_size
     }
 
-    pub fn wchar_size(&self) -> usize {
+    pub fn wchar_size(&self) -> u16 {
         self.wchar_size
     }
 
-    pub fn short_size(&self) -> usize {
+    pub fn short_size(&self) -> u16 {
         self.short_size
     }
 
-    pub fn integer_size(&self) -> usize {
+    pub fn integer_size(&self) -> u16 {
         self.integer_size
     }
 
-    pub fn long_size(&self) -> usize {
+    pub fn long_size(&self) -> u16 {
         self.long_size
     }
 
-    pub fn long_long_size(&self) -> usize {
+    pub fn long_long_size(&self) -> u16 {
         self.long_long_size
     }
 
-    pub fn float_size(&self) -> usize {
+    pub fn float_size(&self) -> u16 {
         self.float_size
     }
 
-    pub fn double_size(&self) -> usize {
+    pub fn double_size(&self) -> u16 {
         self.double_size
     }
 
-    pub fn long_double_size(&self) -> usize {
+    pub fn long_double_size(&self) -> u16 {
         self.long_double_size
     }
 
-    pub fn size_alignment(&self, size: usize) -> u64 {
-        self.size_alignment_map
+    pub fn pointer_shift(&self) -> u32 {
+        self.pointer_shift
+    }
+
+    pub fn char_size(&self) -> u16 {
+        self.char_size
+    }
+
+    pub fn char_signed(&self) -> bool {
+        self.char_signed
+    }
+
+    pub fn bitfield_packing(&self) -> BitfieldPacking {
+        self.bitfield_packing
+    }
+
+    pub fn alignments(&self) -> impl Iterator<Item = (u16, u64)> {
+        self.alignments
+            .iter()
+            .map(|(size, alignment)| (*size, *alignment))
+    }
+
+    pub fn alignment(&self, size: u16) -> u64 {
+        self.alignments
             .get(&size)
-            .cloned()
-            .unwrap_or(self.default_alignment)
+            .copied()
+            .unwrap_or_else(|| self.default_alignment())
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct StackPointer {
-    pub(crate) register: String,
-    pub(crate) space: String,
-}
-
-impl StackPointer {
-    pub fn from_xml(input: xml::Node) -> Result<Self, DeserialiseError> {
-        if input.tag_name().name() != "stackpointer" {
-            return Err(DeserialiseError::TagUnexpected(
-                input.tag_name().name().to_owned(),
-            ));
-        }
-
-        Ok(Self {
-            register: input.attribute_string("register")?,
-            space: input.attribute_string("space")?,
-        })
-    }
-
-    pub fn register(&self) -> &str {
-        &self.register
-    }
-
-    pub fn space(&self) -> &str {
-        &self.space
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub enum ReturnAddress {
-    Register(String),
-    StackRelative { offset: u64, size: usize },
-}
-
-impl ReturnAddress {
-    pub fn from_xml(input: xml::Node) -> Result<Self, DeserialiseError> {
-        if input.tag_name().name() != "returnaddress" {
-            return Err(DeserialiseError::TagUnexpected(
-                input.tag_name().name().to_owned(),
-            ));
-        }
-
-        let mut children = input.children().filter(xml::Node::is_element);
-
-        let node = children
-            .next()
-            .ok_or(DeserialiseError::Invariant("no children for returnaddress"))?;
-
-        match node.tag_name().name() {
-            "register" => Ok(Self::Register(node.attribute_string("name")?)),
-            "varnode"
-                if node
-                    .attribute_string("space")
-                    .map(|space| space == "stack")
-                    .unwrap_or(false) =>
-            {
-                Ok(Self::StackRelative {
-                    offset: node.attribute_int("offset")?,
-                    size: node.attribute_int("size")?,
-                })
-            }
-            tag => Err(DeserialiseError::TagUnexpected(tag.to_owned())),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub enum PrototypeOperand {
-    Register(String),
-    RegisterJoin(String, String),
-    StackRelative(u64),
-}
-
-impl PrototypeOperand {
-    pub fn from_xml(input: xml::Node) -> Result<Self, DeserialiseError> {
-        match input.tag_name().name() {
-            "addr" => match input.attribute_string("space")?.as_ref() {
-                "join" => Ok(Self::RegisterJoin(
-                    input.attribute_string("piece1")?,
-                    input.attribute_string("piece2")?,
-                )),
-                "stack" => Ok(Self::StackRelative(input.attribute_int("offset")?)),
-                tag => Err(DeserialiseError::TagUnexpected(tag.to_owned())),
-            },
-            "register" => Ok(Self::Register(input.attribute_string("name")?)),
-            tag => Err(DeserialiseError::TagUnexpected(tag.to_owned())),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct PrototypeEntry {
-    pub(crate) killed_by_call: bool,
-    pub(crate) min_size: usize,
-    pub(crate) max_size: usize,
-    pub(crate) alignment: u64,
-    pub(crate) meta_type: Option<String>,
-    pub(crate) extension: Option<String>,
-    pub(crate) operand: PrototypeOperand,
-}
-
-impl PrototypeEntry {
-    pub fn from_xml(input: xml::Node, killed_by_call: bool) -> Result<Self, DeserialiseError> {
-        if input.tag_name().name() != "pentry" {
-            return Err(DeserialiseError::TagUnexpected(
-                input.tag_name().name().to_owned(),
-            ));
-        }
-
-        let min_size = input.attribute_int("minsize")?;
-        let max_size = input.attribute_int("maxsize")?;
-        let alignment = input.attribute_int_opt("alignment", 1)?;
-
-        let meta_type = input
-            .attribute_string("metatype")
-            .map(Some)
-            .unwrap_or_default();
-        let extension = input
-            .attribute_string("extension")
-            .map(Some)
-            .unwrap_or_default();
-
-        let node = input.children().find(xml::Node::is_element);
-        if node.is_none() {
-            return Err(DeserialiseError::Invariant(
-                "compiler specification prototype entry does not define an operand",
-            ));
-        }
-
-        let operand = PrototypeOperand::from_xml(node.unwrap())?;
-
-        Ok(Self {
-            killed_by_call,
-            min_size,
-            max_size,
-            alignment,
-            meta_type,
-            extension,
-            operand,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Deserialize,
+    serde::Serialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub enum DatatypeKind {
+    Any,
+    Array,
+    Boolean,
+    Code,
+    Float,
+    HomogeneousFloatAggregate,
+    Integer,
+    PartialStruct,
+    PartialUnion,
+    Pointer,
+    RelativePointer,
+    SignedEnumeration,
+    SpaceBase,
     Struct,
     Union,
-    Float,
-    Any,
-    HomogeneousFloatAggregate,
+    Unknown,
+    UnsignedEnumeration,
+    UnsignedInteger,
+    Void,
 }
 
 impl DatatypeKind {
     pub fn from_name(name: &str) -> Result<Self, DeserialiseError> {
         match name {
+            "any" => Ok(Self::Any),
+            "array" => Ok(Self::Array),
+            "bool" => Ok(Self::Boolean),
+            "code" => Ok(Self::Code),
+            "float" => Ok(Self::Float),
+            "homogeneous-float-aggregate" => Ok(Self::HomogeneousFloatAggregate),
+            "int" => Ok(Self::Integer),
+            "partstruct" => Ok(Self::PartialStruct),
+            "partunion" => Ok(Self::PartialUnion),
+            "ptr" | "pointer" => Ok(Self::Pointer),
+            "ptrrel" => Ok(Self::RelativePointer),
+            "enum_int" => Ok(Self::SignedEnumeration),
+            "spacebase" => Ok(Self::SpaceBase),
             "struct" => Ok(Self::Struct),
             "union" => Ok(Self::Union),
-            "float" => Ok(Self::Float),
-            "any" => Ok(Self::Any),
-            "homogeneous-float-aggregate" => Ok(Self::HomogeneousFloatAggregate),
-            _ => Err(DeserialiseError::Invariant(
+            "unknown" => Ok(Self::Unknown),
+            "enum_uint" => Ok(Self::UnsignedEnumeration),
+            "uint" => Ok(Self::UnsignedInteger),
+            "void" => Ok(Self::Void),
+            _ => Err(DeserialiseError::invariant(
                 "unknown datatype name in prototype rule",
             )),
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Deserialize,
+    serde::Serialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub enum RuleStorage {
-    General,
+    Class1,
+    Class2,
+    Class3,
+    Class4,
     Float,
+    General,
+    HiddenReturn,
+    Pointer,
+    Vector,
 }
 
 impl RuleStorage {
-    pub fn from_attr_opt(
-        node: xml::Node,
-        name: &'static str,
-    ) -> Result<Option<Self>, DeserialiseError> {
+    pub fn from_attr_opt(node: Node, name: &'static str) -> Result<Option<Self>, DeserialiseError> {
         match node.attribute(name) {
-            Some("general") => Ok(Some(Self::General)),
+            Some("class1") => Ok(Some(Self::Class1)),
+            Some("class2") => Ok(Some(Self::Class2)),
+            Some("class3") => Ok(Some(Self::Class3)),
+            Some("class4") => Ok(Some(Self::Class4)),
             Some("float") => Ok(Some(Self::Float)),
-            Some(_) => Err(DeserialiseError::Invariant(
-                "unknown storage class in prototype rule",
+            Some("general") | Some("unknown") => Ok(Some(Self::General)),
+            Some("hiddenret") => Ok(Some(Self::HiddenReturn)),
+            Some("ptr") | Some("pointer") => Ok(Some(Self::Pointer)),
+            Some("vector") => Ok(Some(Self::Vector)),
+            Some(_) => Err(DeserialiseError::invariant(
+                "unknown prototype storage class",
             )),
             None => Ok(None),
         }
     }
 
-    pub fn from_attr(node: xml::Node, name: &'static str) -> Result<Self, DeserialiseError> {
-        Self::from_attr_opt(node, name)?.ok_or(DeserialiseError::AttributeExpected(name))
+    pub fn from_attr(node: Node, name: &'static str) -> Result<Self, DeserialiseError> {
+        Self::from_attr_opt(node, name)?.ok_or(DeserialiseError::attribute_expected(name))
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct DatatypeFilter {
-    pub(crate) kind: DatatypeKind,
-    pub(crate) min_size: Option<usize>,
-    pub(crate) max_size: Option<usize>,
-    pub(crate) sizes: Vec<usize>,
-    pub(crate) max_primitives: Option<usize>,
+    kind: DatatypeKind,
+    min_size: Option<u16>,
+    max_size: Option<u16>,
+    sizes: Vec<u16>,
+    min_elements: Option<u32>,
+    max_elements: Option<u32>,
+    max_primitives: Option<u32>,
 }
 
 impl DatatypeFilter {
-    pub fn from_xml(input: xml::Node) -> Result<Self, DeserialiseError> {
+    pub fn from_xml(input: Node) -> Result<Self, DeserialiseError> {
         if input.tag_name().name() != "datatype" {
-            return Err(DeserialiseError::TagUnexpected(
-                input.tag_name().name().to_owned(),
-            ));
+            return Err(DeserialiseError::tag_unexpected(input.tag_name().name()));
         }
 
         let kind = DatatypeKind::from_name(&input.attribute_string("name")?)?;
@@ -417,6 +428,14 @@ impl DatatypeFilter {
             max_size,
             sizes,
             max_primitives,
+            min_elements: input
+                .attribute("minelements")
+                .map(parse_int_radix)
+                .transpose()?,
+            max_elements: input
+                .attribute("maxelements")
+                .map(parse_int_radix)
+                .transpose()?,
         })
     }
 
@@ -424,91 +443,152 @@ impl DatatypeFilter {
         self.kind
     }
 
-    pub fn min_size(&self) -> Option<usize> {
+    pub fn min_size(&self) -> Option<u16> {
         self.min_size
     }
 
-    pub fn max_size(&self) -> Option<usize> {
+    pub fn max_size(&self) -> Option<u16> {
         self.max_size
     }
 
-    pub fn sizes(&self) -> &[usize] {
+    pub fn sizes(&self) -> &[u16] {
         &self.sizes
     }
 
-    pub fn max_primitives(&self) -> Option<usize> {
+    pub fn min_elements(&self) -> Option<u32> {
+        self.min_elements
+    }
+
+    pub fn max_elements(&self) -> Option<u32> {
+        self.max_elements
+    }
+
+    pub fn max_primitives(&self) -> Option<u32> {
         self.max_primitives
+    }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Deserialize,
+    serde::Serialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+pub enum HiddenReturnStrategy {
+    NormalParameter,
+    Special,
+}
+
+impl HiddenReturnStrategy {
+    fn from_name(name: &str) -> Result<Self, DeserialiseError> {
+        match name {
+            "normalparam" => Ok(Self::NormalParameter),
+            "special" => Ok(Self::Special),
+            _ => Err(DeserialiseError::invariant(
+                "unknown hidden return strategy",
+            )),
+        }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum PrototypeRuleCondition {
     Datatype(DatatypeFilter),
-    Varargs {
-        first: usize,
+    DatatypeAt {
+        index: i32,
+        datatype: DatatypeFilter,
     },
     Position {
-        index: usize,
+        index: i32,
     },
-    DatatypeAt {
-        index: usize,
-        datatype: DatatypeFilter,
+    Varargs {
+        first: Option<i32>,
+        last: Option<i32>,
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Deserialize,
+    serde::Serialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub enum PrototypeRuleAction {
     Consume {
         storage: RuleStorage,
     },
     ConsumeExtra {
+        storage: Option<RuleStorage>,
+        match_size: Option<bool>,
+    },
+    ConsumeRemaining {
         storage: RuleStorage,
+    },
+    ConvertToPtr,
+    ExtraStack {
+        after_bytes: Option<u16>,
+        after_storage: Option<RuleStorage>,
+    },
+    GotoStack,
+    HiddenReturn {
+        void_lock: bool,
+        strategy: Option<HiddenReturnStrategy>,
     },
     Join {
         align: bool,
         backfill: bool,
-        stack_spill: bool,
+        stack_spill: Option<bool>,
         reverse_justify: bool,
-        storage: Option<RuleStorage>,
-    },
-    JoinPerPrimitive {
+        reverse_significance: bool,
         storage: Option<RuleStorage>,
     },
     JoinDualClass {
-        stack_spill: bool,
+        storage: Option<RuleStorage>,
+        first_storage: Option<RuleStorage>,
+        second_storage: Option<RuleStorage>,
+        stack_spill: Option<bool>,
         fill_alternate: bool,
         reverse_justify: bool,
+        reverse_significance: bool,
     },
-    GotoStack,
-    ConvertToPtr,
-    HiddenReturn {
-        void_lock: bool,
+    JoinPerPrimitive {
+        storage: Option<RuleStorage>,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct PrototypeRule {
-    pub(crate) killed_by_call: bool,
-    pub(crate) conditions: Vec<PrototypeRuleCondition>,
-    pub(crate) actions: Vec<PrototypeRuleAction>,
+    killed_by_call: bool,
+    conditions: Vec<PrototypeRuleCondition>,
+    actions: Vec<PrototypeRuleAction>,
 }
 
 impl PrototypeRule {
-    pub fn from_xml(input: xml::Node) -> Result<Self, DeserialiseError> {
-        Self::from_xml_with(input, false)
+    pub fn from_xml(input: Node) -> Result<Self, DeserialiseError> {
+        Self::from_xml_with(false, input)
     }
 
-    pub fn from_xml_with(input: xml::Node, killed_by_call: bool) -> Result<Self, DeserialiseError> {
+    pub fn from_xml_with(killed_by_call: bool, input: Node) -> Result<Self, DeserialiseError> {
         if input.tag_name().name() != "rule" {
-            return Err(DeserialiseError::TagUnexpected(
-                input.tag_name().name().to_owned(),
-            ));
+            return Err(DeserialiseError::tag_unexpected(input.tag_name().name()));
         }
 
         let mut conditions = Vec::new();
         let mut actions = Vec::new();
 
-        for child in input.children().filter(xml::Node::is_element) {
+        for child in input.children().filter(Node::is_element) {
             match child.tag_name().name() {
                 "datatype" => {
                     conditions.push(PrototypeRuleCondition::Datatype(DatatypeFilter::from_xml(
@@ -516,8 +596,11 @@ impl PrototypeRule {
                     )?));
                 }
                 "varargs" => {
-                    let first = child.attribute_int_opt("first", 0usize)?;
-                    conditions.push(PrototypeRuleCondition::Varargs { first });
+                    let first = child.attribute("first").map(parse_int_radix).transpose()?;
+                    conditions.push(PrototypeRuleCondition::Varargs {
+                        first,
+                        last: child.attribute("last").map(parse_int_radix).transpose()?,
+                    });
                 }
                 "position" => {
                     let index = child.attribute_int("index")?;
@@ -527,9 +610,9 @@ impl PrototypeRule {
                     let index = child.attribute_int("index")?;
                     let inner = child
                         .children()
-                        .filter(xml::Node::is_element)
+                        .filter(Node::is_element)
                         .find(|n| n.tag_name().name() == "datatype")
-                        .ok_or(DeserialiseError::Invariant(
+                        .ok_or(DeserialiseError::invariant(
                             "datatype_at missing nested datatype",
                         ))?;
                     let datatype = DatatypeFilter::from_xml(inner)?;
@@ -540,15 +623,35 @@ impl PrototypeRule {
                     actions.push(PrototypeRuleAction::Consume { storage });
                 }
                 "consume_extra" => {
-                    let storage = RuleStorage::from_attr(child, "storage")?;
-                    actions.push(PrototypeRuleAction::ConsumeExtra { storage });
+                    let storage = RuleStorage::from_attr_opt(child, "storage")?;
+                    actions.push(PrototypeRuleAction::ConsumeExtra {
+                        storage,
+                        match_size: child
+                            .attribute("matchsize")
+                            .map(|_| child.attribute_bool("matchsize"))
+                            .transpose()?,
+                    });
                 }
+                "consume_remaining" => actions.push(PrototypeRuleAction::ConsumeRemaining {
+                    storage: RuleStorage::from_attr(child, "storage")?,
+                }),
+                "extra_stack" => actions.push(PrototypeRuleAction::ExtraStack {
+                    after_bytes: child
+                        .attribute("afterbytes")
+                        .map(parse_int_radix)
+                        .transpose()?,
+                    after_storage: RuleStorage::from_attr_opt(child, "afterstorage")?,
+                }),
                 "join" => {
                     actions.push(PrototypeRuleAction::Join {
                         align: child.attribute_bool_opt("align", false)?,
                         backfill: child.attribute_bool_opt("backfill", false)?,
-                        stack_spill: child.attribute_bool_opt("stackspill", false)?,
+                        stack_spill: child
+                            .attribute("stackspill")
+                            .map(|_| child.attribute_bool("stackspill"))
+                            .transpose()?,
                         reverse_justify: child.attribute_bool_opt("reversejustify", false)?,
+                        reverse_significance: child.attribute_bool_opt("reversesignif", false)?,
                         storage: RuleStorage::from_attr_opt(child, "storage")?,
                     });
                 }
@@ -559,9 +662,16 @@ impl PrototypeRule {
                 }
                 "join_dual_class" => {
                     actions.push(PrototypeRuleAction::JoinDualClass {
-                        stack_spill: child.attribute_bool_opt("stackspill", false)?,
+                        storage: RuleStorage::from_attr_opt(child, "storage")?,
+                        first_storage: RuleStorage::from_attr_opt(child, "a")?,
+                        second_storage: RuleStorage::from_attr_opt(child, "b")?,
+                        stack_spill: child
+                            .attribute("stackspill")
+                            .map(|_| child.attribute_bool("stackspill"))
+                            .transpose()?,
                         fill_alternate: child.attribute_bool_opt("fillalternate", false)?,
                         reverse_justify: child.attribute_bool_opt("reversejustify", false)?,
+                        reverse_significance: child.attribute_bool_opt("reversesignif", false)?,
                     });
                 }
                 "goto_stack" => {
@@ -573,10 +683,14 @@ impl PrototypeRule {
                 "hidden_return" => {
                     actions.push(PrototypeRuleAction::HiddenReturn {
                         void_lock: child.attribute_bool_opt("voidlock", false)?,
+                        strategy: child
+                            .attribute("strategy")
+                            .map(HiddenReturnStrategy::from_name)
+                            .transpose()?,
                     });
                 }
                 tag => {
-                    return Err(DeserialiseError::TagUnexpected(tag.to_owned()));
+                    return Err(DeserialiseError::tag_unexpected(tag));
                 }
             }
         }
@@ -602,229 +716,104 @@ impl PrototypeRule {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct Prototype {
-    pub(crate) name: String,
-    pub(crate) extra_pop: u64,
-    pub(crate) stack_shift: u64,
-    pub(crate) inputs: Vec<PrototypeEntry>,
-    pub(crate) outputs: Vec<PrototypeEntry>,
-    pub(crate) input_rules: Vec<PrototypeRule>,
-    pub(crate) output_rules: Vec<PrototypeRule>,
-    pub(crate) unaffected: Vec<PrototypeOperand>,
-    pub(crate) killed_by_call: Vec<PrototypeOperand>,
-    pub(crate) likely_trashed: Vec<PrototypeOperand>,
+pub struct InjectParameter {
+    name: String,
+    size: Option<u16>,
 }
 
-impl Prototype {
-    pub fn from_xml(input: xml::Node) -> Result<Self, DeserialiseError> {
-        if input.tag_name().name() != "prototype" {
-            return Err(DeserialiseError::TagUnexpected(
-                input.tag_name().name().to_owned(),
-            ));
-        }
+impl InjectParameter {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
 
-        let name = input.attribute_string("name")?;
-        let extra_pop = if matches!(input.attribute("extrapop"), Some("unknown")) {
-            0
-        } else {
-            input.attribute_int("extrapop")?
-        };
-        let stack_shift = input.attribute_int("stackshift")?;
+    pub fn size(&self) -> Option<u16> {
+        self.size
+    }
 
-        let mut inputs = Vec::new();
-        let mut outputs = Vec::new();
-        let mut input_rules = Vec::new();
-        let mut output_rules = Vec::new();
-        let mut unaffected = Vec::new();
-        let mut killed_by_call = Vec::new();
-        let mut likely_trashed = Vec::new();
-
-        for child in input.children().filter(xml::Node::is_element) {
-            match child.tag_name().name() {
-                "input" => {
-                    for c in child.children().filter(xml::Node::is_element) {
-                        match c.tag_name().name() {
-                            "pentry" => inputs.push(PrototypeEntry::from_xml(c, false)?),
-                            "rule" => input_rules.push(PrototypeRule::from_xml(c)?),
-                            _ => (),
-                        }
-                    }
-                }
-                "output" => {
-                    let killed = child.attribute_bool("killedbycall").unwrap_or_default();
-                    for c in child.children().filter(xml::Node::is_element) {
-                        match c.tag_name().name() {
-                            "pentry" => outputs.push(PrototypeEntry::from_xml(c, killed)?),
-                            "rule" => output_rules.push(PrototypeRule::from_xml_with(c, killed)?),
-                            _ => (),
-                        }
-                    }
-                }
-                "unaffected" => {
-                    let mut values = child
-                        .children()
-                        .filter(xml::Node::is_element)
-                        .filter_map(|op| PrototypeOperand::from_xml(op).ok())
-                        .collect::<Vec<_>>();
-                    unaffected.append(&mut values);
-                }
-                "killedbycall" => {
-                    let mut values = child
-                        .children()
-                        .filter(xml::Node::is_element)
-                        .filter_map(|op| PrototypeOperand::from_xml(op).ok())
-                        .collect::<Vec<_>>();
-                    killed_by_call.append(&mut values);
-                }
-                "likelytrash" => {
-                    let mut values = child
-                        .children()
-                        .filter(xml::Node::is_element)
-                        .filter_map(|op| PrototypeOperand::from_xml(op).ok())
-                        .collect::<Vec<_>>();
-                    likely_trashed.append(&mut values);
-                }
-                _ => (),
-            }
-        }
-
+    pub fn from_xml(input: Node) -> Result<Self, DeserialiseError> {
         Ok(Self {
-            name,
-            extra_pop,
-            stack_shift,
-            inputs,
-            outputs,
-            input_rules,
-            output_rules,
-            unaffected,
-            killed_by_call,
-            likely_trashed,
+            name: input.attribute_string("name")?,
+            size: input.attribute("size").map(parse_int_radix).transpose()?,
         })
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct CompilerSpec {
-    pub(crate) name: String,
-    pub(crate) data_organisation: Option<DataOrganisation>,
-    pub(crate) stack_pointer: StackPointer,
-    pub(crate) return_address: Option<ReturnAddress>,
-    pub(crate) default_prototype: Prototype,
-    pub(crate) additional_prototypes: Vec<Prototype>,
-    pub(crate) call_fixups: Vec<CallFixup>,
+pub struct InjectPayload {
+    body: Option<String>,
+    inputs: Vec<InjectParameter>,
+    outputs: Vec<InjectParameter>,
+    param_shift: i64,
+    dynamic: bool,
+    incidental_copy: bool,
 }
 
-impl CompilerSpec {
-    pub fn named_from_xml<N: Into<String>>(
-        name: N,
-        input: xml::Node,
-    ) -> Result<Self, DeserialiseError> {
-        if input.tag_name().name() != "compiler_spec" {
-            return Err(DeserialiseError::TagUnexpected(
-                input.tag_name().name().to_owned(),
-            ));
-        }
+impl InjectPayload {
+    pub fn body(&self) -> Option<&str> {
+        self.body.as_deref()
+    }
 
-        let mut data_organisation = None;
-        let mut stack_pointer = None;
-        let mut return_address = None;
-        let mut default_prototype = None;
-        let mut additional_prototypes = Vec::new();
-        let mut call_fixups = Vec::new();
+    pub fn inputs(&self) -> &[InjectParameter] {
+        &self.inputs
+    }
 
-        for child in input.children().filter(xml::Node::is_element) {
+    pub fn outputs(&self) -> &[InjectParameter] {
+        &self.outputs
+    }
+
+    pub fn param_shift(&self) -> i64 {
+        self.param_shift
+    }
+
+    pub fn dynamic(&self) -> bool {
+        self.dynamic
+    }
+
+    pub fn incidental_copy(&self) -> bool {
+        self.incidental_copy
+    }
+
+    pub fn from_xml(input: Node) -> Result<Self, DeserialiseError> {
+        let mut body = None;
+        let mut inputs = Vec::new();
+        let mut outputs = Vec::new();
+        let dynamic = input.attribute_bool_opt("dynamic", false)?;
+        for child in input.children().filter(Node::is_element) {
             match child.tag_name().name() {
-                "data_organization" => {
-                    data_organisation = Some(DataOrganisation::from_xml(child)?);
-                }
-                "stackpointer" => {
-                    stack_pointer = Some(StackPointer::from_xml(child)?);
-                }
-                "returnaddress" => {
-                    return_address = Some(ReturnAddress::from_xml(child)?);
-                }
-                "default_proto" => {
-                    let proto = child.children().find(xml::Node::is_element);
-                    if proto.is_none() {
-                        return Err(DeserialiseError::Invariant(
-                            "compiler specification does not define prototype for default prototype",
+                "input" => inputs.push(InjectParameter::from_xml(child)?),
+                "output" => outputs.push(InjectParameter::from_xml(child)?),
+                "body" => {
+                    if body.is_some() {
+                        return Err(DeserialiseError::invariant(
+                            "injection payload has multiple bodies",
                         ));
                     }
-                    default_prototype = Some(Prototype::from_xml(proto.unwrap())?);
+                    body = Some(child.text().unwrap_or_default().to_owned());
                 }
-                "prototype" => {
-                    additional_prototypes.push(Prototype::from_xml(child)?);
-                }
-                "callfixup" => {
-                    call_fixups.push(CallFixup::from_xml(child)?);
-                }
-                _ => (),
+                tag => return Err(DeserialiseError::tag_unexpected(tag)),
             }
         }
-
-        if stack_pointer.is_none() {
-            return Err(DeserialiseError::Invariant(
-                "compiler specification does not define stack pointer configuration",
+        if body.is_none() && !dynamic {
+            return Err(DeserialiseError::invariant(
+                "injection payload requires a body or dynamic provider",
             ));
         }
-
         Ok(Self {
-            name: name.into(),
-            data_organisation,
-            stack_pointer: stack_pointer.unwrap(),
-            return_address,
-            default_prototype: default_prototype.unwrap(),
-            additional_prototypes,
-            call_fixups,
+            body,
+            inputs,
+            outputs,
+            param_shift: input.attribute_int_opt("paramshift", 0)?,
+            dynamic,
+            incidental_copy: input.attribute_bool_opt("incidentalcopy", false)?,
         })
-    }
-
-    pub fn named_from_file<N: Into<String>, P: AsRef<Path>>(
-        name: N,
-        path: P,
-    ) -> Result<Self, LanguageError> {
-        let path = path.as_ref();
-        let mut file = File::open(path).map_err(|error| LanguageError::ParseFile {
-            path: path.to_owned(),
-            error,
-        })?;
-
-        let mut input = String::new();
-        file.read_to_string(&mut input)
-            .map_err(|error| LanguageError::ParseFile {
-                path: path.to_owned(),
-                error,
-            })?;
-
-        Self::named_from_str(name, &input).map_err(|error| LanguageError::DeserialiseFile {
-            path: path.to_owned(),
-            error,
-        })
-    }
-
-    pub fn named_from_str<N: Into<String>, S: AsRef<str>>(
-        name: N,
-        input: S,
-    ) -> Result<Self, DeserialiseError> {
-        let document = xml::Document::parse(input.as_ref()).map_err(DeserialiseError::Xml)?;
-
-        let res = Self::named_from_xml(name, document.root_element());
-
-        #[cfg(feature = "tracing")]
-        if let Err(ref e) = res {
-            tracing::debug!("load failed: {:?}", e);
-        }
-
-        res
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct CallFixup {
     name: String,
-    shift: i64,
     targets: UstrSet,
-    pcode: String,
+    payload: InjectPayload,
 }
 
 impl CallFixup {
@@ -836,75 +825,83 @@ impl CallFixup {
         &self.targets
     }
 
+    pub fn payload(&self) -> &InjectPayload {
+        &self.payload
+    }
+
     pub fn pcode(&self) -> &str {
-        &self.pcode
+        self.payload.body().unwrap_or_default()
     }
 
     pub fn shift(&self) -> i64 {
-        self.shift
+        self.payload.param_shift()
+    }
+
+    pub fn from_xml(input: Node) -> Result<Self, DeserialiseError> {
+        if input.tag_name().name() != "callfixup" {
+            return Err(DeserialiseError::tag_unexpected(input.tag_name().name()));
+        }
+        let mut targets = UstrSet::default();
+        let mut payload = None;
+        for child in input.children().filter(Node::is_element) {
+            match child.tag_name().name() {
+                "target" => {
+                    targets.insert(child.attribute_string("name")?.into());
+                }
+                "pcode" => {
+                    if payload.is_some() {
+                        return Err(DeserialiseError::invariant(
+                            "call fixup has multiple payloads",
+                        ));
+                    }
+                    payload = Some(InjectPayload::from_xml(child)?);
+                }
+                tag => return Err(DeserialiseError::tag_unexpected(tag)),
+            }
+        }
+        Ok(Self {
+            name: input.attribute_string("name")?,
+            targets,
+            payload: payload.ok_or(DeserialiseError::invariant(
+                "call fixup requires an injection payload",
+            ))?,
+        })
     }
 }
 
-impl CallFixup {
-    pub fn from_xml(input: xml::Node) -> Result<Self, DeserialiseError> {
-        if input.tag_name().name() != "callfixup" {
-            return Err(DeserialiseError::TagUnexpected(
-                input.tag_name().name().to_owned(),
-            ));
-        }
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct UserOpFixup {
+    target_op: UserOpStr,
+    payload: InjectPayload,
+}
 
-        let name = input.attribute_string("name")?;
+impl UserOpFixup {
+    pub fn target_op(&self) -> UserOpStr {
+        self.target_op
+    }
 
-        let mut targets = UstrSet::default();
-        let mut pcode = None;
-        let mut shift = 0;
+    pub fn payload(&self) -> &InjectPayload {
+        &self.payload
+    }
 
-        for child in input.children().filter(xml::Node::is_element) {
-            match child.tag_name().name() {
-                "target" => {
-                    let name = child.attribute_string("name")?;
-                    targets.insert(name.into());
-                }
-                "pcode" => {
-                    if pcode.is_some() {
-                        return Err(DeserialiseError::Invariant(
-                            "call fixup has multiple bodies",
-                        ));
-                    }
-
-                    // first child should be pcode
-                    let Some(elt) = child.first_element_child() else {
-                        return Err(DeserialiseError::Invariant(
-                            "call fixup body does not contain any injectable pcode",
-                        ));
-                    };
-
-                    if elt.tag_name().name() != "body" {
-                        return Err(DeserialiseError::TagUnexpected(
-                            elt.tag_name().name().to_owned(),
-                        ));
-                    }
-
-                    if let Some(text) = elt.text().map(ToOwned::to_owned) {
-                        shift = child.attribute_int_opt("paramshift", 0i64)?;
-                        pcode = Some(text);
-                    }
-                }
-                _ => (),
+    pub fn from_xml(input: Node) -> Result<Self, DeserialiseError> {
+        let mut payload = None;
+        for child in input.children().filter(Node::is_element) {
+            if child.tag_name().name() != "pcode" {
+                return Err(DeserialiseError::tag_unexpected(child.tag_name().name()));
             }
+            if payload.is_some() {
+                return Err(DeserialiseError::invariant(
+                    "callother fixup has multiple payloads",
+                ));
+            }
+            payload = Some(InjectPayload::from_xml(child)?);
         }
-
-        if pcode.is_none() {
-            return Err(DeserialiseError::Invariant(
-                "call fixup does not define any injectable pcode",
-            ));
-        }
-
         Ok(Self {
-            name,
-            targets,
-            shift,
-            pcode: pcode.unwrap(),
+            target_op: input.attribute_str("targetop")?.into(),
+            payload: payload.ok_or(DeserialiseError::invariant(
+                "callother fixup requires an injection payload",
+            ))?,
         })
     }
 }

@@ -3,7 +3,10 @@ use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use flate2::read::GzDecoder;
+use fugue_sleigh_language::float_format::FloatFormat;
+use fugue_sleigh_language::processor::Processor as SleighProcessor;
 use fugue_sleigh_language::{Language as SleighLanguage, LanguageDB, LanguageDef, LanguageError};
+use itertools::Itertools;
 use rkyv::rancor::Error as RkyvError;
 use thiserror::Error;
 
@@ -13,6 +16,9 @@ use crate::dynamic::constructor::Constructor;
 use crate::dynamic::convention::Convention;
 use crate::dynamic::install::Install;
 use crate::dynamic::operand::OperandFilter;
+use crate::dynamic::processor::{
+    ContextSet, DefaultSymbol, RegisterLanes, SegmentOp, TrackedSet, VolatileRange,
+};
 use crate::dynamic::resolve::DecisionNode;
 use crate::dynamic::space::AddressSpace;
 use crate::dynamic::symbol::Symbol;
@@ -22,6 +28,7 @@ use crate::dynamic::{LanguageLoadError, registry};
 use crate::language::Language as StaticLanguage;
 use crate::pattern::PatternOp;
 use crate::pcode::Varnode;
+use crate::processor::SegmentedAddressSpace;
 use crate::template::{ConstTpl, HandleTpl, VarnodeTpl};
 
 #[derive(Debug, Error)]
@@ -37,6 +44,12 @@ pub enum LanguageBuildError {
     #[error("cannot load language database from `{path}`: {source}")]
     LanguageDB {
         path: PathBuf,
+        #[source]
+        source: LanguageError,
+    },
+    #[error("cannot resolve processor specification for `{language}`: {source}")]
+    ProcessorSpec {
+        language: String,
         #[source]
         source: LanguageError,
     },
@@ -82,6 +95,15 @@ pub struct Language {
     #[allow(clippy::type_complexity)]
     pub(crate) call_preserved_registers: Box<[(Box<str>, Box<[Varnode]>)]>,
     pub(crate) conventions: Box<[(Box<str>, Convention)]>,
+    pub(crate) context_sets: Box<[ContextSet]>,
+    pub(crate) tracked_sets: Box<[TrackedSet]>,
+    pub(crate) volatile_ranges: Box<[VolatileRange]>,
+    pub(crate) register_lanes: Box<[RegisterLanes]>,
+    pub(crate) default_symbols: Box<[DefaultSymbol]>,
+    pub(crate) float_formats: Box<[FloatFormat]>,
+    pub(crate) properties: Box<[(Box<str>, Box<str>)]>,
+    pub(crate) segment_ops: Box<[SegmentOp]>,
+    pub(crate) segmented_address_space: Option<SegmentedAddressSpace>,
     pub(crate) space_names: Box<[Box<str>]>,
 }
 
@@ -163,6 +185,15 @@ impl Language {
             context_defaults,
             call_preserved_registers,
             conventions,
+            context_sets,
+            tracked_sets,
+            volatile_ranges,
+            register_lanes,
+            default_symbols,
+            float_formats,
+            properties,
+            segment_ops,
+            segmented_address_space,
             space_names,
         } = self;
 
@@ -224,14 +255,27 @@ impl Language {
             context_defaults: context_defaults.install(),
             call_preserved_registers: call_preserved_registers.install(),
             conventions: conventions.install(),
+            context_sets: context_sets.install(),
+            tracked_sets: tracked_sets.install(),
+            volatile_ranges: volatile_ranges.install(),
+            register_lanes: register_lanes.install(),
+            default_symbols: default_symbols.install(),
+            float_formats: float_formats.install(),
+            properties: properties.install(),
+            segment_ops: segment_ops.install(),
+            segmented_address_space,
             data: language_data,
         }))
     }
 
-    pub(crate) fn from_sleigh(sleigh: &SleighLanguage, definition: &LanguageDef) -> Self {
+    pub(crate) fn from_sleigh(
+        sleigh: &SleighLanguage,
+        definition: &LanguageDef,
+        processor: &SleighProcessor,
+    ) -> Self {
         let tables = Tables::new(sleigh);
-        let context_defaults = definition
-            .context_set()
+        let context_defaults = processor
+            .context_defaults()
             .map(|(name, value)| (Box::<str>::from(name), value))
             .collect();
         let truncated_spaces = definition.truncated_spaces();
@@ -311,7 +355,7 @@ impl Language {
                 let registers = sleigh
                     .call_preserved_registers(compiler)
                     .expect("compiler convention comes from the language")
-                    .into_iter()
+                    .iter()
                     .map(|varnode| {
                         Varnode::new(
                             u8::try_from(varnode.space().index())
@@ -403,6 +447,30 @@ impl Language {
             context_defaults,
             call_preserved_registers,
             conventions,
+            context_sets: processor.context_sets().iter().map(Into::into).collect(),
+            tracked_sets: processor.tracked_sets().iter().map(Into::into).collect(),
+            volatile_ranges: processor.volatile_ranges().iter().map(Into::into).collect(),
+            register_lanes: processor.register_lanes().iter().map(Into::into).collect(),
+            default_symbols: processor.default_symbols().iter().map(Into::into).collect(),
+            properties: processor
+                .properties()
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        Box::<str>::from(key.as_str()),
+                        Box::<str>::from(value.as_str()),
+                    )
+                })
+                .sorted_unstable_by(|(a, _), (b, _)| a.cmp(b))
+                .collect(),
+            segment_ops: processor.segment_ops().iter().map(Into::into).collect(),
+            segmented_address_space: processor.segmented_address_space().map(Into::into),
+            float_formats: sleigh
+                .float_formats()
+                .values()
+                .map(|format| (**format).clone())
+                .sorted_unstable_by_key(FloatFormat::size)
+                .collect(),
             space_names,
         }
     }
@@ -443,7 +511,17 @@ impl Language {
             source,
         })?;
 
-        Ok(Self::from_sleigh(&sleigh, definition.language()))
+        let processor =
+            SleighProcessor::from_file(&sleigh, definition.language().processor_spec_file())
+                .map_err(|source| LanguageBuildError::ProcessorSpec {
+                    language: language_def.to_owned(),
+                    source,
+                })?;
+        Ok(Self::from_sleigh(
+            &sleigh,
+            definition.language(),
+            &processor,
+        ))
     }
 }
 

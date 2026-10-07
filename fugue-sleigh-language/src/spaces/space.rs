@@ -3,8 +3,8 @@ use std::mem;
 use std::ops::{Deref, DerefMut};
 
 use bitflags::bitflags;
-use fugue_sleigh_marshal::sla::*;
 use fugue_sleigh_marshal::Decoder;
+use fugue_sleigh_marshal::sla::*;
 
 use crate::deserialise::{DeserialiseError, XmlExt};
 use crate::util::calculate_mask;
@@ -455,7 +455,7 @@ impl AddressSpace {
                 deadcode_delay,
             }))
         } else {
-            Err(DeserialiseError::ElementUnexpected(id))
+            Err(DeserialiseError::element_unexpected(id))
         }
     }
 
@@ -505,7 +505,7 @@ impl AddressSpace {
                 delay,
                 deadcode_delay,
             })),
-            tag => Err(DeserialiseError::TagUnexpected(tag.to_owned())),
+            tag => Err(DeserialiseError::tag_unexpected(tag)),
         }
     }
 }

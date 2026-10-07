@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
-use fugue_sleigh_marshal::sla::*;
 use fugue_sleigh_marshal::Decoder;
+use fugue_sleigh_marshal::sla::*;
 
 use crate::deserialise::{DeserialiseError, XmlExt};
 use crate::opcode::Opcode;
@@ -77,7 +77,7 @@ impl ConstTpl {
                     1 => HandleKind::Offset,
                     2 => HandleKind::Size,
                     3 => HandleKind::OffsetPlus(input.read_unsigned_integer_with_id(&ATTRIB_PLUS)?),
-                    _ => return Err(DeserialiseError::Invariant("invalid handle kind")),
+                    _ => return Err(DeserialiseError::invariant("invalid handle kind")),
                 },
             ),
             ELEM_CONST_START_ID => Self::Start,
@@ -90,7 +90,7 @@ impl ConstTpl {
                     .read_space_with_id(&ATTRIB_SPACE)?
                     .index()
                     .and_then(|index| spaces.get(index).map(|spc| spc.id()))
-                    .ok_or(DeserialiseError::Invariant("invalid space"))?,
+                    .ok_or(DeserialiseError::invariant("invalid space"))?,
             ),
             ELEM_CONST_RELATIVE_ID => {
                 Self::Relative(input.read_unsigned_integer_with_id(&ATTRIB_VAL)?)
@@ -99,7 +99,7 @@ impl ConstTpl {
             ELEM_CONST_FLOWREF_SIZE_ID => Self::FlowRefSize,
             ELEM_CONST_FLOWDEST_ID => Self::FlowDest,
             ELEM_CONST_FLOWDEST_SIZE_ID => Self::FlowDestSize,
-            _ => return Err(DeserialiseError::Invariant("invalid ConstTpl type")),
+            _ => return Err(DeserialiseError::invariant("invalid ConstTpl type")),
         };
 
         Ok(val)
@@ -110,20 +110,20 @@ impl ConstTpl {
             match input
                 .attribute("type")
                 .or_else(|| input.tag_name().name().strip_prefix("const_"))
-                .ok_or(DeserialiseError::AttributeExpected("type"))?
+                .ok_or(DeserialiseError::attribute_expected("type"))?
             {
                 "real" => Self::Real(input.attribute_int("val")?),
                 "handle" => Self::Handle(
                     input.attribute_int("val")?,
                     match input
                         .attribute("s")
-                        .ok_or(DeserialiseError::AttributeExpected("s"))?
+                        .ok_or(DeserialiseError::attribute_expected("s"))?
                     {
                         "space" | "0" => HandleKind::Space,
                         "offset" | "1" => HandleKind::Offset,
                         "size" | "2" => HandleKind::Size,
                         "offset_plus" | "3" => HandleKind::OffsetPlus(input.attribute_int("plus")?),
-                        _ => return Err(DeserialiseError::Invariant("invalid handle kind")),
+                        _ => return Err(DeserialiseError::invariant("invalid handle kind")),
                     },
                 ),
                 "start" => Self::Start,
@@ -142,7 +142,7 @@ impl ConstTpl {
                 "flowref_size" => Self::FlowRefSize,
                 "flowdest" => Self::FlowDest,
                 "flowdest_size" => Self::FlowDestSize,
-                _ => return Err(DeserialiseError::Invariant("invalid ConstTpl type")),
+                _ => return Err(DeserialiseError::invariant("invalid ConstTpl type")),
             },
         )
     }
@@ -223,23 +223,23 @@ impl HandleTpl {
         Ok(Self {
             space: children
                 .next()
-                .ok_or(DeserialiseError::Invariant("space missing for HandleTpl"))??,
+                .ok_or(DeserialiseError::invariant("space missing for HandleTpl"))??,
             size: children
                 .next()
-                .ok_or(DeserialiseError::Invariant("size missing for HandleTpl"))??,
-            ptr_space: children.next().ok_or(DeserialiseError::Invariant(
+                .ok_or(DeserialiseError::invariant("size missing for HandleTpl"))??,
+            ptr_space: children.next().ok_or(DeserialiseError::invariant(
                 "ptr_space missing for HandleTpl",
             ))??,
-            ptr_offset: children.next().ok_or(DeserialiseError::Invariant(
+            ptr_offset: children.next().ok_or(DeserialiseError::invariant(
                 "ptr_offset missing for HandleTpl",
             ))??,
-            ptr_size: children.next().ok_or(DeserialiseError::Invariant(
+            ptr_size: children.next().ok_or(DeserialiseError::invariant(
                 "ptr_size missing for HandleTpl",
             ))??,
-            tmp_space: children.next().ok_or(DeserialiseError::Invariant(
+            tmp_space: children.next().ok_or(DeserialiseError::invariant(
                 "tmp_space missing for HandleTpl",
             ))??,
-            tmp_offset: children.next().ok_or(DeserialiseError::Invariant(
+            tmp_offset: children.next().ok_or(DeserialiseError::invariant(
                 "tmp_offset missing for HandleTpl",
             ))??,
         })
@@ -301,13 +301,13 @@ impl VarnodeTpl {
         Ok(Self {
             space: children
                 .next()
-                .ok_or(DeserialiseError::Invariant("space missing for VarnodeTpl"))??,
+                .ok_or(DeserialiseError::invariant("space missing for VarnodeTpl"))??,
             offset: children
                 .next()
-                .ok_or(DeserialiseError::Invariant("offset missing for VarnodeTpl"))??,
+                .ok_or(DeserialiseError::invariant("offset missing for VarnodeTpl"))??,
             size: children
                 .next()
-                .ok_or(DeserialiseError::Invariant("size missing for VarnodeTpl"))??,
+                .ok_or(DeserialiseError::invariant("size missing for VarnodeTpl"))??,
         })
     }
 }
@@ -350,7 +350,7 @@ impl OpTpl {
 
         let opcode = input
             .read_signed_integer_with_id(&ATTRIB_CODE)
-            .map_err(DeserialiseError::from)
+            .map_err(DeserialiseError::decoder)
             .and_then(Opcode::try_from)?;
 
         let elem = input.open_element()?;
@@ -379,7 +379,7 @@ impl OpTpl {
         let opcode = input
             .attribute("code")
             .map(Opcode::from_str)
-            .ok_or(DeserialiseError::AttributeExpected("code"))??;
+            .ok_or(DeserialiseError::attribute_expected("code"))??;
 
         let mut children = input.children().filter(xml::Node::is_element);
 
@@ -393,7 +393,7 @@ impl OpTpl {
                 }
                 .transpose()
             })
-            .ok_or(DeserialiseError::Invariant("output missing for OpTpl"))??;
+            .ok_or(DeserialiseError::invariant("output missing for OpTpl"))??;
 
         let inputs = children
             .map(|v| VarnodeTpl::from_xml(v, spaces))
@@ -482,13 +482,9 @@ impl ConstructTpl {
     pub fn from_xml(input: xml::Node, spaces: &AddressSpaces) -> Result<Self, DeserialiseError> {
         let delay_slot = input.attribute_int_opt("delay", 0)?;
         let labels = input.attribute_int_opt("labels", 0)?;
-        let section_id = input.attribute_int_opt::<i64>("section", -1).map(|i| {
-            if i < 0 {
-                None
-            } else {
-                Some(i as usize)
-            }
-        })?;
+        let section_id = input
+            .attribute_int_opt::<i64>("section", -1)
+            .map(|i| if i < 0 { None } else { Some(i as usize) })?;
         let mut children = input.children().filter(xml::Node::is_element);
 
         let result = children
@@ -501,7 +497,7 @@ impl ConstructTpl {
                 }
                 .transpose()
             })
-            .ok_or(DeserialiseError::Invariant(
+            .ok_or(DeserialiseError::invariant(
                 "result missing for ConstructTpl",
             ))??;
 

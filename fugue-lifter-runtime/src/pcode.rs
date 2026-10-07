@@ -2,6 +2,7 @@ use std::fmt::{self, Debug, Display};
 use std::mem;
 
 use arrayvec::ArrayVec;
+use fugue_sleigh_language::varnode::VarnodeData;
 use itertools::{Itertools, Position};
 
 use crate::calculate_mask;
@@ -759,6 +760,16 @@ impl Varnode {
         self.space == other.space
             && self.offset < other.offset + other.size as u64
             && other.offset < self.offset + self.size as u64
+    }
+}
+
+impl From<&VarnodeData> for Varnode {
+    fn from(varnode: &VarnodeData) -> Self {
+        Self::new(
+            u8::try_from(varnode.space().index()).expect("address-space identifier fits in u8"),
+            varnode.offset(),
+            u16::try_from(varnode.size()).expect("register size fits in u16"),
+        )
     }
 }
 

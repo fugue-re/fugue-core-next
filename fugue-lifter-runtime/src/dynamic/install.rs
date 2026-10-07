@@ -1,7 +1,12 @@
+use fugue_sleigh_language::compiler::PrototypeRuleAction;
+use fugue_sleigh_language::float_format::FloatFormat;
+
 use crate::context::{ContextBitRange, ContextPostAction, ContextPreAction};
+use crate::convention::{JoinPiece, PreferredVarnodeSplit, PrototypeReference};
 use crate::operand::Operand;
 use crate::pattern::PatternOp;
 use crate::pcode::Varnode;
+use crate::processor::SegmentedAddressSpace;
 use crate::template::{ConstTpl, HandleTpl, VarnodeTpl};
 
 pub(crate) trait Install {
@@ -69,18 +74,24 @@ macro_rules! install_identity {
 }
 
 install_identity!(
+    ConstTpl,
+    ContextBitRange,
+    ContextPostAction,
+    ContextPreAction,
+    FloatFormat,
+    HandleTpl,
+    JoinPiece,
+    Operand,
+    PatternOp,
+    PreferredVarnodeSplit,
+    PrototypeReference,
+    PrototypeRuleAction,
+    SegmentedAddressSpace,
+    Varnode,
+    VarnodeTpl,
+    i64,
     u16,
     u32,
     u64,
-    i64,
     usize,
-    Varnode,
-    ContextBitRange,
-    ContextPreAction,
-    ContextPostAction,
-    Operand,
-    PatternOp,
-    ConstTpl,
-    HandleTpl,
-    VarnodeTpl,
 );
