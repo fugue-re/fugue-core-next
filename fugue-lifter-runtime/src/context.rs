@@ -305,6 +305,7 @@ impl Default for FreeArray {
 
 pub const CONTEXT_CACHE_BITS: usize = 8;
 pub const CONTEXT_CACHE_SIZE: usize = 1 << CONTEXT_CACHE_BITS;
+const CONTEXT_CACHE_WORDS: usize = CONTEXT_CACHE_SIZE.div_ceil(u64::BITS as usize);
 
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -345,6 +346,7 @@ impl ContextCacheEntry {
 pub struct ContextCache {
     #[cfg_attr(feature = "serde", serde(with = "serde_big_array::BigArray"))]
     entries: [ContextCacheEntry; CONTEXT_CACHE_SIZE],
+    occupied: [u64; CONTEXT_CACHE_WORDS],
     shift: u32,
 }
 
@@ -358,13 +360,16 @@ impl ContextCache {
     pub fn new(alignment: usize) -> Self {
         Self {
             entries: array::from_fn(|_| ContextCacheEntry::default()),
+            occupied: [0; CONTEXT_CACHE_WORDS],
             shift: u32::try_from(alignment.wrapping_sub(1)).expect("address alignment fits in u32"),
         }
     }
 
     #[inline(always)]
     pub fn entry(&mut self, address: u64) -> (bool, &mut ContextCacheEntry) {
-        let cache = &mut self.entries[self.index(address)];
+        let index = self.index(address);
+        self.occupied[index / u64::BITS as usize] |= 1 << (index % u64::BITS as usize);
+        let cache = &mut self.entries[index];
         let is_hit = cache.address == address;
         cache.address = address;
         (is_hit, cache)
@@ -378,9 +383,11 @@ impl ContextCache {
 
     #[inline(always)]
     pub fn invalidate(&mut self, address: u64) {
-        let cache = &mut self.entries[self.index(address)];
+        let index = self.index(address);
+        let cache = &mut self.entries[index];
         if cache.address == address {
             cache.address = u64::MAX;
+            self.occupied[index / u64::BITS as usize] &= !(1 << (index % u64::BITS as usize));
         }
     }
 
@@ -393,8 +400,13 @@ impl ContextCache {
 
     #[inline(always)]
     pub fn clear(&mut self) {
-        for entry in &mut self.entries {
-            entry.address = u64::MAX;
+        for (word_index, occupied) in self.occupied.iter_mut().enumerate() {
+            let mut occupied = mem::take(occupied);
+            while occupied != 0 {
+                let bit = occupied.trailing_zeros() as usize;
+                self.entries[word_index * u64::BITS as usize + bit].address = u64::MAX;
+                occupied &= occupied - 1;
+            }
         }
     }
 
@@ -693,9 +705,12 @@ impl ContextDatabase {
     }
 
     pub fn clear(&mut self) {
+        let clear_cache = !self.database.is_empty();
         self.database.clear();
         self.trackbase.clear();
-        self.clear_cache();
+        if clear_cache {
+            self.clear_cache();
+        }
     }
 }
 

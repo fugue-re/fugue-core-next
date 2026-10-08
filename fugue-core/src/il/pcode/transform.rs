@@ -37,9 +37,12 @@ impl PCodeCanonicaliser {
             let Some(kind) = IlEdgeKinds::from_flow(flow.kind()) else {
                 continue;
             };
-            match by_target.iter_mut().find(|(to, _)| *to == flow.to()) {
+            match by_target
+                .iter_mut()
+                .find(|(to, _)| *to == flow.to().address())
+            {
                 Some((_, kinds)) => *kinds |= kind,
-                None => by_target.push((flow.to(), kind)),
+                None => by_target.push((flow.to().address(), kind)),
             }
         }
 

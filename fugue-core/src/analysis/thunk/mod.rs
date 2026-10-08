@@ -12,7 +12,7 @@ use crate::engine::AnalysisContext;
 use crate::il::common::{IlArtefact, IlError, RegisterId};
 use crate::il::ecode::analysis::ECodeBlockArgInputs;
 use crate::il::ecode::{ECodeIr, ECodeOpcode};
-use crate::ir::{Address, FunctionId};
+use crate::ir::{Address, AddressWithContext, FunctionId};
 use crate::lifter::TrackedContext;
 use crate::project::Project;
 use crate::storage::SegmentMappingCache;
@@ -154,7 +154,7 @@ impl AnalysisPass<StructuredFunctionContext> for ThunkTargetRecovery {
             return Ok(());
         };
 
-        let Some((canonical, _)) = value
+        let Some((canonical, context)) = value
             .to_u64()
             .and_then(|value| arch.canonicalise_address(value))
         else {
@@ -174,7 +174,7 @@ impl AnalysisPass<StructuredFunctionContext> for ThunkTargetRecovery {
             .function_mut()
             .insn_mut(id)
             .expect("the thunk branch exists")
-            .set_indirect_target(target);
+            .set_indirect_target(AddressWithContext::new(target, context));
 
         Ok(())
     }

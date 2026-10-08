@@ -920,7 +920,7 @@ fn test_engine_startup_reaches_entry() -> Result<(), Box<dyn Error>> {
         .targets()
         .iter()
         .filter(|target| target.kind().is_call())
-        .map(|target| target.to())
+        .map(|target| target.to().address())
         .collect::<BTreeSet<_>>();
     let callees = reader
         .callee_page(entry, None, 4096)?
@@ -1428,7 +1428,10 @@ fn test_non_returning_calls_have_no_fall_through() -> Result<(), Box<dyn Error>>
                 let Some(target) = block.call_target() else {
                     continue;
                 };
-                if !block.is_call() || block.is_branch() || !view.is_non_returning_at(target) {
+                if !block.is_call()
+                    || block.is_branch()
+                    || !view.is_non_returning_at(target.address())
+                {
                     continue;
                 }
 

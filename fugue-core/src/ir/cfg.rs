@@ -1,4 +1,4 @@
-use crate::ir::{Address, Insn, InsnTarget};
+use crate::ir::{AddressWithContext, Insn, InsnTarget};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FlowTargets {
@@ -49,14 +49,14 @@ impl FlowKind {
         use InsnTarget::*;
 
         let kind = match target {
-            IntraBlk(target, false) if target.position() == 0 => {
+            IntraBlk(_, 0, false) => {
                 if insn.has_fall_through() {
                     Self::CBranch
                 } else {
                     Self::Branch
                 }
             }
-            IntraBlk(target, true) if target.position() == 0 => Self::Fall,
+            IntraBlk(_, 0, true) => Self::Fall,
             InterBlk(_) => {
                 if insn.has_fall_through() {
                     Self::CBranch
@@ -125,38 +125,43 @@ impl FlowKind {
     rkyv::Deserialize,
 )]
 pub struct FlowTarget {
-    from: Address,
-    to: Address,
+    from: AddressWithContext,
+    to: AddressWithContext,
     kind: FlowKind,
 }
 
 impl FlowTarget {
-    pub fn new(from: impl Into<Address>, to: impl Into<Address>, kind: FlowKind) -> Self {
-        FlowTarget {
+    pub fn new(
+        from: impl Into<AddressWithContext>,
+        to: impl Into<AddressWithContext>,
+        kind: FlowKind,
+    ) -> Self {
+        Self {
             from: from.into(),
             to: to.into(),
             kind,
         }
     }
 
-    pub fn from_insn_target(
-        insn: &Insn,
-        target: &InsnTarget,
-        to: impl Into<Address>,
-    ) -> Option<Self> {
+    pub fn from_insn_target(insn: &Insn, target: &InsnTarget) -> Option<Self> {
         let kind = FlowKind::from_insn_target(insn, target)?;
-        Some(Self::new(insn.address(), to.into(), kind))
+        let (_, to) = target.resolved()?;
+        Some(Self::new(insn.address(), to.clone(), kind))
     }
 
-    pub fn from(&self) -> Address {
-        self.from
+    pub fn from(&self) -> &AddressWithContext {
+        &self.from
     }
 
-    pub fn to(&self) -> Address {
-        self.to
+    pub fn to(&self) -> &AddressWithContext {
+        &self.to
     }
 
     pub fn kind(&self) -> FlowKind {
         self.kind
+    }
+
+    pub(crate) fn into_parts(self) -> (AddressWithContext, AddressWithContext, FlowKind) {
+        (self.from, self.to, self.kind)
     }
 }

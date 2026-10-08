@@ -70,15 +70,24 @@ impl LiftingContext {
 
     pub fn reset(&mut self) {
         for input in &mut self.inputs {
-            *input = ParserInput::empty();
+            input.reset();
         }
-        self.lifting_context = PCodeBuilderContext::new(self.lifting_context.unique_mask);
+        self.lifting_context.clear();
         self.parsing_context.clear();
     }
 
     #[inline(always)]
     pub fn data(&self) -> &'static LanguageData {
         self.language.data()
+    }
+
+    pub fn resolve(
+        &mut self,
+        address: u64,
+        bytes: impl AsRef<[u8]>,
+        apply_commits: bool,
+    ) -> Option<usize> {
+        self.language.resolve(address, bytes, self, apply_commits)
     }
 
     #[doc(hidden)]
@@ -402,8 +411,8 @@ impl<'a> LiftingContextState<'a> {
             self.resolve_relatives();
 
             self.context.inputs_count = 0;
+            self.context.labels[..self.context.label_count as usize].fill(INVALID_LABEL);
             self.context.label_count = 0;
-            self.context.labels.fill(INVALID_LABEL);
             self.context.label_refs.clear();
 
             Some(())
@@ -669,6 +678,16 @@ impl PCodeBuilderContext {
         issued: &mut Vec<PCodeOp>,
     ) {
         issued.push(PCodeOp { op, inputs, output });
+    }
+
+    fn clear(&mut self) {
+        self.inputs = Default::default();
+        self.inputs_count = 0;
+        self.inputs_spill.clear();
+        self.label_base = 0;
+        self.labels[..self.label_count as usize].fill(INVALID_LABEL);
+        self.label_count = 0;
+        self.label_refs.clear();
     }
 }
 

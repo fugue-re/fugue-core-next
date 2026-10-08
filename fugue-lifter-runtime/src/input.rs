@@ -255,6 +255,15 @@ impl ParserInput {
         }
     }
 
+    pub(crate) fn reset(&mut self) {
+        self.context.address = 0;
+        self.context.delay_slot_length = 0;
+        self.context.alloc = 1;
+        self.context.constructors[0] = Default::default();
+        self.context.commits.clear();
+        self.base_state();
+    }
+
     #[inline]
     pub fn initialise(&mut self, address: u64, bytes: &[u8], db: &ContextDatabase) {
         self.context.address = address;

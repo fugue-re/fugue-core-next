@@ -1,7 +1,7 @@
 use std::fmt::{self, Display};
+use std::num::NonZeroU8;
 use std::path::PathBuf;
 
-use arrayvec::ArrayVec;
 pub use fugue_lifter::runtime::context::{TrackedContext, TrackedSet};
 use fugue_lifter::runtime::dynamic::LanguageLoadError;
 use fugue_lifter::runtime::language::LanguageParseError;
@@ -10,10 +10,10 @@ pub use fugue_lifter::{
     ContextBitRange, Language, LanguageId, LiftingContext, Op, PCodeOp as RawPCodeOp, Varnode,
 };
 use fugue_sleigh_language::LanguageError as SleighLanguageError;
-use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::ir::Address;
+use crate::types::EstimateSize;
 
 mod disassembler;
 pub use disassembler::{Disassembler, DisassemblerError};
@@ -79,26 +79,35 @@ impl LanguageError {
 )]
 #[rkyv(derive(PartialEq, Eq, PartialOrd, Ord, Hash))]
 pub struct ContextUpdate {
-    bits: ContextBitRange,
+    start: u8,
+    #[rkyv(niche)]
+    end: NonZeroU8,
     value: u32,
 }
 
 impl Display for ContextUpdate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let start = self.bits.start_bit();
-        let end = self.bits.end_bit();
-        let value = self.value;
+        let bits = self.bits();
+        let start = bits.start_bit();
+        let end = bits.end_bit();
+        let value = self.value();
         write!(f, "[{start}:{end}]={value}")
     }
 }
 
 impl ContextUpdate {
+    #[inline]
     pub fn new(bits: ContextBitRange, value: u32) -> Self {
-        Self { bits, value }
+        let start = u8::try_from(bits.word() * 32 + bits.start_bit())
+            .expect("context bit position exceeds 255");
+        let end = NonZeroU8::new(bits.end_bit() as u8 + 1).expect("context bit range is non-empty");
+        Self { start, end, value }
     }
 
-    pub fn bits(&self) -> &ContextBitRange {
-        &self.bits
+    pub fn bits(&self) -> ContextBitRange {
+        let start = usize::from(self.start);
+        let end = (start & !31) | usize::from(self.end.get() - 1);
+        ContextBitRange::new(start, end)
     }
 
     pub fn value(&self) -> u32 {
@@ -106,76 +115,84 @@ impl ContextUpdate {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
-pub struct ContextSet(SmallVec<[ContextUpdate; 1]>);
+pub struct ContextSet([Option<ContextUpdate>; MAX_CONTEXT_UPDATES]);
+
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, rkyv::Portable, rkyv::bytecheck::CheckBytes)]
+#[bytecheck(crate = rkyv::bytecheck)]
+#[repr(transparent)]
+pub struct ArchivedContextSet(rkyv::vec::ArchivedVec<ArchivedContextUpdate>);
+
+impl rkyv::Archive for ContextSet {
+    type Archived = ArchivedContextSet;
+    type Resolver = rkyv::vec::VecResolver;
+
+    fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        rkyv::munge::munge!(let ArchivedContextSet(updates) = out);
+        rkyv::vec::ArchivedVec::resolve_from_len(self.iter().count(), resolver, updates);
+    }
+}
+
+impl<S> rkyv::Serialize<S> for ContextSet
+where
+    S: rkyv::rancor::Fallible + rkyv::ser::Allocator + rkyv::ser::Writer + ?Sized,
+{
+    fn serialize(&self, serialiser: &mut S) -> Result<Self::Resolver, S::Error> {
+        rkyv::vec::ArchivedVec::serialize_from_unknown_length_iter(
+            &mut self.iter().cloned(),
+            serialiser,
+        )
+    }
+}
+
+impl<D> rkyv::Deserialize<ContextSet, D> for ArchivedContextSet
+where
+    D: rkyv::rancor::Fallible + ?Sized,
+{
+    fn deserialize(&self, deserialiser: &mut D) -> Result<ContextSet, D::Error> {
+        assert!(
+            self.0.len() <= MAX_CONTEXT_UPDATES,
+            "context update limit exceeded"
+        );
+        let mut context = ContextSet::new();
+        for (slot, update) in context.0.iter_mut().zip(self.0.iter()) {
+            *slot = Some(update.deserialize(deserialiser)?);
+        }
+        Ok(context)
+    }
+}
+
+impl fmt::Debug for ContextSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+impl EstimateSize for ContextSet {
+    fn estimate_size(&self) -> usize {
+        size_of::<Self>()
+    }
+}
 
 impl Display for ContextSet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("{")?;
-        if let Some((first, rest)) = self.0.split_first() {
+        let mut updates = self.iter();
+        if let Some(first) = updates.next() {
             first.fmt(f)?;
-            for update in rest.iter() {
+            for update in updates {
                 write!(f, ", {update}")?;
             }
         }
-        f.write_str("}")?;
-        Ok(())
-    }
-}
-
-type ContextSetInner = ArrayVec<ContextUpdate, MAX_CONTEXT_UPDATES>;
-
-#[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[repr(transparent)]
-pub struct ArchivedContextSet(rkyv::Archived<ContextSetInner>);
-
-unsafe impl rkyv::Portable for ArchivedContextSet {}
-unsafe impl rkyv::traits::NoUndef for ArchivedContextSet {}
-
-unsafe impl<C: rkyv::rancor::Fallible + ?Sized> rkyv::bytecheck::CheckBytes<C>
-    for ArchivedContextSet
-where
-    rkyv::Archived<ContextSetInner>: rkyv::bytecheck::CheckBytes<C>,
-{
-    unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
-        unsafe { <rkyv::Archived<ContextSetInner>>::check_bytes(value.cast(), context) }
-    }
-}
-
-impl rkyv::Archive for ContextSet {
-    type Archived = ArchivedContextSet;
-    type Resolver = <ContextSetInner as rkyv::Archive>::Resolver;
-
-    fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
-        let inner = self.0.iter().cloned().collect::<ContextSetInner>();
-        let out_inner = unsafe { out.cast_unchecked::<rkyv::Archived<ContextSetInner>>() };
-        inner.resolve(resolver, out_inner);
-    }
-}
-
-impl<S: rkyv::rancor::Fallible + ?Sized + rkyv::ser::Allocator + rkyv::ser::Writer>
-    rkyv::Serialize<S> for ContextSet
-{
-    fn serialize(&self, serialiser: &mut S) -> Result<Self::Resolver, S::Error> {
-        self.0
-            .iter()
-            .cloned()
-            .collect::<ContextSetInner>()
-            .serialize(serialiser)
-    }
-}
-
-impl<D: rkyv::rancor::Fallible + ?Sized> rkyv::Deserialize<ContextSet, D> for ArchivedContextSet {
-    fn deserialize(&self, deserialiser: &mut D) -> Result<ContextSet, D::Error> {
-        let inner = rkyv::Deserialize::<ContextSetInner, D>::deserialize(&self.0, deserialiser)?;
-        Ok(ContextSet(inner.into_iter().collect()))
+        f.write_str("}")
     }
 }
 
 impl From<ContextUpdate> for ContextSet {
+    #[inline]
     fn from(value: ContextUpdate) -> Self {
-        Self(SmallVec::from_iter([value]))
+        Self::from_iter([value])
     }
 }
 
@@ -190,9 +207,11 @@ impl FromIterator<(ContextBitRange, u32)> for ContextSet {
 
 impl FromIterator<ContextUpdate> for ContextSet {
     fn from_iter<T: IntoIterator<Item = ContextUpdate>>(iter: T) -> Self {
-        Self(SmallVec::from_iter(
-            iter.into_iter().take(MAX_CONTEXT_UPDATES),
-        ))
+        let mut context = Self::new();
+        for (slot, update) in context.0.iter_mut().zip(iter) {
+            *slot = Some(update);
+        }
+        context
     }
 }
 
@@ -208,59 +227,61 @@ impl ContextSet {
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.0[0].is_none()
     }
 
     #[inline]
     pub fn insert(&mut self, value: ContextUpdate) {
-        for update in self.0.iter_mut() {
-            if update.bits == value.bits {
-                *update = value;
-                return;
-            }
-        }
-        assert!(
-            self.0.len() < MAX_CONTEXT_UPDATES,
-            "context update limit exceeded",
-        );
-        self.0.push(value);
+        let slot = self
+            .0
+            .iter_mut()
+            .find(|slot| {
+                slot.as_ref()
+                    .is_none_or(|update| update.start == value.start && update.end == value.end)
+            })
+            .expect("context update limit exceeded");
+        *slot = Some(value);
     }
 
     #[inline]
     pub fn merge(&mut self, other: &Self) {
-        if other.is_empty() {
-            return;
-        }
-
         if self.is_empty() {
             self.clone_from(other);
             return;
         }
 
-        for update in other.0.iter() {
-            self.insert(update.to_owned());
+        for update in other.iter() {
+            self.insert(update.clone());
         }
     }
 
     #[inline]
     pub fn apply(&self, address: Address, context: &mut LiftingContext) {
-        for ContextUpdate { bits, value } in self.0.iter() {
+        for update in self.iter() {
+            let bits = update.bits();
+            let value = update.value();
             tracing::trace!("setting context bits {bits:?} to {value} at {address}");
-            context.set_variable_by_bits(bits, address.offset(), *value);
+            context.set_variable_by_bits(&bits, address.offset(), value);
         }
     }
 
     #[inline]
     pub fn apply_range(&self, from: Address, to: Option<Address>, context: &mut LiftingContext) {
-        for ContextUpdate { bits, value } in self.0.iter() {
+        for update in self.iter() {
+            let bits = update.bits();
+            let value = update.value();
             tracing::trace!("setting context bits {bits:?} to {value} from {from} to {to:?}");
             context.set_variable_region_by_bits(
-                bits,
+                &bits,
                 from.offset(),
                 to.map(|a| a.offset()),
-                *value,
+                value,
             );
         }
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &ContextUpdate> + '_ {
+        self.0.iter().flatten()
     }
 }
 
@@ -350,13 +371,10 @@ impl Display for ContextHint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.kind.fmt(f)?;
 
-        if let Some((first, rest)) = &self
-            .context
-            .as_ref()
-            .and_then(|context| context.0.split_first())
-        {
+        let mut updates = self.context.iter().flat_map(ContextSet::iter);
+        if let Some(first) = updates.next() {
             write!(f, " with context: {first}")?;
-            for update in rest.iter() {
+            for update in updates {
                 write!(f, ", {update}")?;
             }
         }

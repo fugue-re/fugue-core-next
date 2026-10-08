@@ -2,7 +2,9 @@ use std::ops::RangeInclusive;
 
 use smallvec::SmallVec;
 
-use crate::ir::{Address, AddressRange, AddressRangeSet, FlowKind, FlowTarget, Id};
+use crate::ir::{
+    Address, AddressRange, AddressRangeSet, AddressWithContext, FlowKind, FlowTarget, Id,
+};
 use crate::lifter::ContextSet;
 use crate::storage::entities::schema::{ENTITY_CODE_BLOCK_ID, ENTITY_KEY_CODE_BLOCK_ID};
 use crate::storage::entities::{Entity, EntityId, EntityKey, EntityKeyId, MutableEntity};
@@ -40,16 +42,17 @@ pub struct CodeBlock {
 
 #[derive(Debug, Clone, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 struct CodeBlockFlowTarget {
-    target: Address,
+    target: AddressWithContext,
     source_offset: u16,
     kind: FlowKind,
 }
 
 impl CodeBlockFlowTarget {
     fn from_flow(block: Address, size: usize, flow: FlowTarget) -> Self {
-        assert_eq!(block.space(), flow.from().space());
-        let source_offset = flow
-            .from()
+        let (from, target, kind) = flow.into_parts();
+        assert_eq!(block.space(), from.address().space());
+        let source_offset = from
+            .address()
             .checked_offset_from(block)
             .and_then(|offset| offset.try_into().ok())
             .expect("flow source must fall within its code block");
@@ -58,18 +61,10 @@ impl CodeBlockFlowTarget {
             "flow source must fall within its code block"
         );
         Self {
-            target: flow.to(),
+            target,
             source_offset,
-            kind: flow.kind(),
+            kind,
         }
-    }
-
-    fn to_flow(&self, block: Address) -> FlowTarget {
-        FlowTarget::new(
-            block + usize::from(self.source_offset),
-            self.target,
-            self.kind,
-        )
     }
 }
 
@@ -141,10 +136,10 @@ impl CodeBlock {
         self.targets.iter().any(|target| target.kind.is_branch())
     }
 
-    pub fn call_target(&self) -> Option<Address> {
+    pub fn call_target(&self) -> Option<&AddressWithContext> {
         self.targets
             .iter()
-            .find_map(|target| target.kind.is_call().then_some(target.target))
+            .find_map(|target| target.kind.is_call().then_some(&target.target))
     }
 
     pub fn has_unresolved(&self) -> bool {
@@ -183,6 +178,10 @@ impl CodeBlock {
     }
 
     pub fn flow_targets(&self) -> impl Iterator<Item = FlowTarget> + '_ {
-        self.targets.iter().map(|target| target.to_flow(self.start))
+        self.targets.iter().map(|target| {
+            let source = self.start + usize::from(target.source_offset);
+            let source = AddressWithContext::new(source, self.context.clone());
+            FlowTarget::new(source, target.target.clone(), target.kind)
+        })
     }
 }

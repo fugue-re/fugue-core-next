@@ -4,13 +4,16 @@ pub use fugue_lifter::mips::*;
 use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
 use crate::arch::{Arch, ExternalThunkTemplate};
+use crate::ir::RawAddress;
 use crate::lifter::{
-    Language, LanguageError, LanguageId, LanguageLoader, LanguageSource, Lifter, Varnode,
+    ContextBitRange, ContextSet, Language, LanguageError, LanguageId, LanguageLoader,
+    LanguageSource, Lifter, LiftingContext, Varnode,
 };
 
 #[derive(Clone)]
 struct ArchData {
     gprs: [Varnode; 33],
+    isa_mode: ContextBitRange,
 }
 
 impl ArchData {
@@ -26,7 +29,11 @@ impl ArchData {
             reg(name).unwrap_or_else(|| panic!("MIPS language must define register `{name}`"))
         });
 
-        Self { gprs }
+        let isa_mode = language
+            .context_variable_by_name("ISA_MODE")
+            .expect("MIPS language must define ISA_MODE context variable");
+
+        Self { gprs, isa_mode }
     }
 }
 
@@ -38,7 +45,23 @@ pub struct Mips {
 
 impl ArchT for Mips {
     fn lifter(&self) -> Lifter {
-        Lifter::new(self.language)
+        Lifter::new_with(Arch::from(Box::new(self.clone()) as Box<dyn ArchT>))
+    }
+
+    fn canonicalise_address(&self, address: RawAddress) -> Option<(RawAddress, ContextSet)> {
+        let isa_mode = (address.offset() & 1) as u32;
+        self.canonicalise_with_mode(address, isa_mode)
+    }
+
+    fn canonicalise_address_with(
+        &self,
+        address: RawAddress,
+        context: &LiftingContext,
+    ) -> Option<(RawAddress, ContextSet)> {
+        let isa_mode = (address.offset() & 1 == 1
+            || context.get_variable_by_bits(self.data.isa_mode, address.offset()) == 1)
+            as u32;
+        self.canonicalise_with_mode(address, isa_mode)
     }
 
     fn external_thunk_template(&self) -> ExternalThunkTemplate {
@@ -108,6 +131,18 @@ impl Mips {
         }
         let lid = LanguageId::new_with("MIPS", is_be, 32, variant);
         loader.load(&lid)
+    }
+
+    fn canonicalise_with_mode(
+        &self,
+        address: RawAddress,
+        isa_mode: u32,
+    ) -> Option<(RawAddress, ContextSet)> {
+        let alignment = if isa_mode != 0 { 2 } else { 4 };
+        let cleared = address.align_down(2);
+        let canonical = cleared.wrap_and_align_with(self.language(), alignment);
+        (canonical == cleared)
+            .then_some((canonical, ContextSet::single(self.data.isa_mode, isa_mode)))
     }
 }
 

@@ -88,20 +88,25 @@ impl InsnResolver {
         self.lifter.context_mut()
     }
 
+    pub(crate) fn reset(&mut self) {
+        self.lifter.context_mut().reset();
+        self.operations.clear();
+    }
+
     pub(crate) fn resolve(
         &mut self,
         address: Address,
         bytes: impl AsRef<[u8]>,
     ) -> Result<ResolvedInsn, InsnResolverError> {
         let bytes = bytes.as_ref();
-        self.operations.clear();
         let mut insn = self
             .disassembler
             .disassemble(address, bytes, self.lifter.context_mut())?;
 
         if insn.needs_flow_resolution() || insn.size() == 0 {
-            let size = self.lifter.lift(address, bytes, &mut self.operations)?;
-            insn.resolve_flow(self.lifter.language(), size, &self.operations)?;
+            insn.resolve_flow(&mut self.lifter, bytes, &mut self.operations)?;
+        } else {
+            self.operations.clear();
         }
 
         let language = self.lifter.language();

@@ -87,7 +87,7 @@ impl ArchT for X86_64 {
     }
 
     fn lifter(&self) -> Lifter {
-        Lifter::new(self.language)
+        Lifter::new_with(Arch::from(Box::new(self.clone()) as Box<dyn ArchT>))
     }
 
     fn external_thunk_template(&self) -> ExternalThunkTemplate {
@@ -452,7 +452,7 @@ mod test {
         let mut lifter = arch.lifter();
         let mut operations = Vec::new();
         let size = lifter.lift(address, bytes, &mut operations)?;
-        let lifted = Insn::from_resolved_flow(language, address, size, &operations)?;
+        let lifted = Insn::from_resolved_flow(&lifter, address, size, &operations)?;
 
         assert_eq!(
             direct.properties(),
