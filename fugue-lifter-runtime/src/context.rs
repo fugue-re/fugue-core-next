@@ -45,6 +45,12 @@ pub enum ContextPostActionHandle {
 }
 
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub enum ContextAction {
+    Commit(ContextPostAction),
+    Operator(ContextPreAction),
+}
+
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct ContextPostAction {
     pub handle: ContextPostActionHandle,
     pub num: usize,

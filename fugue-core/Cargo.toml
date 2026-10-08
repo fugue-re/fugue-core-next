@@ -52,7 +52,7 @@ libmdbx = { version = "0.6", optional = true }
 md-5 = "0.10"
 memchr = "2"
 memmap2 = "0.9"
-object = "0.39"
+object = { version = "0.39", features = ["elf", "write_core"] }
 ouroboros = "0.18"
 parking_lot = { version = "0.12", features = ["arc_lock"] }
 quick_cache = "0.6"

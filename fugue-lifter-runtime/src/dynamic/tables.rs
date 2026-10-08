@@ -15,7 +15,7 @@ use fugue_sleigh_language::symbol::sub_table::{
 };
 use indexmap::IndexMap;
 
-use crate::context::{ContextPostAction, ContextPostActionHandle, ContextPreAction};
+use crate::context::{ContextAction, ContextPostAction, ContextPostActionHandle, ContextPreAction};
 use crate::dynamic::constructor::Constructor;
 use crate::dynamic::operand::OperandFilter;
 use crate::dynamic::resolve::{DecisionNode, DecisionPair};
@@ -445,20 +445,14 @@ impl<'a> Tables<'a> {
     pub(crate) fn build_context_actions(
         &mut self,
         ctor: &SleighConstructor,
-    ) -> (Box<[ContextPreAction]>, Box<[ContextPostAction]>) {
-        let mut pre = Vec::new();
-        let mut post = Vec::new();
-        for action in ctor.context().iter() {
-            match action {
-                SleighContext::Operator { .. } => {
-                    pre.push(self.pre_action(action));
-                }
-                SleighContext::Commit { .. } => {
-                    post.push(self.post_action(action));
-                }
-            }
-        }
-        (pre.into_boxed_slice(), post.into_boxed_slice())
+    ) -> Box<[ContextAction]> {
+        ctor.context()
+            .iter()
+            .map(|action| match action {
+                SleighContext::Commit { .. } => ContextAction::Commit(self.post_action(action)),
+                SleighContext::Operator { .. } => ContextAction::Operator(self.pre_action(action)),
+            })
+            .collect()
     }
 
     pub(crate) fn operand_resolvers(

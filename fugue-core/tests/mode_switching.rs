@@ -8,7 +8,7 @@ use fugue_core::analysis::function::{
     FunctionCandidate, FunctionRecovery, FunctionRecoveryExtension, StructuredFunctionContext,
 };
 use fugue_core::analysis::{AnalysisError, AnalysisPass};
-use fugue_core::arch::{Arch, Mips, Mips64, X86_64};
+use fugue_core::arch::{Arch, Arm, Mips, Mips64, X86_64};
 use fugue_core::engine::{AnalysisContext, AnalysisEngine, AnalysisEngineConfig};
 use fugue_core::extension;
 use fugue_core::ir::{Address, AddressWithContext, RawAddress};
@@ -359,6 +359,28 @@ fn mips_jalx_uses_the_address_after_its_delay_slot() -> Result<(), Box<dyn Error
     assert_eq!(size, 8);
     assert_eq!(link_value(&operations, link_register), 0x1008);
     assert_eq!(mips32.context().get_variable_by_bits(isa_mode, 0x2000), 1);
+
+    Ok(())
+}
+
+#[test]
+fn thumb_blx_commits_arm_mode_at_its_target() -> Result<(), Box<dyn Error>> {
+    let language = Arm::resolve_default_variant(false)?;
+    let arch = Arch::new(language);
+    let t_mode = language
+        .context_variable_by_name("TMode")
+        .expect("ARM language must define TMode");
+    let address = Address::in_default_space(0x4c8u64);
+
+    let mut thumb = arch.lifter();
+    thumb
+        .context_mut()
+        .set_variable_default("TMode", 1)
+        .expect("TMode is a context variable");
+    let mut operations = Vec::new();
+    let size = thumb.lift(address, &[0xff, 0xf7, 0x3a, 0xef], &mut operations)?;
+    assert_eq!(size, 4);
+    assert_eq!(thumb.context().get_variable_by_bits(t_mode, 0x340), 0);
 
     Ok(())
 }

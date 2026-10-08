@@ -800,11 +800,16 @@ impl FunctionBuilderContext {
                         if let Some(target) = indirect_target
                             && let Some((target, target_context)) =
                                 arch.canonicalise_address_with(target, resolver.context())
+                            && let target = Address::new(address.space(), target)
+                            && self
+                                .mapping_cache
+                                .mapping_properties(segments, target)
+                                .is_some_and(|properties| properties.is_executable())
                         {
                             f.insn_mut(insn_id)
                                 .expect("inserted instruction must exist")
                                 .set_indirect_target(AddressWithContext::new(
-                                    Address::new(address.space(), target),
+                                    target,
                                     target_context,
                                 ));
                         }

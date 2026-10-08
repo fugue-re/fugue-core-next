@@ -13,7 +13,7 @@ use object::elf::{
     STT_NOTYPE, STT_OBJECT, STT_TLS,
 };
 use object::read::elf::{
-    self, ElfFile, ElfSection, ElfSectionIterator, ElfSegmentIterator, FileHeader,
+    self, ElfFile, ElfSection, ElfSectionIterator, ElfSegmentIterator, FileHeader, ProgramHeader,
 };
 use object::{
     Endianness, FileKind, Object, ObjectKind, ObjectSection, ObjectSegment, ObjectSymbol, ReadRef,
@@ -29,6 +29,7 @@ use crate::ir::{
 };
 use crate::lifter::{ContextHint, TrackedSet};
 use crate::loader::elf::extensions::{ImageContext, TrackedSetContext};
+use crate::loader::elf::read::image::ElfImageData;
 use crate::loader::elf::read::permissive;
 use crate::loader::{
     ExternalThunkLayout, ImageAddress, ImageBacking, ImageBank, ImageBankHandle, ImageBankLayout,
@@ -68,27 +69,35 @@ pub const ATTRIBUTE_PERMISSIVE: &str = "loader.elf.permissive";
 
 #[ouroboros::self_referencing]
 struct ElfInner<'a> {
-    data: BytesOrMapping<'a>,
+    data: ElfImageData<'a>,
     #[borrows(data)]
     #[covariant]
     view: ElfFileRepr<'this, 'a>,
 }
 
 pub enum ElfFileRepr<'this, 'data> {
-    Elf32(ElfFile<'this, FileHeader32<Endianness>, &'this BytesOrMapping<'data>>),
-    Elf64(ElfFile<'this, FileHeader64<Endianness>, &'this BytesOrMapping<'data>>),
+    Elf32(ElfFile<'this, FileHeader32<Endianness>, &'this ElfImageData<'data>>),
+    Elf64(ElfFile<'this, FileHeader64<Endianness>, &'this ElfImageData<'data>>),
 }
 
 type ElfRecoverError<'a> = Box<(BytesOrMapping<'a>, LoaderError)>;
 
 impl<'a> ElfInner<'a> {
-    fn from_bytes(data: BytesOrMapping<'a>) -> Result<Self, LoaderError> {
-        Self::try_new(data, |data| ElfFileRepr::parse(data))
+    fn from_bytes(
+        data: ElfImageData<'a>,
+        config: ElfLoaderProperties,
+    ) -> Result<Self, LoaderError> {
+        Self::try_new(data, |data| ElfFileRepr::parse(data, config))
     }
 
-    fn from_bytes_or_recover(data: BytesOrMapping<'a>) -> Result<Self, ElfRecoverError<'a>> {
-        Self::try_new_or_recover(data, |data| ElfFileRepr::parse(data))
-            .map_err(|(error, heads)| ElfRecoverError::new((heads.data, error)))
+    fn from_bytes_or_recover(
+        data: BytesOrMapping<'a>,
+        config: ElfLoaderProperties,
+    ) -> Result<Self, ElfRecoverError<'a>> {
+        Self::try_new_or_recover(ElfImageData::new(data), |data| {
+            ElfFileRepr::parse(data, config)
+        })
+        .map_err(|(error, heads)| ElfRecoverError::new((heads.data.into_image(), error)))
     }
 }
 
@@ -102,7 +111,10 @@ macro_rules! with_elf {
 }
 
 impl<'this, 'data> ElfFileRepr<'this, 'data> {
-    fn parse(data: &'this BytesOrMapping<'data>) -> Result<Self, LoaderError> {
+    fn parse(
+        data: &'this ElfImageData<'data>,
+        config: ElfLoaderProperties,
+    ) -> Result<Self, LoaderError> {
         let elf = match FileKind::parse(data).map_err(LoaderError::format)? {
             FileKind::Elf32 => {
                 Self::Elf32(elf::ElfFile32::parse(data).map_err(LoaderError::format)?)
@@ -114,6 +126,22 @@ impl<'this, 'data> ElfFileRepr<'this, 'data> {
                 return Err(LoaderError::format_with("input is not an ELF"));
             }
         };
+
+        if config.is_permissive()
+            && with_elf!(
+                &elf,
+                elf | elf.elf_section_table().is_empty()
+                    && elf
+                        .elf_program_headers()
+                        .iter()
+                        .any(|phdr| matches!(phdr.dynamic(elf.endian(), data), Ok(Some(_))))
+            )
+        {
+            return Err(LoaderError::format_with(
+                "ELF has a dynamic segment but no section headers",
+            ));
+        }
+
         Ok(elf)
     }
 
@@ -166,7 +194,7 @@ impl<'a> Elf<'a> {
         let attributes = attributes.into();
         let config = ElfLoaderProperties::new(&attributes);
 
-        let object = match ElfInner::from_bytes_or_recover(data.into()) {
+        let object = match ElfInner::from_bytes_or_recover(data.into(), config) {
             Ok(object) => object,
             Err(failed) => {
                 let (data, error) = *failed;
@@ -179,7 +207,7 @@ impl<'a> Elf<'a> {
                     return Err(error);
                 };
 
-                ElfInner::from_bytes(repaired)?
+                ElfInner::from_bytes(repaired, config)?
             }
         };
 
@@ -249,14 +277,8 @@ impl<'a> Elf<'a> {
         let header_last = config
             .load_headers()
             .then(|| {
-                with_elf!(
-                    view,
-                    elf | elf
-                        .data()
-                        .len()
-                        .ok()
-                        .and_then(|len| base.checked_add(len.checked_sub(1)?))
-                )
+                let len = object.borrow_data().image().as_ref().len() as u64;
+                base.checked_add(len.checked_sub(1)?)
             })
             .flatten();
         let bank_base = if config.load_headers() {
@@ -1385,8 +1407,11 @@ impl ElfSymbolLayout {
             let st_type = st_info & 0x0f;
 
             let is_visible = st_bind == STB_GLOBAL || st_bind == STB_WEAK;
+            let is_unbound_import = config.is_permissive()
+                && sym.is_undefined()
+                && sym.name().is_ok_and(|name| !name.is_empty());
 
-            let is_import = is_visible && sym.address() == 0;
+            let is_import = (is_visible || is_unbound_import) && sym.address() == 0;
             let is_export = is_visible && sym.address() != 0;
 
             let kind = if [STT_FUNC, STT_GNU_IFUNC].contains(&st_type) {
@@ -2187,7 +2212,7 @@ impl Loadable for Elf<'_> {
     fn metadata(&self) -> &LoadableMetadata {
         self.metadata.get_or_init(|| {
             LoadableMetadata::new_with(
-                self.object.borrow_data(),
+                self.object.borrow_data().image(),
                 self.path.clone(),
                 format!("Fugue v{} ELF Loader", env!("CARGO_PKG_VERSION")),
             )
