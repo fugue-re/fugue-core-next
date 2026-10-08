@@ -441,6 +441,55 @@ where
     }
 }
 
+pub struct ImagePlacedRegion<T> {
+    start: RawAddress,
+    last: RawAddress,
+    file_delta: u64,
+    placement: usize,
+    source: T,
+}
+
+impl<T> ImagePlacedRegion<T>
+where
+    T: Copy,
+{
+    pub fn new(
+        start: RawAddress,
+        last: RawAddress,
+        file_delta: u64,
+        placement: usize,
+        source: T,
+    ) -> Self {
+        Self {
+            start,
+            last,
+            file_delta,
+            placement,
+            source,
+        }
+    }
+
+    pub fn start(&self) -> RawAddress {
+        self.start
+    }
+
+    pub fn last(&self) -> RawAddress {
+        self.last
+    }
+
+    pub fn placement(&self) -> usize {
+        self.placement
+    }
+
+    pub fn source(&self) -> T {
+        self.source
+    }
+
+    pub fn conflicts(&self, start: RawAddress, last: RawAddress, file_delta: u64) -> bool {
+        self.file_delta != file_delta && start <= self.last && self.start <= last
+    }
+}
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
 )]

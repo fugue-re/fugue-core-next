@@ -27,7 +27,7 @@ pub use elf::{
     ELF_DYNSYM_SELECTOR, ELF_SYMTAB_SELECTOR, Elf, ElfFileRepr, ElfSegmentRelocator,
 };
 
-pub(crate) mod image;
+pub mod image;
 pub use image::{
     ImageAddress, ImageBacking, ImageBank, ImageBankHandle, ImageBanks, ImageLayout,
     ImageResolution, ImageSegment, ImageSegmentContents, ImageSegmentContentsIterator,

@@ -10,6 +10,14 @@ use crate::loader::LoaderError;
 
 pub const GP_BIAS: u64 = 0x7ff0;
 
+pub const STO_MIPS_ISA: u8 = 0xc0;
+pub const STO_MIPS16: u8 = 0xf0;
+pub const STO_MICROMIPS: u8 = 0x80;
+
+pub fn is_compressed(st_other: u8) -> bool {
+    st_other & STO_MIPS16 == STO_MIPS16 || st_other & STO_MIPS_ISA == STO_MICROMIPS
+}
+
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct RegInfo32<E: Endian> {

@@ -27,6 +27,7 @@ use crate::ir::{
     SymbolTableSelector, TransientSymbolTable,
 };
 use crate::lifter::{ContextHint, TrackedSet};
+use crate::loader::image::ImagePlacedRegion;
 use crate::loader::pe::extensions::{ImageContext, TrackedSetContext};
 use crate::loader::pe::read::permissive;
 use crate::loader::{
@@ -391,12 +392,10 @@ impl PeLoadState {
                     &external_thunks,
                     config,
                 )?;
-                let mut placements = Vec::new();
-                while let Some(placement) = walk.next_segment()? {
-                    placements.push(placement);
+                while let Some(region) = walk.next_region() {
+                    walk.place_region(region)?;
                 }
-                let (spaces, bank_layout) = walk.into_parts();
-                (placements, spaces, bank_layout)
+                walk.into_parts()
             }
         );
 
@@ -539,6 +538,8 @@ impl PeSymbolLayout {
         let mut import_slots = BTreeMap::new();
         let mut external_addresses = BTreeMap::<Symbol, RawAddress>::new();
 
+        let mut mapping_hints = BTreeMap::new();
+
         let exports = (|| -> Result<(), LoaderError> {
             let Some(export_table) = permissive::read_exports(pe, config)? else {
                 return Ok(());
@@ -562,6 +563,15 @@ impl PeSymbolLayout {
                 let properties = symbol_properties_for_address(address, &sections)
                     | SymbolProperties::LOCAL
                     | SymbolProperties::EXPORT;
+                let address = match arch.canonicalise_address(address) {
+                    Some((canonical, context))
+                        if properties.is_function() && canonical != address =>
+                    {
+                        mapping_hints.insert(canonical, ContextHint::code().with_context(context));
+                        canonical
+                    }
+                    _ => address,
+                };
                 symbols.insert(
                     SymbolIndex::new(PE_EXPORT_SELECTOR, export_index),
                     RawPeSymbol {
@@ -677,7 +687,7 @@ impl PeSymbolLayout {
 
         Ok(Self {
             bounds: min_addr..=max_addr,
-            mapping_hints: BTreeMap::new(),
+            mapping_hints,
             symbols,
             external_thunks,
             import_slots,
@@ -1092,6 +1102,7 @@ struct PeRegion<'data> {
     size: u64,
     properties: SegmentProperties,
     provenance: SegmentMappingProvenance,
+    file_offset: Option<u64>,
     source: PeRegionSource,
 }
 
@@ -1143,6 +1154,8 @@ where
     external_thunks: Option<&'file ExternalThunkLayout>,
     header: Option<PeHeaderRegion<'data>>,
     covered: RawAddressRangeSet,
+    placed_regions: Vec<ImagePlacedRegion<PeRegionSource>>,
+    placements: Vec<PeImageSegment>,
     spaces: ImageSpaces,
     bank_layout: PeBankLayout,
     config: PeLoaderProperties,
@@ -1178,6 +1191,8 @@ where
             external_thunks: Some(external_thunks),
             header,
             covered: RawAddressRangeSet::new(),
+            placed_regions: Vec::new(),
+            placements: Vec::new(),
             spaces: smallvec![ImageSpace::base(base_space)],
             bank_layout: PeBankLayout::new(default_bank),
             config,
@@ -1194,6 +1209,7 @@ where
                 size: header.size(),
                 properties: SegmentProperties::PERM_READ,
                 provenance: SegmentMappingProvenance::Section,
+                file_offset: Some(0),
                 source: PeRegionSource::header(),
             });
         }
@@ -1216,6 +1232,10 @@ where
                 size,
                 properties: pe_section_properties(&sect),
                 provenance: SegmentMappingProvenance::Section,
+                file_offset: sect
+                    .file_range()
+                    .filter(|(_, size)| *size != 0)
+                    .map(|(offset, _)| offset),
                 source: PeRegionSource::section(sect.index().0),
             });
         }
@@ -1234,15 +1254,12 @@ where
             size: external_thunks.size() as u64,
             properties: SegmentProperties::PERM_READ | SegmentProperties::PERM_EXECUTE,
             provenance: SegmentMappingProvenance::External,
+            file_offset: None,
             source: PeRegionSource::external_thunks(),
         })
     }
 
-    fn next_segment(&mut self) -> Result<Option<PeImageSegment>, LoaderError> {
-        let Some(region) = self.next_region() else {
-            return Ok(None);
-        };
-
+    fn place_region(&mut self, region: PeRegion) -> Result<(), LoaderError> {
         let last = region
             .address
             .checked_add(region.size.saturating_sub(1))
@@ -1252,9 +1269,17 @@ where
             .checked_sub(self.bank_base)
             .ok_or_else(|| LoaderError::address_overflow(region.address))?;
         let range = region.address..=last;
-        let overlaps = self.covered.intersects_range(range.clone());
+        let file_delta = region
+            .file_offset
+            .map(|offset| offset.wrapping_sub(region.address.offset()));
+        let conflicts = self.covered.intersects_range(range.clone())
+            && file_delta.is_none_or(|delta| {
+                self.placed_regions
+                    .iter()
+                    .any(|placed| placed.conflicts(region.address, last, delta))
+            });
 
-        let (space, bank, backing_offset) = if overlaps {
+        let (space, bank, backing_offset) = if conflicts {
             let handle = ImageSpaceHandle::new(
                 u16::try_from(self.spaces.len()).expect("space count must fit in u16"),
             );
@@ -1264,6 +1289,15 @@ where
             self.bank_layout.route_region(region.source(), bank);
             (handle, bank, RawAddress::from(0u64))
         } else {
+            if let Some(delta) = file_delta {
+                self.placed_regions.push(ImagePlacedRegion::new(
+                    region.address,
+                    last,
+                    delta,
+                    self.placements.len(),
+                    region.source(),
+                ));
+            }
             (self.base_space, ImageBankHandle::default(), backing_offset)
         };
 
@@ -1271,11 +1305,12 @@ where
 
         let mut segment = PeImageSegment::new(&region, space, backing_offset);
         segment.bank = bank;
-        Ok(Some(segment))
+        self.placements.push(segment);
+        Ok(())
     }
 
-    fn into_parts(self) -> (ImageSpaces, PeBankLayout) {
-        (self.spaces, self.bank_layout)
+    fn into_parts(self) -> (Vec<PeImageSegment>, ImageSpaces, PeBankLayout) {
+        (self.placements, self.spaces, self.bank_layout)
     }
 }
 

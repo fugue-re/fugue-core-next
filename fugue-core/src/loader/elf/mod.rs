@@ -31,6 +31,7 @@ use crate::lifter::{ContextHint, TrackedSet};
 use crate::loader::elf::extensions::{ImageContext, TrackedSetContext};
 use crate::loader::elf::read::image::ElfImageData;
 use crate::loader::elf::read::permissive;
+use crate::loader::image::ImagePlacedRegion;
 use crate::loader::{
     ExternalThunkLayout, ImageAddress, ImageBacking, ImageBank, ImageBankHandle, ImageBankLayout,
     ImageCoveredRegions, ImageLayout, ImageRegionBankMap, ImageSegment, ImageSegmentContents,
@@ -464,10 +465,6 @@ impl ElfRegion<'_> {
     fn source(&self) -> Option<ElfRegionSource> {
         self.source
     }
-
-    fn section_source(&self) -> Option<ElfRegionSource> {
-        self.source.filter(|source| source.is_section())
-    }
 }
 
 struct ElfImageSegment {
@@ -534,10 +531,6 @@ impl ElfRegionSource {
 
     fn is_kind(self, kind: ElfRegionSourceKind) -> bool {
         self.kind() == kind
-    }
-
-    fn is_section(self) -> bool {
-        self.is_kind(ElfRegionSourceKind::Section)
     }
 
     fn is_segment(self) -> bool {
@@ -770,56 +763,10 @@ where
     spaces: ImageSpaces,
     bank_layout: ElfBankLayout,
     placements: Vec<ElfImageSegment>,
-    placed_regions: Vec<ElfPlacedRegion>,
+    placed_regions: Vec<ImagePlacedRegion<ElfRegionSource>>,
     segment_ordinal: usize,
     config: ElfLoaderProperties,
     is_object: bool,
-}
-
-struct ElfPlacedRegion {
-    start: RawAddress,
-    last: RawAddress,
-    file_delta: u64,
-    placement: usize,
-    source: ElfRegionSource,
-}
-
-impl ElfPlacedRegion {
-    fn new(
-        start: RawAddress,
-        last: RawAddress,
-        file_delta: u64,
-        placement: usize,
-        source: ElfRegionSource,
-    ) -> Self {
-        Self {
-            start,
-            last,
-            file_delta,
-            placement,
-            source,
-        }
-    }
-
-    fn start(&self) -> RawAddress {
-        self.start
-    }
-
-    fn last(&self) -> RawAddress {
-        self.last
-    }
-
-    fn file_delta(&self) -> u64 {
-        self.file_delta
-    }
-
-    fn placement(&self) -> usize {
-        self.placement
-    }
-
-    fn source(&self) -> ElfRegionSource {
-        self.source
-    }
 }
 
 impl<'data, 'file, Elf, R> ElfSegmentWalk<'data, 'file, Elf, R>
@@ -1004,34 +951,11 @@ where
             .enumerate()
             .filter(|(_, placed)| {
                 placed.source().is_kind(kind)
-                    && placed.file_delta() != file_delta
-                    && start <= placed.last()
-                    && placed.start() <= last
+                    && placed.conflicts(start, last, file_delta)
                     && self.placements[placed.placement()].space() == self.base_space
             })
             .map(|(index, _)| index)
             .collect()
-    }
-
-    fn demote_section_if_conflicting(
-        &mut self,
-        source: ElfRegionSource,
-        address: RawAddress,
-        placement: usize,
-        last: RawAddress,
-        file_delta: u64,
-    ) {
-        let conflicts =
-            self.conflicting_base_regions(ElfRegionSourceKind::Section, address, last, file_delta);
-        if conflicts.is_empty() {
-            return;
-        }
-
-        let bank = self.bank_layout.allocate_overlay(address..=last);
-        let displaced = &mut self.placements[placement];
-        displaced.bank = bank;
-        displaced.backing_offset = RawAddress::from(0u64);
-        self.bank_layout.route_region(source, bank);
     }
 
     fn place_overlapping_region(
@@ -1041,16 +965,28 @@ where
         last: RawAddress,
         file_delta: Option<u64>,
     ) -> Option<usize> {
-        let base = region
-            .source()
-            .is_some_and(ElfRegionSource::is_segment)
-            .then(|| self.push_placement(region, self.base_space, backing_offset));
-        let overlay = self.next_overlay_space();
-        let placement = self.push_placement(region, overlay, backing_offset);
-        if let Some((source, delta)) = region.section_source().zip(file_delta) {
-            self.demote_section_if_conflicting(source, region.address, placement, last, delta);
+        if region.source().is_some_and(ElfRegionSource::is_segment)
+            || file_delta.is_some_and(|delta| {
+                self.conflicting_base_regions(
+                    ElfRegionSourceKind::Section,
+                    region.address,
+                    last,
+                    delta,
+                )
+                .is_empty()
+            })
+        {
+            return Some(self.push_placement(region, self.base_space, backing_offset));
         }
-        base
+
+        let overlay = self.next_overlay_space();
+        let placement = self.push_placement(region, overlay, 0u64);
+        self.placements[placement].bank = self.bank_layout.allocate_overlay(region.address..=last);
+        if let Some(source) = region.source() {
+            self.bank_layout
+                .route_region(source, self.placements[placement].bank);
+        }
+        None
     }
 
     fn place_region(&mut self, region: ElfRegion) -> Result<(), LoaderError> {
@@ -1113,7 +1049,7 @@ where
             return Ok(());
         };
 
-        self.placed_regions.push(ElfPlacedRegion::new(
+        self.placed_regions.push(ImagePlacedRegion::new(
             address, last, file_delta, placement, source,
         ));
 
@@ -1369,6 +1305,18 @@ impl ElfSymbolLayout {
                 properties |= SymbolProperties::LOCAL;
             }
 
+            let address = match arch.canonicalise_address(address) {
+                Some((canonical, context))
+                    if properties.is_function()
+                        && !properties.is_extern()
+                        && canonical != address =>
+                {
+                    mapping_hints.insert(canonical, ContextHint::code().with_context(context));
+                    canonical
+                }
+                _ => address,
+            };
+
             symbols.insert(
                 SymbolIndex::new(ELF_SYMTAB_SELECTOR, symbol.index().0),
                 RawElfSymbol {
@@ -1453,6 +1401,17 @@ impl ElfSymbolLayout {
                 section_start + sym.address()
             } else {
                 (base_addr - preferred_base) + sym.address()
+            };
+            let address = match arch.canonicalise_address(address) {
+                Some((canonical, context))
+                    if properties.is_function()
+                        && !properties.is_extern()
+                        && canonical != address =>
+                {
+                    mapping_hints.insert(canonical, ContextHint::code().with_context(context));
+                    canonical
+                }
+                _ => address,
             };
             let symbol = sym.name().ok().unwrap_or_default().into();
 
