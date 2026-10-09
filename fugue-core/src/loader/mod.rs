@@ -46,7 +46,7 @@ pub use pe::extensions::{
 };
 pub use pe::{
     ATTRIBUTE_LOAD_HEADERS as ATTRIBUTE_PE_LOAD_HEADERS, ATTRIBUTE_PERMISSIVE, PE_EXPORT_SELECTOR,
-    PE_IMPORT_SELECTOR, Pe, PeSegmentRelocator,
+    PE_IMPORT_SELECTOR, PE_SYMTAB_SELECTOR, Pe, PeSegmentRelocator,
 };
 
 pub(crate) mod shellcode;

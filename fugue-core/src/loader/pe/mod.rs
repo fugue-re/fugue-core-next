@@ -17,7 +17,7 @@ use object::pe::{
 use object::read::pe::{
     self, ImageNtHeaders, ImageOptionalHeader, PeFile, PeSection, PeSectionIterator, Relocation,
 };
-use object::{FileKind, Object, ObjectSection, ReadRef, SectionFlags};
+use object::{FileKind, Object, ObjectSection, ObjectSymbol, ReadRef, SectionFlags, SymbolKind};
 use smallvec::{SmallVec, smallvec};
 
 use crate::AnalysisData;
@@ -54,6 +54,7 @@ use tracked::PeTrackedSetResolver;
 
 pub const PE_EXPORT_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(0);
 pub const PE_IMPORT_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(1);
+pub const PE_SYMTAB_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(2);
 
 pub const ATTRIBUTE_PERMISSIVE: &str = "loader.pe.permissive";
 pub const ATTRIBUTE_LOAD_HEADERS: &str = "loader.pe.load_headers";
@@ -431,11 +432,12 @@ impl PeLoadState {
         let mut image_symbols = TransientSymbolTable::<ImageAddress>::new();
         for (index, symbol) in symbols {
             let space = space_by_index.get(&index).copied().unwrap_or_default();
-            image_symbols.insert(
+            image_symbols.insert_with(
                 index,
                 ImageAddress::new(space, symbol.address),
                 symbol.symbol,
                 symbol.properties,
+                symbol.size,
             );
         }
 
@@ -471,6 +473,7 @@ struct RawPeSymbol {
     address: RawAddress,
     symbol: Symbol,
     properties: SymbolProperties,
+    size: Option<u64>,
 }
 
 struct PeSymbolLayout {
@@ -578,6 +581,7 @@ impl PeSymbolLayout {
                         address,
                         symbol: String::from_utf8_lossy(name).into_owned().into(),
                         properties,
+                        size: None,
                     },
                 );
                 export_index += 1;
@@ -649,6 +653,7 @@ impl PeSymbolLayout {
                             address: external_address,
                             symbol,
                             properties: SymbolProperties::EXTERN | SymbolProperties::FUNCTION,
+                            size: None,
                         },
                     );
 
@@ -681,6 +686,56 @@ impl PeSymbolLayout {
             );
         } else {
             imports?;
+        }
+
+        for symbol in pe.symbols() {
+            if !symbol.is_definition()
+                || !matches!(symbol.kind(), SymbolKind::Text | SymbolKind::Data)
+            {
+                continue;
+            }
+
+            let Ok(name) = symbol.name() else {
+                tracing::warn!(
+                    "skipping COFF symbol {} with an unreadable name",
+                    symbol.index().0
+                );
+                continue;
+            };
+
+            let Some(address) = symbol
+                .address()
+                .checked_sub(preferred_base.offset())
+                .and_then(|offset| base.checked_add(offset))
+            else {
+                tracing::warn!("skipping COFF symbol {name}: address overflow");
+                continue;
+            };
+
+            let kind = if symbol.kind() == SymbolKind::Text {
+                SymbolProperties::FUNCTION
+            } else {
+                symbol_properties_for_address(address, &sections)
+            };
+            let properties = kind | SymbolProperties::LOCAL;
+
+            let address = match arch.canonicalise_address(address) {
+                Some((canonical, context)) if properties.is_function() && canonical != address => {
+                    mapping_hints.insert(canonical, ContextHint::code().with_context(context));
+                    canonical
+                }
+                _ => address,
+            };
+
+            symbols.insert(
+                SymbolIndex::new(PE_SYMTAB_SELECTOR, symbol.index().0),
+                RawPeSymbol {
+                    address,
+                    symbol: name.into(),
+                    properties,
+                    size: (symbol.size() != 0).then_some(symbol.size()),
+                },
+            );
         }
 
         let max_addr = external_thunks.last().unwrap_or(max_addr);
@@ -1515,8 +1570,8 @@ mod test {
     use object::{Object, ObjectSection, ReadRef};
 
     use super::{
-        ATTRIBUTE_LOAD_HEADERS, ATTRIBUTE_PERMISSIVE, Pe, PeImageContext, PeImageSegmentContents,
-        PeLoaderProperties, PeRegionBankMap, PeSegmentWalk,
+        ATTRIBUTE_LOAD_HEADERS, ATTRIBUTE_PERMISSIVE, PE_SYMTAB_SELECTOR, Pe, PeImageContext,
+        PeImageSegmentContents, PeLoaderProperties, PeRegionBankMap, PeSegmentWalk,
     };
     use crate::arch::ExternalThunkTemplate;
     use crate::attributes;
@@ -1890,6 +1945,26 @@ mod test {
             attributes![ATTRIBUTE_PERMISSIVE => true],
         )?;
         let _segments = load_segments(&pe)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_pe_coff_symbols() -> Result<(), Box<dyn std::error::Error>> {
+        let pe = Pe::new(BytesOrMapping::from_file("tests/hello-pe-mingw.exe")?)?;
+
+        for (name, address) in [("main", 0x140001592u64), ("printf", 0x140001550)] {
+            let (_, _, symbol) = pe
+                .image_symbols()
+                .iter_by_index()
+                .find(|(index, _, symbol)| {
+                    index.selector() == PE_SYMTAB_SELECTOR && symbol.symbol().as_str() == name
+                })
+                .ok_or("COFF symbol")?;
+
+            assert_eq!(symbol.address().raw_offset(), address);
+            assert!(symbol.is_function() && symbol.is_local());
+        }
 
         Ok(())
     }
