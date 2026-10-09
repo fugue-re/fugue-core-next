@@ -12,8 +12,9 @@ use object::endian::LittleEndian as LE;
 use object::pe::{
     IMAGE_DIRECTORY_ENTRY_BASERELOC, IMAGE_SCN_CNT_UNINITIALIZED_DATA, IMAGE_SCN_MEM_EXECUTE,
     IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE, IMAGE_SIZEOF_FILE_HEADER, IMAGE_SIZEOF_SECTION_HEADER,
-    ImageNtHeaders32, ImageNtHeaders64,
+    IMAGE_SYM_CLASS_STATIC, IMAGE_SYM_DTYPE_NULL, ImageNtHeaders32, ImageNtHeaders64,
 };
+use object::read::coff::ImageSymbol;
 use object::read::pe::{
     self, ImageNtHeaders, ImageOptionalHeader, PeFile, PeSection, PeSectionIterator, Relocation,
 };
@@ -703,6 +704,17 @@ impl PeSymbolLayout {
                 continue;
             };
 
+            let coff_symbol = symbol.coff_symbol();
+            let is_section_definition = coff_symbol.storage_class() == IMAGE_SYM_CLASS_STATIC
+                && coff_symbol.derived_type() == IMAGE_SYM_DTYPE_NULL
+                && symbol
+                    .section_index()
+                    .and_then(|index| pe.section_by_index(index).ok()?.name().ok())
+                    .is_some_and(|section| name.split('$').next() == Some(section));
+            if is_section_definition {
+                continue;
+            }
+
             let Some(address) = symbol
                 .address()
                 .checked_sub(preferred_base.offset())
@@ -715,7 +727,7 @@ impl PeSymbolLayout {
             let kind = if symbol.kind() == SymbolKind::Text {
                 SymbolProperties::FUNCTION
             } else {
-                symbol_properties_for_address(address, &sections)
+                SymbolProperties::DATA
             };
             let properties = kind | SymbolProperties::LOCAL;
 
@@ -1575,7 +1587,7 @@ mod test {
     };
     use crate::arch::ExternalThunkTemplate;
     use crate::attributes;
-    use crate::ir::{Address, Endian, RawAddress};
+    use crate::ir::{Address, Endian, RawAddress, Symbol};
     use crate::loader::{
         ExternalThunkLayout, ImageAddress, ImageBacking, ImageBank, ImageBankHandle,
         ImageSegmentContents, Loadable, LoaderError,
@@ -1965,6 +1977,18 @@ mod test {
             assert_eq!(symbol.address().raw_offset(), address);
             assert!(symbol.is_function() && symbol.is_local());
         }
+
+        let wcslen = pe
+            .image_symbols()
+            .iter_by_index()
+            .filter(|(index, _, symbol)| {
+                index.selector() == PE_SYMTAB_SELECTOR
+                    && symbol.address().raw_offset() == 0x140007210
+            })
+            .map(|(_, _, symbol)| symbol.symbol())
+            .next();
+
+        assert_eq!(wcslen, Some(Symbol::from("wcslen")));
 
         Ok(())
     }
