@@ -8,7 +8,7 @@ use fugue_sleigh_language::float_format::FloatFormat;
 use thiserror::Error;
 
 use crate::constructor::Constructor;
-use crate::context::{ContextBitRange, ContextDatabase};
+use crate::context::{ContextBitRange, ContextDatabase, ContextDatabaseBuilder};
 use crate::convention::Convention;
 use crate::dynamic::{Language as DynamicLanguage, LanguageLoadError, registry};
 use crate::format::InstructionFormatter;
@@ -594,16 +594,9 @@ impl Language {
     }
 
     pub fn default_context(&self) -> ContextDatabase {
-        let mut db = ContextDatabase::new(self.address_upper_bound, self.address_alignment);
-        let bits_per_word = u32::BITS as usize;
-        for (name, bits) in self.context_vars {
-            let word_offset = bits.word() * bits_per_word;
-            db.register_variable(
-                *name,
-                word_offset + bits.start_bit(),
-                word_offset + bits.end_bit(),
-            );
-        }
+        let mut db = ContextDatabaseBuilder::new(self.address_upper_bound, self.address_alignment)
+            .with_variables(self.context_vars.iter().copied())
+            .build();
         for (name, value) in self.context_defaults {
             if let Some(bits) = self.context_variable_by_name(name) {
                 db.set_variable_default_by_bits(bits, *value);
@@ -646,6 +639,18 @@ impl Language {
             .binary_search_by_key(&key, |(off, sz, _)| (*off, *sz))
             .ok()
             .map(|idx| self.register_ranges[idx].2)
+    }
+
+    pub fn containing_register(&self, vnd: &Varnode) -> Option<Varnode> {
+        if vnd.space() != self.register_space {
+            return None;
+        }
+        let end = vnd.offset().checked_add(u64::from(vnd.size))?;
+        self.register_ranges
+            .iter()
+            .filter(|(off, sz, _)| *off <= vnd.offset() && end <= off + u64::from(*sz))
+            .min_by_key(|(_, sz, _)| *sz)
+            .map(|(off, sz, _)| Varnode::new(self.register_space, *off, *sz))
     }
 
     pub fn user_op_by_name(&self, name: impl AsRef<str>) -> Option<u16> {

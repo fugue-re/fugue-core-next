@@ -308,11 +308,9 @@ impl ArmDisassembler {
     #[allow(clippy::new_ret_no_self)]
     fn new(is_thumb: bool, endian: Endian, t_mode: ContextBitRange) -> Disassembler {
         Disassembler::new(Self {
-            decoder: if is_thumb {
-                InstDecoder::default_thumb()
-            } else {
-                InstDecoder::default()
-            },
+            decoder: InstDecoder::default()
+                .with_thumb_mode(is_thumb)
+                .allow_nonconforming(false),
             endian,
             t_mode,
         })
@@ -673,7 +671,7 @@ mod test {
 
     #[test]
     fn arm_fall_through_fast_path_matches_decoder_samples() {
-        let decoder = InstDecoder::default();
+        let decoder = InstDecoder::default().allow_nonconforming(false);
         let mut state = 0x6d2b_79f5u32;
 
         for _ in 0..250_000 {

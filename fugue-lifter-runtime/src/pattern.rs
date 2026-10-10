@@ -1,6 +1,8 @@
 use std::fmt;
 use std::ops::Range;
 
+use smallvec::SmallVec;
+
 use crate::format::{InstructionFormatError, InstructionSection, InstructionWriter};
 use crate::input::{BREADCRUMBS, INVALID_HANDLE};
 use crate::language::{Language, LanguageData};
@@ -153,7 +155,7 @@ impl PatternExpression {
         input: &mut LiftingContextState<'_>,
     ) -> Option<(i64, Option<Range<u32>>)> {
         unsafe {
-            let mut stack = Vec::new();
+            let mut stack = SmallVec::<[i64; 8]>::new();
             let operations = self.operations(data);
 
             let mut range = None;

@@ -28,7 +28,7 @@ use crate::ir::{
     SymbolTableSelector, TransientSymbolTable,
 };
 use crate::lifter::{ContextHint, TrackedSet};
-use crate::loader::elf::extensions::{ImageContext, TrackedSetContext};
+use crate::loader::elf::extensions::ImageContext;
 use crate::loader::elf::read::image::ElfImageData;
 use crate::loader::elf::read::permissive;
 use crate::loader::image::ImagePlacedRegion;
@@ -252,20 +252,17 @@ impl<'a> Elf<'a> {
         );
 
         let mut tracked_sets = RawAddressMap::new();
-        if !TrackedSetContext::new(
+        with_elf!(
             view,
-            &architecture,
-            base - preferred_base,
-            &mut tracked_sets,
-        )
-        .apply_tracked_sets()?
-        {
-            with_elf!(
+            elf | ElfTrackedSetResolver::new(
                 view,
-                elf | ElfTrackedSetResolver::new(elf, &architecture, base - preferred_base)
-                    .apply(&mut tracked_sets)
-            );
-        }
+                elf,
+                &architecture,
+                base - preferred_base,
+                &mut tracked_sets,
+            )
+            .apply()
+        )?;
 
         let entry = entry.map(|entry| match architecture.canonicalise_address(entry) {
             Some((canonical, context)) if canonical != entry => {

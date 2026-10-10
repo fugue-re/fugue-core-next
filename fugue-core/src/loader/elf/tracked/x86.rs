@@ -3,18 +3,17 @@ use object::read::elf::FileHeader;
 use object::{Object, ObjectSection, ReadRef};
 
 use super::ElfTrackedSetResolver;
-use crate::ir::RawAddressMap;
 use crate::lifter::{TrackedContext, TrackedSet};
 
 const PLT_SECTIONS: [&str; 3] = [".plt", ".plt.got", ".plt.sec"];
 
-impl<'data, 'file, Elf, R> ElfTrackedSetResolver<'data, 'file, Elf, R>
+impl<'data, 'file, Elf, R> ElfTrackedSetResolver<'data, 'file, '_, Elf, R>
 where
     Elf: FileHeader,
     R: ReadRef<'data>,
     'file: 'data,
 {
-    pub(crate) fn apply_x86_tracked_sets(&self, tracked_sets: &mut RawAddressMap<TrackedSet>) {
+    pub(crate) fn apply_x86_tracked_sets(&mut self) {
         let Some(register) = self.arch.language().register_by_name("EBX") else {
             return;
         };
@@ -43,7 +42,8 @@ where
             else {
                 continue;
             };
-            tracked_sets.insert_range(start..=last, tracked.clone());
+            self.tracked_sets
+                .insert_range(start..=last, tracked.clone());
         }
     }
 }

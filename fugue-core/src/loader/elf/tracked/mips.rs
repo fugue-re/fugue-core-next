@@ -3,17 +3,17 @@ use object::read::elf::FileHeader;
 use object::{Object, ObjectSymbol, ReadRef};
 
 use super::ElfTrackedSetResolver;
-use crate::ir::{RawAddress, RawAddressMap};
+use crate::ir::RawAddress;
 use crate::lifter::{TrackedContext, TrackedSet};
 use crate::loader::elf::read::mips::{GP_BIAS, OptionsIterator, RegInfo32};
 
-impl<'data, 'file, Elf, R> ElfTrackedSetResolver<'data, 'file, Elf, R>
+impl<'data, 'file, Elf, R> ElfTrackedSetResolver<'data, 'file, '_, Elf, R>
 where
     Elf: FileHeader,
     R: ReadRef<'data>,
     'file: 'data,
 {
-    pub(crate) fn apply_mips_tracked_sets(&self, tracked_sets: &mut RawAddressMap<TrackedSet>) {
+    pub(crate) fn apply_mips_tracked_sets(&mut self) {
         let gp = self
             .elf
             .symbol_by_name("_gp")
@@ -22,14 +22,10 @@ where
             .or_else(|| self.mips_reginfo_gp())
             .or_else(|| self.dynamic_value(DT_PLTGOT).map(|got| got + GP_BIAS));
 
-        self.apply_mips_gp(tracked_sets, gp);
+        self.apply_mips_gp(gp);
     }
 
-    pub(crate) fn apply_mips_gp(
-        &self,
-        tracked_sets: &mut RawAddressMap<TrackedSet>,
-        gp: Option<u64>,
-    ) {
+    pub(crate) fn apply_mips_gp(&mut self, gp: Option<u64>) {
         let Some(register) = self.arch.language().register_by_name("gp") else {
             return;
         };
@@ -40,7 +36,8 @@ where
 
         let mut tracked = TrackedSet::default();
         tracked.insert(TrackedContext::new(register, self.rebase(gp).offset()));
-        tracked_sets.insert_range(RawAddress::zero()..=RawAddress::MAX, tracked);
+        self.tracked_sets
+            .insert_range(RawAddress::zero()..=RawAddress::MAX, tracked);
     }
 
     fn mips_options_gp(&self) -> Option<u64> {

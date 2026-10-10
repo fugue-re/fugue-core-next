@@ -40,7 +40,8 @@ pub(crate) use image::{ImageBankLayout, ImageCoveredRegions, ImageRegionBankMap}
 
 pub mod pe;
 pub use pe::extensions::{
-    ArchResolver as PeArchResolver, ImageContext as PeImageContext,
+    ArchResolver as PeArchResolver, ExceptionContext as PeExceptionContext,
+    ExceptionExtension as PeExceptionExtension, ImageContext as PeImageContext,
     RelocationContext as PeRelocationContext, RelocationExtension as PeRelocationExtension,
     TrackedSetContext as PeTrackedSetContext, TrackedSetExtension as PeTrackedSetExtension,
 };

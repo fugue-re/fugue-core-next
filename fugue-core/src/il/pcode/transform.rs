@@ -674,21 +674,31 @@ impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
     }
 
     fn lift(mut self) -> Result<PCodeIr, PCodeError> {
-        match self
+        let speculative = match self
             .source
             .take()
             .expect("a PCode function lifter owns exactly one source")
         {
-            PCodeFunctionSource::Admitted(input) => self.lift_admitted(input)?,
-            PCodeFunctionSource::Speculative { function, .. } => self.lift_speculative(function)?,
-        }
+            PCodeFunctionSource::Admitted(input) => {
+                self.lift_admitted(input)?;
+                false
+            }
+            PCodeFunctionSource::Speculative { function, .. } => {
+                self.lift_speculative(function)?;
+                true
+            }
+        };
         self.builder.set_graph(
             IlGraph::new(self.blocks, self.successors, self.successor_kinds)
                 .with_block_sources(self.block_sources),
         );
         self.builder.set_source_spans(self.source_spans);
 
-        Ok(self.builder.build()?)
+        if speculative {
+            Ok(self.builder.build()?)
+        } else {
+            Ok(self.builder.build_unchecked())
+        }
     }
 }
 

@@ -1,6 +1,6 @@
 use crate::analysis::function::recovery::StructuredFunctionContext;
 use crate::analysis::{AnalysisError, AnalysisPass};
-use crate::engine::AnalysisContext;
+use crate::engine::{AnalysisContext, Priority};
 
 pub(crate) const NON_RETURNING_THUNK_ANALYSER: &str = "non-returning-thunk";
 
@@ -8,6 +8,10 @@ pub(crate) const NON_RETURNING_THUNK_ANALYSER: &str = "non-returning-thunk";
 pub(crate) struct NonReturningThunk;
 
 impl AnalysisPass<StructuredFunctionContext> for NonReturningThunk {
+    fn priority(&self) -> Priority {
+        Priority::ENRICHMENT
+    }
+
     fn analyse_with(
         &mut self,
         context: &mut AnalysisContext<'_, '_>,

@@ -29,7 +29,7 @@ use crate::ir::{
 };
 use crate::lifter::{ContextHint, TrackedSet};
 use crate::loader::image::ImagePlacedRegion;
-use crate::loader::pe::extensions::{ImageContext, TrackedSetContext};
+use crate::loader::pe::extensions::ImageContext;
 use crate::loader::pe::read::permissive;
 use crate::loader::{
     ExternalThunkLayout, ImageAddress, ImageBacking, ImageBank, ImageBankHandle, ImageBankLayout,
@@ -42,6 +42,9 @@ use crate::storage::segments::SegmentProperties;
 use crate::storage::segments::mapping::SegmentMappingProvenance;
 use crate::types::attributes::{ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE};
 use crate::types::{AttributeMap, BytesOrMapping};
+
+mod exceptions;
+use exceptions::PeExceptionResolver;
 
 pub mod extensions;
 
@@ -284,6 +287,7 @@ struct PeLoadState {
     entry: Option<ImageAddress>,
     layout: ImageLayout,
     mapping_hints: BTreeMap<RawAddress, ContextHint>,
+    function_hints: BTreeSet<RawAddress>,
     tracked_sets: RawAddressMap<TrackedSet>,
     symbols: TransientSymbolTable<ImageAddress>,
     external_thunks: ExternalThunkLayout,
@@ -336,19 +340,17 @@ impl PeLoadState {
         let architecture = context.resolve_architecture()?;
 
         let mut tracked_sets = RawAddressMap::new();
-        if !TrackedSetContext::new(
+        with_pe!(
             view,
-            &architecture,
-            base - preferred_base,
-            &mut tracked_sets,
-        )
-        .apply_tracked_sets()?
-        {
-            with_pe!(
+            pe | PeTrackedSetResolver::new(
                 view,
-                pe | PeTrackedSetResolver::new(pe).apply(&mut tracked_sets)
-            );
-        }
+                pe,
+                &architecture,
+                base - preferred_base,
+                &mut tracked_sets,
+            )
+            .apply()
+        )?;
 
         let symbols = with_pe!(
             view,
@@ -362,6 +364,21 @@ impl PeLoadState {
             external_thunks,
             import_slots,
         } = symbols;
+
+        let mut function_hints = BTreeSet::new();
+        with_pe!(
+            view,
+            pe | PeExceptionResolver::new(
+                view,
+                pe,
+                &architecture,
+                base,
+                config,
+                &mut function_hints,
+                &mut mapping_hints,
+            )
+            .apply()
+        )?;
 
         let image_entry = entry
             .map(|entry| match architecture.canonicalise_address(entry) {
@@ -454,6 +471,7 @@ impl PeLoadState {
             entry: image_entry,
             layout,
             mapping_hints,
+            function_hints,
             tracked_sets,
             symbols: image_symbols,
             external_thunks,
@@ -727,7 +745,7 @@ impl PeSymbolLayout {
             let kind = if symbol.kind() == SymbolKind::Text {
                 SymbolProperties::FUNCTION
             } else {
-                SymbolProperties::DATA
+                symbol_properties_for_address(address, &sections)
             };
             let properties = kind | SymbolProperties::LOCAL;
 
@@ -1385,6 +1403,7 @@ struct PeImageSegments<'a> {
     segments: slice::Iter<'a, PeImageSegment>,
     image_symbols: &'a TransientSymbolTable<ImageAddress>,
     mapping_hints: &'a BTreeMap<RawAddress, ContextHint>,
+    function_hints: &'a BTreeSet<RawAddress>,
     tracked_sets: &'a RawAddressMap<TrackedSet>,
 }
 
@@ -1393,12 +1412,14 @@ impl<'a> PeImageSegments<'a> {
         segments: &'a [PeImageSegment],
         image_symbols: &'a TransientSymbolTable<ImageAddress>,
         mapping_hints: &'a BTreeMap<RawAddress, ContextHint>,
+        function_hints: &'a BTreeSet<RawAddress>,
         tracked_sets: &'a RawAddressMap<TrackedSet>,
     ) -> Self {
         Self {
             segments: segments.iter(),
             image_symbols,
             mapping_hints,
+            function_hints,
             tracked_sets,
         }
     }
@@ -1427,6 +1448,7 @@ impl<'a> PeImageSegments<'a> {
                             .contains(SymbolProperties::FUNCTION | SymbolProperties::EXTERN)
                     })
                     .map(|(_, entry)| entry.address().offset())
+                    .chain(self.function_hints.range(seg_start..=seg_last).copied())
                     .collect::<BTreeSet<RawAddress>>();
 
                 (mapping_hints, function_hints)
@@ -1531,6 +1553,7 @@ impl Loadable for Pe<'_> {
             &state.segments,
             &state.symbols,
             &state.mapping_hints,
+            &state.function_hints,
             &state.tracked_sets,
         )) as ImageSegmentIterator<'b>
     }
@@ -1989,6 +2012,30 @@ mod test {
             .next();
 
         assert_eq!(wcslen, Some(Symbol::from("wcslen")));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_pe_exception_directory_function_hints() -> Result<(), Box<dyn std::error::Error>> {
+        for (path, expected) in [
+            (
+                "tests/pe-chained-unwind-x86_64.exe",
+                &[0x140001000u64, 0x140001040][..],
+            ),
+            (
+                "tests/pe-pdata-arm64.exe",
+                &[0x140001000, 0x140001010, 0x140001020, 0x140001030][..],
+            ),
+        ] {
+            let pe = Pe::new(BytesOrMapping::from_file(path)?)?;
+            let mut hints = Vec::new();
+            let mut segments = pe.image_segments();
+            while let Some(segment) = segments.next()? {
+                hints.extend(segment.function_hints().iter().map(|hint| hint.offset()));
+            }
+            assert_eq!(hints, expected, "{path}");
+        }
 
         Ok(())
     }

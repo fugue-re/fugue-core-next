@@ -1,5 +1,5 @@
 use std::fmt::{self, Debug, Display};
-use std::mem;
+use std::{iter, mem};
 
 use arrayvec::ArrayVec;
 use fugue_sleigh_language::varnode::VarnodeData;
@@ -58,7 +58,9 @@ impl LiftingContext {
     ) -> Self {
         Self {
             language,
-            inputs: vec![ParserInput::empty(); ninputs],
+            inputs: iter::repeat_with(ParserInput::empty)
+                .take(ninputs)
+                .collect(),
             lifting_context: PCodeBuilderContext::new(unique_mask),
             parsing_context: context,
         }
@@ -291,9 +293,11 @@ impl<'a> LiftingContextState<'a> {
     #[inline]
     pub unsafe fn apply_commits(&mut self, data: &'static LanguageData) {
         unsafe {
-            for commit in mem::take(&mut self.inputs.input.context.commits) {
+            for index in 0..self.inputs.input.context.commits.len() {
+                let commit = self.inputs.input.context.commits[index].clone();
                 commit.action.apply(data, self, &commit);
             }
+            self.inputs.input.context.commits.clear();
         }
     }
 
@@ -784,12 +788,20 @@ impl Default for Varnode {
 
 impl<'a> Display for LanguageFormatter<'a, Varnode> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.value.space() == self.language.register_space() {
-            let reg = self
+        if let Some(register) = self.language.containing_register(self.value) {
+            let name = self
                 .language
-                .register_name(self.value)
-                .expect("valid register");
-            return f.write_str(reg);
+                .register_name(&register)
+                .expect("a containing register is named");
+            f.write_str(name)?;
+            let delta = self.value.offset() - register.offset();
+            if delta != 0 {
+                write!(f, "+{delta}")?;
+            }
+            if self.value.size() != register.size() {
+                write!(f, ":{}", self.value.size())?;
+            }
+            return Ok(());
         }
 
         if self.value.space() == self.language.unique_space() {

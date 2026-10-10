@@ -80,7 +80,7 @@ uuid = { version = "1", features = ["serde", "v7"] }
 ustr = { version = "1.1", package = "fugue-ustr", features = ["rkyv", "serde"] }
 walkdir = "2.5"
 yaxpeax-arch = { version = "0.3", default-features = false }
-yaxpeax-arm = { version = "0.4", git = "https://github.com/fugue-re/yaxpeax-arm.git", rev = "e34ced89551c607befc6dfc3186e2f6af9c77a10" }
+yaxpeax-arm = "0.5"
 yaxpeax-x86 = "2.0"
 zip = { version = "7", default-features = false, features = ["zstd"] }
 

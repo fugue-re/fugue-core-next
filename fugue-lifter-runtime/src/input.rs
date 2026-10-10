@@ -4,10 +4,9 @@ use std::ops::{Deref, DerefMut};
 use arrayvec::ArrayVec;
 
 use crate::constructor::Constructor;
-use crate::context::{ContextDatabase, ContextPostAction};
+use crate::context::{ContextDatabase, ContextPostAction, MAX_CTXT_CHUNKS};
 
 const MAX_CTOR_STATES: usize = 256; // 128;
-const MAX_CTXT_CHUNKS: usize = 2;
 const MAX_PARSER_DEPTH: usize = 128; // 64;
 
 pub const INVALID_HANDLE: u8 = 0xff;

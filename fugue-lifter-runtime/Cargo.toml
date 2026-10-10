@@ -5,7 +5,7 @@ edition = "2024"
 
 [features]
 default = []
-serde = ["dep:serde", "dep:serde-big-array"]
+serde = ["dep:serde", "dep:serde-big-array", "smallvec/serde"]
 
 [dependencies]
 arrayvec = "0.7"
@@ -14,9 +14,10 @@ flate2 = "1.1"
 fugue-sleigh-language = { version = "0.3", path = "../fugue-sleigh-language" }
 indexmap = "2"
 itertools = "0.14"
-rkyv = { version = "0.8", features = ["arrayvec-0_7"] }
+rkyv = { version = "0.8", features = ["arrayvec-0_7", "smallvec-1"] }
 serde = { version = "1", features = ["derive"], optional = true }
 serde-big-array = { version = "0.5", optional = true }
+smallvec = "1.15"
 thiserror = "2"
 
 [lints]
