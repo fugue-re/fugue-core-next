@@ -88,6 +88,16 @@ impl PCodeBuilder {
     }
 
     pub fn build(self) -> Result<PCodeIr, IlError> {
+        let ir = self.build_unchecked();
+
+        if ir.verify().is_err() {
+            return Err(IlError::invalid_artefact(PCodeIr::FORM));
+        }
+
+        Ok(ir)
+    }
+
+    pub(crate) fn build_unchecked(self) -> PCodeIr {
         let mut ir = PCodeIr {
             metadata: self.metadata,
             graph: self.graph,
@@ -97,14 +107,8 @@ impl PCodeBuilder {
             operands: self.operands.into_values(),
             targets: self.targets,
         };
-
         ir.shrink_to_fit();
-
-        if ir.verify().is_err() {
-            return Err(IlError::invalid_artefact(PCodeIr::FORM));
-        }
-
-        Ok(ir)
+        ir
     }
 }
 

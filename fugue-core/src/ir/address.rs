@@ -1,18 +1,21 @@
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Display, LowerHex, UpperHex};
+use std::mem::ManuallyDrop;
 use std::num::ParseIntError;
 use std::ops::{Add, AddAssign, Bound, Range, RangeBounds, RangeInclusive, Sub, SubAssign};
 use std::str::FromStr;
-use std::{fmt, iter, mem};
+use std::{fmt, iter, mem, ptr};
 
 use rangemap::{RangeInclusiveMap, RangeInclusiveSet};
 use serde::{Deserialize, Serialize};
 
-use crate::lifter::{ContextSet, Language, Varnode};
+use crate::lifter::{
+    ContextBitRange, ContextSet, ContextUpdate, Language, MAX_CONTEXT_UPDATES, Varnode,
+};
 use crate::storage::entities::schema::{ENTITY_KEY_ADDRESS_ID, ENTITY_KEY_RAW_ADDRESS_ID};
 use crate::storage::entities::{EntityKey, EntityKeyCodec, EntityKeyId};
 use crate::storage::segments::space::AddressSpaceId;
-use crate::types::Confidence;
+use crate::types::EstimateSize;
 
 #[derive(
     Copy,
@@ -471,32 +474,147 @@ impl ToRawAddress for Varnode {
     }
 }
 
-#[derive(
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    rkyv::Archive,
-    rkyv::Serialize,
-    rkyv::Deserialize,
-)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AddressWithContext {
     address: Address,
     context: ContextSet,
-    confidence: Confidence,
+}
+
+#[derive(rkyv::Portable)]
+#[repr(C)]
+pub struct ArchivedAddressWithContext {
+    offset: rkyv::Archived<u64>,
+    context: ArchivedContextValue,
+    space: rkyv::Archived<u16>,
+    start: u8,
+    end: u8,
+}
+
+#[derive(rkyv::Portable)]
+#[repr(C)]
+union ArchivedContextValue {
+    value: rkyv::Archived<u32>,
+    updates: ManuallyDrop<
+        rkyv::boxed::ArchivedBox<rkyv::Archived<[ContextUpdate; MAX_CONTEXT_UPDATES]>>,
+    >,
+}
+
+unsafe impl<C> rkyv::bytecheck::CheckBytes<C> for ArchivedAddressWithContext
+where
+    C: rkyv::rancor::Fallible + rkyv::validation::ArchiveContext + ?Sized,
+    C::Error: rkyv::rancor::Source,
+{
+    unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
+        // SAFETY: the range bytes select the active union field; all other inline fields accept any bits.
+        let (start, end) = unsafe { ((*value).start, (*value).end) };
+        match end {
+            0 => Ok(()),
+            1..=32 if start & 31 < end => Ok(()),
+            u8::MAX => unsafe {
+                <rkyv::boxed::ArchivedBox<rkyv::Archived<[ContextUpdate; MAX_CONTEXT_UPDATES]>> as rkyv::bytecheck::CheckBytes<C>>::check_bytes(
+                    ptr::addr_of!((*value).context.updates).cast(),
+                    context,
+                )
+            },
+            _ => rkyv::rancor::fail!(rkyv::bytecheck::InvalidEnumDiscriminantError {
+                enum_name: "ArchivedAddressWithContext",
+                invalid_discriminant: u16::from_be_bytes([start, end]),
+            }),
+        }
+    }
+}
+
+impl rkyv::Archive for AddressWithContext {
+    type Archived = ArchivedAddressWithContext;
+    type Resolver = Option<rkyv::boxed::BoxResolver>;
+
+    fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        rkyv::munge::munge!(let ArchivedAddressWithContext { offset, context, space, start, end } = out);
+        self.address.offset().resolve((), offset);
+        self.address.space().value().resolve((), space);
+        if let Some(resolver) = resolver {
+            start.write(0);
+            end.write(u8::MAX);
+            // SAFETY: repr(C) union fields share an offset and the union provides their alignment.
+            let updates = unsafe { context.cast_unchecked() };
+            rkyv::boxed::ArchivedBox::<rkyv::Archived<[ContextUpdate; MAX_CONTEXT_UPDATES]>>::resolve_from_raw_parts(resolver, (), updates);
+            return;
+        }
+
+        // SAFETY: the inline branch selects the u32 field of the repr(C) union.
+        let value = unsafe { context.cast_unchecked::<rkyv::Archived<u32>>() };
+        if let Some(update) = self.context.iter().next() {
+            let bits = update.bits();
+            start.write((bits.word() * 32 + bits.start_bit()) as u8);
+            end.write(bits.end_bit() as u8 + 1);
+            update.value().resolve((), value);
+        } else {
+            start.write(0);
+            end.write(0);
+            0u32.resolve((), value);
+        }
+    }
+}
+
+impl<S> rkyv::Serialize<S> for AddressWithContext
+where
+    S: rkyv::rancor::Fallible + rkyv::ser::Allocator + rkyv::ser::Writer + ?Sized,
+{
+    fn serialize(&self, serialiser: &mut S) -> Result<Self::Resolver, S::Error> {
+        let mut updates = self.context.iter();
+        let (Some(first), Some(second)) = (updates.next(), updates.next()) else {
+            return Ok(None);
+        };
+        rkyv::boxed::ArchivedBox::serialize_from_ref(&[first.clone(), second.clone()], serialiser)
+            .map(Some)
+    }
+}
+
+impl<D> rkyv::Deserialize<AddressWithContext, D> for ArchivedAddressWithContext
+where
+    D: rkyv::rancor::Fallible + ?Sized,
+{
+    fn deserialize(&self, deserialiser: &mut D) -> Result<AddressWithContext, D::Error> {
+        let address = Address::new(
+            AddressSpaceId::from(self.space.to_native()),
+            RawAddress::from(self.offset.to_native()),
+        );
+        if self.end == 0 {
+            return Ok(AddressWithContext::from(address));
+        }
+        if self.end == u8::MAX {
+            // SAFETY: this tag selects the relative pointer, validated by CheckBytes.
+            let updates = unsafe { self.context.updates.get() };
+            let updates =
+                rkyv::Deserialize::<[ContextUpdate; MAX_CONTEXT_UPDATES], D>::deserialize(
+                    updates,
+                    deserialiser,
+                )?;
+            return Ok(AddressWithContext::new(
+                address,
+                ContextSet::from_iter(updates),
+            ));
+        }
+        let start = usize::from(self.start);
+        let end = (start & !31) | usize::from(self.end - 1);
+        // SAFETY: the inline tag selects the u32 field.
+        let value = unsafe { self.context.value }.to_native();
+        Ok(AddressWithContext::new(
+            address,
+            ContextSet::single(ContextBitRange::new(start, end), value),
+        ))
+    }
+}
+
+impl EstimateSize for AddressWithContext {
+    fn estimate_size(&self) -> usize {
+        size_of::<Self>()
+    }
 }
 
 impl Display for AddressWithContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} (context: {}, confidence: {})",
-            self.address, self.context, self.confidence
-        )
+        write!(f, "{} (context: {})", self.address, self.context)
     }
 }
 
@@ -518,29 +636,11 @@ where
     }
 }
 
-impl<A> From<(A, ContextSet, Confidence)> for AddressWithContext
-where
-    A: Into<Address>,
-{
-    fn from(parts: (A, ContextSet, Confidence)) -> Self {
-        Self::new_with(parts.0.into(), parts.1, parts.2)
-    }
-}
-
 impl AddressWithContext {
     pub fn new(address: impl Into<Address>, context: ContextSet) -> Self {
-        Self::new_with(address.into(), context, Confidence::certain())
-    }
-
-    pub fn new_with(
-        address: impl Into<Address>,
-        context: ContextSet,
-        confidence: Confidence,
-    ) -> Self {
         Self {
             address: address.into(),
             context,
-            confidence,
         }
     }
 
@@ -552,22 +652,12 @@ impl AddressWithContext {
         &self.context
     }
 
-    pub fn confidence(&self) -> Confidence {
-        self.confidence
-    }
-
     pub fn context_mut(&mut self) -> &mut ContextSet {
         &mut self.context
     }
 
     pub fn merge_context(&mut self, other: &ContextSet) {
         self.context.merge(other);
-    }
-
-    pub fn merge_max_confidence(&mut self, other: Confidence) {
-        if other > self.confidence {
-            self.confidence = other;
-        }
     }
 
     pub fn into_parts(self) -> (Address, ContextSet) {
@@ -1084,6 +1174,7 @@ impl<V> RawAddressMap<V>
 where
     V: Clone + Ord,
 {
+    #[inline(never)]
     pub fn max_in_range(&self, range: impl Into<RangeInclusive<RawAddress>>) -> Option<V> {
         let range = range.into();
         let start = range.start().offset();
@@ -1096,6 +1187,195 @@ where
                     .max()
             })
             .flatten()
+    }
+}
+
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct RawAddressRun<V> {
+    start: RawAddress,
+    last: RawAddress,
+    value: V,
+}
+
+struct RawAddressRunRef<'a, V> {
+    start: RawAddress,
+    last: RawAddress,
+    value: &'a V,
+}
+
+impl<V> rkyv::Archive for RawAddressRunRef<'_, V>
+where
+    V: rkyv::Archive,
+{
+    type Archived = ArchivedRawAddressRun<V>;
+    type Resolver = RawAddressRunResolver<V>;
+
+    fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        rkyv::munge::munge!(let ArchivedRawAddressRun { start, last, value } = out);
+        self.start.resolve(resolver.start, start);
+        self.last.resolve(resolver.last, last);
+        self.value.resolve(resolver.value, value);
+    }
+}
+
+impl<V, S> rkyv::Serialize<S> for RawAddressRunRef<'_, V>
+where
+    V: rkyv::Serialize<S>,
+    S: rkyv::rancor::Fallible + ?Sized,
+{
+    fn serialize(&self, serialiser: &mut S) -> Result<Self::Resolver, S::Error> {
+        Ok(RawAddressRunResolver {
+            start: rkyv::Serialize::serialize(&self.start, serialiser)?,
+            last: rkyv::Serialize::serialize(&self.last, serialiser)?,
+            value: rkyv::Serialize::serialize(self.value, serialiser)?,
+        })
+    }
+}
+
+#[repr(transparent)]
+pub struct ArchivedRawAddressMap<V>(rkyv::vec::ArchivedVec<ArchivedRawAddressRun<V>>)
+where
+    V: rkyv::Archive;
+
+unsafe impl<V> rkyv::Portable for ArchivedRawAddressMap<V> where V: rkyv::Archive {}
+
+impl<V> ArchivedRawAddressMap<V>
+where
+    V: rkyv::Archive,
+{
+    pub fn contains_address(&self, address: impl Into<RawAddress>) -> bool {
+        self.get(address).is_some()
+    }
+
+    pub fn get(&self, address: impl Into<RawAddress>) -> Option<&V::Archived> {
+        let address = address.into().offset();
+        let index = self
+            .0
+            .partition_point(|run| run.start.0.to_native() <= address)
+            .checked_sub(1)?;
+        let run = &self.0[index];
+        (address <= run.last.0.to_native()).then_some(&run.value)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn run_count(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (RawAddress, &V::Archived)> {
+        self.0.iter().flat_map(|run| {
+            (run.start.0.to_native()..=run.last.0.to_native())
+                .map(move |address| (RawAddress::from(address), &run.value))
+        })
+    }
+
+    pub fn range(
+        &self,
+        range: impl RangeBounds<RawAddress>,
+    ) -> impl Iterator<Item = (RawAddress, &V::Archived)> {
+        raw_address_bounds(&range)
+            .into_iter()
+            .flat_map(move |query| {
+                let (query_start, query_end) = query.into_inner();
+                let first = self
+                    .0
+                    .partition_point(|run| run.last.0.to_native() < query_start);
+                self.0[first..]
+                    .iter()
+                    .take_while(move |run| run.start.0.to_native() <= query_end)
+                    .flat_map(move |run| {
+                        let start = run.start.0.to_native().max(query_start);
+                        let end = run.last.0.to_native().min(query_end);
+                        (start..=end).map(move |address| (RawAddress::from(address), &run.value))
+                    })
+            })
+    }
+}
+
+impl<V> ArchivedRawAddressMap<V>
+where
+    V: rkyv::Archive,
+    V::Archived: Ord,
+{
+    pub fn max_in_range(
+        &self,
+        range: impl Into<RangeInclusive<RawAddress>>,
+    ) -> Option<&V::Archived> {
+        let range = range.into();
+        let start = range.start().offset();
+        let end = range.end().offset();
+        if start > end {
+            return None;
+        }
+        let first = self.0.partition_point(|run| run.last.0.to_native() < start);
+        self.0[first..]
+            .iter()
+            .take_while(|run| run.start.0.to_native() <= end)
+            .map(|run| &run.value)
+            .max()
+    }
+}
+
+unsafe impl<V, C> rkyv::bytecheck::CheckBytes<C> for ArchivedRawAddressMap<V>
+where
+    V: rkyv::Archive,
+    C: rkyv::rancor::Fallible + ?Sized,
+    rkyv::vec::ArchivedVec<ArchivedRawAddressRun<V>>: rkyv::bytecheck::CheckBytes<C>,
+{
+    unsafe fn check_bytes(value: *const Self, context: &mut C) -> Result<(), C::Error> {
+        unsafe {
+            <rkyv::vec::ArchivedVec<ArchivedRawAddressRun<V>>>::check_bytes(value.cast(), context)
+        }
+    }
+}
+
+impl<V> rkyv::Archive for RawAddressMap<V>
+where
+    V: Clone + Eq + rkyv::Archive,
+{
+    type Archived = ArchivedRawAddressMap<V>;
+    type Resolver = rkyv::vec::VecResolver;
+
+    fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
+        let out =
+            unsafe { out.cast_unchecked::<rkyv::vec::ArchivedVec<ArchivedRawAddressRun<V>>>() };
+        rkyv::vec::ArchivedVec::resolve_from_len(self.run_count(), resolver, out);
+    }
+}
+
+impl<V, S> rkyv::Serialize<S> for RawAddressMap<V>
+where
+    V: Clone + Eq + rkyv::Serialize<S>,
+    S: rkyv::rancor::Fallible + rkyv::ser::Writer + rkyv::ser::Allocator + ?Sized,
+{
+    fn serialize(&self, serialiser: &mut S) -> Result<Self::Resolver, S::Error> {
+        rkyv::vec::ArchivedVec::<ArchivedRawAddressRun<V>>::serialize_from_unknown_length_iter(
+            &mut self.0.iter().map(|(range, value)| RawAddressRunRef {
+                start: RawAddress::from(*range.start()),
+                last: RawAddress::from(*range.end()),
+                value,
+            }),
+            serialiser,
+        )
+    }
+}
+
+impl<V, D> rkyv::Deserialize<RawAddressMap<V>, D> for ArchivedRawAddressMap<V>
+where
+    V: Clone + Eq + rkyv::Archive,
+    V::Archived: rkyv::Deserialize<V, D>,
+    D: rkyv::rancor::Fallible + ?Sized,
+{
+    fn deserialize(&self, deserialiser: &mut D) -> Result<RawAddressMap<V>, D::Error> {
+        let mut map = RawAddressMap::new();
+        for run in self.0.iter() {
+            let run = rkyv::Deserialize::<RawAddressRun<V>, D>::deserialize(run, deserialiser)?;
+            map.insert_range(run.start..=run.last, run.value);
+        }
+        Ok(map)
     }
 }
 
@@ -1755,6 +2035,62 @@ impl AddressTable {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn raw_address_map_round_trips_its_runs() {
+        let mut map = RawAddressMap::new();
+        map.insert_range(
+            RawAddress::from(0x1000u64)..=RawAddress::from(0x1fffu64),
+            1u32,
+        );
+        map.insert_range(
+            RawAddress::from(0x1800u64)..=RawAddress::from(0x18ffu64),
+            2u32,
+        );
+        map.insert_range(RawAddress::from(u64::MAX - 1)..=RawAddress::MAX, 3u32);
+
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&map).unwrap();
+        let decoded = rkyv::from_bytes::<RawAddressMap<u32>, rkyv::rancor::Error>(&bytes).unwrap();
+
+        assert_eq!(decoded, map);
+        assert_eq!(decoded.run_count(), 4);
+
+        let archived =
+            rkyv::access::<ArchivedRawAddressMap<u32>, rkyv::rancor::Error>(&bytes).unwrap();
+        assert_eq!(archived.get(0xfffu64), None);
+        assert_eq!(
+            archived.get(0x1000u64).map(|value| value.to_native()),
+            Some(1)
+        );
+        assert_eq!(
+            archived.get(0x1800u64).map(|value| value.to_native()),
+            Some(2)
+        );
+        assert_eq!(
+            archived.get(0x1900u64).map(|value| value.to_native()),
+            Some(1)
+        );
+        assert_eq!(archived.get(0x2000u64), None);
+        assert_eq!(
+            archived.get(RawAddress::MAX).map(|value| value.to_native()),
+            Some(3)
+        );
+        assert_eq!(
+            archived
+                .range(RawAddress::from(0x17feu64)..=RawAddress::from(0x1801u64))
+                .map(|(address, value)| (address.offset(), value.to_native()))
+                .collect::<Vec<_>>(),
+            map.range(RawAddress::from(0x17feu64)..=RawAddress::from(0x1801u64))
+                .map(|(address, value)| (address.offset(), value))
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            archived
+                .max_in_range(RawAddress::from(0x1000u64)..=RawAddress::from(0x1fffu64))
+                .map(|value| value.to_native()),
+            map.max_in_range(RawAddress::from(0x1000u64)..=RawAddress::from(0x1fffu64)),
+        );
+    }
 
     #[test]
     fn empty_address_table_has_no_range() {

@@ -11,7 +11,9 @@ use yaxpeax_arm::armv7::{
 use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
 use crate::arch::{Arch, BytesProperties, ExternalThunkTemplate};
-use crate::ir::{Address, Insn, InsnError, InsnProperties, LazySymbol, RawAddress, Symbol};
+use crate::ir::{
+    Address, AddressWithContext, Insn, InsnError, InsnProperties, LazySymbol, RawAddress, Symbol,
+};
 use crate::lazy_symbol;
 use crate::lifter::traits::Disassembler as DisassemblerT;
 use crate::lifter::{
@@ -67,7 +69,7 @@ impl ArchT for Arm {
     }
 
     fn lifter(&self) -> Lifter {
-        Lifter::new(self.language)
+        Lifter::new_with(Arch::from(Box::new(self.clone()) as Box<dyn ArchT>))
     }
 
     fn canonicalise_address(&self, addr: RawAddress) -> Option<(RawAddress, ContextSet)> {
@@ -306,11 +308,9 @@ impl ArmDisassembler {
     #[allow(clippy::new_ret_no_self)]
     fn new(is_thumb: bool, endian: Endian, t_mode: ContextBitRange) -> Disassembler {
         Disassembler::new(Self {
-            decoder: if is_thumb {
-                InstDecoder::default_thumb()
-            } else {
-                InstDecoder::default()
-            },
+            decoder: InstDecoder::default()
+                .with_thumb_mode(is_thumb)
+                .allow_nonconforming(false),
             endian,
             t_mode,
         })
@@ -397,6 +397,7 @@ impl ArmDisassembler {
     }
 
     fn resolve_arm_direct_flow(
+        &self,
         address: Address,
         insn: &Instruction,
         size: usize,
@@ -410,21 +411,25 @@ impl ArmDisassembler {
                     address.space(),
                     address.offset().wrapping_add_signed(i64::from(offset) << 2),
                 );
+                let context = ContextSet::single(self.t_mode, 0);
+                let source = AddressWithContext::new(address, context.clone());
+                let target = AddressWithContext::new(target, context);
                 if insn.opcode == Opcode::B {
                     Insn::from_direct_branch(
-                        address,
+                        source,
                         size,
                         target,
                         insn.condition != ConditionCode::AL,
                     )
                 } else {
-                    Insn::from_direct_call(address, size, target)
+                    Insn::from_direct_call(source, size, target)
                 }
                 .map(Some)
             }
             _ if insn.condition != ConditionCode::AL => Ok(None),
             Opcode::BLX if matches!(insn.operands[0], Operand::Reg(_)) => {
-                Insn::from_indirect_call(address, size).map(Some)
+                let context = ContextSet::single(self.t_mode, 0);
+                Insn::from_indirect_call(AddressWithContext::new(address, context), size).map(Some)
             }
             Opcode::BX => {
                 let Operand::Reg(register) = insn.operands[0] else {
@@ -493,7 +498,7 @@ impl DisassemblerT for ArmDisassembler {
             Ok(insn) => {
                 let size = insn.len().to_const() as usize;
                 if !insn.thumb
-                    && let Some(resolved) = Self::resolve_arm_direct_flow(address, &insn, size)?
+                    && let Some(resolved) = self.resolve_arm_direct_flow(address, &insn, size)?
                 {
                     return Ok(resolved);
                 }
@@ -536,7 +541,7 @@ mod test {
         let mut lifter = arch.lifter();
         let mut operations = Vec::new();
         let size = lifter.lift(address, bytes, &mut operations)?;
-        let lifted = Insn::from_resolved_flow(language, address, size, &operations)?;
+        let lifted = Insn::from_resolved_flow(&lifter, address, size, &operations)?;
 
         assert_eq!(
             direct.properties(),
@@ -666,7 +671,7 @@ mod test {
 
     #[test]
     fn arm_fall_through_fast_path_matches_decoder_samples() {
-        let decoder = InstDecoder::default();
+        let decoder = InstDecoder::default().allow_nonconforming(false);
         let mut state = 0x6d2b_79f5u32;
 
         for _ in 0..250_000 {

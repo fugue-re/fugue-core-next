@@ -18,7 +18,7 @@ pub mod symbol;
 pub mod template;
 
 pub use constructor::Constructor;
-pub use context::ContextDatabase;
+pub use context::{ContextDatabase, ContextDatabaseBuilder};
 pub use convention::{
     BitfieldPacking, CallFixup, Convention, DataOrganisation, DatatypeFilter, DatatypeKind,
     HiddenReturnStrategy, InjectParameter, InjectPayload, JoinPiece, PreferredVarnodeSplit,

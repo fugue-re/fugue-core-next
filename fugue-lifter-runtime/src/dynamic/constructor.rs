@@ -1,6 +1,6 @@
 use fugue_sleigh_language::symbol::sub_table::Constructor as SleighConstructor;
 
-use crate::context::{ContextPostAction, ContextPreAction};
+use crate::context::ContextAction;
 use crate::dynamic::install::Install;
 use crate::dynamic::tables::Tables;
 use crate::operand::Operand;
@@ -8,8 +8,7 @@ use crate::operand::Operand;
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub(crate) struct Constructor {
     pub(crate) id: u16,
-    pub(crate) context_pre_actions: Box<[ContextPreAction]>,
-    pub(crate) context_post_actions: Box<[ContextPostAction]>,
+    pub(crate) context_actions: Box<[ContextAction]>,
     pub(crate) operands: Box<[Operand]>,
     pub(crate) result: Option<u16>,
     pub(crate) build_action: Option<u16>,
@@ -39,7 +38,7 @@ impl Constructor {
             .collect::<Box<[PrintPiece]>>();
 
         let operands = tables.build_operands(ctor);
-        let (context_pre_actions, context_post_actions) = tables.build_context_actions(ctor);
+        let context_actions = tables.build_context_actions(ctor);
         let result = ctor
             .template()
             .and_then(|tmpl| tmpl.result())
@@ -48,8 +47,7 @@ impl Constructor {
 
         Self {
             id,
-            context_pre_actions,
-            context_post_actions,
+            context_actions,
             operands,
             result,
             build_action,
@@ -71,8 +69,7 @@ impl Install for Constructor {
     fn install(self) -> Self::Target {
         let Self {
             id,
-            context_pre_actions,
-            context_post_actions,
+            context_actions,
             operands,
             result,
             build_action,
@@ -84,8 +81,7 @@ impl Install for Constructor {
         } = self;
         Self::Target {
             id,
-            context_pre_actions: context_pre_actions.install(),
-            context_post_actions: context_post_actions.install(),
+            context_actions: context_actions.install(),
             operands: operands.install(),
             result,
             build_action,

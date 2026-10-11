@@ -1,3 +1,4 @@
+use std::ptr;
 use std::str::FromStr;
 
 use fugue_lifter::runtime::context::ContextBitRange;
@@ -7,6 +8,7 @@ use fugue_lifter::runtime::pcode::{LiftingContext, Varnode};
 use fugue_lifter::{Lifter as FugueLifter, LifterBuilderError};
 use thiserror::Error;
 
+use crate::arch::Arch;
 use crate::ir::{Address, Insn, InsnProperties};
 use crate::lifter::traits::Disassembler;
 use crate::lifter::{DisassemblerError, RawPCodeOp, resolve_language};
@@ -28,111 +30,126 @@ impl LifterError {
 }
 
 #[derive(Clone)]
-pub struct Lifter(FugueLifter);
+pub struct Lifter {
+    arch: Arch,
+    lifter: FugueLifter,
+}
 
 impl Lifter {
     pub fn new(language: &'static Language) -> Self {
-        Self(FugueLifter::new(language))
+        Self::new_with(Arch::from(language))
+    }
+
+    pub(crate) fn new_with(arch: Arch) -> Self {
+        let lifter = FugueLifter::new(arch.language());
+        Self { arch, lifter }
     }
 
     pub fn with_context(language: &'static Language, context: LiftingContext) -> Self {
-        Self(FugueLifter::with_context(language, context))
+        Self {
+            arch: Arch::from(language),
+            lifter: FugueLifter::with_context(language, context),
+        }
+    }
+
+    pub(crate) fn arch(&self) -> &Arch {
+        &self.arch
     }
 
     pub fn language(&self) -> &'static Language {
-        self.0.language()
+        self.lifter.language()
     }
 
     pub fn context(&self) -> &LiftingContext {
-        self.0.context()
+        self.lifter.context()
     }
 
     pub fn context_mut(&mut self) -> &mut LiftingContext {
-        self.0.context_mut()
+        self.lifter.context_mut()
     }
 
     pub fn address_alignment(&self) -> usize {
-        self.0.address_alignment()
+        self.lifter.address_alignment()
     }
 
     pub fn address_bits(&self) -> u32 {
-        self.0.address_bits()
+        self.lifter.address_bits()
     }
 
     pub fn address_size(&self) -> usize {
-        self.0.address_size()
+        self.lifter.address_size()
     }
 
     pub fn address_upper_bound(&self) -> u64 {
-        self.0.address_upper_bound()
+        self.lifter.address_upper_bound()
     }
 
     pub fn constant_space(&self) -> u8 {
-        self.0.constant_space()
+        self.lifter.constant_space()
     }
 
     pub fn default_space(&self) -> u8 {
-        self.0.default_space()
+        self.lifter.default_space()
     }
 
     pub fn register_space(&self) -> u8 {
-        self.0.register_space()
+        self.lifter.register_space()
     }
 
     pub fn register_space_size(&self) -> usize {
-        self.0.register_space_size()
+        self.lifter.register_space_size()
     }
 
     pub fn unique_mask(&self) -> u64 {
-        self.0.unique_mask()
+        self.lifter.unique_mask()
     }
 
     pub fn unique_space(&self) -> u8 {
-        self.0.unique_space()
+        self.lifter.unique_space()
     }
 
     pub fn unique_space_size(&self) -> usize {
-        self.0.unique_space_size()
+        self.lifter.unique_space_size()
     }
 
     pub fn space_name(&self, space: u8) -> Option<&'static str> {
-        self.0.space_name(space)
+        self.lifter.space_name(space)
     }
 
     pub fn space_by_name(&self, name: impl AsRef<str>) -> Option<u8> {
-        self.0.space_by_name(name)
+        self.lifter.space_by_name(name)
     }
 
     pub fn space_word_size(&self, space: u8) -> Option<usize> {
-        self.0.space_word_size(space)
+        self.lifter.space_word_size(space)
     }
 
     pub fn space_upper_bound(&self, space: u8) -> Option<u64> {
-        self.0.space_upper_bound(space)
+        self.lifter.space_upper_bound(space)
     }
 
     pub fn wrap_offset(&self, space: u8, offset: u64) -> Option<u64> {
-        self.0.wrap_offset(space, offset)
+        self.lifter.wrap_offset(space, offset)
     }
 
     pub fn context_variable_by_name(&self, name: impl AsRef<str>) -> Option<ContextBitRange> {
-        self.0.context_variable_by_name(name)
+        self.lifter.context_variable_by_name(name)
     }
 
     pub fn register_by_name(&self, name: impl AsRef<str>) -> Option<Varnode> {
-        self.0.register_by_name(name)
+        self.lifter.register_by_name(name)
     }
 
     pub fn register_name(&self, vnd: &Varnode) -> Option<&'static str> {
-        self.0.register_name(vnd)
+        self.lifter.register_name(vnd)
     }
 
     pub fn user_op_by_name(&self, name: impl AsRef<str>) -> Option<u16> {
-        self.0.user_op_by_name(name)
+        self.lifter.user_op_by_name(name)
     }
 
     pub fn user_op_by_id(&self, id: u16) -> Option<&'static str> {
-        self.0.user_op_by_id(id)
+        self.lifter.user_op_by_id(id)
     }
 
     pub fn resolve(
@@ -142,7 +159,19 @@ impl Lifter {
         apply_commits: bool,
     ) -> Option<usize> {
         let address = address.into();
-        self.0.resolve(address.offset(), bytes, apply_commits)
+        self.lifter.resolve(address.offset(), bytes, apply_commits)
+    }
+
+    fn resolve_with(
+        &mut self,
+        address: impl Into<Address>,
+        bytes: &[u8],
+        context: &mut LiftingContext,
+        apply_commits: bool,
+    ) -> Option<usize> {
+        debug_assert!(ptr::eq(self.language(), context.language()));
+        let address = address.into();
+        context.resolve(address.offset(), bytes, apply_commits)
     }
 
     pub fn operands(&mut self, address: impl Into<Address>, bytes: &[u8]) -> Option<Operands> {
@@ -158,7 +187,7 @@ impl Lifter {
         operands: &mut Operands,
     ) -> Option<usize> {
         let address = address.into();
-        self.0.operands(address.offset(), bytes, operands)
+        self.lifter.operands(address.offset(), bytes, operands)
     }
 
     pub fn disassemble(
@@ -168,7 +197,7 @@ impl Lifter {
         output: &mut String,
     ) -> Option<usize> {
         let address = address.into();
-        self.0.disassemble(address.offset(), bytes, output)
+        self.lifter.disassemble(address.offset(), bytes, output)
     }
 
     pub fn disassemble_parts(
@@ -179,7 +208,7 @@ impl Lifter {
         operands: &mut String,
     ) -> Option<usize> {
         let address = address.into();
-        self.0
+        self.lifter
             .disassemble_parts(address.offset(), bytes, mnemonic, operands)
     }
 
@@ -190,7 +219,7 @@ impl Lifter {
         output: &mut Vec<RawPCodeOp>,
     ) -> Result<usize, LifterError> {
         let address = address.into();
-        let Some(length) = self.0.lift(address.offset(), bytes, output) else {
+        let Some(length) = self.lifter.lift(address.offset(), bytes, output) else {
             return Err(LifterError::invalid_insn(address));
         };
 
@@ -213,9 +242,9 @@ impl Disassembler for Lifter {
         &mut self,
         address: Address,
         bytes: &[u8],
-        _context: &mut LiftingContext,
+        context: &mut LiftingContext,
     ) -> Result<Insn, DisassemblerError> {
-        let Some(size) = self.resolve(address, bytes, true) else {
+        let Some(size) = self.resolve_with(address, bytes, context, true) else {
             return Err(DisassemblerError::invalid_insn(address));
         };
 

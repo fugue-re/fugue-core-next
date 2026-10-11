@@ -89,6 +89,7 @@ pub struct SymbolEntry<A = Address> {
     address: A,
     symbol: Symbol,
     properties: SymbolProperties,
+    size: Option<u64>,
     indices: SmallVec<[SymbolIndex; 2]>,
 }
 
@@ -129,10 +130,20 @@ where
         symbol: impl Into<Symbol>,
         properties: SymbolProperties,
     ) -> Self {
+        Self::new_with(address, symbol, properties, None)
+    }
+
+    pub fn new_with(
+        address: impl Into<A>,
+        symbol: impl Into<Symbol>,
+        properties: SymbolProperties,
+        size: impl Into<Option<u64>>,
+    ) -> Self {
         Self {
             address: address.into(),
             symbol: symbol.into(),
             properties,
+            size: size.into(),
             indices: SmallVec::new(),
         }
     }
@@ -147,6 +158,10 @@ where
 
     pub fn properties(&self) -> SymbolProperties {
         self.properties
+    }
+
+    pub fn size(&self) -> Option<u64> {
+        self.size
     }
 
     pub fn set_properties(&mut self, properties: SymbolProperties) {

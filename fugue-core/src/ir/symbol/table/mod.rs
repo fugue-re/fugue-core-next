@@ -372,6 +372,24 @@ impl SymbolTable {
         }
     }
 
+    pub fn insert_with(
+        &mut self,
+        index: SymbolIndex,
+        address: impl Into<Address>,
+        symbol: impl Into<Symbol>,
+        properties: SymbolProperties,
+        size: impl Into<Option<u64>>,
+    ) -> Result<SymbolId, EntityStorageError> {
+        let address = address.into();
+        let symbol = symbol.into();
+        match self {
+            Self::Persistent(table) => table.insert_with(index, address, symbol, properties, size),
+            Self::Transient(table) => {
+                Ok(table.insert_with(index, address, symbol, properties, size))
+            }
+        }
+    }
+
     pub fn modify_by_id<R>(
         &mut self,
         id: SymbolId,

@@ -1,9 +1,9 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap as Map;
-use std::ops::{Deref, DerefMut};
 use std::{array, mem};
 
 use itertools::Itertools;
+use smallvec::SmallVec;
 
 use crate::input::{ContextCommit, FixedHandle};
 use crate::language::LanguageData;
@@ -43,6 +43,12 @@ impl ContextPreAction {
 pub enum ContextPostActionHandle {
     Operand(u16),
     Symbol(u16),
+}
+
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+pub enum ContextAction {
+    Commit(ContextPostAction),
+    Operator(ContextPreAction),
 }
 
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -215,26 +221,31 @@ impl ContextBitRange {
     }
 }
 
-#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(
+    Debug, Copy, Clone, PartialEq, Eq, Hash, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TrackedContext {
     location: Varnode,
-    value: u32,
+    value: u64,
 }
 
 impl TrackedContext {
-    pub fn location(&self) -> &Varnode {
+    pub const fn new(location: Varnode, value: u64) -> Self {
+        Self { location, value }
+    }
+
+    pub const fn location(&self) -> &Varnode {
         &self.location
     }
 
-    pub fn value(&self) -> u32 {
+    pub const fn value(&self) -> u64 {
         self.value
     }
 }
 
-#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[repr(transparent)]
 pub struct TrackedSet(Vec<TrackedContext>);
 
 impl Default for TrackedSet {
@@ -243,25 +254,43 @@ impl Default for TrackedSet {
     }
 }
 
-impl Deref for TrackedSet {
-    type Target = Vec<TrackedContext>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
+impl TrackedSet {
+    pub fn iter(&self) -> impl Iterator<Item = &TrackedContext> {
+        self.0.iter()
     }
-}
 
-impl DerefMut for TrackedSet {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn value(&self, location: &Varnode) -> Option<u64> {
+        self.0
+            .iter()
+            .find(|tracked| tracked.location() == location)
+            .map(TrackedContext::value)
+    }
+
+    pub fn insert(&mut self, tracked: TrackedContext) {
+        match self
+            .0
+            .iter_mut()
+            .find(|existing| existing.location() == tracked.location())
+        {
+            Some(existing) => *existing = tracked,
+            None => self.0.push(tracked),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
     }
 }
 
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FreeArray {
-    values: Vec<u32>,
-    masks: Vec<u32>,
+    values: SmallVec<[u32; MAX_CTXT_CHUNKS]>,
+    masks: SmallVec<[u32; MAX_CTXT_CHUNKS]>,
 }
 
 impl FreeArray {
@@ -275,20 +304,23 @@ impl FreeArray {
 impl Default for FreeArray {
     fn default() -> Self {
         Self {
-            values: Vec::with_capacity(2),
-            masks: Vec::with_capacity(2),
+            values: SmallVec::new(),
+            masks: SmallVec::new(),
         }
     }
 }
 
+pub(crate) const MAX_CTXT_CHUNKS: usize = 2;
+
 pub const CONTEXT_CACHE_BITS: usize = 8;
 pub const CONTEXT_CACHE_SIZE: usize = 1 << CONTEXT_CACHE_BITS;
+const CONTEXT_CACHE_WORDS: usize = CONTEXT_CACHE_SIZE.div_ceil(u64::BITS as usize);
 
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ContextCacheEntry {
     address: u64,
-    values: Vec<u32>,
+    values: SmallVec<[u32; MAX_CTXT_CHUNKS]>,
 }
 
 impl Default for ContextCacheEntry {
@@ -301,7 +333,7 @@ impl ContextCacheEntry {
     pub fn new() -> Self {
         Self {
             address: u64::MAX,
-            values: Vec::with_capacity(2),
+            values: SmallVec::new(),
         }
     }
 
@@ -323,6 +355,7 @@ impl ContextCacheEntry {
 pub struct ContextCache {
     #[cfg_attr(feature = "serde", serde(with = "serde_big_array::BigArray"))]
     entries: [ContextCacheEntry; CONTEXT_CACHE_SIZE],
+    occupied: [u64; CONTEXT_CACHE_WORDS],
     shift: u32,
 }
 
@@ -336,14 +369,20 @@ impl ContextCache {
     pub fn new(alignment: usize) -> Self {
         Self {
             entries: array::from_fn(|_| ContextCacheEntry::default()),
+            occupied: [0; CONTEXT_CACHE_WORDS],
             shift: u32::try_from(alignment.wrapping_sub(1)).expect("address alignment fits in u32"),
         }
     }
 
     #[inline(always)]
     pub fn entry(&mut self, address: u64) -> (bool, &mut ContextCacheEntry) {
-        let cache = &mut self.entries[self.index(address)];
-        let is_hit = cache.address == address;
+        let index = self.index(address);
+        let word = &mut self.occupied[index / u64::BITS as usize];
+        let bit = 1 << (index % u64::BITS as usize);
+        let occupied = *word & bit != 0;
+        *word |= bit;
+        let cache = &mut self.entries[index];
+        let is_hit = occupied && cache.address == address;
         cache.address = address;
         (is_hit, cache)
     }
@@ -351,28 +390,29 @@ impl ContextCache {
     #[inline(always)]
     pub fn update(&mut self, address: u64, values: &[u32]) {
         let (_, entry) = self.entry(address);
-        entry.values.copy_from_slice(values);
+        entry.values.clear();
+        entry.values.extend_from_slice(values);
     }
 
     #[inline(always)]
     pub fn invalidate(&mut self, address: u64) {
-        let cache = &mut self.entries[self.index(address)];
+        let index = self.index(address);
+        let cache = &mut self.entries[index];
         if cache.address == address {
             cache.address = u64::MAX;
-        }
-    }
-
-    #[inline(always)]
-    pub fn resize(&mut self, size: usize) {
-        for entry in &mut self.entries {
-            entry.values.resize(size, 0);
+            self.occupied[index / u64::BITS as usize] &= !(1 << (index % u64::BITS as usize));
         }
     }
 
     #[inline(always)]
     pub fn clear(&mut self) {
-        for entry in &mut self.entries {
-            entry.address = u64::MAX;
+        for (word_index, occupied) in self.occupied.iter_mut().enumerate() {
+            let mut occupied = mem::take(occupied);
+            while occupied != 0 {
+                let bit = occupied.trailing_zeros() as usize;
+                self.entries[word_index * u64::BITS as usize + bit].address = u64::MAX;
+                occupied &= occupied - 1;
+            }
         }
     }
 
@@ -394,23 +434,63 @@ pub struct ContextDatabase {
     address_limit: u64,
 }
 
-impl ContextDatabase {
+pub struct ContextDatabaseBuilder {
+    address_limit: u64,
+    address_alignment: usize,
+    variables: Vec<(String, ContextBitRange)>,
+}
+
+impl ContextDatabaseBuilder {
     pub fn new(address_limit: u64, address_alignment: usize) -> Self {
         Self {
-            size: 0,
-            variables: Map::new(),
-            database: PartMap::new(Default::default()),
-            database_cache: RefCell::new(ContextCache::new(address_alignment)),
-            trackbase: PartMap::new(Default::default()),
             address_limit,
+            address_alignment,
+            variables: Vec::new(),
         }
+    }
+
+    pub fn with_variables<'a>(
+        mut self,
+        variables: impl IntoIterator<Item = (&'a str, ContextBitRange)>,
+    ) -> Self {
+        self.variables.extend(
+            variables
+                .into_iter()
+                .map(|(name, bits)| (name.to_owned(), bits)),
+        );
+        self
+    }
+
+    pub fn build(self) -> ContextDatabase {
+        let size = self
+            .variables
+            .iter()
+            .map(|(_, bits)| bits.word() + 1)
+            .max()
+            .unwrap_or(0);
+        let mut database = PartMap::new(FreeArray::default());
+        database.default_value_mut().reset(size);
+        ContextDatabase {
+            size,
+            variables: self.variables.into_iter().collect(),
+            database,
+            database_cache: RefCell::new(ContextCache::new(self.address_alignment)),
+            trackbase: PartMap::new(Default::default()),
+            address_limit: self.address_limit,
+        }
+    }
+}
+
+impl ContextDatabase {
+    pub fn new(address_limit: u64, address_alignment: usize) -> Self {
+        ContextDatabaseBuilder::new(address_limit, address_alignment).build()
     }
 
     pub fn size(&self) -> usize {
         self.size
     }
 
-    pub fn new_tracked_set(&mut self, addr1: u64, addr2: u64) -> &mut TrackedSet {
+    pub fn new_tracked_set(&mut self, addr1: u64, addr2: Option<u64>) -> &mut TrackedSet {
         let range = self.trackbase.clear_range(addr1, addr2);
         range.clear();
         range
@@ -442,9 +522,10 @@ impl ContextDatabase {
             let (hit, entry) = borrowed_cache.entry(address);
 
             if !hit {
+                entry.values.clear();
                 entry
                     .values
-                    .copy_from_slice(&self.database.get_or_default(address).values)
+                    .extend_from_slice(&self.database.get_or_default(address).values);
             }
 
             context.get(&entry.values)
@@ -456,9 +537,10 @@ impl ContextDatabase {
         let mut borrowed_cache = self.database_cache.borrow_mut();
         let (hit, entry) = borrowed_cache.entry(address);
         if !hit {
+            entry.values.clear();
             entry
                 .values
-                .copy_from_slice(&self.database.get_or_default(address).values);
+                .extend_from_slice(&self.database.get_or_default(address).values);
         }
         bits.get(&entry.values)
     }
@@ -543,7 +625,7 @@ impl ContextDatabase {
         if size > self.size {
             self.size = size;
             self.database.default_value_mut().reset(size);
-            self.database_cache.borrow_mut().resize(size);
+            self.database_cache.borrow_mut().clear();
         }
 
         self.variables.insert(name.into(), bit_range);
@@ -671,9 +753,12 @@ impl ContextDatabase {
     }
 
     pub fn clear(&mut self) {
+        let clear_cache = !self.database.is_empty();
         self.database.clear();
         self.trackbase.clear();
-        self.clear_cache();
+        if clear_cache {
+            self.clear_cache();
+        }
     }
 }
 
@@ -685,7 +770,7 @@ fn get_region_to_change_point<F>(
     mask: u32,
     mut f: F,
 ) where
-    F: FnMut(u64, &mut Vec<u32>),
+    F: FnMut(u64, &mut [u32]),
 {
     use itertools::Position;
 
@@ -719,7 +804,7 @@ fn get_region_for_set<'a, F>(
     mask: u32,
     mut f: F,
 ) where
-    F: FnMut(u64, &'a mut Vec<u32>),
+    F: FnMut(u64, &'a mut [u32]),
 {
     db.split(addr1);
 

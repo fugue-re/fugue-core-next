@@ -146,8 +146,7 @@ impl Lifter {
         bytes: impl AsRef<[u8]>,
         apply_commits: bool,
     ) -> Option<usize> {
-        self.language
-            .resolve(address, bytes, &mut self.context, apply_commits)
+        self.context.resolve(address, bytes, apply_commits)
     }
 
     pub fn operands(

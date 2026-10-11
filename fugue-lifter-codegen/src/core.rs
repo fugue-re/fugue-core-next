@@ -393,31 +393,22 @@ impl<'a> LifterGenerator<'a> {
         operands
     }
 
-    fn generate_constructor_context_actions(
-        &mut self,
-        ctor: &'a Constructor,
-    ) -> (Vec<TokenStream>, Vec<TokenStream>) {
-        let mut pre_actions = Vec::new();
-        let mut post_actions = Vec::new();
-
-        for action in ctor.context().iter() {
-            match action {
-                Context::Operator { .. } => {
-                    pre_actions.push(
-                        ContextAdaptor::new(&self.language, action, &mut self.tables)
-                            .context_action_tokens(),
-                    );
+    fn generate_constructor_context_actions(&mut self, ctor: &'a Constructor) -> Vec<TokenStream> {
+        ctor.context()
+            .iter()
+            .map(|action| {
+                let tokens = ContextAdaptor::new(&self.language, action, &mut self.tables)
+                    .context_action_tokens();
+                match action {
+                    Context::Commit { .. } => {
+                        quote! { fugue_lifter_runtime::context::ContextAction::Commit(#tokens) }
+                    }
+                    Context::Operator { .. } => {
+                        quote! { fugue_lifter_runtime::context::ContextAction::Operator(#tokens) }
+                    }
                 }
-                Context::Commit { .. } => {
-                    post_actions.push(
-                        ContextAdaptor::new(&self.language, action, &mut self.tables)
-                            .context_action_tokens(),
-                    );
-                }
-            }
-        }
-
-        (pre_actions, post_actions)
+            })
+            .collect()
     }
 
     fn generate_handle_template(&mut self, tmpl: &'a HandleTpl) -> u16 {
@@ -480,7 +471,7 @@ impl<'a> LifterGenerator<'a> {
                 .map_or_else(|| quote! { None }, |index| quote! { Some(#index) });
 
             let operands = self.generate_constructor_operand_resolvers(ctor);
-            let (pre_actions, post_actions) = self.generate_constructor_context_actions(ctor);
+            let context_actions = self.generate_constructor_context_actions(ctor);
 
             let template_result = self.generate_constructor_template_resolvers(ctor);
             let lifting_action = self.generate_constructor_lifting_actions(ctor);
@@ -490,8 +481,7 @@ impl<'a> LifterGenerator<'a> {
             self.tables.ctors.push(quote! {
                 fugue_lifter_runtime::Constructor {
                     id: #cid,
-                    context_pre_actions: &[#(#pre_actions),*],
-                    context_post_actions: &[#(#post_actions),*],
+                    context_actions: &[#(#context_actions),*],
                     operands: &[#(#operands),*],
                     result: #template_result,
                     build_action: #lifting_action,

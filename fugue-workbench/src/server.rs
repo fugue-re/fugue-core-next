@@ -311,7 +311,7 @@ impl<'a> Snapshot<'a> {
             .iter()
             .filter_map(|function| {
                 let target = function.thunk_target(project.blocks())?;
-                let name = names.get(&target)?.clone();
+                let name = names.get(&target.address())?.clone();
                 Some((function.entry(), name))
             })
             .collect::<Vec<_>>();

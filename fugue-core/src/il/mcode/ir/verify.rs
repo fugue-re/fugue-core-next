@@ -246,9 +246,16 @@ impl MCodeVerifier<'_> {
 
         for (arg_index, arg) in self.ir.block_args().iter().enumerate() {
             let arg_id = IlBlockArgId::try_from_index(arg_index)?;
-            self.ir.graph().blocks().get(arg.block().index()).ok_or(
-                IlError::range_out_of_bounds(arg.block().index(), self.ir.graph().blocks().len()),
-            )?;
+            self.ir
+                .graph()
+                .blocks()
+                .get(arg.block().index())
+                .ok_or_else(|| {
+                    IlError::range_out_of_bounds(
+                        arg.block().index(),
+                        self.ir.graph().blocks().len(),
+                    )
+                })?;
 
             self.ir.values().get(arg.value().index()).ok_or_else(|| {
                 IlError::range_out_of_bounds(arg.value().index(), self.ir.values().len())

@@ -12,22 +12,25 @@ use object::endian::LittleEndian as LE;
 use object::pe::{
     IMAGE_DIRECTORY_ENTRY_BASERELOC, IMAGE_SCN_CNT_UNINITIALIZED_DATA, IMAGE_SCN_MEM_EXECUTE,
     IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE, IMAGE_SIZEOF_FILE_HEADER, IMAGE_SIZEOF_SECTION_HEADER,
-    ImageNtHeaders32, ImageNtHeaders64,
+    IMAGE_SYM_CLASS_STATIC, IMAGE_SYM_DTYPE_NULL, ImageNtHeaders32, ImageNtHeaders64,
 };
+use object::read::coff::ImageSymbol;
 use object::read::pe::{
     self, ImageNtHeaders, ImageOptionalHeader, PeFile, PeSection, PeSectionIterator, Relocation,
 };
-use object::{FileKind, Object, ObjectSection, ReadRef, SectionFlags};
+use object::{FileKind, Object, ObjectSection, ObjectSymbol, ReadRef, SectionFlags, SymbolKind};
 use smallvec::{SmallVec, smallvec};
 
 use crate::AnalysisData;
 use crate::arch::Arch;
 use crate::ir::{
-    Endian, RawAddress, RawAddressRangeSet, Symbol, SymbolIndex, SymbolProperties,
+    Endian, RawAddress, RawAddressMap, RawAddressRangeSet, Symbol, SymbolIndex, SymbolProperties,
     SymbolTableSelector, TransientSymbolTable,
 };
-use crate::lifter::ContextHint;
+use crate::lifter::{ContextHint, TrackedSet};
+use crate::loader::image::ImagePlacedRegion;
 use crate::loader::pe::extensions::ImageContext;
+use crate::loader::pe::read::permissive;
 use crate::loader::{
     ExternalThunkLayout, ImageAddress, ImageBacking, ImageBank, ImageBankHandle, ImageBankLayout,
     ImageCoveredRegions, ImageLayout, ImageRegionBankMap, ImageSegment, ImageSegmentContents,
@@ -40,15 +43,22 @@ use crate::storage::segments::mapping::SegmentMappingProvenance;
 use crate::types::attributes::{ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE};
 use crate::types::{AttributeMap, BytesOrMapping};
 
+mod exceptions;
+use exceptions::PeExceptionResolver;
+
 pub mod extensions;
 
-mod permissive;
+pub mod read;
 
 mod relocations;
 pub use relocations::PeSegmentRelocator;
 
+mod tracked;
+use tracked::PeTrackedSetResolver;
+
 pub const PE_EXPORT_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(0);
 pub const PE_IMPORT_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(1);
+pub const PE_SYMTAB_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(2);
 
 pub const ATTRIBUTE_PERMISSIVE: &str = "loader.pe.permissive";
 pub const ATTRIBUTE_LOAD_HEADERS: &str = "loader.pe.load_headers";
@@ -145,6 +155,8 @@ impl<'this, 'data> PeFileRepr<'this, 'data> {
     }
 }
 
+type PeRecoverError<'a> = Box<(BytesOrMapping<'a>, LoaderError)>;
+
 impl<'a> PeInner<'a> {
     fn from_bytes(
         data: BytesOrMapping<'a>,
@@ -158,11 +170,9 @@ impl<'a> PeInner<'a> {
         attributes: &AttributeMap,
     ) -> Result<Self, PeRecoverError<'a>> {
         Self::try_new_or_recover(data, |data| PeLoadedRepr::parse(data, attributes))
-            .map_err(|(error, heads)| Box::new((heads.data, error)))
+            .map_err(|(error, heads)| PeRecoverError::new((heads.data, error)))
     }
 }
-
-type PeRecoverError<'a> = Box<(BytesOrMapping<'a>, LoaderError)>;
 
 #[derive(AnalysisData)]
 pub struct Pe<'a> {
@@ -209,8 +219,9 @@ impl<'a> Pe<'a> {
             attributes,
         };
 
-        if let Some(entry) = slf.entry() {
-            slf.attributes.set_attr(ATTRIBUTE_ENTRY_POINT, entry);
+        if let Some(entry) = slf.object.borrow_loaded().state.entry {
+            slf.attributes
+                .set_attr(ATTRIBUTE_ENTRY_POINT, entry.offset());
         }
 
         slf
@@ -276,6 +287,8 @@ struct PeLoadState {
     entry: Option<ImageAddress>,
     layout: ImageLayout,
     mapping_hints: BTreeMap<RawAddress, ContextHint>,
+    function_hints: BTreeSet<RawAddress>,
+    tracked_sets: RawAddressMap<TrackedSet>,
     symbols: TransientSymbolTable<ImageAddress>,
     external_thunks: ExternalThunkLayout,
     import_slots: BTreeMap<RawAddress, RawAddress>,
@@ -323,9 +336,21 @@ impl PeLoadState {
         } else {
             None
         };
-        let image_entry = entry.map(|entry| ImageAddress::in_default_space(entry.offset()));
         let context = ImageContext::new(view, base, preferred_base, entry, attributes);
         let architecture = context.resolve_architecture()?;
+
+        let mut tracked_sets = RawAddressMap::new();
+        with_pe!(
+            view,
+            pe | PeTrackedSetResolver::new(
+                view,
+                pe,
+                &architecture,
+                base - preferred_base,
+                &mut tracked_sets,
+            )
+            .apply()
+        )?;
 
         let symbols = with_pe!(
             view,
@@ -334,11 +359,36 @@ impl PeLoadState {
 
         let PeSymbolLayout {
             bounds,
-            mapping_hints,
+            mut mapping_hints,
             symbols,
             external_thunks,
             import_slots,
         } = symbols;
+
+        let mut function_hints = BTreeSet::new();
+        with_pe!(
+            view,
+            pe | PeExceptionResolver::new(
+                view,
+                pe,
+                &architecture,
+                base,
+                config,
+                &mut function_hints,
+                &mut mapping_hints,
+            )
+            .apply()
+        )?;
+
+        let image_entry = entry
+            .map(|entry| match architecture.canonicalise_address(entry) {
+                Some((canonical, context)) if canonical != entry => {
+                    mapping_hints.insert(canonical, ContextHint::code().with_context(context));
+                    canonical
+                }
+                _ => entry,
+            })
+            .map(|entry| ImageAddress::in_default_space(entry.offset()));
         let bank_base = if config.load_headers() {
             base.min(*bounds.start())
         } else {
@@ -361,12 +411,10 @@ impl PeLoadState {
                     &external_thunks,
                     config,
                 )?;
-                let mut placements = Vec::new();
-                while let Some(placement) = walk.next_segment()? {
-                    placements.push(placement);
+                while let Some(region) = walk.next_region() {
+                    walk.place_region(region)?;
                 }
-                let (spaces, bank_layout) = walk.into_parts();
-                (placements, spaces, bank_layout)
+                walk.into_parts()
             }
         );
 
@@ -402,11 +450,12 @@ impl PeLoadState {
         let mut image_symbols = TransientSymbolTable::<ImageAddress>::new();
         for (index, symbol) in symbols {
             let space = space_by_index.get(&index).copied().unwrap_or_default();
-            image_symbols.insert(
+            image_symbols.insert_with(
                 index,
                 ImageAddress::new(space, symbol.address),
                 symbol.symbol,
                 symbol.properties,
+                symbol.size,
             );
         }
 
@@ -422,6 +471,8 @@ impl PeLoadState {
             entry: image_entry,
             layout,
             mapping_hints,
+            function_hints,
+            tracked_sets,
             symbols: image_symbols,
             external_thunks,
             import_slots,
@@ -441,6 +492,7 @@ struct RawPeSymbol {
     address: RawAddress,
     symbol: Symbol,
     properties: SymbolProperties,
+    size: Option<u64>,
 }
 
 struct PeSymbolLayout {
@@ -508,6 +560,8 @@ impl PeSymbolLayout {
         let mut import_slots = BTreeMap::new();
         let mut external_addresses = BTreeMap::<Symbol, RawAddress>::new();
 
+        let mut mapping_hints = BTreeMap::new();
+
         let exports = (|| -> Result<(), LoaderError> {
             let Some(export_table) = permissive::read_exports(pe, config)? else {
                 return Ok(());
@@ -531,12 +585,22 @@ impl PeSymbolLayout {
                 let properties = symbol_properties_for_address(address, &sections)
                     | SymbolProperties::LOCAL
                     | SymbolProperties::EXPORT;
+                let address = match arch.canonicalise_address(address) {
+                    Some((canonical, context))
+                        if properties.is_function() && canonical != address =>
+                    {
+                        mapping_hints.insert(canonical, ContextHint::code().with_context(context));
+                        canonical
+                    }
+                    _ => address,
+                };
                 symbols.insert(
                     SymbolIndex::new(PE_EXPORT_SELECTOR, export_index),
                     RawPeSymbol {
                         address,
                         symbol: String::from_utf8_lossy(name).into_owned().into(),
                         properties,
+                        size: None,
                     },
                 );
                 export_index += 1;
@@ -608,6 +672,7 @@ impl PeSymbolLayout {
                             address: external_address,
                             symbol,
                             properties: SymbolProperties::EXTERN | SymbolProperties::FUNCTION,
+                            size: None,
                         },
                     );
 
@@ -642,11 +707,72 @@ impl PeSymbolLayout {
             imports?;
         }
 
+        for symbol in pe.symbols() {
+            if !symbol.is_definition()
+                || !matches!(symbol.kind(), SymbolKind::Text | SymbolKind::Data)
+            {
+                continue;
+            }
+
+            let Ok(name) = symbol.name() else {
+                tracing::warn!(
+                    "skipping COFF symbol {} with an unreadable name",
+                    symbol.index().0
+                );
+                continue;
+            };
+
+            let coff_symbol = symbol.coff_symbol();
+            let is_section_definition = coff_symbol.storage_class() == IMAGE_SYM_CLASS_STATIC
+                && coff_symbol.derived_type() == IMAGE_SYM_DTYPE_NULL
+                && symbol
+                    .section_index()
+                    .and_then(|index| pe.section_by_index(index).ok()?.name().ok())
+                    .is_some_and(|section| name.split('$').next() == Some(section));
+            if is_section_definition {
+                continue;
+            }
+
+            let Some(address) = symbol
+                .address()
+                .checked_sub(preferred_base.offset())
+                .and_then(|offset| base.checked_add(offset))
+            else {
+                tracing::warn!("skipping COFF symbol {name}: address overflow");
+                continue;
+            };
+
+            let kind = if symbol.kind() == SymbolKind::Text {
+                SymbolProperties::FUNCTION
+            } else {
+                symbol_properties_for_address(address, &sections)
+            };
+            let properties = kind | SymbolProperties::LOCAL;
+
+            let address = match arch.canonicalise_address(address) {
+                Some((canonical, context)) if properties.is_function() && canonical != address => {
+                    mapping_hints.insert(canonical, ContextHint::code().with_context(context));
+                    canonical
+                }
+                _ => address,
+            };
+
+            symbols.insert(
+                SymbolIndex::new(PE_SYMTAB_SELECTOR, symbol.index().0),
+                RawPeSymbol {
+                    address,
+                    symbol: name.into(),
+                    properties,
+                    size: (symbol.size() != 0).then_some(symbol.size()),
+                },
+            );
+        }
+
         let max_addr = external_thunks.last().unwrap_or(max_addr);
 
         Ok(Self {
             bounds: min_addr..=max_addr,
-            mapping_hints: BTreeMap::new(),
+            mapping_hints,
             symbols,
             external_thunks,
             import_slots,
@@ -1061,6 +1187,7 @@ struct PeRegion<'data> {
     size: u64,
     properties: SegmentProperties,
     provenance: SegmentMappingProvenance,
+    file_offset: Option<u64>,
     source: PeRegionSource,
 }
 
@@ -1112,6 +1239,8 @@ where
     external_thunks: Option<&'file ExternalThunkLayout>,
     header: Option<PeHeaderRegion<'data>>,
     covered: RawAddressRangeSet,
+    placed_regions: Vec<ImagePlacedRegion<PeRegionSource>>,
+    placements: Vec<PeImageSegment>,
     spaces: ImageSpaces,
     bank_layout: PeBankLayout,
     config: PeLoaderProperties,
@@ -1147,6 +1276,8 @@ where
             external_thunks: Some(external_thunks),
             header,
             covered: RawAddressRangeSet::new(),
+            placed_regions: Vec::new(),
+            placements: Vec::new(),
             spaces: smallvec![ImageSpace::base(base_space)],
             bank_layout: PeBankLayout::new(default_bank),
             config,
@@ -1163,6 +1294,7 @@ where
                 size: header.size(),
                 properties: SegmentProperties::PERM_READ,
                 provenance: SegmentMappingProvenance::Section,
+                file_offset: Some(0),
                 source: PeRegionSource::header(),
             });
         }
@@ -1185,6 +1317,10 @@ where
                 size,
                 properties: pe_section_properties(&sect),
                 provenance: SegmentMappingProvenance::Section,
+                file_offset: sect
+                    .file_range()
+                    .filter(|(_, size)| *size != 0)
+                    .map(|(offset, _)| offset),
                 source: PeRegionSource::section(sect.index().0),
             });
         }
@@ -1203,15 +1339,12 @@ where
             size: external_thunks.size() as u64,
             properties: SegmentProperties::PERM_READ | SegmentProperties::PERM_EXECUTE,
             provenance: SegmentMappingProvenance::External,
+            file_offset: None,
             source: PeRegionSource::external_thunks(),
         })
     }
 
-    fn next_segment(&mut self) -> Result<Option<PeImageSegment>, LoaderError> {
-        let Some(region) = self.next_region() else {
-            return Ok(None);
-        };
-
+    fn place_region(&mut self, region: PeRegion) -> Result<(), LoaderError> {
         let last = region
             .address
             .checked_add(region.size.saturating_sub(1))
@@ -1221,9 +1354,17 @@ where
             .checked_sub(self.bank_base)
             .ok_or_else(|| LoaderError::address_overflow(region.address))?;
         let range = region.address..=last;
-        let overlaps = self.covered.intersects_range(range.clone());
+        let file_delta = region
+            .file_offset
+            .map(|offset| offset.wrapping_sub(region.address.offset()));
+        let conflicts = self.covered.intersects_range(range.clone())
+            && file_delta.is_none_or(|delta| {
+                self.placed_regions
+                    .iter()
+                    .any(|placed| placed.conflicts(region.address, last, delta))
+            });
 
-        let (space, bank, backing_offset) = if overlaps {
+        let (space, bank, backing_offset) = if conflicts {
             let handle = ImageSpaceHandle::new(
                 u16::try_from(self.spaces.len()).expect("space count must fit in u16"),
             );
@@ -1233,6 +1374,15 @@ where
             self.bank_layout.route_region(region.source(), bank);
             (handle, bank, RawAddress::from(0u64))
         } else {
+            if let Some(delta) = file_delta {
+                self.placed_regions.push(ImagePlacedRegion::new(
+                    region.address,
+                    last,
+                    delta,
+                    self.placements.len(),
+                    region.source(),
+                ));
+            }
             (self.base_space, ImageBankHandle::default(), backing_offset)
         };
 
@@ -1240,11 +1390,12 @@ where
 
         let mut segment = PeImageSegment::new(&region, space, backing_offset);
         segment.bank = bank;
-        Ok(Some(segment))
+        self.placements.push(segment);
+        Ok(())
     }
 
-    fn into_parts(self) -> (ImageSpaces, PeBankLayout) {
-        (self.spaces, self.bank_layout)
+    fn into_parts(self) -> (Vec<PeImageSegment>, ImageSpaces, PeBankLayout) {
+        (self.placements, self.spaces, self.bank_layout)
     }
 }
 
@@ -1252,6 +1403,8 @@ struct PeImageSegments<'a> {
     segments: slice::Iter<'a, PeImageSegment>,
     image_symbols: &'a TransientSymbolTable<ImageAddress>,
     mapping_hints: &'a BTreeMap<RawAddress, ContextHint>,
+    function_hints: &'a BTreeSet<RawAddress>,
+    tracked_sets: &'a RawAddressMap<TrackedSet>,
 }
 
 impl<'a> PeImageSegments<'a> {
@@ -1259,11 +1412,15 @@ impl<'a> PeImageSegments<'a> {
         segments: &'a [PeImageSegment],
         image_symbols: &'a TransientSymbolTable<ImageAddress>,
         mapping_hints: &'a BTreeMap<RawAddress, ContextHint>,
+        function_hints: &'a BTreeSet<RawAddress>,
+        tracked_sets: &'a RawAddressMap<TrackedSet>,
     ) -> Self {
         Self {
             segments: segments.iter(),
             image_symbols,
             mapping_hints,
+            function_hints,
+            tracked_sets,
         }
     }
 
@@ -1291,6 +1448,7 @@ impl<'a> PeImageSegments<'a> {
                             .contains(SymbolProperties::FUNCTION | SymbolProperties::EXTERN)
                     })
                     .map(|(_, entry)| entry.address().offset())
+                    .chain(self.function_hints.range(seg_start..=seg_last).copied())
                     .collect::<BTreeSet<RawAddress>>();
 
                 (mapping_hints, function_hints)
@@ -1307,6 +1465,7 @@ impl<'a> PeImageSegments<'a> {
         .with_provenance(segment.provenance)
         .with_mapping_hints(mapping_hints)
         .with_function_hints(function_hints)
+        .with_tracked_sets(self.tracked_sets.clone())
     }
 }
 
@@ -1394,6 +1553,8 @@ impl Loadable for Pe<'_> {
             &state.segments,
             &state.symbols,
             &state.mapping_hints,
+            &state.function_hints,
+            &state.tracked_sets,
         )) as ImageSegmentIterator<'b>
     }
 
@@ -1444,12 +1605,12 @@ mod test {
     use object::{Object, ObjectSection, ReadRef};
 
     use super::{
-        ATTRIBUTE_LOAD_HEADERS, ATTRIBUTE_PERMISSIVE, Pe, PeImageContext, PeImageSegmentContents,
-        PeLoaderProperties, PeRegionBankMap, PeSegmentWalk,
+        ATTRIBUTE_LOAD_HEADERS, ATTRIBUTE_PERMISSIVE, PE_SYMTAB_SELECTOR, Pe, PeImageContext,
+        PeImageSegmentContents, PeLoaderProperties, PeRegionBankMap, PeSegmentWalk,
     };
     use crate::arch::ExternalThunkTemplate;
     use crate::attributes;
-    use crate::ir::{Address, Endian, RawAddress};
+    use crate::ir::{Address, Endian, RawAddress, Symbol};
     use crate::loader::{
         ExternalThunkLayout, ImageAddress, ImageBacking, ImageBank, ImageBankHandle,
         ImageSegmentContents, Loadable, LoaderError,
@@ -1819,6 +1980,62 @@ mod test {
             attributes![ATTRIBUTE_PERMISSIVE => true],
         )?;
         let _segments = load_segments(&pe)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_pe_coff_symbols() -> Result<(), Box<dyn std::error::Error>> {
+        let pe = Pe::new(BytesOrMapping::from_file("tests/hello-pe-mingw.exe")?)?;
+
+        for (name, address) in [("main", 0x140001592u64), ("printf", 0x140001550)] {
+            let (_, _, symbol) = pe
+                .image_symbols()
+                .iter_by_index()
+                .find(|(index, _, symbol)| {
+                    index.selector() == PE_SYMTAB_SELECTOR && symbol.symbol().as_str() == name
+                })
+                .ok_or("COFF symbol")?;
+
+            assert_eq!(symbol.address().raw_offset(), address);
+            assert!(symbol.is_function() && symbol.is_local());
+        }
+
+        let wcslen = pe
+            .image_symbols()
+            .iter_by_index()
+            .filter(|(index, _, symbol)| {
+                index.selector() == PE_SYMTAB_SELECTOR
+                    && symbol.address().raw_offset() == 0x140007210
+            })
+            .map(|(_, _, symbol)| symbol.symbol())
+            .next();
+
+        assert_eq!(wcslen, Some(Symbol::from("wcslen")));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_pe_exception_directory_function_hints() -> Result<(), Box<dyn std::error::Error>> {
+        for (path, expected) in [
+            (
+                "tests/pe-chained-unwind-x86_64.exe",
+                &[0x140001000u64, 0x140001040][..],
+            ),
+            (
+                "tests/pe-pdata-arm64.exe",
+                &[0x140001000, 0x140001010, 0x140001020, 0x140001030][..],
+            ),
+        ] {
+            let pe = Pe::new(BytesOrMapping::from_file(path)?)?;
+            let mut hints = Vec::new();
+            let mut segments = pe.image_segments();
+            while let Some(segment) = segments.next()? {
+                hints.extend(segment.function_hints().iter().map(|hint| hint.offset()));
+            }
+            assert_eq!(hints, expected, "{path}");
+        }
 
         Ok(())
     }

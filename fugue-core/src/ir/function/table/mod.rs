@@ -937,7 +937,7 @@ impl FunctionTableStaging {
         let call_targets = targets
             .iter()
             .filter(|target| target.kind().is_call())
-            .map(|target| target.to())
+            .map(|target| target.to().address())
             .collect();
         let references = Function::flow_references_from(targets);
         let record = StagedFunctionChangeRecord {

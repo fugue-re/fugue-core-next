@@ -10,8 +10,8 @@ use rkyv::rancor::Error as RkyvError;
 use smallvec::SmallVec;
 use thiserror::Error;
 
-use crate::ir::{Address, AddressRange, AddressRangeExt, RawAddress};
-use crate::lifter::ContextHint;
+use crate::ir::{Address, AddressRange, AddressRangeExt, RawAddress, RawAddressMap};
+use crate::lifter::{ContextHint, TrackedSet};
 use crate::loader::{
     ImageAddress, ImageBankHandle, ImageResolution, ImageSpaceHandle, ImageSpaceKind, Loadable,
     LoaderError,
@@ -31,7 +31,7 @@ pub(crate) mod view;
 
 pub use cache::SegmentMappingCache;
 pub use mapping::{
-    SegmentMapping, SegmentMappingBuilder, SegmentMappingFlags, SegmentMappingId,
+    MappingHints, SegmentMapping, SegmentMappingBuilder, SegmentMappingFlags, SegmentMappingId,
     SegmentMappingKind, SegmentMappingProvenance, SegmentMappingRef, SegmentSubMapping,
 };
 pub use properties::SegmentProperties;
@@ -138,6 +138,7 @@ struct MappingMetadata {
     flags: SegmentMappingFlags,
     mapping_hints: BTreeMap<RawAddress, ContextHint>,
     function_hints: BTreeSet<RawAddress>,
+    tracked_sets: RawAddressMap<TrackedSet>,
     provider_id: SegmentStorageProviderId,
 }
 
@@ -359,7 +360,7 @@ impl SegmentStorage {
             let size = segment.size();
             let properties = segment.properties();
             let provenance = segment.provenance();
-            let (name, segment_mapping_hints, segment_function_hints) =
+            let (name, segment_mapping_hints, segment_function_hints, tracked_sets) =
                 segment.into_name_and_hints();
 
             let start = address.raw_address();
@@ -378,7 +379,8 @@ impl SegmentStorage {
                     .with_mapping_hints(
                         segment_mapping_hints.into_iter().chain(extra_mapping_hints),
                     )
-                    .with_function_hints(segment_function_hints.into_iter().chain(extra_hints)),
+                    .with_function_hints(segment_function_hints.into_iter().chain(extra_hints))
+                    .with_tracked_sets(tracked_sets),
             )?;
 
             storage.add_mapping_to_space(address.space(), mapping_id)?;
@@ -528,7 +530,8 @@ impl SegmentStorage {
                 .with_provenance(mapping_meta.provenance)
                 .with_flags(mapping_meta.flags)
                 .with_mapping_hints(mapping_meta.mapping_hints.clone())
-                .with_function_hints(mapping_meta.function_hints.clone()),
+                .with_function_hints(mapping_meta.function_hints.clone())
+                .with_tracked_sets(mapping_meta.tracked_sets.clone()),
             )?;
 
             mapping_map.insert(mapping_meta.id, mapping_id);
@@ -870,8 +873,13 @@ impl SegmentStorage {
                 kind: m.kind(),
                 provenance: m.provenance(),
                 flags: m.flags(),
-                mapping_hints: m.mapping_hint_offsets().clone(),
+                mapping_hints: m
+                    .mapping_hints()
+                    .iter()
+                    .map(|(address, hint)| (address.raw_address(), hint.clone()))
+                    .collect(),
                 function_hints: m.function_hint_offsets().clone(),
+                tracked_sets: m.tracked_set_offsets().clone(),
                 provider_id: m.provider_id(),
             })
             .collect::<Vec<_>>();
@@ -1910,6 +1918,62 @@ mod test {
         }
     }
 
+    const BANK_A: ImageBankHandle = ImageBankHandle::new(0);
+    const BANK_B: ImageBankHandle = ImageBankHandle::new(1);
+    const SPACE_A: ImageSpaceHandle = ImageSpaceHandle::new(0);
+    const SPACE_B: ImageSpaceHandle = ImageSpaceHandle::new(1);
+    const OVERLAP_BASE: u64 = 0x1000;
+    const OVERLAP_SIZE: usize = 0x10;
+
+    fn overlapping_banks_image() -> FakeImage {
+        let range = RawAddress::from(OVERLAP_BASE)
+            ..=RawAddress::from(OVERLAP_BASE + OVERLAP_SIZE as u64 - 1);
+        FakeImage {
+            layout: ImageLayout::new(
+                vec![
+                    ImageBank::new(BANK_A, range.clone()),
+                    ImageBank::new(BANK_B, range),
+                ],
+                vec![
+                    ImageSpace::base(SPACE_A),
+                    ImageSpace::overlay(SPACE_B, SPACE_A),
+                ],
+            ),
+            segments: vec![
+                SegSpec {
+                    name: "a",
+                    space: SPACE_A,
+                    addr: OVERLAP_BASE,
+                    size: OVERLAP_SIZE as u64,
+                    bank: BANK_A,
+                },
+                SegSpec {
+                    name: "b",
+                    space: SPACE_B,
+                    addr: OVERLAP_BASE,
+                    size: OVERLAP_SIZE as u64,
+                    bank: BANK_B,
+                },
+            ],
+            contents: vec![
+                ContentSpec {
+                    addr: OVERLAP_BASE,
+                    bank: BANK_A,
+                    fill: 0xAA,
+                    size: OVERLAP_SIZE,
+                },
+                ContentSpec {
+                    addr: OVERLAP_BASE,
+                    bank: BANK_B,
+                    fill: 0xBB,
+                    size: OVERLAP_SIZE,
+                },
+            ],
+            metadata: LoadableMetadata::new(b"", "test"),
+            attributes: AttributeMap::new(),
+        }
+    }
+
     #[test]
     fn mapping_properties_fast_path() -> Result<(), SegmentStorageError> {
         let mut storage = SegmentStorage::empty();
@@ -2368,6 +2432,56 @@ mod test {
     }
 
     #[test]
+    fn mapping_hint_ranges_follow_visible_bounds_and_space() -> Result<(), SegmentStorageError> {
+        let mut storage = SegmentStorage::empty();
+        let provider = storage.open_provider(
+            InMemorySegmentStorage::from_bytes(vec![0; 16]),
+            SegmentProperties::PERM_ALL,
+        );
+        let mapping = storage.create_mapping_from_builder(
+            SegmentMappingBuilder::new(0x1000u64, 16, 0, provider).with_mapping_hints([
+                (RawAddress::from(0x1000u64), ContextHint::data()),
+                (RawAddress::from(0x1008u64), ContextHint::code()),
+                (RawAddress::from(0x100cu64), ContextHint::data()),
+            ]),
+        )?;
+        let covering = storage
+            .create_mapping_from_builder(SegmentMappingBuilder::new(0x1000u64, 8, 0, provider))?;
+        let space = storage.create_space()?;
+        storage.add_mapping_to_space_bottom(space, mapping)?;
+        storage.add_mapping_to_space_top(space, covering)?;
+
+        let address = Address::new(space, 0x1009u64);
+        let view = storage.view_containing(address)?;
+        let hints = view.mapping_hints();
+        assert_eq!(
+            hints.iter().map(|(address, _)| address).collect::<Vec<_>>(),
+            vec![
+                Address::new(space, 0x1008u64),
+                Address::new(space, 0x100cu64)
+            ],
+        );
+        assert_eq!(
+            hints.range(..=address).next_back(),
+            Some((Address::new(space, 0x1008u64), &ContextHint::code())),
+        );
+        assert!(
+            hints
+                .range(..Address::new(space, 0x1008u64))
+                .next()
+                .is_none()
+        );
+        assert!(hints.get(Address::in_default_space(0x1008u64)).is_none());
+        assert!(
+            hints
+                .range(..=Address::in_default_space(0x100cu64))
+                .next()
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_prioritise_brings_mapping_to_top() -> Result<(), SegmentStorageError> {
         let mut storage = SegmentStorage::empty();
 
@@ -2590,7 +2704,7 @@ mod test {
         );
 
         assert_eq!(
-            view.mapping_hint_at(0x1040u64),
+            view.mapping_hints().get(0x1040u64),
             Some(&ContextHint::data()),
             "relocation-discovered mapping hint should reach the covering mapping",
         );
@@ -2600,63 +2714,12 @@ mod test {
 
     #[test]
     fn test_from_loadable_routes_overlapping_banks() -> Result<(), SegmentStorageError> {
-        const BANK_A: ImageBankHandle = ImageBankHandle::new(0);
-        const BANK_B: ImageBankHandle = ImageBankHandle::new(1);
-        const SPACE_A: ImageSpaceHandle = ImageSpaceHandle::new(0);
-        const SPACE_B: ImageSpaceHandle = ImageSpaceHandle::new(1);
-        const BASE: u64 = 0x1000;
-        const SIZE: usize = 0x10;
-
-        let range = RawAddress::from(BASE)..=RawAddress::from(BASE + SIZE as u64 - 1);
-        let loader = FakeImage {
-            layout: ImageLayout::new(
-                vec![
-                    ImageBank::new(BANK_A, range.clone()),
-                    ImageBank::new(BANK_B, range),
-                ],
-                vec![
-                    ImageSpace::base(SPACE_A),
-                    ImageSpace::overlay(SPACE_B, SPACE_A),
-                ],
-            ),
-            segments: vec![
-                SegSpec {
-                    name: "a",
-                    space: SPACE_A,
-                    addr: BASE,
-                    size: SIZE as u64,
-                    bank: BANK_A,
-                },
-                SegSpec {
-                    name: "b",
-                    space: SPACE_B,
-                    addr: BASE,
-                    size: SIZE as u64,
-                    bank: BANK_B,
-                },
-            ],
-            contents: vec![
-                ContentSpec {
-                    addr: BASE,
-                    bank: BANK_A,
-                    fill: 0xAA,
-                    size: SIZE,
-                },
-                ContentSpec {
-                    addr: BASE,
-                    bank: BANK_B,
-                    fill: 0xBB,
-                    size: SIZE,
-                },
-            ],
-            metadata: LoadableMetadata::new(b"", "test"),
-            attributes: AttributeMap::new(),
-        };
-
         let mut attributes = AttributeMap::new();
-        let (storage, resolution) =
-            SegmentStorage::from_loadable::<InMemorySegmentStorage>(&loader, &mut attributes)?
-                .into_parts();
+        let (storage, resolution) = SegmentStorage::from_loadable::<InMemorySegmentStorage>(
+            &overlapping_banks_image(),
+            &mut attributes,
+        )?
+        .into_parts();
 
         let space_a = resolution.resolve_space(SPACE_A).expect("space a resolved");
         let space_b = resolution.resolve_space(SPACE_B).expect("space b resolved");
@@ -2672,22 +2735,53 @@ mod test {
             "distinct banks need distinct providers"
         );
 
-        let mut buf = [0u8; SIZE];
+        let mut buf = [0u8; OVERLAP_SIZE];
         storage.read_bytes_direct(provider_a, 0, &mut buf)?;
-        assert_eq!(buf, [0xAAu8; SIZE], "bank A provider holds content A");
-        storage.read_bytes_direct(provider_b, 0, &mut buf)?;
-        assert_eq!(buf, [0xBBu8; SIZE], "bank B provider holds content B");
-
-        storage.read_bytes(Address::new(space_a, BASE), &mut buf)?;
         assert_eq!(
-            buf, [0xAAu8; SIZE],
+            buf, [0xAAu8; OVERLAP_SIZE],
+            "bank A provider holds content A"
+        );
+        storage.read_bytes_direct(provider_b, 0, &mut buf)?;
+        assert_eq!(
+            buf, [0xBBu8; OVERLAP_SIZE],
+            "bank B provider holds content B"
+        );
+
+        storage.read_bytes(Address::new(space_a, OVERLAP_BASE), &mut buf)?;
+        assert_eq!(
+            buf, [0xAAu8; OVERLAP_SIZE],
             "base space reads bank A at the shared address"
         );
-        storage.read_bytes(Address::new(space_b, BASE), &mut buf)?;
+        storage.read_bytes(Address::new(space_b, OVERLAP_BASE), &mut buf)?;
         assert_eq!(
-            buf, [0xBBu8; SIZE],
+            buf, [0xBBu8; OVERLAP_SIZE],
             "overlay space reads bank B at the shared address"
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_persisted_overlay_space_survives_reload() -> Result<(), SegmentStorageError> {
+        let project = tempfile::tempdir().map_err(SegmentStorageError::backing)?;
+        let mut attributes = AttributeMap::new();
+        attributes.set_attr(ATTRIBUTE_PROJECT_PATH, project.path());
+        let (storage, resolution) = SegmentStorage::from_loadable::<
+            MemoryMappedSegmentStorage<{ PERSISTENT }>,
+        >(&overlapping_banks_image(), &mut attributes)?
+        .into_parts();
+        let space_a = resolution.resolve_space(SPACE_A).expect("space a resolved");
+        let space_b = resolution.resolve_space(SPACE_B).expect("space b resolved");
+        drop(storage);
+
+        let storage = SegmentStorage::from_storage(project.path(), &mut attributes)?;
+        let mut buf = [0u8; OVERLAP_SIZE];
+
+        assert_eq!(storage.base_space(space_b), Some(space_a));
+        storage.read_bytes(Address::new(space_a, OVERLAP_BASE), &mut buf)?;
+        assert_eq!(buf, [0xAAu8; OVERLAP_SIZE]);
+        storage.read_bytes(Address::new(space_b, OVERLAP_BASE), &mut buf)?;
+        assert_eq!(buf, [0xBBu8; OVERLAP_SIZE]);
 
         Ok(())
     }

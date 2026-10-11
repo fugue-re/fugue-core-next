@@ -1,0 +1,16 @@
+--- a/x86/ia.sinc
++++ b/x86/ia.sinc
+@@ -4253,11 +4253,13 @@
+ :PREFETCH     m8  is vexMode=0 & byte=0x0f; byte=0x0d; m8 & reg_opcode   ... { }  # rest aliased to /0
+ :PREFETCHW    m8  is vexMode=0 & byte=0x0f; byte=0x0d; m8 & reg_opcode=1 ... { }
+ :PREFETCHWT1  m8  is vexMode=0 & byte=0x0f; byte=0x0d; m8 & reg_opcode=2 ... { }
++:PREFETCH     Rmr8 is vexMode=0 & byte=0x0f; byte=0x0d; mod=3 & Rmr8 & reg_opcode=0 { }
+ 
+ :PREFETCHT0 m8  is vexMode=0 & byte=0x0f; byte=0x18; ( mod != 0b11 & reg_opcode=1 ) ... & m8 { }
+ :PREFETCHT1 m8  is vexMode=0 & byte=0x0f; byte=0x18; ( mod != 0b11 & reg_opcode=2 ) ... & m8 { }
+ :PREFETCHT2 m8  is vexMode=0 & byte=0x0f; byte=0x18; ( mod != 0b11 & reg_opcode=3 ) ... & m8 { }
+ :PREFETCHNTA m8 is vexMode=0 & byte=0x0f; byte=0x18; ( mod != 0b11 & reg_opcode=0 ) ... & m8 { }
++:NOP^"/reserved" Rmr8 is vexMode=0 & byte=0x0f; byte=0x18; mod=3 & Rmr8 & reg_opcode_hb=0 { }
+ 
+ define pcodeop ptwrite;
+ 

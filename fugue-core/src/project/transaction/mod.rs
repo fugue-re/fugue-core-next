@@ -620,7 +620,7 @@ mod test {
         Reference, ReferenceKey, ReferenceKind, ReferenceOrigin, ReferenceProperties, SymbolEntry,
         SymbolIndex, SymbolProperties, SymbolTableSelector,
     };
-    use crate::lifter::{ContextSet, Op, RawPCodeOp, Varnode, resolve_language};
+    use crate::lifter::{ContextSet, Lifter, Op, RawPCodeOp, Varnode, resolve_language};
     use crate::storage::{AddressSpaceId, DEFAULT_SPACE_ID};
 
     fn calling_function(
@@ -635,7 +635,7 @@ mod test {
             output: Varnode::INVALID,
         };
         let operations = [operation];
-        let insn = Insn::from_resolved_flow(language, entry, size, &operations)?;
+        let insn = Insn::from_resolved_flow(&Lifter::new(language), entry, size, &operations)?;
         let mut function = IncompleteFunction::new(entry);
 
         let insn = match function.insn_entry(entry) {

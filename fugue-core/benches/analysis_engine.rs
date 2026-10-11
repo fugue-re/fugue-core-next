@@ -1,6 +1,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::error::Error;
 use std::hint::black_box;
+use std::io::Error as IoError;
 use std::ops::Bound;
 #[cfg(feature = "sqlite")]
 use std::path::Path;
@@ -13,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use fugue_core::analysis::function::{FunctionRecoveryConfig, LinearSweepConfig};
 use fugue_core::analysis::non_returning::NonReturningExterns;
+use fugue_core::arch::{Arch, Mips};
 #[cfg(feature = "sqlite")]
 use fugue_core::attributes;
 use fugue_core::engine::{AnalysisEngine, AnalysisEngineConfig, ProjectUpdates, ProjectView};
@@ -24,8 +26,9 @@ use fugue_core::il::ecode::{ECodeIr, ECodeOpcode, PCodeToECode};
 use fugue_core::il::mcode::{ECodeToMCode, MCodeIr};
 use fugue_core::il::pcode::PCodeIr;
 use fugue_core::ir::{
-    Address, AddressRange, AddressRangeSet, IncompleteCodeBlock, IncompleteFunction, Reference,
-    ReferenceProperties, SymbolEntry, SymbolIndex, SymbolProperties, SymbolTableSelector,
+    Address, AddressRange, AddressRangeSet, CodeBlock, IncompleteCodeBlock, IncompleteFunction,
+    Reference, ReferenceProperties, SymbolEntry, SymbolIndex, SymbolProperties,
+    SymbolTableSelector,
 };
 use fugue_core::loader::{Loadable, Loader};
 use fugue_core::project::{ChangeKinds, ChangeSource, Project};
@@ -52,6 +55,7 @@ use rayon::prelude::*;
 const SYNTHETIC_SYMBOLS: usize = 1024;
 const SYNTHETIC_FUNCTIONS: usize = 256;
 const LARGE_FUNCTION_BLOCKS: usize = 4096;
+const MIPS_MODE_RESOLUTIONS: usize = 65_536;
 const DOMINANCE_BRANCHES: usize = 512;
 const DOMINANCE_LIVE_DOMAINS: usize = 256;
 const PAGE_LIMIT: usize = 64;
@@ -711,6 +715,61 @@ fn bench_initial_analysis(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn 
     black_box(engine.query_reader()?.revision()?);
     results.push(call_targets);
 
+    Ok(())
+}
+
+fn bench_mips_mode_resolution(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
+    let arch = Arch::new(Mips::resolve_default_variant(true)?);
+    let mut disassembler = arch.disassembler();
+    let mut lifter = arch.lifter();
+
+    let (result, checksum) = measure("mips16_mode_resolution", || {
+        let mut checksum = 0usize;
+        for _ in 0..MIPS_MODE_RESOLUTIONS {
+            lifter.context_mut().reset();
+            let (address, context) = arch
+                .canonicalise_address_with(0x1001u64, lifter.context())
+                .ok_or_else(|| IoError::other("MIPS16 address is not canonical"))?;
+            let address = Address::in_default_space(address);
+            context.apply(address, lifter.context_mut());
+            let insn = disassembler.disassemble(address, [0x68, 0x01], lifter.context_mut())?;
+            checksum = checksum.wrapping_add(insn.size());
+        }
+        Ok((checksum, MIPS_MODE_RESOLUTIONS))
+    })?;
+    black_box(checksum);
+    results.push(result);
+    Ok(())
+}
+
+fn bench_context_storage(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
+    let loader = Loader::from_file(REPRESENTATIVE_FIXTURE)?;
+    let engine = AnalysisEngine::new(Project::new_transient(&loader)?)?;
+    engine.analyse()?;
+    let reader = engine.query_reader()?;
+    let project = reader.project()?;
+
+    let (archive, encoded) = measure("context_block_archive", || {
+        let encoded = project
+            .blocks()
+            .iter()
+            .map(|block| rkyv::to_bytes::<rkyv::rancor::Error>(block.as_ref()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let count = encoded.len();
+        Ok((encoded, count))
+    })?;
+    results.push(archive);
+
+    let (rehydration, blocks) = measure("context_block_rehydration", || {
+        let blocks = encoded
+            .iter()
+            .map(|bytes| rkyv::from_bytes::<CodeBlock, rkyv::rancor::Error>(bytes))
+            .collect::<Result<Vec<_>, _>>()?;
+        let count = blocks.len();
+        Ok((blocks, count))
+    })?;
+    black_box(blocks);
+    results.push(rehydration);
     Ok(())
 }
 
@@ -1619,8 +1678,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     if selected_group(selected.as_deref(), "analysis") {
         bench_initial_analysis(&mut results)?;
     }
+    if selected_group(selected.as_deref(), "mips") {
+        bench_mips_mode_resolution(&mut results)?;
+    }
     if selected_group(selected.as_deref(), "representative") {
         bench_representative_analysis(&mut results)?;
+    }
+    if selected_group(selected.as_deref(), "contexts") {
+        bench_context_storage(&mut results)?;
     }
     if selected_group(selected.as_deref(), "il") {
         bench_dominance_traversal(&mut results)?;

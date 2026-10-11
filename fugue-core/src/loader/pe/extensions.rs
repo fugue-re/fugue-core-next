@@ -1,11 +1,13 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use object::endian::LittleEndian;
 use object::read::pe::{ImageNtHeaders, PeFile};
 use object::{ReadRef, pe};
 
 use crate::arch::Arch;
 use crate::extension::{self, Registration};
-use crate::ir::{Endian, RawAddress};
-use crate::lifter::{LanguageId, LanguageSource};
+use crate::ir::{Endian, RawAddress, RawAddressMap};
+use crate::lifter::{ContextHint, LanguageId, LanguageSource, TrackedSet};
 use crate::loader::pe::PeFileRepr;
 use crate::loader::{ImageSegmentContents, LanguageVariantOverride, LoaderError};
 use crate::types::{ATTRIBUTE_LANGUAGE_VARIANT, AttributeMap};
@@ -308,3 +310,170 @@ impl Registration for RelocationExtension {
 }
 
 extension::collect!(RelocationExtension);
+
+pub struct TrackedSetContext<'a, 'this, 'data> {
+    view: &'a PeFileRepr<'this, 'data>,
+    arch: &'a Arch,
+    base: RawAddress,
+    tracked_sets: &'a mut RawAddressMap<TrackedSet>,
+}
+
+impl<'a, 'this, 'data> TrackedSetContext<'a, 'this, 'data> {
+    pub(crate) fn new(
+        view: &'a PeFileRepr<'this, 'data>,
+        arch: &'a Arch,
+        base: RawAddress,
+        tracked_sets: &'a mut RawAddressMap<TrackedSet>,
+    ) -> Self {
+        Self {
+            view,
+            arch,
+            base,
+            tracked_sets,
+        }
+    }
+
+    pub fn view(&self) -> &PeFileRepr<'this, 'data> {
+        self.view
+    }
+
+    pub fn arch(&self) -> &Arch {
+        self.arch
+    }
+
+    pub fn base(&self) -> RawAddress {
+        self.base
+    }
+
+    pub fn tracked_sets(&self) -> &RawAddressMap<TrackedSet> {
+        self.tracked_sets
+    }
+
+    pub fn tracked_sets_mut(&mut self) -> &mut RawAddressMap<TrackedSet> {
+        self.tracked_sets
+    }
+
+    pub fn apply_tracked_sets(&mut self) -> Result<bool, LoaderError> {
+        for extension in extension::iter::<TrackedSetExtension>() {
+            if extension.apply(self)? {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+}
+
+type TrackedSetExtensionFn = fn(&mut TrackedSetContext<'_, '_, '_>) -> Result<bool, LoaderError>;
+
+pub struct TrackedSetExtension {
+    name: &'static str,
+    apply: TrackedSetExtensionFn,
+}
+
+impl TrackedSetExtension {
+    pub const fn new(name: &'static str, apply: TrackedSetExtensionFn) -> Self {
+        Self { name, apply }
+    }
+
+    pub fn apply(&self, context: &mut TrackedSetContext<'_, '_, '_>) -> Result<bool, LoaderError> {
+        (self.apply)(context)
+    }
+}
+
+impl Registration for TrackedSetExtension {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+}
+
+extension::collect!(TrackedSetExtension);
+
+pub struct ExceptionContext<'a, 'this, 'data> {
+    view: &'a PeFileRepr<'this, 'data>,
+    arch: &'a Arch,
+    base: RawAddress,
+    function_hints: &'a mut BTreeSet<RawAddress>,
+    mapping_hints: &'a mut BTreeMap<RawAddress, ContextHint>,
+}
+
+impl<'a, 'this, 'data> ExceptionContext<'a, 'this, 'data> {
+    pub(crate) fn new(
+        view: &'a PeFileRepr<'this, 'data>,
+        arch: &'a Arch,
+        base: RawAddress,
+        function_hints: &'a mut BTreeSet<RawAddress>,
+        mapping_hints: &'a mut BTreeMap<RawAddress, ContextHint>,
+    ) -> Self {
+        Self {
+            view,
+            arch,
+            base,
+            function_hints,
+            mapping_hints,
+        }
+    }
+
+    pub fn view(&self) -> &PeFileRepr<'this, 'data> {
+        self.view
+    }
+
+    pub fn arch(&self) -> &Arch {
+        self.arch
+    }
+
+    pub fn base(&self) -> RawAddress {
+        self.base
+    }
+
+    pub fn function_hints(&self) -> &BTreeSet<RawAddress> {
+        self.function_hints
+    }
+
+    pub fn function_hints_mut(&mut self) -> &mut BTreeSet<RawAddress> {
+        self.function_hints
+    }
+
+    pub fn mapping_hints(&self) -> &BTreeMap<RawAddress, ContextHint> {
+        self.mapping_hints
+    }
+
+    pub fn mapping_hints_mut(&mut self) -> &mut BTreeMap<RawAddress, ContextHint> {
+        self.mapping_hints
+    }
+
+    pub fn apply_exceptions(&mut self) -> Result<bool, LoaderError> {
+        for extension in extension::iter::<ExceptionExtension>() {
+            if extension.apply(self)? {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+}
+
+type ExceptionExtensionFn = fn(&mut ExceptionContext<'_, '_, '_>) -> Result<bool, LoaderError>;
+
+pub struct ExceptionExtension {
+    name: &'static str,
+    apply: ExceptionExtensionFn,
+}
+
+impl ExceptionExtension {
+    pub const fn new(name: &'static str, apply: ExceptionExtensionFn) -> Self {
+        Self { name, apply }
+    }
+
+    pub fn apply(&self, context: &mut ExceptionContext<'_, '_, '_>) -> Result<bool, LoaderError> {
+        (self.apply)(context)
+    }
+}
+
+impl Registration for ExceptionExtension {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+}
+
+extension::collect!(ExceptionExtension);

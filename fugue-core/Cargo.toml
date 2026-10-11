@@ -52,7 +52,7 @@ libmdbx = { version = "0.6", optional = true }
 md-5 = "0.10"
 memchr = "2"
 memmap2 = "0.9"
-object = "0.39"
+object = { version = "0.39", features = ["elf", "write_core"] }
 ouroboros = "0.18"
 parking_lot = { version = "0.12", features = ["arc_lock"] }
 quick_cache = "0.6"
@@ -80,7 +80,7 @@ uuid = { version = "1", features = ["serde", "v7"] }
 ustr = { version = "1.1", package = "fugue-ustr", features = ["rkyv", "serde"] }
 walkdir = "2.5"
 yaxpeax-arch = { version = "0.3", default-features = false }
-yaxpeax-arm = { version = "0.4", git = "https://github.com/fugue-re/yaxpeax-arm.git", rev = "e34ced89551c607befc6dfc3186e2f6af9c77a10" }
+yaxpeax-arm = "0.5"
 yaxpeax-x86 = "2.0"
 zip = { version = "7", default-features = false, features = ["zstd"] }
 

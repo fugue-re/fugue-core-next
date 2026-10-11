@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_yaml::Error as YamlError;
 use thiserror::Error;
 
+use crate::analysis::function::recovery::FunctionCandidate;
 use crate::analysis::function::recovery::analysis::FunctionDiscoveryContext;
 use crate::analysis::{AnalysisError, AnalysisPass};
 use crate::engine::{AnalysisContext, ProjectView};
@@ -144,7 +145,6 @@ impl FunctionRecoveryPatternMatcher {
             return;
         };
 
-        let arch = project.arch();
         let language = project.language();
 
         let mut mapping_cache = SegmentMappingCache::new();
@@ -167,7 +167,7 @@ impl FunctionRecoveryPatternMatcher {
                         .flat_map(|patterns| patterns.matches(bytes))
                     {
                         let start = Address::new(space_id, *range_in_space.start() + range.start);
-                        if arch.canonicalise_address(start).is_none() || ranges.is_avoided(start) {
+                        if ranges.is_avoided(start) {
                             continue;
                         }
 
@@ -183,8 +183,9 @@ impl FunctionRecoveryPatternMatcher {
                             "adding candidate at {start} with context {context:?} (confidence: {confidence})"
                         );
 
-                        ranges.add_candidate(AddressWithContext::new_with(
-                            start, context, confidence,
+                        ranges.add_candidate(FunctionCandidate::new_with(
+                            AddressWithContext::new(start, context),
+                            confidence,
                         ));
                     }
                 },

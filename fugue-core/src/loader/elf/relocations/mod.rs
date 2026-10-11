@@ -1,6 +1,7 @@
-use object::read::elf::{ElfFile, ElfSection, FileHeader};
+use object::read::elf::{ElfFile, ElfSection, ElfSymbol, FileHeader};
 use object::{
-    Architecture, Object, ObjectSection, ReadRef, Relocation, RelocationFlags, RelocationTarget,
+    Architecture, Object, ObjectSection, ObjectSymbolTable, ReadRef, Relocation, RelocationFlags,
+    RelocationTarget,
 };
 
 use crate::arch::Arch;
@@ -142,19 +143,6 @@ where
         origin: RawAddress,
         bytes: &mut ImageSegmentContents<'data>,
     ) -> Result<(), LoaderError> {
-        let Some(drels) = self.elf.dynamic_relocations() else {
-            tracing::trace!("no dynamic relocations");
-            return Ok(());
-        };
-
-        tracing::trace!(
-            "attempting to apply {} dynamic relocations",
-            self.elf
-                .dynamic_relocations()
-                .map(|d| d.count())
-                .unwrap_or_default()
-        );
-
         let Some(origin_offset) = origin.offset().checked_sub(self.base.offset()) else {
             tracing::warn!(
                 "dynamic relocation origin {origin} is below image base {}",
@@ -167,14 +155,33 @@ where
             return Err(LoaderError::address_overflow(origin));
         };
 
-        for (off, rel) in
-            drels.filter(|(off, _)| *off >= origin_offset && *off <= origin_last_offset)
-        {
-            tracing::trace!("applying dynamic relocation at {}", RawAddress::from(off));
+        if let Some(drels) = self.elf.dynamic_relocations() {
+            tracing::trace!(
+                "attempting to apply {} dynamic relocations",
+                self.elf
+                    .dynamic_relocations()
+                    .map(|d| d.count())
+                    .unwrap_or_default()
+            );
 
-            let off = off - origin_offset;
+            for (off, rel) in
+                drels.filter(|(off, _)| *off >= origin_offset && *off <= origin_last_offset)
+            {
+                tracing::trace!("applying dynamic relocation at {}", RawAddress::from(off));
 
-            self.apply_relocation(bytes, off, &rel, true)?;
+                let off = off - origin_offset;
+
+                self.apply_relocation(bytes, off, &rel, true)?;
+            }
+        } else {
+            tracing::trace!("no dynamic relocations");
+        }
+
+        if matches!(
+            self.elf.architecture(),
+            Architecture::Mips | Architecture::Mips64
+        ) {
+            self.apply_mips_global_got(origin_offset..=origin_last_offset, bytes);
         }
 
         Ok(())
@@ -252,6 +259,22 @@ where
     ) -> Option<u64> {
         self.resolve_relocation_entry(reloc, is_dynamic)
             .map(|entry| entry.address().raw_offset())
+    }
+
+    pub(crate) fn resolve_relocation_target(
+        &self,
+        reloc: &Relocation,
+        is_dynamic: bool,
+    ) -> Option<ElfSymbol<'data, 'file, Elf, R>> {
+        let RelocationTarget::Symbol(index) = reloc.target() else {
+            return None;
+        };
+
+        if is_dynamic && !self.is_object {
+            self.elf.dynamic_symbol_table()?.symbol_by_index(index).ok()
+        } else {
+            self.elf.symbol_by_index(index).ok()
+        }
     }
 
     pub(crate) fn mark_function_symbol(

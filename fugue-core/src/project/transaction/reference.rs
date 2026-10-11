@@ -65,7 +65,7 @@ mod test {
         IncompleteFunction, Insn, InsnEntry, InsnProperties, ReferenceProperties, ReferenceTarget,
         Switch, SwitchCase, SwitchModel,
     };
-    use crate::lifter::{ContextSet, Op, RawPCodeOp, Varnode, resolve_language};
+    use crate::lifter::{ContextSet, Lifter, Op, RawPCodeOp, Varnode, resolve_language};
     use crate::project::{ChangeRecord, Project, ProjectTransaction};
     use crate::storage::{AddressSpaceId, DEFAULT_SPACE_ID};
 
@@ -491,7 +491,7 @@ mod test {
             output: Varnode::new(language.register_space(), 0, 8),
         };
         let operations = [operation];
-        let insn = Insn::from_resolved_flow(language, entry, 1, &operations)?;
+        let insn = Insn::from_resolved_flow(&Lifter::new(language), entry, 1, &operations)?;
         let mut function = IncompleteFunction::new(entry);
 
         let insn = match function.insn_entry(entry) {
@@ -523,7 +523,7 @@ mod test {
             output: Varnode::INVALID,
         };
         let operations = [operation];
-        let insn = Insn::from_resolved_flow(language, entry, size, &operations)?;
+        let insn = Insn::from_resolved_flow(&Lifter::new(language), entry, size, &operations)?;
         let mut function = IncompleteFunction::new(entry);
 
         let insn = match function.insn_entry(entry) {

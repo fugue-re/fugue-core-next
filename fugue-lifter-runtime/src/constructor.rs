@@ -1,6 +1,6 @@
 use std::fmt::{self, Debug};
 
-use crate::context::{ContextPostAction, ContextPreAction};
+use crate::context::ContextAction;
 use crate::format::{
     InstructionFormatError, InstructionParts, InstructionSection, InstructionText,
     InstructionWriter,
@@ -13,8 +13,7 @@ use crate::template::handle_tpl;
 
 pub struct Constructor {
     pub id: u16,
-    pub context_pre_actions: &'static [ContextPreAction],
-    pub context_post_actions: &'static [ContextPostAction],
+    pub context_actions: &'static [ContextAction],
     pub operands: &'static [Operand],
     pub result: Option<u16>,
     pub build_action: Option<u16>,
@@ -55,18 +54,19 @@ impl Constructor {
         state: &mut LiftingContextState,
     ) -> Option<()> {
         unsafe {
-            for action in self.context_pre_actions {
-                action.apply(data, state)?;
-            }
-
-            for action in self.context_post_actions {
-                let value = action.extract(state);
-                let commit = ContextCommit {
-                    action,
-                    point: state.input().point,
-                    value,
-                };
-                state.input().register_context_commit(commit);
+            for action in self.context_actions {
+                match action {
+                    ContextAction::Commit(action) => {
+                        let value = action.extract(state);
+                        let commit = ContextCommit {
+                            action,
+                            point: state.input().point,
+                            value,
+                        };
+                        state.input().register_context_commit(commit);
+                    }
+                    ContextAction::Operator(action) => action.apply(data, state)?,
+                }
             }
 
             Some(())
@@ -94,7 +94,7 @@ impl Constructor {
                 state.input().pop_operand();
 
                 if self.delay_slot_length > 0 {
-                    state.input().set_delay_slot_length(self.delay_slot_length);
+                    state.inputs.set_delay_slot_length(self.delay_slot_length);
                 }
 
                 return Some(());
@@ -146,7 +146,7 @@ impl Constructor {
                 state.input().pop_operand();
 
                 if ctor.delay_slot_length > 0 {
-                    state.input().set_delay_slot_length(ctor.delay_slot_length);
+                    state.inputs.set_delay_slot_length(ctor.delay_slot_length);
                 }
             }
 
