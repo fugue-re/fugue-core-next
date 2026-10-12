@@ -136,11 +136,10 @@ impl ExitGraph {
     fn stale_calls<'a>(
         &'a self,
         targets: &'a NonReturningTargets<'a>,
-        non_returning: &'a BTreeSet<Address>,
     ) -> impl Iterator<Item = &'a StaleCall> {
-        self.calls.iter().filter(move |call| {
-            non_returning.contains(&call.target) || targets.is_non_returning(call.target)
-        })
+        self.calls
+            .iter()
+            .filter(move |call| targets.is_non_returning(call.target))
     }
 
     fn non_returning(&self, project: &ProjectView<'_>) -> BTreeSet<Address> {
@@ -270,7 +269,7 @@ impl AnalysisPass<InterFunctionStructuringContext> for NonReturningPropagation {
 
         let targets = NonReturningTargets::new(project);
 
-        for &StaleCall { caller, target } in graph.stale_calls(&targets, &non_returning) {
+        for &StaleCall { caller, target } in graph.stale_calls(&targets) {
             tracing::debug!("re-analysing {caller}: calls non-returning function at {target}");
 
             state.reanalyse_function(caller);

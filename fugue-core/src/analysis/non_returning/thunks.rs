@@ -2,12 +2,12 @@ use crate::analysis::function::recovery::StructuredFunctionContext;
 use crate::analysis::{AnalysisError, AnalysisPass};
 use crate::engine::{AnalysisContext, Priority};
 
-pub(crate) const NON_RETURNING_THUNK_ANALYSER: &str = "non-returning-thunk";
+pub(crate) const NON_RETURNING_THUNKS_ANALYSER: &str = "non-returning-thunks";
 
 #[derive(Debug, Default)]
-pub(crate) struct NonReturningThunk;
+pub(crate) struct NonReturningThunks;
 
-impl AnalysisPass<StructuredFunctionContext> for NonReturningThunk {
+impl AnalysisPass<StructuredFunctionContext> for NonReturningThunks {
     fn priority(&self) -> Priority {
         Priority::ENRICHMENT
     }

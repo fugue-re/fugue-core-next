@@ -1,7 +1,8 @@
+use object::elf::SHF_ALLOC;
 use object::read::elf::{ElfFile, ElfSection, ElfSymbol, FileHeader};
 use object::{
     Architecture, Object, ObjectSection, ObjectSymbolTable, ReadRef, Relocation, RelocationFlags,
-    RelocationTarget,
+    RelocationTarget, SectionFlags,
 };
 
 use crate::arch::Arch;
@@ -115,7 +116,9 @@ where
         bytes: &mut ImageSegmentContents<'data>,
         sect: &ElfSection<'data, 'file, Elf, R>,
     ) -> Result<(), LoaderError> {
-        self.apply_relocations(bytes, sect)?;
+        if self.is_object {
+            self.apply_relocations(bytes, sect)?;
+        }
         self.apply_dynamic_relocations(origin, bytes)?;
         Ok(())
     }
@@ -175,6 +178,30 @@ where
             }
         } else {
             tracing::trace!("no dynamic relocations");
+        }
+
+        for section in self.elf.sections() {
+            let Some(relocations) = self.elf.elf_relocation_sections().get(section.index()) else {
+                continue;
+            };
+            let Ok(relocations) = self.elf.section_by_index(relocations) else {
+                continue;
+            };
+            let SectionFlags::Elf { sh_flags } = relocations.flags() else {
+                continue;
+            };
+            if (sh_flags as u32 & SHF_ALLOC) != SHF_ALLOC {
+                continue;
+            }
+
+            for (off, rel) in section
+                .relocations()
+                .filter(|(off, _)| *off >= origin_offset && *off <= origin_last_offset)
+            {
+                tracing::trace!("applying allocated relocation at {}", RawAddress::from(off));
+
+                self.apply_relocation(bytes, off - origin_offset, &rel, false)?;
+            }
         }
 
         if matches!(

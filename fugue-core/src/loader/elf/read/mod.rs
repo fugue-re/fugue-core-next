@@ -1,3 +1,4 @@
+pub mod exception;
 pub mod image;
 pub mod mips;
 pub mod mips64;

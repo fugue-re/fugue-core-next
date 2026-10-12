@@ -671,7 +671,7 @@ impl PeSymbolLayout {
                         RawPeSymbol {
                             address: external_address,
                             symbol,
-                            properties: SymbolProperties::EXTERN | SymbolProperties::FUNCTION,
+                            properties: SymbolProperties::EXTERNAL | SymbolProperties::FUNCTION,
                             size: None,
                         },
                     );
@@ -1445,7 +1445,7 @@ impl<'a> PeImageSegments<'a> {
                     .filter(|(_, entry)| {
                         entry
                             .properties()
-                            .contains(SymbolProperties::FUNCTION | SymbolProperties::EXTERN)
+                            .contains(SymbolProperties::FUNCTION | SymbolProperties::EXTERNAL)
                     })
                     .map(|(_, entry)| entry.address().offset())
                     .chain(self.function_hints.range(seg_start..=seg_last).copied())

@@ -1,7 +1,8 @@
 use object::elf::{
     R_PPC64_ADDR16_HA, R_PPC64_ADDR16_HI, R_PPC64_ADDR16_LO, R_PPC64_COPY, R_PPC64_GLOB_DAT,
-    R_PPC64_JMP_SLOT, R_PPC64_REL24, R_PPC64_REL32, R_PPC64_REL64, R_PPC64_RELATIVE, R_PPC64_TOC,
-    R_PPC64_TOC16, R_PPC64_TOC16_HA, R_PPC64_TOC16_HI, R_PPC64_TOC16_LO,
+    R_PPC64_IRELATIVE, R_PPC64_JMP_SLOT, R_PPC64_REL24, R_PPC64_REL32, R_PPC64_REL64,
+    R_PPC64_RELATIVE, R_PPC64_TOC, R_PPC64_TOC16, R_PPC64_TOC16_HA, R_PPC64_TOC16_HI,
+    R_PPC64_TOC16_LO,
 };
 use object::read::elf::FileHeader;
 use object::{ReadRef, Relocation, RelocationKind};
@@ -33,7 +34,7 @@ where
         };
 
         match reloc_type {
-            R_PPC64_RELATIVE => {
+            R_PPC64_RELATIVE | R_PPC64_IRELATIVE => {
                 let value = self.base.offset().wrapping_add_signed(reloc.addend());
 
                 tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");

@@ -16,7 +16,8 @@ use crate::types::{AttributeMap, BytesOrMapping};
 
 pub mod elf;
 pub use elf::extensions::{
-    ArchResolver as ElfArchResolver, ImageContext as ElfImageContext,
+    ArchResolver as ElfArchResolver, ExceptionContext as ElfExceptionContext,
+    ExceptionExtension as ElfExceptionExtension, ImageContext as ElfImageContext,
     RelocationContext as ElfRelocationContext, RelocationExtension as ElfRelocationExtension,
     TrackedSetContext as ElfTrackedSetContext, TrackedSetExtension as ElfTrackedSetExtension,
 };

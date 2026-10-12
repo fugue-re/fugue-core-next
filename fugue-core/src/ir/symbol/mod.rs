@@ -177,8 +177,8 @@ where
         &self.indices
     }
 
-    pub fn is_extern(&self) -> bool {
-        self.properties.is_extern()
+    pub fn is_external(&self) -> bool {
+        self.properties.is_external()
     }
 
     pub fn is_local(&self) -> bool {
@@ -195,6 +195,10 @@ where
 
     pub fn is_non_returning(&self) -> bool {
         self.properties.is_non_returning()
+    }
+
+    pub fn is_indirect(&self) -> bool {
+        self.properties.is_indirect()
     }
 
     fn is_valid(&self) -> bool {
@@ -223,19 +227,19 @@ where
         self.indices.retain(|existing| *existing != index);
     }
 
-    pub fn mark_as_extern(&mut self) {
-        self.properties |= SymbolProperties::EXTERN;
+    pub fn mark_as_external(&mut self) {
+        self.properties |= SymbolProperties::EXTERNAL;
         self.properties.remove(SymbolProperties::LOCAL);
     }
 
     pub fn mark_as_local(&mut self) {
         self.properties |= SymbolProperties::LOCAL;
-        self.properties.remove(SymbolProperties::EXTERN);
+        self.properties.remove(SymbolProperties::EXTERNAL);
     }
 
     pub fn mark_as_export(&mut self) {
         self.properties |= SymbolProperties::EXPORT | SymbolProperties::LOCAL;
-        self.properties.remove(SymbolProperties::EXTERN);
+        self.properties.remove(SymbolProperties::EXTERNAL);
     }
 
     pub fn mark_as_function(&mut self) {
@@ -273,17 +277,18 @@ bitflags::bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct SymbolProperties: u8 {
         const NONE          = 0b0000_0000;
-        const EXTERN        = 0b0000_0001;
+        const EXTERNAL      = 0b0000_0001;
         const EXPORT        = 0b0000_0010;
         const LOCAL         = 0b0000_0100;
         const FUNCTION      = 0b0000_1000;
         const DATA          = 0b0001_0000;
         const NON_RETURNING = 0b0010_0000;
+        const INDIRECT      = 0b0100_0000;
 
-        const IMPORT = Self::EXTERN.bits();
+        const IMPORT = Self::EXTERNAL.bits();
 
         const KIND       = Self::FUNCTION.bits() | Self::DATA.bits();
-        const VISIBILITY = Self::EXTERN.bits() | Self::LOCAL.bits() | Self::EXPORT.bits();
+        const VISIBILITY = Self::EXTERNAL.bits() | Self::LOCAL.bits() | Self::EXPORT.bits();
 
         const INVALID = 0b1111_1111;
     }
@@ -321,15 +326,15 @@ impl SymbolProperties {
     }
 
     pub fn is_import(self) -> bool {
-        self.is_extern()
+        self.is_external()
     }
 
     pub fn is_export(self) -> bool {
         self.contains(SymbolProperties::EXPORT)
     }
 
-    pub fn is_extern(self) -> bool {
-        self.contains(SymbolProperties::EXTERN)
+    pub fn is_external(self) -> bool {
+        self.contains(SymbolProperties::EXTERNAL)
     }
 
     pub fn is_local(self) -> bool {
@@ -346,6 +351,10 @@ impl SymbolProperties {
 
     pub fn is_non_returning(self) -> bool {
         self.contains(SymbolProperties::NON_RETURNING)
+    }
+
+    pub fn is_indirect(self) -> bool {
+        self.contains(SymbolProperties::INDIRECT)
     }
 }
 

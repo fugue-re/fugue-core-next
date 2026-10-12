@@ -43,6 +43,7 @@ fugue-core-derive = { version = "0.3", path = "../fugue-core-derive" }
 fugue-lifter = { version = "0.3", path = "../fugue-lifter", default-features = false }
 fugue-sleigh-language = { version = "0.3", path = "../fugue-sleigh-language" }
 fugue-specs = { version = "0.3", path = "../fugue-specs", features = ["rkyv"] }
+gimli = { version = "0.33", default-features = false, features = ["fallible-iterator", "read"] }
 hex-display = "0.3"
 indexmap = "2"
 inventory = "0.3"

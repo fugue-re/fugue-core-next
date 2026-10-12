@@ -2,7 +2,7 @@ use std::sync::LazyLock;
 
 use crate::ir::symbol::{SymbolSet, symbol};
 use crate::platform::OperatingSystem;
-use crate::platform::analysis::NonReturningExternSet;
+use crate::platform::analysis::NonReturningExternalSet;
 
 static POSIX_NON_RETURNING: LazyLock<SymbolSet> = LazyLock::new(|| {
     [
@@ -46,7 +46,7 @@ static POSIX_NON_RETURNING: LazyLock<SymbolSet> = LazyLock::new(|| {
 });
 
 #[fugue_core::extension]
-impl NonReturningExternSet {
+impl NonReturningExternalSet {
     const NAME: &str = "posix";
     const OPERATING_SYSTEMS: &[OperatingSystem] = &[
         OperatingSystem::FreeBsd,
@@ -54,7 +54,7 @@ impl NonReturningExternSet {
         OperatingSystem::Macos,
     ];
 
-    fn externs() -> &'static SymbolSet {
+    fn externals() -> &'static SymbolSet {
         &POSIX_NON_RETURNING
     }
 }

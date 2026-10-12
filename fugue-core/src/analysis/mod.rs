@@ -4,6 +4,7 @@ mod error;
 mod group;
 mod pass;
 
+pub mod external;
 pub mod function;
 pub mod non_returning;
 pub mod switch;

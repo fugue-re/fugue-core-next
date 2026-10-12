@@ -345,16 +345,16 @@ where
         self.insert(index, address, symbol, properties | SymbolProperties::LOCAL)
     }
 
-    pub fn insert_extern(
+    pub fn insert_external(
         &mut self,
         index: SymbolIndex,
         address: impl Into<A>,
         symbol: impl Into<Symbol>,
     ) -> SymbolId {
-        self.insert_extern_with(index, address, symbol, SymbolProperties::NONE)
+        self.insert_external_with(index, address, symbol, SymbolProperties::NONE)
     }
 
-    pub fn insert_extern_with(
+    pub fn insert_external_with(
         &mut self,
         index: SymbolIndex,
         address: impl Into<A>,
@@ -365,7 +365,7 @@ where
             index,
             address,
             symbol,
-            properties | SymbolProperties::EXTERN,
+            properties | SymbolProperties::EXTERNAL,
         )
     }
 

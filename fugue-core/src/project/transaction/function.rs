@@ -118,6 +118,12 @@ impl ProjectTransaction<'_> {
             .set_callees(entry, record.take_call_targets(), !replaces_existing);
         if replaces_existing {
             self.remove_lifted_descendants(id, &PCodeIr::FORM)?;
+            self.replace_derived_references(
+                reference_coverage.clone(),
+                ReferenceKind::Data,
+                ReferenceProvenance::Function(id),
+                [],
+            )?;
         }
 
         let references = record.take_references();
@@ -308,12 +314,16 @@ impl ProjectTransaction<'_> {
         let entry = function.entry();
         self.call_graph_staging.clear_callees(entry);
 
-        self.replace_derived_references(
-            covered.clone(),
-            ReferenceKind::Flow,
-            ReferenceProvenance::Function(id),
-            [],
-        )?;
+        self.replace_derived_reference_batches([ReferenceKind::Flow, ReferenceKind::Data].map(
+            |kind| {
+                DerivedReferenceBatch::new(
+                    covered.clone(),
+                    kind,
+                    ReferenceProvenance::Function(id),
+                    [],
+                )
+            },
+        ))?;
 
         self.remove_switches_of_function(id)?;
 

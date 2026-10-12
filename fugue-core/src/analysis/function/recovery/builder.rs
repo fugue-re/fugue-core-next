@@ -467,6 +467,10 @@ impl FunctionBuilderContext {
         &mut self.avoids
     }
 
+    pub fn mapping_cache_mut(&mut self) -> &mut SegmentMappingCache {
+        &mut self.mapping_cache
+    }
+
     pub fn candidates(&self) -> impl ExactSizeIterator<Item = &AddressWithContext> {
         self.candidates.iter()
     }
@@ -801,6 +805,7 @@ impl FunctionBuilderContext {
                             && let Some((target, target_context)) =
                                 arch.canonicalise_address_with(target, resolver.context())
                             && let target = Address::new(address.space(), target)
+                            && !f.contains_insn(target)
                             && self
                                 .mapping_cache
                                 .mapping_properties(segments, target)
@@ -825,34 +830,20 @@ impl FunctionBuilderContext {
                             );
                         }
 
-                        let orphaned_fall_through = if config.non_returning_analysis()
+                        if config.non_returning_analysis()
                             && insn.call_target().is_some_and(|target| {
                                 non_returning_targets
                                     .binary_search(&target.address())
                                     .is_ok()
-                            }) {
+                            })
+                        {
                             tracing::trace!(
                                 "suppressing fall-through of non-returning call at {address}"
                             );
 
-                            let fall_through =
-                                insn.iter_targets().find_map(|(target, _, address)| {
-                                    target.is_fall_through().then(|| address.clone())
-                                });
-
                             f.insn_mut(insn_id)
                                 .expect("inserted instruction must exist")
                                 .remove_fall_through();
-
-                            fall_through
-                        } else {
-                            None
-                        };
-
-                        if let Some(fall_through) = orphaned_fall_through {
-                            if !is_avoided(&self.avoids, fall_through.address()) {
-                                self.global_targets.insert(fall_through);
-                            }
                         }
 
                         let insn = f.insn(insn_id).expect("inserted instruction must exist");

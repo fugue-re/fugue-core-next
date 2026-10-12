@@ -978,7 +978,7 @@ fn test_symbol_pages_handle_shared_address_boundaries() -> Result<(), Box<dyn Er
     let address = Address::in_default_space(0x7fff_1234u64);
     let inserted = [
         SymbolEntry::new(address, "z_page_boundary", SymbolProperties::LOCAL),
-        SymbolEntry::new(address, "a_page_boundary", SymbolProperties::EXTERN),
+        SymbolEntry::new(address, "a_page_boundary", SymbolProperties::EXTERNAL),
         SymbolEntry::new(
             address,
             "m_page_boundary",

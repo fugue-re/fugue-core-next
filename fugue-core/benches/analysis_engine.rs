@@ -13,7 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use fugue_core::analysis::function::{FunctionRecoveryConfig, LinearSweepConfig};
-use fugue_core::analysis::non_returning::NonReturningExterns;
+use fugue_core::analysis::non_returning::NonReturningExternals;
 use fugue_core::arch::{Arch, Mips};
 #[cfg(feature = "sqlite")]
 use fugue_core::attributes;
@@ -798,10 +798,10 @@ fn bench_representative_analysis(results: &mut Vec<BenchResult>) -> Result<(), B
     let loader = Loader::from_file(REPRESENTATIVE_FIXTURE)?;
     let project_without_external_classification = Project::new_transient(&loader)?;
     let mut config = AnalysisEngineConfig::default();
-    config.disable_analyser::<NonReturningExterns>();
+    config.disable_analyser::<NonReturningExternals>();
     let comparison_function_count = {
         let (comparison, comparison_engine) = measure(
-            "representative_arm_analysis_without_non_returning_externs",
+            "representative_arm_analysis_without_non_returning_externals",
             || {
                 let engine =
                     AnalysisEngine::with_config(project_without_external_classification, config)?;

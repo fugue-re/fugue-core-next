@@ -185,7 +185,8 @@ impl FunctionRecoveryExtension {
     const NAME: &str = "thunk-target";
 
     fn configure(_: &Project, recovery: &mut FunctionRecovery) -> Result<(), AnalysisError> {
-        recovery.add_post_structuring_pass(THUNK_TARGET_RECOVERY_ANALYSER, ThunkTargetRecovery::new());
+        recovery
+            .add_post_structuring_pass(THUNK_TARGET_RECOVERY_ANALYSER, ThunkTargetRecovery::new());
         Ok(())
     }
 }

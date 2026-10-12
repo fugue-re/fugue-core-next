@@ -160,7 +160,7 @@ fn ida_symbols(
                 .0
                 .allocate_at(addr)
                 .map_err(LoaderError::other)?;
-            symbols.insert_extern_with(
+            symbols.insert_external_with(
                 SymbolIndex::new(FUNCTIONS_SELECTOR, n),
                 addr,
                 name.unwrap_or_default(),
@@ -193,7 +193,7 @@ fn ida_symbols(
                 .0
                 .allocate_at(addr)
                 .map_err(LoaderError::other)?;
-            symbols.insert_extern_with(
+            symbols.insert_external_with(
                 SymbolIndex::new(NAMES_SELECTOR, n),
                 addr,
                 name,

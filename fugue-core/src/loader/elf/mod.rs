@@ -53,6 +53,9 @@ pub mod read;
 mod relocations;
 pub use relocations::ElfSegmentRelocator;
 
+mod exceptions;
+use exceptions::ElfExceptionResolver;
+
 mod tracked;
 use tracked::ElfTrackedSetResolver;
 
@@ -175,6 +178,7 @@ pub struct Elf<'a> {
     layout: ImageLayout,
     image_symbols: TransientSymbolTable<ImageAddress>,
     mapping_hints: BTreeMap<RawAddress, ContextHint>,
+    function_hints: BTreeSet<RawAddress>,
     tracked_sets: RawAddressMap<TrackedSet>,
     segments: Vec<ElfImageSegment>,
     region_bank: ElfRegionBankMap,
@@ -260,6 +264,21 @@ impl<'a> Elf<'a> {
                 &architecture,
                 base - preferred_base,
                 &mut tracked_sets,
+            )
+            .apply()
+        )?;
+
+        let mut function_hints = BTreeSet::new();
+        with_elf!(
+            view,
+            elf | ElfExceptionResolver::new(
+                view,
+                elf,
+                &architecture,
+                base - preferred_base,
+                config,
+                &mut function_hints,
+                &mut mapping_hints,
             )
             .apply()
         )?;
@@ -367,6 +386,7 @@ impl<'a> Elf<'a> {
             image_symbols,
             layout,
             mapping_hints,
+            function_hints,
             tracked_sets,
             segments: placements,
             region_bank,
@@ -1083,6 +1103,7 @@ where
 struct ElfImageSegments<'a> {
     segments: slice::Iter<'a, ElfImageSegment>,
     mapping_hints: &'a BTreeMap<RawAddress, ContextHint>,
+    function_hints: &'a BTreeSet<RawAddress>,
     tracked_sets: &'a RawAddressMap<TrackedSet>,
     image_symbols: &'a TransientSymbolTable<ImageAddress>,
 }
@@ -1092,11 +1113,13 @@ impl<'a> ElfImageSegments<'a> {
         segments: &'a [ElfImageSegment],
         image_symbols: &'a TransientSymbolTable<ImageAddress>,
         mapping_hints: &'a BTreeMap<RawAddress, ContextHint>,
+        function_hints: &'a BTreeSet<RawAddress>,
         tracked_sets: &'a RawAddressMap<TrackedSet>,
     ) -> Self {
         Self {
             segments: segments.iter(),
             mapping_hints,
+            function_hints,
             tracked_sets,
             image_symbols,
         }
@@ -1123,9 +1146,10 @@ impl<'a> ElfImageSegments<'a> {
                     .filter(|(_, entry)| {
                         entry
                             .properties()
-                            .contains(SymbolProperties::FUNCTION | SymbolProperties::EXTERN)
+                            .contains(SymbolProperties::FUNCTION | SymbolProperties::EXTERNAL)
                     })
                     .map(|(_, entry)| entry.address().offset())
+                    .chain(self.function_hints.range(seg_start..=seg_last).copied())
                     .collect::<BTreeSet<RawAddress>>();
 
                 (mapping_hints, function_hints)
@@ -1281,8 +1305,10 @@ impl ElfSymbolLayout {
             let is_import = is_visible && symbol.address() == 0;
             let is_export = is_visible && symbol.address() != 0;
 
-            let kind = if [STT_FUNC, STT_GNU_IFUNC].contains(&st_type) {
+            let kind = if st_type == STT_FUNC {
                 SymbolProperties::FUNCTION
+            } else if st_type == STT_GNU_IFUNC {
+                SymbolProperties::FUNCTION | SymbolProperties::INDIRECT
             } else if [STT_COMMON, STT_OBJECT, STT_TLS, STT_GNU_UNIQUE].contains(&st_type) {
                 SymbolProperties::DATA
             } else {
@@ -1295,7 +1321,7 @@ impl ElfSymbolLayout {
             let mut properties = kind;
 
             if is_import && (!is_object || st_type == STT_NOTYPE) {
-                properties |= SymbolProperties::EXTERN;
+                properties |= SymbolProperties::EXTERNAL;
             } else if is_export {
                 properties |= SymbolProperties::EXPORT | SymbolProperties::LOCAL;
             } else {
@@ -1305,7 +1331,7 @@ impl ElfSymbolLayout {
             let address = match arch.canonicalise_address(address) {
                 Some((canonical, context))
                     if properties.is_function()
-                        && !properties.is_extern()
+                        && !properties.is_external()
                         && canonical != address =>
                 {
                     mapping_hints.insert(canonical, ContextHint::code().with_context(context));
@@ -1320,7 +1346,8 @@ impl ElfSymbolLayout {
                     address,
                     symbol: symbol.name().ok().unwrap_or_default().into(),
                     properties,
-                    size: (!properties.is_extern() && symbol.size() != 0).then_some(symbol.size()),
+                    size: (!properties.is_external() && symbol.size() != 0)
+                        .then_some(symbol.size()),
                 },
             );
         }
@@ -1359,8 +1386,10 @@ impl ElfSymbolLayout {
             let is_import = (is_visible || is_unbound_import) && sym.address() == 0;
             let is_export = is_visible && sym.address() != 0;
 
-            let kind = if [STT_FUNC, STT_GNU_IFUNC].contains(&st_type) {
+            let kind = if st_type == STT_FUNC {
                 SymbolProperties::FUNCTION
+            } else if st_type == STT_GNU_IFUNC {
+                SymbolProperties::FUNCTION | SymbolProperties::INDIRECT
             } else if [STT_COMMON, STT_OBJECT, STT_TLS, STT_GNU_UNIQUE].contains(&st_type) {
                 SymbolProperties::DATA
             } else {
@@ -1368,7 +1397,7 @@ impl ElfSymbolLayout {
             };
 
             if is_import && (!is_object || st_type == STT_NOTYPE) {
-                Some((index, sym, kind | SymbolProperties::EXTERN))
+                Some((index, sym, kind | SymbolProperties::EXTERNAL))
             } else if is_export {
                 Some((
                     index,
@@ -1384,7 +1413,7 @@ impl ElfSymbolLayout {
                 None
             }
         }) {
-            let address = if properties.is_extern() {
+            let address = if properties.is_external() {
                 external_thunks
                     .allocate()
                     .ok_or_else(|| LoaderError::address_overflow(base_addr))?
@@ -1402,7 +1431,7 @@ impl ElfSymbolLayout {
             let address = match arch.canonicalise_address(address) {
                 Some((canonical, context))
                     if properties.is_function()
-                        && !properties.is_extern()
+                        && !properties.is_external()
                         && canonical != address =>
                 {
                     mapping_hints.insert(canonical, ContextHint::code().with_context(context));
@@ -1418,7 +1447,7 @@ impl ElfSymbolLayout {
                     address,
                     symbol,
                     properties,
-                    size: (!properties.is_extern() && sym.size() != 0).then_some(sym.size()),
+                    size: (!properties.is_external() && sym.size() != 0).then_some(sym.size()),
                 },
             );
         }
@@ -1830,7 +1859,7 @@ where
             .filter_map(|(_, sym)| {
                 if sym
                     .properties()
-                    .contains(SymbolProperties::FUNCTION | SymbolProperties::EXTERN)
+                    .contains(SymbolProperties::FUNCTION | SymbolProperties::EXTERNAL)
                 {
                     Some(sym.address().offset())
                 } else {
@@ -2202,6 +2231,7 @@ impl Loadable for Elf<'_> {
             &self.segments,
             &self.image_symbols,
             &self.mapping_hints,
+            &self.function_hints,
             &self.tracked_sets,
         )) as ImageSegmentIterator<'b>
     }
