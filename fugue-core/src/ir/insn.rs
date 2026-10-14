@@ -6,9 +6,10 @@ use thiserror::Error;
 
 use crate::il::pcode::raw::analysis::{RawPCodeFlow, RawPCodeFlows};
 use crate::ir::{
-    Address, AddressRange, FlowTarget, Id, Location, Reference, ReferenceOrigin, ToRawAddress,
+    Address, AddressRange, AddressWithContext, FlowKind, FlowTarget, Id, Location, Reference,
+    ReferenceOrigin, ToRawAddress,
 };
-use crate::lifter::{Language, Op, RawPCodeOp};
+use crate::lifter::{Language, Lifter, LifterError, Op, RawPCodeOp};
 use crate::storage::schema::bitflags::archived_bitflags;
 use crate::types::EstimateSize;
 
@@ -18,6 +19,8 @@ pub type InsnId = Id<Insn>;
 pub enum InsnError {
     #[error("instruction size {size} exceeds retained limit")]
     InsnTooLarge { size: usize },
+    #[error(transparent)]
+    Lifting(#[from] LifterError),
 }
 
 impl InsnError {
@@ -48,20 +51,30 @@ pub struct Insn {
 
 impl Insn {
     pub(crate) fn from_direct_branch(
-        address: Address,
+        address: impl Into<AddressWithContext>,
         size: usize,
-        target: Address,
+        target: impl Into<AddressWithContext>,
         conditional: bool,
     ) -> Result<Self, InsnError> {
-        Self::from_direct_flow(address, size, InsnTarget::InterBlk(target), conditional)
+        Self::from_direct_flow(
+            address.into(),
+            size,
+            InsnTarget::InterBlk(target.into()),
+            conditional,
+        )
     }
 
     pub(crate) fn from_direct_call(
-        address: Address,
+        address: impl Into<AddressWithContext>,
         size: usize,
-        target: Address,
+        target: impl Into<AddressWithContext>,
     ) -> Result<Self, InsnError> {
-        Self::from_direct_flow(address, size, InsnTarget::InterSub(target), true)
+        Self::from_direct_flow(
+            address.into(),
+            size,
+            InsnTarget::InterSub(target.into()),
+            true,
+        )
     }
 
     pub(crate) fn from_indirect_branch(address: Address, size: usize) -> Result<Self, InsnError> {
@@ -70,8 +83,16 @@ impl Insn {
         Self::from_flow_targets(address, size, targets)
     }
 
-    pub(crate) fn from_indirect_call(address: Address, size: usize) -> Result<Self, InsnError> {
-        Self::from_direct_flow(address, size, InsnTarget::InterSubIndirect(None), true)
+    pub(crate) fn from_indirect_call(
+        address: impl Into<AddressWithContext>,
+        size: usize,
+    ) -> Result<Self, InsnError> {
+        Self::from_direct_flow(
+            address.into(),
+            size,
+            InsnTarget::InterSubIndirect(None),
+            true,
+        )
     }
 
     pub(crate) fn from_return(address: Address, size: usize) -> Result<Self, InsnError> {
@@ -81,17 +102,22 @@ impl Insn {
     }
 
     fn from_direct_flow(
-        address: Address,
+        address: AddressWithContext,
         size: usize,
         target: InsnTarget,
         fall_through: bool,
     ) -> Result<Self, InsnError> {
+        let (address, fall_through_context) = address.into_parts();
         let mut targets = SmallVec::new();
         targets.push((0, target));
         if fall_through {
             targets.push((
                 0,
-                InsnTarget::IntraBlk(Location::new(address + size, 0), true),
+                InsnTarget::IntraBlk(
+                    AddressWithContext::new(address + size, fall_through_context),
+                    0,
+                    true,
+                ),
             ));
         }
         Self::from_flow_targets(address, size, targets)
@@ -116,50 +142,76 @@ impl Insn {
     }
 
     pub(crate) fn from_resolved_flow(
-        language: &'static Language,
+        lifter: &Lifter,
         address: Address,
         size: usize,
         operations: &[RawPCodeOp],
     ) -> Result<Self, InsnError> {
+        let language = lifter.language();
+        let canonicalise = |address: Address| {
+            let (canonical, context) = lifter
+                .arch()
+                .canonicalise_address_with(address.raw_address(), lifter.context())?;
+            Some(AddressWithContext::new(
+                Address::new(address.space(), canonical),
+                context,
+            ))
+        };
         let operation_count = operations.len() as u16;
         let next_address = address + size;
         let is_local = |location: &Location| location.address() == address;
         let is_fall_through = |location: &Location| location.address() == next_address;
 
-        let mut targets = SmallVec::new();
+        let mut targets = SmallVec::<[(u16, InsnTarget); 1]>::new();
         for (index, flow) in RawPCodeFlows::new(language, address, size, operations).iter() {
-            let target = match flow {
-                RawPCodeFlow::Branch(Some(location)) => {
-                    if is_local(&location) {
-                        InsnTarget::IntraIns(location, false)
-                    } else if is_fall_through(&location) {
-                        InsnTarget::IntraBlk(location, false)
-                    } else {
-                        InsnTarget::InterBlk(location.address())
+            let target = (|| {
+                Some(match flow {
+                    RawPCodeFlow::Branch(Some(location)) => {
+                        if is_local(&location) {
+                            InsnTarget::IntraIns(location, false)
+                        } else if is_fall_through(&location) {
+                            InsnTarget::IntraBlk(
+                                canonicalise(location.address())?,
+                                location.position(),
+                                false,
+                            )
+                        } else {
+                            InsnTarget::InterBlk(canonicalise(location.address())?)
+                        }
                     }
-                }
-                RawPCodeFlow::Branch(None) => InsnTarget::InterBlkIndirect(None),
-                RawPCodeFlow::Call(Some(location)) => {
-                    if location.position() != 0 {
-                        InsnTarget::IntraIns(location, false)
-                    } else {
-                        InsnTarget::InterSub(location.address())
+                    RawPCodeFlow::Branch(None) => InsnTarget::InterBlkIndirect(None),
+                    RawPCodeFlow::Call(Some(location)) => {
+                        if location.position() != 0 {
+                            InsnTarget::IntraIns(location, false)
+                        } else {
+                            InsnTarget::InterSub(canonicalise(location.address())?)
+                        }
                     }
-                }
-                RawPCodeFlow::Call(None) => InsnTarget::InterSubIndirect(None),
-                RawPCodeFlow::FallThrough(location) => {
-                    if is_local(&location) {
-                        InsnTarget::IntraIns(location, true)
-                    } else {
-                        InsnTarget::IntraBlk(location, true)
+                    RawPCodeFlow::Call(None) => InsnTarget::InterSubIndirect(None),
+                    RawPCodeFlow::FallThrough(location) => {
+                        if is_local(&location) {
+                            InsnTarget::IntraIns(location, true)
+                        } else {
+                            InsnTarget::IntraBlk(
+                                canonicalise(location.address())?,
+                                location.position(),
+                                true,
+                            )
+                        }
                     }
-                }
-                RawPCodeFlow::Intrinsic => InsnTarget::Intrinsic,
-                RawPCodeFlow::Return(return_address) => {
-                    InsnTarget::InterRet(return_address, index + 1 == operation_count)
-                }
-            };
-            targets.push((index, target));
+                    RawPCodeFlow::Intrinsic => InsnTarget::Intrinsic,
+                    RawPCodeFlow::Return(return_address) => InsnTarget::InterRet(
+                        match return_address {
+                            Some(address) => Some(canonicalise(address)?),
+                            None => None,
+                        },
+                        index + 1 == operation_count,
+                    ),
+                })
+            })();
+            if let Some(target) = target {
+                targets.push((index, target));
+            }
         }
         let mut properties = InsnProperties::from_targets(&targets);
         if operations.is_empty() {
@@ -200,7 +252,7 @@ impl Insn {
     }
 
     pub fn next_address(&self) -> Address {
-        self.address + self.size as usize
+        self.address() + self.size as usize
     }
 
     pub fn properties(&self) -> InsnProperties {
@@ -216,56 +268,66 @@ impl Insn {
             return None;
         }
         AddressRange::from_size(
-            self.address + (self.size - self.delay_slot_size) as usize,
+            self.address() + (self.size - self.delay_slot_size) as usize,
             u64::from(self.delay_slot_size),
         )
     }
 
     pub fn iter_targets<'a>(
         &'a self,
-    ) -> impl Iterator<Item = (&'a InsnTarget, InsnTargetKind, Address)> + 'a {
-        self.targets
-            .iter()
-            .filter_map(|(_, target)| target.resolved().map(|(kind, to)| (target, kind, to)))
+    ) -> impl Iterator<Item = (&'a InsnTarget, InsnTargetKind, &'a AddressWithContext)> + 'a {
+        self.targets.iter().filter_map(|(_, target)| {
+            target
+                .resolved()
+                .map(|(kind, address)| (target, kind, address))
+        })
     }
 
     pub fn flow_targets(&self) -> impl Iterator<Item = FlowTarget> + '_ {
-        self.iter_targets()
-            .filter_map(move |(target, _, to)| FlowTarget::from_insn_target(self, target, to))
+        self.iter_targets().filter_map(|(target, _, address)| {
+            FlowKind::from_insn_target(self, target)
+                .map(|kind| FlowTarget::new(self.address(), address.clone(), kind))
+        })
     }
 
     pub fn flow_references(&self) -> impl Iterator<Item = Reference> + '_ {
-        self.flow_targets().filter_map(|target| {
-            if !target.kind().is_global() {
+        self.iter_targets().filter_map(|(target, _, address)| {
+            let kind = FlowKind::from_insn_target(self, target)?;
+            if !kind.is_global() {
                 return None;
             }
             Some(
-                Reference::from_flow(target.from(), target.to(), target.kind())
+                Reference::from_flow(self.address(), address.address(), kind)
                     .with_origin(ReferenceOrigin::Derived),
             )
         })
     }
 
-    pub fn set_indirect_target(&mut self, target: Address) {
-        for (_, existing) in self.targets.iter_mut() {
+    pub fn set_indirect_target(&mut self, target: AddressWithContext) {
+        for (_, existing) in &mut self.targets {
             match existing {
                 InsnTarget::InterBlkIndirect(None) => {
-                    *existing = InsnTarget::InterBlkIndirect(Some(target));
+                    *existing = InsnTarget::InterBlkIndirect(Some(target.clone()));
                 }
                 InsnTarget::InterSubIndirect(None) => {
-                    *existing = InsnTarget::InterSubIndirect(Some(target));
+                    *existing = InsnTarget::InterSubIndirect(Some(target.clone()));
                 }
                 _ => (),
             }
         }
 
-        self.properties = InsnProperties::from_targets(&self.targets)
+        self.properties = InsnProperties::from_targets(self.targets.as_slice())
             | (self.properties & !InsnProperties::FLOW & !InsnProperties::FALL_THROUGH);
     }
 
-    pub fn call_target(&self) -> Option<Address> {
-        self.flow_targets()
-            .find_map(|target| target.kind().is_call().then_some(target.to()))
+    pub fn call_target(&self) -> Option<&AddressWithContext> {
+        self.targets.iter().find_map(|(_, target)| {
+            if target.is_call() {
+                target.address_with_context()
+            } else {
+                None
+            }
+        })
     }
 
     pub fn is_taken(&self) -> bool {
@@ -370,12 +432,14 @@ impl Insn {
 
     pub(crate) fn resolve_flow(
         &mut self,
-        language: &'static Language,
-        size: usize,
-        operations: &[RawPCodeOp],
+        lifter: &mut Lifter,
+        bytes: &[u8],
+        operations: &mut Vec<RawPCodeOp>,
     ) -> Result<(), InsnError> {
+        operations.clear();
+        let size = lifter.lift(self.address(), bytes, operations)?;
         let encoded_size = self.size;
-        *self = Self::from_resolved_flow(language, self.address, size, operations)?;
+        *self = Self::from_resolved_flow(lifter, self.address(), size, operations)?;
         if encoded_size != 0 {
             self.delay_slot_size = self.size.saturating_sub(encoded_size);
         }
@@ -384,7 +448,7 @@ impl Insn {
 
     pub fn remove_fall_through(&mut self) {
         self.targets.retain(|(_, target)| !target.is_fall_through());
-        self.properties = InsnProperties::from_targets(&self.targets)
+        self.properties = InsnProperties::from_targets(self.targets.as_slice())
             | (self.properties & !InsnProperties::FLOW & !InsnProperties::FALL_THROUGH);
     }
 
@@ -524,13 +588,13 @@ impl Default for InsnProperties {
 archived_bitflags!(InsnProperties, ArchivedInsnProperties, u16);
 
 impl InsnProperties {
-    pub(crate) fn from_targets(targets: &[(u16, InsnTarget)]) -> Self {
+    fn from_targets(targets: &[(u16, InsnTarget)]) -> Self {
         let mut prop = Self::empty();
 
-        for (_, target) in targets.iter() {
+        for (_, target) in targets {
             match target {
-                InsnTarget::IntraBlk(_, true) => prop |= Self::FALL_THROUGH,
-                InsnTarget::IntraBlk(_, false) | InsnTarget::InterBlk(_) => prop |= Self::BRANCH,
+                InsnTarget::IntraBlk(_, _, true) => prop |= Self::FALL_THROUGH,
+                InsnTarget::IntraBlk(_, _, false) | InsnTarget::InterBlk(_) => prop |= Self::BRANCH,
                 InsnTarget::InterBlkIndirect(_) => prop |= Self::BRANCH | Self::INDIRECT,
                 InsnTarget::InterSub(_) => prop |= Self::CALL,
                 InsnTarget::InterSubIndirect(_) => prop |= Self::CALL | Self::INDIRECT,
@@ -585,12 +649,12 @@ impl InsnTargetKind {
     rkyv::Deserialize,
 )]
 pub enum InsnTarget {
-    InterBlk(Address),
-    InterBlkIndirect(Option<Address>),
-    InterRet(Option<Address>, bool),
-    InterSub(Address),
-    InterSubIndirect(Option<Address>),
-    IntraBlk(Location, bool),
+    InterBlk(AddressWithContext),
+    InterBlkIndirect(Option<AddressWithContext>),
+    InterRet(Option<AddressWithContext>, bool),
+    InterSub(AddressWithContext),
+    InterSubIndirect(Option<AddressWithContext>),
+    IntraBlk(AddressWithContext, u16, bool),
     IntraIns(Location, bool),
     Intrinsic,
 }
@@ -601,7 +665,7 @@ impl InsnTarget {
     }
 
     pub fn is_fall_through(&self) -> bool {
-        matches!(self, Self::IntraIns(_, true) | Self::IntraBlk(_, true))
+        matches!(self, Self::IntraIns(_, true) | Self::IntraBlk(_, _, true))
     }
 
     pub fn is_indirect(&self) -> bool {
@@ -621,26 +685,31 @@ impl InsnTarget {
 
     pub fn address(&self) -> Option<Address> {
         match self {
-            Self::IntraIns(location, _) | Self::IntraBlk(location, _) => Some(location.address()),
-            Self::InterBlk(address)
-            | Self::InterBlkIndirect(Some(address))
-            | Self::InterSub(address)
-            | Self::InterSubIndirect(Some(address))
-            | Self::InterRet(Some(address), _) => Some(*address),
-            Self::InterBlkIndirect(None)
-            | Self::InterSubIndirect(None)
-            | Self::InterRet(None, _)
-            | Self::Intrinsic => None,
+            Self::IntraIns(location, _) => Some(location.address()),
+            _ => self.address_with_context().map(AddressWithContext::address),
         }
     }
 
-    fn resolved(&self) -> Option<(InsnTargetKind, Address)> {
+    fn address_with_context(&self) -> Option<&AddressWithContext> {
+        match self {
+            Self::IntraBlk(address, _, _)
+            | Self::InterBlk(address)
+            | Self::InterBlkIndirect(Some(address))
+            | Self::InterSub(address)
+            | Self::InterSubIndirect(Some(address))
+            | Self::InterRet(Some(address), _) => Some(address),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn resolved(&self) -> Option<(InsnTargetKind, &AddressWithContext)> {
         use InsnTarget::*;
         use InsnTargetKind::*;
 
-        match *self {
-            IntraBlk(taken, _) if taken.position() == 0 => Some((Local, taken.address())),
-            InterBlk(taken) | InterBlkIndirect(Some(taken)) => Some((Local, taken)),
+        match self {
+            IntraBlk(taken, 0, _) | InterBlk(taken) | InterBlkIndirect(Some(taken)) => {
+                Some((Local, taken))
+            }
             InterSub(taken) | InterSubIndirect(Some(taken)) | InterRet(Some(taken), _) => {
                 Some((Global, taken))
             }
@@ -653,7 +722,9 @@ impl fmt::Display for InsnTarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::IntraIns(loc, _) => write!(f, "intra-instruction flow to {loc}"),
-            Self::IntraBlk(loc, _) => write!(f, "intra-block flow to {loc}"),
+            Self::IntraBlk(address, position, _) => {
+                write!(f, "intra-block flow to {address}.{position}")
+            }
             Self::InterBlk(tgt) => write!(f, "inter-block flow to {tgt}"),
             Self::InterBlkIndirect(None) => write!(f, "unresolved indirect inter-block flow"),
             Self::InterBlkIndirect(Some(tgt)) => {
@@ -688,10 +759,10 @@ mod test {
         let target = Address::from(0x2000u64);
         let mut insn = Insn::from_indirect_call(address, 4)?;
 
-        insn.set_indirect_target(target);
+        insn.set_indirect_target(target.into());
 
         assert!(insn.is_indirect());
-        assert_eq!(insn.call_target(), Some(target));
+        assert_eq!(insn.call_target(), Some(&target.into()));
         assert_eq!(
             insn.flow_targets()
                 .find(|flow| flow.kind().is_call())

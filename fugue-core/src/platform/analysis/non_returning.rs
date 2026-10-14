@@ -2,24 +2,24 @@ use crate::extension::{self, Registration};
 use crate::ir::symbol::{Symbol, SymbolSet};
 use crate::platform::OperatingSystem;
 
-type NonReturningExternSetFn = fn() -> &'static SymbolSet;
+type NonReturningExternalSetFn = fn() -> &'static SymbolSet;
 
-pub struct NonReturningExternSet {
+pub struct NonReturningExternalSet {
     name: &'static str,
     operating_systems: &'static [OperatingSystem],
-    externs: NonReturningExternSetFn,
+    externals: NonReturningExternalSetFn,
 }
 
-impl NonReturningExternSet {
+impl NonReturningExternalSet {
     pub const fn new(
         name: &'static str,
         operating_systems: &'static [OperatingSystem],
-        externs: NonReturningExternSetFn,
+        externals: NonReturningExternalSetFn,
     ) -> Self {
         Self {
             name,
             operating_systems,
-            externs,
+            externals,
         }
     }
 
@@ -27,8 +27,8 @@ impl NonReturningExternSet {
         self.operating_systems
     }
 
-    pub fn externs(&self) -> &'static SymbolSet {
-        (self.externs)()
+    pub fn externals(&self) -> &'static SymbolSet {
+        (self.externals)()
     }
 
     pub fn covers(&self, os: OperatingSystem) -> bool {
@@ -36,18 +36,18 @@ impl NonReturningExternSet {
     }
 }
 
-impl Registration for NonReturningExternSet {
+impl Registration for NonReturningExternalSet {
     fn name(&self) -> &'static str {
         self.name
     }
 }
 
-extension::collect!(NonReturningExternSet);
+extension::collect!(NonReturningExternalSet);
 
-pub fn is_non_returning_extern(os: OperatingSystem, symbol: Symbol) -> bool {
-    extension::iter::<NonReturningExternSet>()
+pub fn is_non_returning_external(os: OperatingSystem, symbol: Symbol) -> bool {
+    extension::iter::<NonReturningExternalSet>()
         .filter(|registration| registration.covers(os))
-        .any(|registration| registration.externs().contains(&symbol))
+        .any(|registration| registration.externals().contains(&symbol))
 }
 
 #[cfg(test)]
@@ -57,8 +57,8 @@ mod test {
 
     #[test]
     fn test_non_returning_externs_are_selected_by_operating_system() {
-        let linux = |name| is_non_returning_extern(OperatingSystem::Linux, symbol(name));
-        let windows = |name| is_non_returning_extern(OperatingSystem::Windows, symbol(name));
+        let linux = |name| is_non_returning_external(OperatingSystem::Linux, symbol(name));
+        let windows = |name| is_non_returning_external(OperatingSystem::Windows, symbol(name));
 
         assert!(linux("__stack_chk_fail"));
         assert!(linux("_Unwind_Resume"));
@@ -73,7 +73,7 @@ mod test {
         assert!(!linux("_cexit"));
         assert!(!windows("_cexit"));
 
-        assert!(!is_non_returning_extern(
+        assert!(!is_non_returning_external(
             OperatingSystem::Unknown,
             symbol("abort")
         ));

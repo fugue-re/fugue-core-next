@@ -91,7 +91,10 @@ where
                 match reloc.target() {
                     RelocationTarget::Symbol(_) => {
                         match self.resolve_relocation_symbol(reloc, is_dynamic) {
-                            Some(symbol) => Some(symbol.wrapping_add_signed(addend)),
+                            Some(symbol) => Some(
+                                (symbol | self.mips_isa_bit(reloc, is_dynamic))
+                                    .wrapping_add_signed(addend),
+                            ),
                             None => {
                                 tracing::warn!(
                                     "failed to resolve relocation {step:#x} at {offset:#x}"
@@ -104,10 +107,11 @@ where
                 }
             }
             R_MIPS_GLOB_DAT | R_MIPS_JUMP_SLOT => {
-                let Some(value) = self.resolve_relocation_symbol(reloc, is_dynamic) else {
+                let Some(symbol) = self.resolve_relocation_symbol(reloc, is_dynamic) else {
                     tracing::warn!("failed to resolve relocation {step:#x} at {offset:#x}");
                     return None;
                 };
+                let value = symbol | self.mips_isa_bit(reloc, is_dynamic);
 
                 if step == R_MIPS_JUMP_SLOT {
                     self.mark_function_symbol(value, bytes);

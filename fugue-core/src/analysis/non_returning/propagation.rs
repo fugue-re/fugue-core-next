@@ -22,7 +22,7 @@ impl BlockExit {
 
         match terminator
             .flow_targets()
-            .find_map(|target| target.kind().is_call().then_some(target.to()))
+            .find_map(|target| target.kind().is_call().then(|| target.to().address()))
         {
             Some(target) => Self::Via(target),
             None => Self::Unknown,
@@ -35,7 +35,7 @@ impl BlockExit {
         }
 
         match block.call_target() {
-            Some(target) => Self::Via(target),
+            Some(target) => Self::Via(target.address()),
             None => Self::Unknown,
         }
     }
@@ -136,11 +136,10 @@ impl ExitGraph {
     fn stale_calls<'a>(
         &'a self,
         targets: &'a NonReturningTargets<'a>,
-        non_returning: &'a BTreeSet<Address>,
     ) -> impl Iterator<Item = &'a StaleCall> {
-        self.calls.iter().filter(move |call| {
-            non_returning.contains(&call.target) || targets.is_non_returning(call.target)
-        })
+        self.calls
+            .iter()
+            .filter(move |call| targets.is_non_returning(call.target))
     }
 
     fn non_returning(&self, project: &ProjectView<'_>) -> BTreeSet<Address> {
@@ -189,7 +188,10 @@ impl ExitGraph {
             && !block.is_branch()
             && let Some(target) = block.call_target()
         {
-            self.calls.insert(StaleCall { caller, target });
+            self.calls.insert(StaleCall {
+                caller,
+                target: target.address(),
+            });
         }
     }
 
@@ -213,7 +215,10 @@ impl ExitGraph {
             && !terminator.is_branch()
             && let Some(target) = terminator.call_target()
         {
-            self.calls.insert(StaleCall { caller, target });
+            self.calls.insert(StaleCall {
+                caller,
+                target: target.address(),
+            });
         }
     }
 }
@@ -264,7 +269,7 @@ impl AnalysisPass<InterFunctionStructuringContext> for NonReturningPropagation {
 
         let targets = NonReturningTargets::new(project);
 
-        for &StaleCall { caller, target } in graph.stale_calls(&targets, &non_returning) {
+        for &StaleCall { caller, target } in graph.stale_calls(&targets) {
             tracing::debug!("re-analysing {caller}: calls non-returning function at {target}");
 
             state.reanalyse_function(caller);

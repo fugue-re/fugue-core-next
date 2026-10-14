@@ -345,16 +345,16 @@ where
         self.insert(index, address, symbol, properties | SymbolProperties::LOCAL)
     }
 
-    pub fn insert_extern(
+    pub fn insert_external(
         &mut self,
         index: SymbolIndex,
         address: impl Into<A>,
         symbol: impl Into<Symbol>,
     ) -> SymbolId {
-        self.insert_extern_with(index, address, symbol, SymbolProperties::NONE)
+        self.insert_external_with(index, address, symbol, SymbolProperties::NONE)
     }
 
-    pub fn insert_extern_with(
+    pub fn insert_external_with(
         &mut self,
         index: SymbolIndex,
         address: impl Into<A>,
@@ -365,7 +365,7 @@ where
             index,
             address,
             symbol,
-            properties | SymbolProperties::EXTERN,
+            properties | SymbolProperties::EXTERNAL,
         )
     }
 
@@ -419,11 +419,23 @@ where
         symbol: impl Into<Symbol>,
         properties: SymbolProperties,
     ) -> SymbolId {
+        self.insert_with(index, address, symbol, properties, None)
+    }
+
+    pub fn insert_with(
+        &mut self,
+        index: SymbolIndex,
+        address: impl Into<A>,
+        symbol: impl Into<Symbol>,
+        properties: SymbolProperties,
+        size: impl Into<Option<u64>>,
+    ) -> SymbolId {
         use std::collections::btree_map::Entry;
 
         let address = address.into();
         let symbol = symbol.into();
-        let symbol_entry = SymbolEntry::new(address, symbol, properties).with_index(index);
+        let symbol_entry =
+            SymbolEntry::new_with(address, symbol, properties, size).with_index(index);
 
         match self.indices.entry(index) {
             Entry::Vacant(entry) => {

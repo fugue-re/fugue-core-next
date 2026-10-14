@@ -398,13 +398,11 @@ mod test {
     use fugue_lifter::runtime::pcode::Inputs;
 
     use super::*;
-    use crate::il::common::{IlGraph, IlIndexRange, IlMetadata, IlSourceSpan};
-    use crate::il::pcode::{PCodeBuilder, PCodeLocation, PCodeOpSpec, PCodeOpcode};
     use crate::ir::{
         CodeBlockTable, FunctionId, FunctionTable, FunctionTableStaging, IncompleteCodeBlock,
         IncompleteFunction, Insn, InsnEntry,
     };
-    use crate::lifter::{ContextSet, Language, Op, RawPCodeOp, Varnode, resolve_language};
+    use crate::lifter::{ContextSet, Language, Lifter, Op, RawPCodeOp, Varnode, resolve_language};
     use crate::storage::EntityStorage;
     use crate::storage::entities::{
         Entity, EntityKeyPrefix, InMemoryEntityStorage, WriteBackWorker,
@@ -441,7 +439,7 @@ mod test {
                     output: Varnode::INVALID,
                 }];
 
-                Insn::from_resolved_flow(language, entry + offset, 1, &operations)
+                Insn::from_resolved_flow(&Lifter::new(language), entry + offset, 1, &operations)
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -792,95 +790,6 @@ mod test {
     }
 
     #[test]
-    fn data_references_from_constant_pointer() -> Result<(), Box<dyn std::error::Error>> {
-        let language = resolve_language("x86:LE:64")?;
-        let default_space = language.default_space();
-        let insn_address = address(0, 0x1000);
-        let data_space = insn_address.space();
-        let data_address = 0x4000u64;
-        let register_value = Varnode::new(language.register_space(), 0, 8);
-        let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = PCodeBuilder::new(metadata, IlGraph::default());
-        {
-            let mut emitter = builder.emitter();
-            let pointer = emitter.intern_location(PCodeLocation::from_varnode(
-                language,
-                &Varnode::constant(data_address, 8),
-            ))?;
-            let register =
-                emitter.intern_location(PCodeLocation::from_varnode(language, &register_value))?;
-            emitter.emit(
-                PCodeOpSpec::new(PCodeOpcode::Load)
-                    .with_immediate(u32::from(default_space))
-                    .with_address_space(data_space),
-                Some(register),
-                [pointer],
-            )?;
-            emitter.emit(
-                PCodeOpSpec::new(PCodeOpcode::Store)
-                    .with_immediate(u32::from(default_space))
-                    .with_address_space(data_space),
-                None,
-                [pointer, register],
-            )?;
-        }
-        builder.set_source_spans(vec![IlSourceSpan::new(
-            IlIndexRange::new(0, 2).unwrap(),
-            insn_address,
-            0,
-            2,
-        )]);
-        let ir = builder.build()?;
-        let artefact_refs = ir.data_references().collect::<Vec<_>>();
-
-        assert_eq!(artefact_refs.len(), 2);
-        assert_eq!(artefact_refs[0].from(), insn_address);
-        assert_eq!(
-            artefact_refs[0].target().address(),
-            Some(Address::new(data_space, data_address))
-        );
-        assert!(artefact_refs[0].is_read());
-        assert!(artefact_refs[0].origin().is_derived());
-        assert_eq!(artefact_refs[1].from(), insn_address);
-        assert!(artefact_refs[1].is_write());
-        assert_eq!(
-            artefact_refs[1].target().address(),
-            Some(Address::new(data_space, data_address))
-        );
-
-        let metadata = IlMetadata::new(FunctionId::default(), 0);
-        let mut builder = PCodeBuilder::new(metadata, IlGraph::default());
-        {
-            let mut emitter = builder.emitter();
-            let pointer = emitter.intern_location(PCodeLocation::from_varnode(
-                language,
-                &Varnode::new(language.register_space(), 0x20, 8),
-            ))?;
-            let output = emitter.intern_location(PCodeLocation::from_varnode(
-                language,
-                &Varnode::new(language.register_space(), 0, 8),
-            ))?;
-            emitter.emit(
-                PCodeOpSpec::new(PCodeOpcode::Load)
-                    .with_immediate(u32::from(default_space))
-                    .with_address_space(data_space),
-                Some(output),
-                [pointer],
-            )?;
-        }
-        builder.set_source_spans(vec![IlSourceSpan::new(
-            IlIndexRange::new(0, 1).unwrap(),
-            insn_address,
-            0,
-            1,
-        )]);
-        let ir = builder.build()?;
-        assert!(ir.data_references().next().is_none());
-
-        Ok(())
-    }
-
-    #[test]
     fn block_reference_derivation_excludes_instruction_data_references()
     -> Result<(), Box<dyn std::error::Error>> {
         let language = resolve_language("x86:LE:64")?;
@@ -903,7 +812,8 @@ mod test {
                 output: Varnode::INVALID,
             },
         ];
-        let read_modify_write = Insn::from_resolved_flow(language, insn_address, 1, &operations)?;
+        let read_modify_write =
+            Insn::from_resolved_flow(&Lifter::new(language), insn_address, 1, &operations)?;
 
         let mut functions = FunctionTable::new_transient();
         let mut blocks = CodeBlockTable::new_transient();

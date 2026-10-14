@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::ops::Bound;
@@ -8,7 +8,7 @@ use thiserror::Error;
 
 use crate::ir::persistent::cursor_bound;
 use crate::ir::switch::{Switch, SwitchId};
-use crate::ir::{Address, FunctionId, IdSet};
+use crate::ir::{Address, IdSet};
 use crate::storage::entities::schema::ENTITY_SWITCH_TABLE_ID;
 use crate::storage::entities::{
     Entity, EntityId, EntityRef, EntityWrite, EntityWriteBatch, ProjectEntity, WriteBackWorker,
@@ -40,14 +40,12 @@ impl Entity for SwitchTableHeader {
 
 struct SwitchIndex {
     branches: BTreeMap<Address, SwitchId>,
-    by_function: BTreeMap<FunctionId, BTreeSet<Address>>,
 }
 
 impl SwitchIndex {
     fn new() -> Self {
         Self {
             branches: BTreeMap::new(),
-            by_function: BTreeMap::new(),
         }
     }
 
@@ -57,14 +55,6 @@ impl SwitchIndex {
 
     fn contains(&self, branch: Address) -> bool {
         self.branches.contains_key(&branch)
-    }
-
-    fn branches_for_function(&self, function: FunctionId) -> impl Iterator<Item = Address> + '_ {
-        self.by_function
-            .get(&function)
-            .into_iter()
-            .flatten()
-            .copied()
     }
 
     fn branches(&self) -> impl Iterator<Item = Address> + '_ {
@@ -89,27 +79,12 @@ impl SwitchIndex {
             .map(|(&address, &id)| (address, id))
     }
 
-    fn link(&mut self, function: FunctionId, branch: Address) {
-        self.by_function.entry(function).or_default().insert(branch);
-    }
-
-    fn insert(&mut self, id: SwitchId, function: FunctionId, branch: Address) {
+    fn insert(&mut self, id: SwitchId, branch: Address) {
         self.branches.insert(branch, id);
-        self.link(function, branch);
     }
 
-    fn remove(&mut self, function: FunctionId, branch: Address) {
+    fn remove(&mut self, branch: Address) {
         self.branches.remove(&branch);
-        self.unlink(function, branch);
-    }
-
-    fn unlink(&mut self, function: FunctionId, branch: Address) {
-        if let Some(branches) = self.by_function.get_mut(&function) {
-            branches.remove(&branch);
-            if branches.is_empty() {
-                self.by_function.remove(&function);
-            }
-        }
     }
 }
 
@@ -129,14 +104,8 @@ pub(crate) struct PreparedSwitchBatch {
 struct PreparedSwitchRecord {
     branch: Address,
     encoded_size: usize,
-    previous: Option<PreviousSwitch>,
+    previous: Option<SwitchId>,
     switch: Option<Switch>,
-}
-
-#[derive(Clone, Copy)]
-struct PreviousSwitch {
-    function: FunctionId,
-    id: SwitchId,
 }
 
 pub enum SwitchTable {
@@ -232,16 +201,6 @@ impl SwitchTable {
         match self {
             Self::Persistent(table) => Ok(table.try_get_by_branch(branch)?.map(EntityRef::cached)),
             Self::Transient(table) => Ok(table.get_by_branch(branch).map(EntityRef::borrowed)),
-        }
-    }
-
-    pub fn branches_for_function(
-        &self,
-        function: FunctionId,
-    ) -> Box<dyn Iterator<Item = Address> + '_> {
-        match self {
-            Self::Persistent(table) => Box::new(table.branches_for_function(function)),
-            Self::Transient(table) => Box::new(table.branches_for_function(function)),
         }
     }
 
@@ -393,24 +352,17 @@ impl SwitchTable {
         }
     }
 
-    pub(crate) fn publish_upsert(
-        &mut self,
-        switch: Switch,
-        previous_function: Option<FunctionId>,
-        encoded_size: usize,
-    ) {
+    pub(crate) fn publish_upsert(&mut self, switch: Switch, encoded_size: usize) {
         match self {
-            Self::Persistent(table) => {
-                table.publish_upsert(switch, previous_function, encoded_size)
-            }
-            Self::Transient(table) => table.publish_upsert(switch, previous_function),
+            Self::Persistent(table) => table.publish_upsert(switch, encoded_size),
+            Self::Transient(table) => table.publish_upsert(switch),
         }
     }
 
-    pub(crate) fn publish_remove(&mut self, id: SwitchId, function: FunctionId, branch: Address) {
+    pub(crate) fn publish_remove(&mut self, id: SwitchId, branch: Address) {
         match self {
-            Self::Persistent(table) => table.publish_remove(id, function, branch),
-            Self::Transient(table) => table.publish_remove(id, function, branch),
+            Self::Persistent(table) => table.publish_remove(id, branch),
+            Self::Transient(table) => table.publish_remove(id, branch),
         }
     }
 }
@@ -428,25 +380,23 @@ impl SwitchTableStaging {
         }
     }
 
-    pub(crate) fn branches_for_function(
-        &self,
-        switches: &SwitchTable,
-        function: FunctionId,
-    ) -> BTreeSet<Address> {
-        let mut branches = switches
-            .branches_for_function(function)
-            .collect::<BTreeSet<_>>();
-        for (&branch, switch) in &self.staged_switches {
-            match switch {
-                Some(switch) if switch.function() == function => {
-                    branches.insert(branch);
-                }
-                Some(_) | None => {
-                    branches.remove(&branch);
-                }
-            }
+    pub(crate) fn get_by_id<'a>(
+        &'a self,
+        switches: &'a SwitchTable,
+        id: SwitchId,
+    ) -> Result<Option<SwitchRef<'a>>, EntityStorageError> {
+        if let Some(switch) = self
+            .staged_switches
+            .values()
+            .flatten()
+            .find(|switch| switch.id() == id)
+        {
+            return Ok(Some(EntityRef::borrowed(switch)));
         }
-        branches
+        let Some(switch) = switches.try_get_by_id(id)? else {
+            return Ok(None);
+        };
+        Ok((!self.staged_switches.contains_key(&switch.branch())).then_some(switch))
     }
 
     pub(crate) fn insert(&mut self, switch: Switch) {
@@ -508,10 +458,7 @@ impl SwitchTableStaging {
             if switch.is_none() && previous.is_none() {
                 continue;
             }
-            let previous = previous.map(|switch| PreviousSwitch {
-                function: switch.function(),
-                id: switch.id(),
-            });
+            let previous = previous.map(|switch| switch.id());
             match &switch {
                 Some(entry) => {
                     if previous.is_none() {
@@ -534,9 +481,7 @@ impl SwitchTableStaging {
                     });
                 }
                 None => {
-                    let id = previous
-                        .expect("prepared switch removal has a previous switch")
-                        .id;
+                    let id = previous.expect("prepared switch removal has a previous switch");
                     removed += 1;
                     releases.push(id);
                     if persistent {
@@ -596,16 +541,12 @@ impl PreparedSwitchBatch {
         switches.publish_allocations(&switch_reservations, &cancelled_switches, added, removed);
         for record in records {
             match record.switch {
-                Some(switch) => switches.publish_upsert(
-                    switch,
-                    record.previous.map(|previous| previous.function),
-                    record.encoded_size,
-                ),
+                Some(switch) => switches.publish_upsert(switch, record.encoded_size),
                 None => {
                     let previous = record
                         .previous
                         .expect("prepared switch removal has a previous switch");
-                    switches.publish_remove(previous.id, previous.function, record.branch);
+                    switches.publish_remove(previous, record.branch);
                 }
             }
         }
@@ -632,10 +573,6 @@ mod test {
     use crate::ir::SwitchModel;
     use crate::storage::entities::InMemoryEntityStorage;
 
-    fn function(index: usize) -> FunctionId {
-        FunctionId::from_index(index)
-    }
-
     fn tables() -> [SwitchTable; 2] {
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
         let worker = WriteBackWorker::new(storage.clone()).unwrap();
@@ -643,53 +580,6 @@ mod test {
             SwitchTable::new_transient(),
             SwitchTable::new_persistent(storage, 64 * 1024, worker).unwrap(),
         ]
-    }
-
-    #[test]
-    fn indexes_switches_by_owning_function() {
-        let owner = function(0);
-        let other = function(1);
-        let placements = [
-            (Address::from(0x1000u64), owner),
-            (Address::from(0x2000u64), owner),
-            (Address::from(0x3000u64), other),
-        ];
-
-        for mut table in tables() {
-            for (branch, owning) in placements {
-                table
-                    .insert(branch, |id, branch| {
-                        Ok(Switch::new(id, branch, SwitchModel::Explicit).with_function(owning))
-                    })
-                    .unwrap();
-            }
-
-            let mut owned = table.branches_for_function(owner).collect::<Vec<_>>();
-            owned.sort();
-            assert_eq!(
-                owned,
-                vec![Address::from(0x1000u64), Address::from(0x2000u64)]
-            );
-            assert_eq!(
-                table.branches_for_function(other).collect::<Vec<_>>(),
-                vec![Address::from(0x3000u64)]
-            );
-
-            table.remove_by_branch(Address::from(0x1000u64));
-            assert_eq!(
-                table.branches_for_function(owner).collect::<Vec<_>>(),
-                vec![Address::from(0x2000u64)]
-            );
-
-            table.modify_by_branch(Address::from(0x2000u64), |switch| {
-                switch.set_function(other);
-            });
-            assert!(table.branches_for_function(owner).next().is_none());
-            assert_eq!(
-                table.branches_for_function(other).collect::<Vec<_>>(),
-                vec![Address::from(0x2000u64), Address::from(0x3000u64)]
-            );
-        }
     }
 
     #[test]

@@ -4,24 +4,23 @@ use rayon::prelude::*;
 use rayon::{ThreadPool, ThreadPoolBuilder};
 
 use crate::analysis::AnalysisError;
-use crate::analysis::function::recovery::FUNCTION_RECOVERY_ANALYSER;
 use crate::analysis::function::recovery::analysis::FunctionRecoveryContext;
 use crate::analysis::function::recovery::builder::{
     FunctionBuilder, FunctionCandidateOutcome, FunctionCandidateState,
 };
+use crate::analysis::function::recovery::{FUNCTION_RECOVERY_ANALYSER, FunctionCandidate};
 use crate::engine::AnalysisContext;
-use crate::ir::AddressWithContext;
 use crate::lifter::InsnResolver;
 
 pub(crate) struct FunctionCandidateBatch<'a> {
-    candidates: Vec<AddressWithContext>,
+    candidates: Vec<FunctionCandidate>,
     context: &'a FunctionRecoveryContext,
 }
 
 impl<'a> FunctionCandidateBatch<'a> {
     pub(crate) fn new(
         context: &'a FunctionRecoveryContext,
-        candidates: Vec<AddressWithContext>,
+        candidates: Vec<FunctionCandidate>,
     ) -> Self {
         Self {
             candidates,
@@ -66,7 +65,7 @@ impl FunctionRecoveryExecutor {
             &mut AnalysisContext<'_, '_>,
             FunctionCandidateOutcome,
         ) -> Result<bool, AnalysisError>,
-    ) -> Result<Vec<AddressWithContext>, AnalysisError> {
+    ) -> Result<Vec<FunctionCandidate>, AnalysisError> {
         let worker_limit = analysis.worker_limit();
         let FunctionCandidateBatch {
             candidates,
@@ -97,9 +96,7 @@ impl FunctionRecoveryExecutor {
             let mut tasks = candidates
                 .by_ref()
                 .take(workers)
-                .map(|candidate| {
-                    FunctionCandidateState::new(analysis.project.fork(), candidate, &config)
-                })
+                .map(|candidate| FunctionCandidateState::new(analysis.project.fork(), candidate))
                 .collect::<Vec<_>>();
             if tasks.is_empty() {
                 return Ok(Vec::new());

@@ -1,8 +1,8 @@
 use smallvec::SmallVec;
 
 use crate::ir::{
-    Address, AddressTable, AddressWithContext, FunctionId, Id, RawAddress, Reference,
-    ReferenceOrigin, ReferenceProperties,
+    Address, AddressTable, AddressWithContext, Id, RawAddress, Reference, ReferenceOrigin,
+    ReferenceProperties,
 };
 use crate::storage::entities::schema::{ENTITY_KEY_SWITCH_ID, ENTITY_SWITCH_ID};
 use crate::storage::entities::{Entity, EntityId, EntityKey, EntityKeyId, MutableEntity};
@@ -27,7 +27,6 @@ impl EntityKey for SwitchId {
 )]
 pub struct Switch {
     id: SwitchId,
-    function: FunctionId,
     branch: Address,
     model: SwitchModel,
     cases: Vec<SwitchCase>,
@@ -63,7 +62,6 @@ impl Switch {
     pub fn new(id: SwitchId, branch: Address, model: SwitchModel) -> Self {
         Self {
             id,
-            function: FunctionId::INVALID,
             branch,
             model,
             cases: Vec::new(),
@@ -81,21 +79,8 @@ impl Switch {
         self.id = id;
     }
 
-    pub fn with_function(mut self, function: FunctionId) -> Self {
-        self.set_function(function);
-        self
-    }
-
     pub fn id(&self) -> SwitchId {
         self.id
-    }
-
-    pub fn function(&self) -> FunctionId {
-        self.function
-    }
-
-    pub fn set_function(&mut self, function: FunctionId) {
-        self.function = function;
     }
 
     pub fn branch(&self) -> Address {

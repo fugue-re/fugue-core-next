@@ -1,8 +1,8 @@
 use fugue_bv::BitVec;
 
 use crate::ir::{
-    Address, AddressTable, AddressWithContext, FunctionId, Switch, SwitchCase, SwitchCaseLabel,
-    SwitchId, SwitchModel, SwitchProperties,
+    Address, AddressTable, AddressWithContext, Switch, SwitchCase, SwitchCaseLabel, SwitchId,
+    SwitchModel, SwitchProperties,
 };
 use crate::types::Confidence;
 
@@ -151,9 +151,8 @@ impl RecoveredSwitch {
         }
     }
 
-    pub(crate) fn into_switch(self, id: SwitchId, function: FunctionId, branch: Address) -> Switch {
+    pub(crate) fn into_switch(self, id: SwitchId, branch: Address) -> Switch {
         let mut switch = Switch::new(id, branch, self.model)
-            .with_function(function)
             .with_cases(self.cases)
             .with_properties(self.properties);
         if let Some(default) = self.default {
@@ -218,7 +217,7 @@ mod test {
         let recovered =
             RecoveredSwitch::new(SwitchModel::Explicit, Vec::new(), SwitchProperties::empty())
                 .with_fallback_default(function.sibling_successor_from_incoming(branch_block))
-                .into_switch(SwitchId::INVALID, FunctionId::INVALID, branch);
+                .into_switch(SwitchId::INVALID, branch);
 
         assert_eq!(
             recovered.default_case().map(|case| case.target().address()),

@@ -101,11 +101,15 @@ impl<'a, 'b> SwitchResolver<'a, 'b> {
             .arch
             .canonicalise_address_with(value, self.resolver.context())?;
         let address = Address::new(source.space(), canonical);
+        self.validate_address(AddressWithContext::new(address, context))
+    }
+
+    fn validate_address(&mut self, target: AddressWithContext) -> Option<AddressWithContext> {
         let executable = self
             .mapping_cache
-            .mapping_properties(self.segments, address)
+            .mapping_properties(self.segments, target.address())
             .is_some_and(|properties| properties.is_executable());
-        executable.then(|| AddressWithContext::new(address, context))
+        executable.then_some(target)
     }
 
     pub(crate) fn resolve_branch_target(
@@ -136,7 +140,7 @@ impl<'a, 'b> SwitchResolver<'a, 'b> {
         if targets.next().is_some() {
             return None;
         }
-        self.resolve_address(address, target.raw_address())
+        self.validate_address(target.clone())
     }
 
     pub(crate) fn properties_for_table(

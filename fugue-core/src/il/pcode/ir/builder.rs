@@ -88,6 +88,16 @@ impl PCodeBuilder {
     }
 
     pub fn build(self) -> Result<PCodeIr, IlError> {
+        let ir = self.build_unchecked();
+
+        if ir.verify().is_err() {
+            return Err(IlError::invalid_artefact(PCodeIr::FORM));
+        }
+
+        Ok(ir)
+    }
+
+    pub(crate) fn build_unchecked(self) -> PCodeIr {
         let mut ir = PCodeIr {
             metadata: self.metadata,
             graph: self.graph,
@@ -97,14 +107,8 @@ impl PCodeBuilder {
             operands: self.operands.into_values(),
             targets: self.targets,
         };
-
         ir.shrink_to_fit();
-
-        if ir.verify().is_err() {
-            return Err(IlError::invalid_artefact(PCodeIr::FORM));
-        }
-
-        Ok(ir)
+        ir
     }
 }
 
@@ -276,116 +280,6 @@ mod test {
         let decoded = rkyv::from_bytes::<PCodeIr, rkyv::rancor::Error>(&bytes).unwrap();
 
         assert_eq!(decoded, ir);
-    }
-
-    #[test]
-    fn pcode_ir_derives_constant_data_references() {
-        let source = Address::new(AddressSpaceId::new(1), 0x1000u64);
-        let data_space = AddressSpaceId::new(2);
-        let data = 0x4000u64;
-        let mut builder = PCodeBuilder::new(metadata(), IlGraph::default());
-
-        builder.set_source_spans(vec![IlSourceSpan::new(
-            IlIndexRange::new(0, 2).unwrap(),
-            source,
-            0,
-            2,
-        )]);
-        let pointer = builder
-            .emitter()
-            .intern_location(PCodeLocation::new(
-                PCodeLifterSpaceHandle::new(0),
-                data,
-                8,
-                PCodeLocationProperties::CONSTANT,
-            ))
-            .unwrap();
-        let value = builder
-            .emitter()
-            .intern_location(PCodeLocation::new(
-                PCodeLifterSpaceHandle::new(1),
-                0,
-                8,
-                PCodeLocationProperties::empty(),
-            ))
-            .unwrap();
-        builder
-            .emitter()
-            .emit(
-                PCodeOpSpec::new(PCodeOpcode::Load).with_address_space(data_space),
-                Some(value),
-                [pointer],
-            )
-            .unwrap();
-        builder
-            .emitter()
-            .emit(
-                PCodeOpSpec::new(PCodeOpcode::Store).with_address_space(data_space),
-                None,
-                [pointer, value],
-            )
-            .unwrap();
-
-        let ir = builder.build().unwrap();
-        let references = ir.data_references().collect::<Vec<_>>();
-
-        assert_eq!(references.len(), 2);
-        assert!(references[0].is_read());
-        assert_eq!(references[0].from(), source);
-        assert_eq!(
-            references[0].target().address(),
-            Some(Address::new(data_space, data))
-        );
-        assert!(references[0].origin().is_derived());
-        assert!(references[1].is_write());
-        assert_eq!(
-            references[1].target().address(),
-            Some(Address::new(data_space, data))
-        );
-    }
-
-    #[test]
-    fn pcode_ir_ignores_non_constant_data_references() {
-        let source = Address::new(AddressSpaceId::new(1), 0x1000u64);
-        let data_space = AddressSpaceId::new(2);
-        let mut builder = PCodeBuilder::new(metadata(), IlGraph::default());
-
-        builder.set_source_spans(vec![IlSourceSpan::new(
-            IlIndexRange::new(0, 1).unwrap(),
-            source,
-            0,
-            1,
-        )]);
-        let pointer = builder
-            .emitter()
-            .intern_location(PCodeLocation::new(
-                PCodeLifterSpaceHandle::new(1),
-                0x20,
-                8,
-                PCodeLocationProperties::empty(),
-            ))
-            .unwrap();
-        let output = builder
-            .emitter()
-            .intern_location(PCodeLocation::new(
-                PCodeLifterSpaceHandle::new(1),
-                0,
-                8,
-                PCodeLocationProperties::empty(),
-            ))
-            .unwrap();
-        builder
-            .emitter()
-            .emit(
-                PCodeOpSpec::new(PCodeOpcode::Load).with_address_space(data_space),
-                Some(output),
-                [pointer],
-            )
-            .unwrap();
-
-        let ir = builder.build().unwrap();
-
-        assert!(ir.data_references().next().is_none());
     }
 
     #[test]
