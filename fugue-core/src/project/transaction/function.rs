@@ -74,8 +74,13 @@ impl ProjectTransaction<'_> {
 
     fn stage_normalised_function(
         &mut self,
-        function: FunctionRecord,
+        mut function: FunctionRecord,
     ) -> Result<StagedFunctionReferenceRecord, ProjectError> {
+        for switch in function.switches_mut() {
+            let staged = switch.clone();
+            let id = self.add_switch(staged.branch(), |id, _| staged.with_id(id))?;
+            switch.set_id(id);
+        }
         let entry = function.entry();
         let record = self.function_staging.stage_materialisation(
             &self.project.functions,
@@ -324,8 +329,6 @@ impl ProjectTransaction<'_> {
                 )
             },
         ))?;
-
-        self.remove_switches_of_function(id)?;
 
         self.remove_lifted_descendants(id, &PCodeIr::FORM)?;
         self.il_staging

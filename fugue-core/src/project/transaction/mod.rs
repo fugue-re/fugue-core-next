@@ -427,6 +427,7 @@ impl ProjectTransaction<'_> {
     pub fn commit(mut self) -> Result<ChangeSet, ProjectError> {
         let span = self.span.clone();
         let _entered = span.enter();
+        self.stage_switch_removals()?;
         let changes = &mut self.changes;
         self.il_staging.for_each_change(|change| {
             changes.push(match change {

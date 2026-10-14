@@ -118,6 +118,7 @@ pub(crate) struct FunctionRecord {
     origin: ReferenceOrigin,
     properties: FunctionProperties,
     references: Vec<Reference>,
+    switches: Vec<Switch>,
     tail_call_sites: SmallVec<[Address; 1]>,
 }
 
@@ -132,6 +133,10 @@ impl FunctionRecord {
 
     pub(crate) fn entry(&self) -> Address {
         self.entry
+    }
+
+    pub(crate) fn switches_mut(&mut self) -> &mut [Switch] {
+        &mut self.switches
     }
 
     pub(crate) fn take_call_targets(&mut self) -> BTreeSet<Address> {
@@ -166,8 +171,16 @@ impl FunctionRecord {
         edges.sort_unstable();
         edges.dedup();
 
-        let mut function =
-            Function::new_with(id, self.entry, self.name).with_blocks(members, edges, entry_block);
+        let mut switches = self
+            .switches
+            .iter()
+            .map(|switch| (switch.branch(), switch.id()))
+            .collect::<Vec<_>>();
+        switches.sort_unstable();
+
+        let mut function = Function::new_with(id, self.entry, self.name)
+            .with_blocks(members, edges, entry_block)
+            .with_switches(switches);
         function.set_properties(self.properties);
         function.set_origin(self.origin);
         function.set_confidence(self.confidence);
@@ -656,10 +669,6 @@ impl IncompleteFunction {
         }
     }
 
-    pub fn take_pending_switches(&mut self) -> Vec<Switch> {
-        mem::take(&mut self.pending_switches)
-    }
-
     pub fn clear_name(&mut self) {
         self.name = None;
     }
@@ -981,6 +990,7 @@ impl IncompleteFunction {
             origin: self.origin,
             properties: self.properties,
             references,
+            switches: self.pending_switches,
             tail_call_sites: self.tail_call_sites,
         })
     }

@@ -128,6 +128,9 @@ impl CodeBlockRecord {
             terminator = Some(insn);
         }
         if let Some(terminator) = terminator {
+            if terminator.has_fall_through() {
+                properties |= CodeBlockProperties::FALL_THROUGH;
+            }
             if terminator.is_call() {
                 properties |= CodeBlockProperties::CALL;
             }

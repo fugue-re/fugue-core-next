@@ -7,7 +7,7 @@ use ustr::Ustr;
 
 use crate::ir::{
     Address, AddressWithContext, CodeBlock, CodeBlockId, CodeBlockTable, FlowKind, FlowTarget, Id,
-    IdSet, Reference, ReferenceKey, ReferenceOrigin, ReferenceProperties,
+    IdSet, Reference, ReferenceKey, ReferenceOrigin, ReferenceProperties, SwitchId,
 };
 use crate::storage::entities::schema::{ENTITY_FUNCTION_ID, ENTITY_KEY_FUNCTION_ID};
 use crate::storage::entities::{Entity, EntityId, EntityKey, EntityKeyId, MutableEntity};
@@ -44,6 +44,7 @@ pub struct Function {
     entry_block: CodeBlockId,
     blocks: Vec<(Address, CodeBlockId)>,
     edges: Vec<(CodeBlockId, CodeBlockId)>,
+    switches: Vec<(Address, SwitchId)>,
     tail_call_sites: Vec<Address>,
     frame: FunctionFrame,
     properties: FunctionProperties,
@@ -108,6 +109,7 @@ impl Function {
             entry_block: CodeBlockId::INVALID,
             blocks: Vec::new(),
             edges: Vec::new(),
+            switches: Vec::new(),
             frame: FunctionFrame::default(),
             properties: FunctionProperties::NONE,
             origin: ReferenceOrigin::Derived,
@@ -183,6 +185,12 @@ impl Function {
         self.edges.iter().copied()
     }
 
+    pub fn switches(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = (Address, SwitchId)> + ExactSizeIterator + '_ {
+        self.switches.iter().copied()
+    }
+
     pub(crate) fn set_tail_call_sites(&mut self, sites: impl IntoIterator<Item = Address>) {
         self.tail_call_sites.clear();
         self.tail_call_sites.extend(sites);
@@ -201,6 +209,16 @@ impl Function {
         self.blocks = blocks;
         self.edges = edges;
         self.entry_block = entry_block.unwrap_or(CodeBlockId::INVALID);
+        self
+    }
+
+    fn set_switches(&mut self, switches: Vec<(Address, SwitchId)>) {
+        debug_assert!(switches.is_sorted_by_key(|(branch, _)| *branch));
+        self.switches = switches;
+    }
+
+    fn with_switches(mut self, switches: Vec<(Address, SwitchId)>) -> Self {
+        self.set_switches(switches);
         self
     }
 
@@ -313,6 +331,14 @@ impl Function {
                     .into_iter();
             }
         })
+    }
+
+    pub fn entry_with_context(&self, blocks: &CodeBlockTable) -> Option<AddressWithContext> {
+        let entry_block = blocks.get_by_id(self.entry_block()?)?;
+        Some(AddressWithContext::new(
+            self.entry,
+            entry_block.context().clone(),
+        ))
     }
 
     pub fn thunk_target(&self, blocks: &CodeBlockTable) -> Option<AddressWithContext> {
@@ -499,15 +525,36 @@ impl Function {
         let mut child_tail_calls = self.tail_call_sites_in(blocks, &child_members);
         child_tail_calls.extend(child_boundary);
 
+        let switches_in = |members: &IdSet<CodeBlock>| {
+            self.switches()
+                .filter(|(branch, _)| {
+                    let index = self.blocks.partition_point(|(start, _)| start <= branch);
+                    index
+                        .checked_sub(1)
+                        .and_then(|index| self.blocks.get(index))
+                        .is_some_and(|(_, block)| {
+                            members.contains(*block)
+                                && blocks.get_by_id(*block).is_some_and(|block| {
+                                    block.address_range().contains_address(*branch)
+                                })
+                        })
+                })
+                .collect::<Vec<_>>()
+        };
+        let parent_switches = switches_in(&parent_members);
+        let child_switches = switches_in(&child_members);
+
         let mut parent = self
             .clone()
-            .with_blocks(parent_blocks, parent_edges, Some(current_entry));
+            .with_blocks(parent_blocks, parent_edges, Some(current_entry))
+            .with_switches(parent_switches);
         parent.clear_analysis();
         parent.set_tail_call_sites(parent_tail_calls);
         let mut child = Self::new(FunctionId::INVALID, split_entry)
             .with_origin(self.origin)
             .with_confidence(self.confidence)
-            .with_blocks(child_blocks, child_edges, Some(new_entry));
+            .with_blocks(child_blocks, child_edges, Some(new_entry))
+            .with_switches(child_switches);
         child.set_tail_call_sites(child_tail_calls);
         Some((parent, child))
     }
@@ -548,7 +595,14 @@ impl Function {
         tail_call_sites.extend(source.tail_call_sites_in(blocks, &member_ids));
         tail_call_sites.retain(|site| !internalised.contains(site));
 
-        let mut merged = self.clone().with_blocks(members, edges, Some(target_entry));
+        let mut switches = self.switches().chain(source.switches()).collect::<Vec<_>>();
+        switches.sort_unstable();
+        switches.dedup();
+
+        let mut merged = self
+            .clone()
+            .with_blocks(members, edges, Some(target_entry))
+            .with_switches(switches);
         merged.clear_analysis();
         merged.set_tail_call_sites(tail_call_sites);
         Some(merged)
@@ -599,6 +653,7 @@ impl Function {
     pub fn clear_blocks(&mut self) {
         self.blocks.clear();
         self.edges.clear();
+        self.switches.clear();
         self.entry_block = CodeBlockId::INVALID;
     }
 

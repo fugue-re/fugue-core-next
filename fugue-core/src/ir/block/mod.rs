@@ -95,13 +95,15 @@ impl MutableEntity for CodeBlock {
 bitflags::bitflags! {
     #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct CodeBlockProperties: u32 {
-        const NONE       = 0x0000_0000;
+        const NONE         = 0x0000_0000;
+        /// The block ends in an instruction that falls through.
+        const FALL_THROUGH = 0x0000_0001;
         /// The block ends in a call to another function.
-        const CALL       = 0x0000_0001;
-        /// The block has unresolved control flow.
-        const UNRESOLVED = 0x0000_0002;
+        const CALL         = 0x0000_0002;
         /// The block ends in a return.
-        const RETURN     = 0x0000_0004;
+        const RETURN       = 0x0000_0004;
+        /// The block has unresolved control flow.
+        const UNRESOLVED   = 0x0000_0008;
     }
 }
 
@@ -134,6 +136,10 @@ impl CodeBlock {
 
     pub fn is_branch(&self) -> bool {
         self.targets.iter().any(|target| target.kind.is_branch())
+    }
+
+    pub fn has_fall_through(&self) -> bool {
+        self.properties.contains(CodeBlockProperties::FALL_THROUGH)
     }
 
     pub fn call_target(&self) -> Option<&AddressWithContext> {

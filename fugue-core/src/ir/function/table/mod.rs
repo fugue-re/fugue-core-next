@@ -14,7 +14,7 @@ use crate::ir::{
     Address, AddressRange, AddressRangeSet, CodeBlock, CodeBlockId, CodeBlockIdsByAddress,
     CodeBlockRecord, CodeBlockTable, Function, FunctionId, FunctionProperties, Id, IdAllocator,
     IdSet, IncompleteFunctionError, PreparedCodeBlockRecord, RawAddress, Reference,
-    ReferenceOrigin,
+    ReferenceOrigin, SwitchId,
 };
 use crate::storage::entities::schema::ENTITY_FUNCTION_TABLE_ID;
 use crate::storage::entities::{
@@ -53,6 +53,7 @@ struct FunctionIndex {
     allocator: IdAllocator<Function>,
     addresses: BTreeMap<Address, Id<Function>>,
     by_block: FxHashMap<CodeBlockId, IdSet<Function>>,
+    by_switch: FxHashMap<SwitchId, IdSet<Function>>,
 }
 
 impl FunctionIndex {
@@ -61,6 +62,7 @@ impl FunctionIndex {
             allocator,
             addresses,
             by_block: FxHashMap::default(),
+            by_switch: FxHashMap::default(),
         }
     }
 
@@ -68,53 +70,70 @@ impl FunctionIndex {
         self.by_block.get(&block).cloned().unwrap_or_default()
     }
 
-    fn insert_membership(&mut self, function: &Function) {
-        self.insert_memberships(function.id(), function.blocks().map(|(_, block)| block));
+    fn get_by_switch_id(&self, switch: SwitchId) -> IdSet<Function> {
+        self.by_switch.get(&switch).cloned().unwrap_or_default()
     }
 
-    fn insert_memberships(
-        &mut self,
-        function: FunctionId,
-        blocks: impl IntoIterator<Item = CodeBlockId>,
-    ) {
-        for block in blocks {
-            self.by_block.entry(block).or_default().insert(function);
+    fn insert_membership(&mut self, function: &Function) {
+        let id = function.id();
+        for (_, block) in function.blocks() {
+            self.by_block.entry(block).or_default().insert(id);
+        }
+        for (_, switch) in function.switches() {
+            self.by_switch.entry(switch).or_default().insert(id);
         }
     }
 
     fn remove_membership(&mut self, function: &Function) {
-        self.remove_memberships(function.id(), function.blocks().map(|(_, block)| block));
-    }
-
-    fn remove_memberships(
-        &mut self,
-        function: FunctionId,
-        blocks: impl IntoIterator<Item = CodeBlockId>,
-    ) {
-        for block in blocks {
+        let id = function.id();
+        for (_, block) in function.blocks() {
             let remove = self.by_block.get_mut(&block).is_some_and(|functions| {
-                functions.remove(function);
+                functions.remove(id);
                 functions.is_empty()
             });
-
             if remove {
                 self.by_block.remove(&block);
             }
         }
+        for (_, switch) in function.switches() {
+            let remove = self.by_switch.get_mut(&switch).is_some_and(|functions| {
+                functions.remove(id);
+                functions.is_empty()
+            });
+            if remove {
+                self.by_switch.remove(&switch);
+            }
+        }
     }
 
-    fn publish_membership(&mut self, mut by_block: FxHashMap<CodeBlockId, IdSet<Function>>) {
+    fn publish_membership(
+        &mut self,
+        mut by_block: FxHashMap<CodeBlockId, IdSet<Function>>,
+        mut by_switch: FxHashMap<SwitchId, IdSet<Function>>,
+    ) {
         if self.by_block.is_empty() {
             by_block.retain(|_, functions| !functions.is_empty());
             self.by_block = by_block;
-            return;
+        } else {
+            for (block, functions) in by_block {
+                if functions.is_empty() {
+                    self.by_block.remove(&block);
+                } else {
+                    self.by_block.insert(block, functions);
+                }
+            }
         }
 
-        for (block, functions) in by_block {
-            if functions.is_empty() {
-                self.by_block.remove(&block);
-            } else {
-                self.by_block.insert(block, functions);
+        if self.by_switch.is_empty() {
+            by_switch.retain(|_, functions| !functions.is_empty());
+            self.by_switch = by_switch;
+        } else {
+            for (switch, functions) in by_switch {
+                if functions.is_empty() {
+                    self.by_switch.remove(&switch);
+                } else {
+                    self.by_switch.insert(switch, functions);
+                }
             }
         }
     }
@@ -268,6 +287,8 @@ pub(crate) struct FunctionTableStaging {
     cancelled_blocks: IdSet<CodeBlock>,
     by_block: FxHashMap<CodeBlockId, IdSet<Function>>,
     original_by_block: FxHashMap<CodeBlockId, IdSet<Function>>,
+    by_switch: FxHashMap<SwitchId, IdSet<Function>>,
+    original_by_switch: FxHashMap<SwitchId, IdSet<Function>>,
 }
 
 struct StagedFunctionRecord {
@@ -289,6 +310,7 @@ pub(crate) struct PreparedFunctionBatch {
     function_reservations: Vec<FunctionId>,
     functions: Vec<PreparedFunctionRecord>,
     by_block: FxHashMap<CodeBlockId, IdSet<Function>>,
+    by_switch: FxHashMap<SwitchId, IdSet<Function>>,
 }
 
 pub(crate) struct StagedFunctionChangeRecord {
@@ -541,6 +563,13 @@ impl FunctionTable {
         }
     }
 
+    pub fn get_by_switch_id(&self, switch: SwitchId) -> IdSet<Function> {
+        match self {
+            Self::Persistent(table) => table.get_by_switch_id(switch),
+            Self::Transient(table) => table.get_by_switch_id(switch),
+        }
+    }
+
     pub fn iter(&self) -> Box<dyn Iterator<Item = FunctionRef<'_>> + '_> {
         match self {
             Self::Persistent(table) => Box::new(table.iter().map(EntityRef::cached)),
@@ -604,15 +633,6 @@ impl FunctionTable {
         range: &AddressRange,
     ) -> Result<SmallVec<[FunctionId; 8]>, IncompleteFunctionError> {
         staging.functions_overlapping(self, blocks, range)
-    }
-
-    pub(crate) fn staged_unique_function_containing_address(
-        &self,
-        blocks: &CodeBlockTable,
-        staging: &FunctionTableStaging,
-        address: Address,
-    ) -> Result<Option<FunctionId>, IncompleteFunctionError> {
-        staging.unique_function_containing_address(self, blocks, address)
     }
 
     pub(crate) fn pending_id(&self, offset: usize) -> FunctionId {
@@ -756,10 +776,14 @@ impl FunctionTable {
         }
     }
 
-    fn publish_membership(&mut self, by_block: FxHashMap<CodeBlockId, IdSet<Function>>) {
+    fn publish_membership(
+        &mut self,
+        by_block: FxHashMap<CodeBlockId, IdSet<Function>>,
+        by_switch: FxHashMap<SwitchId, IdSet<Function>>,
+    ) {
         match self {
             Self::Persistent(_) => {}
-            Self::Transient(table) => table.publish_membership(by_block),
+            Self::Transient(table) => table.publish_membership(by_block, by_switch),
         }
     }
 }
@@ -833,6 +857,25 @@ impl FunctionTableStaging {
                 original_by_block.insert(block, current.clone());
                 current
             }
+        })
+    }
+
+    pub(crate) fn switches_without_membership(&self) -> impl Iterator<Item = SwitchId> + '_ {
+        self.by_switch
+            .iter()
+            .filter_map(|(&switch, functions)| functions.is_empty().then_some(switch))
+    }
+
+    fn by_switch_mut<'a>(
+        &'a mut self,
+        functions: &FunctionTable,
+        switch: SwitchId,
+    ) -> &'a mut IdSet<Function> {
+        let original_by_switch = &mut self.original_by_switch;
+        self.by_switch.entry(switch).or_insert_with(|| {
+            let current = functions.get_by_switch_id(switch);
+            original_by_switch.insert(switch, current.clone());
+            current
         })
     }
 
@@ -973,9 +1016,16 @@ impl FunctionTableStaging {
                 })?;
                 self.by_block_mut(functions, block).remove(id);
             }
+            for (_, switch) in previous.switches() {
+                self.by_switch_mut(functions, switch).remove(id);
+            }
             if previous.entry() != entry {
                 self.function_addresses.insert(previous.entry(), None);
             }
+        }
+
+        for (_, switch) in function.switches() {
+            self.by_switch_mut(functions, switch).insert(id);
         }
 
         for (_, block) in function.blocks() {
@@ -1181,6 +1231,9 @@ impl FunctionTableStaging {
             for (_, block) in previous.blocks() {
                 self.by_block_mut(functions, block).remove(id);
             }
+            for (_, switch) in previous.switches() {
+                self.by_switch_mut(functions, switch).remove(id);
+            }
             if function
                 .as_ref()
                 .is_none_or(|function| function.entry() != previous.entry())
@@ -1191,6 +1244,9 @@ impl FunctionTableStaging {
         if let Some(function) = &function {
             for (_, block) in function.blocks() {
                 self.by_block_mut(functions, block).insert(id);
+            }
+            for (_, switch) in function.switches() {
+                self.by_switch_mut(functions, switch).insert(id);
             }
             self.function_addresses
                 .insert(function.entry(), Some(function.id()));
@@ -1258,41 +1314,6 @@ impl FunctionTableStaging {
         Ok(())
     }
 
-    fn functions_containing(
-        &self,
-        functions: &FunctionTable,
-        blocks: &CodeBlockTable,
-        address: Address,
-    ) -> Result<SmallVec<[FunctionId; 4]>, IncompleteFunctionError> {
-        let mut containing = SmallVec::new();
-        for id in functions.functions_containing(blocks, address) {
-            let contains = match self.staged_functions.get(&id) {
-                Some(StagedFunctionRecord {
-                    function: Some(function),
-                    ..
-                }) => self.function_contains(blocks, function, address)?,
-                Some(StagedFunctionRecord { function: None, .. }) => false,
-                None => true,
-            };
-            if contains {
-                containing.push(id);
-            }
-        }
-        for (id, record) in self.staged_functions.iter() {
-            let Some(function) = &record.function else {
-                continue;
-            };
-            if containing.binary_search(&id).is_ok()
-                || !self.function_contains(blocks, function, address)?
-            {
-                continue;
-            }
-            let index = containing.binary_search(&id).unwrap_err();
-            containing.insert(index, id);
-        }
-        Ok(containing)
-    }
-
     fn functions_overlapping(
         &self,
         functions: &FunctionTable,
@@ -1316,42 +1337,6 @@ impl FunctionTableStaging {
         }
 
         Ok(overlapping)
-    }
-
-    fn unique_function_containing_address(
-        &self,
-        functions: &FunctionTable,
-        blocks: &CodeBlockTable,
-        address: Address,
-    ) -> Result<Option<FunctionId>, IncompleteFunctionError> {
-        if let Some(function) = self.function_by_address(functions, address)? {
-            return Ok(Some(function.id()));
-        }
-
-        let containing = self.functions_containing(functions, blocks, address)?;
-        Ok(match containing.as_slice() {
-            [function] => Some(*function),
-            _ => None,
-        })
-    }
-
-    fn function_contains(
-        &self,
-        blocks: &CodeBlockTable,
-        function: &Function,
-        address: Address,
-    ) -> Result<bool, IncompleteFunctionError> {
-        for (_, id) in function.blocks() {
-            if self
-                .with_block(blocks, id, |block| {
-                    block.address_range().contains_address(address)
-                })?
-                .unwrap_or(false)
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
     }
 
     fn function_intersects(
@@ -1385,6 +1370,8 @@ impl FunctionTableStaging {
             function_reservations,
             by_block,
             original_by_block,
+            by_switch,
+            original_by_switch,
             ..
         } = self;
         let mut block_records = Vec::with_capacity(staged_code_blocks.len());
@@ -1515,6 +1502,8 @@ impl FunctionTableStaging {
                 &cancelled_functions,
                 &by_block,
                 &original_by_block,
+                &by_switch,
+                &original_by_switch,
                 &mut writes,
             )?;
         }
@@ -1537,6 +1526,7 @@ impl FunctionTableStaging {
                 function_reservations,
                 functions: function_records,
                 by_block,
+                by_switch,
             },
             writes,
         ))
@@ -1554,6 +1544,7 @@ impl PreparedFunctionBatch {
             function_reservations,
             functions: function_entries,
             by_block,
+            by_switch,
         } = self;
 
         let functions_added = function_entries
@@ -1609,7 +1600,7 @@ impl PreparedFunctionBatch {
                 ),
             }
         }
-        functions.publish_membership(by_block);
+        functions.publish_membership(by_block, by_switch);
     }
 }
 

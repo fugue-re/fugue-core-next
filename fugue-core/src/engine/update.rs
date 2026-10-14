@@ -86,32 +86,6 @@ impl SymbolAddition {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SwitchAddition {
-    asserted: bool,
-    switch: Switch,
-}
-
-impl SwitchAddition {
-    fn new(switch: Switch) -> Self {
-        Self {
-            asserted: true,
-            switch,
-        }
-    }
-
-    fn derived(switch: Switch) -> Self {
-        Self {
-            asserted: false,
-            switch,
-        }
-    }
-
-    fn into_parts(self) -> (Switch, bool) {
-        (self.switch, self.asserted)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ProblemAddition {
     address: Address,
@@ -537,11 +511,8 @@ impl ProjectUpdates {
         self.updates.reserve(additional);
     }
 
-    pub fn add_function(&mut self, mut function: IncompleteFunction) {
-        let switches = function.take_pending_switches();
+    pub fn add_function(&mut self, function: IncompleteFunction) {
         self.updates.push(ProjectUpdate::add_function(function));
-        self.updates
-            .extend(switches.into_iter().map(ProjectUpdate::add_derived_switch));
     }
 
     pub fn add_mapping_to_space(&mut self, space: AddressSpaceId, mapping: SegmentMappingId) {
@@ -681,7 +652,7 @@ enum ProjectOperation {
     AddMappingToSpace(MappingPlacement),
     AddProblem(ProblemAddition),
     AddReference(Reference),
-    AddSwitch(SwitchAddition),
+    AddSwitch(Switch),
     AddSymbol(SymbolAddition),
     DeprioritiseMapping(MappingPriorityUpdate),
     PrioritiseMapping(MappingPriorityUpdate),
@@ -799,11 +770,7 @@ impl ProjectUpdate {
     }
 
     pub(crate) fn add_switch(switch: Switch) -> Self {
-        Self::new(ProjectOperation::AddSwitch(SwitchAddition::new(switch)))
-    }
-
-    pub(crate) fn add_derived_switch(switch: Switch) -> Self {
-        Self::new(ProjectOperation::AddSwitch(SwitchAddition::derived(switch)))
+        Self::new(ProjectOperation::AddSwitch(switch))
     }
 
     pub(crate) fn add_problem(address: impl Into<Address>, kind: ProblemKind) -> Self {
@@ -880,11 +847,8 @@ impl ProjectUpdate {
                 transaction.add_reference(reference)?;
                 Ok(())
             }
-            ProjectOperation::AddSwitch(addition) => {
-                let (mut switch, asserted) = addition.into_parts();
-                if asserted {
-                    switch.mark_override();
-                }
+            ProjectOperation::AddSwitch(mut switch) => {
+                switch.mark_override();
                 let branch = switch.branch();
                 transaction.add_switch(branch, move |id, _| switch.with_id(id))?;
                 Ok(())

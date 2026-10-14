@@ -66,7 +66,7 @@ mod test {
     use crate::ir::{
         Address, AddressRange, AddressWithContext, FunctionId, IncompleteCodeBlock,
         IncompleteFunction, Insn, InsnEntry, InsnProperties, ReferenceProperties, ReferenceTarget,
-        Switch, SwitchCase, SwitchModel,
+        Switch, SwitchCase, SwitchId, SwitchModel,
     };
     use crate::lifter::{ContextSet, Lifter, Op, RawPCodeOp, Varnode, resolve_language};
     use crate::project::{ChangeRecord, Project, ProjectTransaction};
@@ -607,16 +607,14 @@ mod test {
 
         let (function_id, changes) = {
             let mut transaction = project.transaction("test");
-            let function_id =
-                transaction.add_function(flow_resolved_load_function(entry, 0x4000)?)?;
-            transaction.add_switch(entry, |id, branch| {
-                let mut switch = Switch::new(id, branch, SwitchModel::Explicit);
-                switch.add_case(SwitchCase::new(AddressWithContext::new(
-                    target,
-                    ContextSet::default(),
-                )));
-                switch
-            })?;
+            let mut function = flow_resolved_load_function(entry, 0x4000)?;
+            let mut switch = Switch::new(SwitchId::INVALID, entry, SwitchModel::Explicit);
+            switch.add_case(SwitchCase::new(AddressWithContext::new(
+                target,
+                ContextSet::default(),
+            )));
+            function.add_pending_switch(switch);
+            let function_id = transaction.add_function(function)?;
             assert!(
                 transaction
                     .modify_switch(entry, |switch| {
@@ -635,7 +633,12 @@ mod test {
             .switches()
             .get_by_branch(entry)
             .expect("switch present");
-        assert_eq!(switch.function(), function_id);
+        assert!(
+            project
+                .functions()
+                .get_by_switch_id(switch.id())
+                .contains(function_id)
+        );
         for destination in [target, default] {
             let reference =
                 project

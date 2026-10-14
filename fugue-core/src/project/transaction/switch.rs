@@ -2,8 +2,8 @@ use smallvec::SmallVec;
 
 use super::ProjectTransaction;
 use crate::ir::{
-    Address, AddressRange, AddressRangeSet, FunctionId, Reference, ReferenceKind,
-    ReferenceProvenance, Switch, SwitchId, SwitchTableError,
+    Address, AddressRange, AddressRangeSet, Reference, ReferenceKind, ReferenceProvenance, Switch,
+    SwitchId, SwitchTableError,
 };
 use crate::project::ProjectError;
 
@@ -12,14 +12,6 @@ impl ProjectTransaction<'_> {
     where
         F: FnOnce(SwitchId, Address) -> Switch,
     {
-        let function = self
-            .project
-            .functions
-            .staged_unique_function_containing_address(
-                &self.project.blocks,
-                &self.function_staging,
-                branch,
-            )?;
         let existing = self
             .switch_staging
             .get_by_branch(&self.project.switches, branch)?
@@ -32,10 +24,6 @@ impl ProjectTransaction<'_> {
         if switch.branch() != branch {
             return Err(SwitchTableError::AddressMismatch.into());
         }
-        let switch = match function {
-            Some(function) => switch.with_function(function),
-            None => switch,
-        };
         self.synchronise_switch_references(&switch)?;
         self.switch_staging.insert(switch);
         Ok(id)
@@ -46,14 +34,6 @@ impl ProjectTransaction<'_> {
         branch: Address,
         f: impl FnOnce(&mut Switch) -> R,
     ) -> Result<Option<R>, ProjectError> {
-        let function = self
-            .project
-            .functions
-            .staged_unique_function_containing_address(
-                &self.project.blocks,
-                &self.function_staging,
-                branch,
-            )?;
         let Some(mut switch) = self
             .switch_staging
             .get_by_branch(&self.project.switches, branch)?
@@ -62,7 +42,6 @@ impl ProjectTransaction<'_> {
             return Ok(None);
         };
         let result = f(&mut switch);
-        switch.set_function(function.unwrap_or(FunctionId::INVALID));
         self.synchronise_switch_references(&switch)?;
         self.switch_staging.insert(switch);
         Ok(Some(result))
@@ -77,17 +56,20 @@ impl ProjectTransaction<'_> {
         Ok(true)
     }
 
-    pub(crate) fn remove_switches_of_function(
-        &mut self,
-        function: FunctionId,
-    ) -> Result<(), ProjectError> {
-        for branch in self
-            .switch_staging
-            .branches_for_function(&self.project.switches, function)
-        {
-            self.remove_switch(branch)?;
+    pub(crate) fn stage_switch_removals(&mut self) -> Result<(), ProjectError> {
+        let removals = self
+            .function_staging
+            .switches_without_membership()
+            .collect::<SmallVec<[_; 4]>>();
+        for switch in removals {
+            let branch = self
+                .switch_staging
+                .get_by_id(&self.project.switches, switch)?
+                .map(|switch| switch.branch());
+            if let Some(branch) = branch {
+                self.remove_switch(branch)?;
+            }
         }
-
         Ok(())
     }
 

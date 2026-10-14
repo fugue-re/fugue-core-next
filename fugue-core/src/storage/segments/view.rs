@@ -117,6 +117,15 @@ impl<'a> SegmentMappingView<'a> {
         MappingHints::new(self.mapping, self.range)
     }
 
+    pub fn contains_function_hint(&self, addr: impl Into<Address>) -> bool {
+        let addr = addr.into();
+        self.contains(addr)
+            && self
+                .mapping
+                .function_hint_offsets()
+                .contains(&addr.raw_address())
+    }
+
     pub fn function_hints(&self) -> impl Iterator<Item = Address> + '_ {
         self.mapping.function_hints().filter_map(|address| {
             let mapped = Address::new(self.space(), address.raw_address());
