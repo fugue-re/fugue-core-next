@@ -120,9 +120,10 @@ impl CodeBlockRecord {
                         !target.is_fall_through()
                             || destination.address() == address + usize::from(size.get())
                     })
-                    .filter_map(|(target, _, _)| FlowTarget::from_insn_target(insn, target))
-                    .map(|target| {
-                        CodeBlockFlowTarget::from_flow(address, usize::from(size.get()), target)
+                    .filter_map(|(target, _, _)| {
+                        FlowTarget::from_insn_target(insn, target).map(|target| {
+                            CodeBlockFlowTarget::from_flow(address, usize::from(size.get()), target)
+                        })
                     }),
             );
             terminator = Some(insn);

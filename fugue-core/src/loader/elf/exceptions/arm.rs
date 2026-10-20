@@ -25,7 +25,15 @@ where
         let endian = self.elf.endian();
         let mut place = address as u32;
         for entry in ExidxEntry::<Elf::Endian>::parse_table(data)? {
-            self.insert_function_hint(entry.function_address(endian, place).into());
+            let function = entry.function_address(endian, place).into();
+            if self
+                .mapping_hints
+                .range(..=self.rebase(function))
+                .next_back()
+                .is_some_and(|(_, hint)| hint.context().is_some())
+            {
+                self.insert_function_hint(function);
+            }
             place = place.wrapping_add(mem::size_of::<ExidxEntry<Elf::Endian>>() as u32);
         }
 

@@ -182,7 +182,7 @@ impl AnalysisPass<StructuredFunctionContext> for ThunkTargetRecovery {
 
 #[fugue_core::extension]
 impl FunctionRecoveryExtension {
-    const NAME: &str = "thunk-target";
+    const NAME: &str = THUNK_TARGET_RECOVERY_ANALYSER;
 
     fn configure(_: &Project, recovery: &mut FunctionRecovery) -> Result<(), AnalysisError> {
         recovery

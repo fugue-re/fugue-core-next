@@ -18,9 +18,10 @@ impl AnalysisPass<StructuredFunctionContext> for SwitchOverrides {
         let overrides = state
             .function()
             .indirect_branches()
-            .filter_map(|(_, site)| project.switch_at(site))
-            .filter(|switch| switch.is_override())
-            .map(|switch| switch.as_ref().clone())
+            .filter_map(|(_, site)| {
+                let switch = project.switch_at(site)?;
+                switch.is_override().then(|| switch.as_ref().clone())
+            })
             .collect::<Vec<_>>();
 
         for switch in overrides {

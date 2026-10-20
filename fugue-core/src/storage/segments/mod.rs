@@ -31,8 +31,9 @@ pub(crate) mod view;
 
 pub use cache::SegmentMappingCache;
 pub use mapping::{
-    MappingHints, SegmentMapping, SegmentMappingBuilder, SegmentMappingFlags, SegmentMappingId,
-    SegmentMappingKind, SegmentMappingProvenance, SegmentMappingRef, SegmentSubMapping,
+    SegmentMapping, SegmentMappingBuilder, SegmentMappingFlags, SegmentMappingHints,
+    SegmentMappingId, SegmentMappingKind, SegmentMappingProvenance, SegmentMappingRef,
+    SegmentSubMapping,
 };
 pub use properties::SegmentProperties;
 pub use provider::{

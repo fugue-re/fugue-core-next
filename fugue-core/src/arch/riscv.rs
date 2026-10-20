@@ -36,7 +36,7 @@ pub struct RiscV {
 
 impl ArchT for RiscV {
     fn lifter(&self) -> Lifter {
-        Lifter::new_with(Arch::from(Box::new(self.clone()) as Box<dyn ArchT>))
+        Lifter::from(Arch::from(Box::new(self.clone()) as Box<dyn ArchT>))
     }
 
     fn external_thunk_template(&self) -> ExternalThunkTemplate {

@@ -117,7 +117,7 @@ impl FunctionRecoveryContext {
         &self.non_returning_targets
     }
 
-    fn add_non_returning_targets(&mut self, targets: impl IntoIterator<Item = Address>) {
+    pub(crate) fn add_non_returning_targets(&mut self, targets: impl IntoIterator<Item = Address>) {
         self.non_returning_targets.extend(targets);
         self.non_returning_targets.sort_unstable();
         self.non_returning_targets.dedup();
@@ -1046,24 +1046,24 @@ impl FunctionRecovery {
             coverage.flush();
         }
         self.candidates.append(&mut state.candidates);
+
         if let Some(context) = self.context.as_mut() {
-            context.add_non_returning_targets(
-                state
-                    .changed_functions
-                    .iter()
-                    .filter(|(_, properties)| {
-                        properties.contains(FunctionProperties::NON_RETURNING)
-                    })
-                    .map(|(&entry, _)| entry)
-                    .chain(
-                        state
-                            .pending_functions
-                            .iter()
-                            .filter(|(_, function)| function.is_non_returning())
-                            .map(|(&entry, _)| entry),
-                    ),
-            );
+            let changed = state
+                .changed_functions
+                .iter()
+                .filter_map(|(&entry, properties)| {
+                    properties
+                        .contains(FunctionProperties::NON_RETURNING)
+                        .then_some(entry)
+                });
+            let pending = state
+                .pending_functions
+                .iter()
+                .filter_map(|(&entry, function)| function.is_non_returning().then_some(entry));
+
+            context.add_non_returning_targets(changed.chain(pending));
         }
+
         for entry in state.removed_functions {
             if state.pending_functions.remove(&entry).is_none() {
                 analysis.updates.remove_function(entry);
@@ -1241,6 +1241,9 @@ impl FunctionRecovery {
                     || !batch_addresses.insert(address)
                 {
                     tracing::trace!("skipping {address}: already analysed");
+                    if replacing {
+                        self.reanalysis_candidates.remove(&original_address);
+                    }
                 } else {
                     if replacing {
                         replacements.insert(address, original_address);

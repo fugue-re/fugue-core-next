@@ -1,8 +1,8 @@
 use crate::ir::{Address, AddressRange};
 use crate::lifter::TrackedSet;
 use crate::storage::segments::mapping::{
-    MappingHints, SegmentMapping, SegmentMappingKind, SegmentMappingProvenance, SegmentMappingRef,
-    SegmentSubMapping,
+    SegmentMapping, SegmentMappingHints, SegmentMappingKind, SegmentMappingProvenance,
+    SegmentMappingRef, SegmentSubMapping,
 };
 use crate::storage::segments::provider::{SegmentStorageDescriptor, SegmentView};
 use crate::storage::segments::space::AddressSpaceId;
@@ -113,8 +113,8 @@ impl<'a> SegmentMappingView<'a> {
         self.mapping.revision() == self.mapping_revision
     }
 
-    pub fn mapping_hints(&self) -> MappingHints<'a> {
-        MappingHints::new(self.mapping, self.range)
+    pub fn mapping_hints(&self) -> SegmentMappingHints<'a> {
+        SegmentMappingHints::new(self.mapping, self.range)
     }
 
     pub fn contains_function_hint(&self, addr: impl Into<Address>) -> bool {

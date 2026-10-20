@@ -802,21 +802,16 @@ impl FunctionBuilderContext {
                             ));
                         }
                         if let Some(target) = indirect_target
-                            && let Some((target, target_context)) =
-                                arch.canonicalise_address_with(target, resolver.context())
-                            && let target = Address::new(address.space(), target)
-                            && !f.contains_insn(target)
+                            && let Some(target) = resolver.resolve_address(target)
+                            && !f.contains_insn(target.address())
                             && self
                                 .mapping_cache
-                                .mapping_properties(segments, target)
+                                .mapping_properties(segments, target.address())
                                 .is_some_and(|properties| properties.is_executable())
                         {
                             f.insn_mut(insn_id)
                                 .expect("inserted instruction must exist")
-                                .set_indirect_target(AddressWithContext::new(
-                                    target,
-                                    target_context,
-                                ));
+                                .set_indirect_target(target);
                         }
                         let insn = f.insn(insn_id).expect("inserted instruction must exist");
 

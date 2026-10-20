@@ -37,22 +37,17 @@ pub struct Lifter {
 
 impl Lifter {
     pub fn new(language: &'static Language) -> Self {
-        Self::new_with(Arch::from(language))
+        Self::from(Arch::from(language))
     }
 
-    pub(crate) fn new_with(arch: Arch) -> Self {
-        let lifter = FugueLifter::new(arch.language());
-        Self { arch, lifter }
-    }
-
-    pub fn with_context(language: &'static Language, context: LiftingContext) -> Self {
+    pub fn new_with(language: &'static Language, context: LiftingContext) -> Self {
         Self {
             arch: Arch::from(language),
-            lifter: FugueLifter::with_context(language, context),
+            lifter: FugueLifter::new_with(language, context),
         }
     }
 
-    pub(crate) fn arch(&self) -> &Arch {
+    pub fn arch(&self) -> &Arch {
         &self.arch
     }
 
@@ -224,6 +219,13 @@ impl Lifter {
         };
 
         Ok(length)
+    }
+}
+
+impl From<Arch> for Lifter {
+    fn from(arch: Arch) -> Self {
+        let lifter = FugueLifter::new(arch.language());
+        Self { arch, lifter }
     }
 }
 

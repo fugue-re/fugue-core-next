@@ -18,7 +18,7 @@ use crate::storage::{
 };
 use crate::types::Confidence;
 
-const LINEAR_SWEEP_ANALYSER: &str = "linear-sweep";
+pub(crate) const LINEAR_SWEEP_ANALYSER: &str = "linear-sweep";
 
 const DEFAULT_MIN_ZERO_FILL_BYTES: usize = 16;
 const DEFAULT_MAX_TRIAL_INSNS: usize = 16;
@@ -735,7 +735,7 @@ impl AnalysisPass<FunctionDiscoveryContext> for FunctionRecoveryLinearSweep {
 
 #[fugue_core::extension]
 impl FunctionRecoveryExtension {
-    const NAME: &str = "linear-sweep";
+    const NAME: &str = LINEAR_SWEEP_ANALYSER;
 
     fn configure(project: &Project, recovery: &mut FunctionRecovery) -> Result<(), AnalysisError> {
         let Some(config) = recovery.config().linear_sweep().copied() else {

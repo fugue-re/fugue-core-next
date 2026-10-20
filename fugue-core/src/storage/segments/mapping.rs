@@ -137,12 +137,12 @@ pub struct SegmentMapping {
 }
 
 #[derive(Clone, Copy)]
-pub struct MappingHints<'a> {
+pub struct SegmentMappingHints<'a> {
     hints: &'a BTreeMap<RawAddress, ContextHint>,
     range: AddressRange,
 }
 
-impl<'a> MappingHints<'a> {
+impl<'a> SegmentMappingHints<'a> {
     pub(crate) fn new(mapping: &'a SegmentMapping, range: AddressRange) -> Self {
         Self {
             hints: &mapping.mapping_hints,
@@ -362,8 +362,8 @@ impl SegmentMapping {
             .flatten()
     }
 
-    pub fn mapping_hints(&self) -> MappingHints<'_> {
-        MappingHints::new(
+    pub fn mapping_hints(&self) -> SegmentMappingHints<'_> {
+        SegmentMappingHints::new(
             self,
             AddressRange::new(self.space(), 0u64.into(), RawAddress::MAX),
         )

@@ -305,7 +305,7 @@ impl Worker {
             .into_reconfiguration();
 
         let revision = project.read().revision();
-        let generation = IlGenerationSession::new(&registry);
+        let generation = IlGenerationSession::new(&registry, project.read().language());
         let mut worker = Self {
             analysers,
             config,
@@ -1292,8 +1292,9 @@ impl Worker {
                 .collect();
         }
 
+        let language = self.project.read().language();
         let mut generation = (0..workers)
-            .map(|_| IlGenerationSession::new(&self.registry))
+            .map(|_| IlGenerationSession::new(&self.registry, language))
             .collect::<Vec<_>>();
         let mut generated = Vec::with_capacity(functions.len());
         let batch_size = workers.saturating_mul(self.config.functions_per_worker());

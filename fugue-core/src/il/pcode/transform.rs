@@ -21,13 +21,12 @@ use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::segments::{SegmentMappingCache, SegmentStorage};
 use crate::types::Revision;
 
-#[derive(Default)]
 pub struct PCodeCanonicaliser {
     block_id_by_code_block: FxHashMap<CodeBlockId, IlBlockId>,
     block_addresses: Vec<Address>,
     block_successors: Vec<IlBlockId>,
     block_successor_kinds: Vec<IlEdgeKinds>,
-    lifter: Option<Lifter>,
+    lifter: Lifter,
 }
 
 impl fmt::Debug for PCodeCanonicaliser {
@@ -42,8 +41,14 @@ impl fmt::Debug for PCodeCanonicaliser {
 }
 
 impl PCodeCanonicaliser {
-    fn set_lifter(&mut self, lifter: Lifter) {
-        self.lifter = Some(lifter);
+    pub fn new(language: &'static Language) -> Self {
+        Self {
+            block_id_by_code_block: FxHashMap::default(),
+            block_addresses: Vec::new(),
+            block_successors: Vec::new(),
+            block_successor_kinds: Vec::new(),
+            lifter: Lifter::new(language),
+        }
     }
 
     fn block_id(&self, code_block: CodeBlockId) -> Option<IlBlockId> {
@@ -56,17 +61,6 @@ impl PCodeCanonicaliser {
 
     fn block_successor_kinds(&self) -> &[IlEdgeKinds] {
         &self.block_successor_kinds
-    }
-
-    fn take_lifter(&mut self, language: &'static Language) -> Lifter {
-        match self.lifter.take() {
-            Some(mut lifter) => {
-                debug_assert_eq!(lifter.language().id(), language.id());
-                lifter.context_mut().reset();
-                lifter
-            }
-            None => Lifter::new(language),
-        }
     }
 
     fn clear_blocks(&mut self) {
@@ -167,6 +161,10 @@ fn remap_target_position(
 
 impl IlProducer for PCodeCanonicaliser {
     type Output = PCodeIr;
+
+    fn new(language: &'static Language) -> Self {
+        Self::new(language)
+    }
 
     fn produce(
         &mut self,
@@ -365,7 +363,6 @@ struct PCodeFunctionLifter<'source, 'scratch> {
     builder: PCodeBuilder,
     mapping_cache: SegmentMappingCache,
     segments: &'source SegmentStorage,
-    lifter: Lifter,
     blocks: Vec<IlBlock>,
     successors: Vec<IlBlockId>,
     successor_kinds: Vec<IlEdgeKinds>,
@@ -385,7 +382,7 @@ impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
         let language = source.language();
         let metadata = source.metadata();
         let segments = source.segments();
-        let lifter = canonicaliser.take_lifter(language);
+        canonicaliser.lifter.context_mut().reset();
         Self {
             source: Some(source),
             canonicaliser,
@@ -393,7 +390,6 @@ impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
             builder: PCodeBuilder::new(metadata, IlGraph::default()),
             mapping_cache: SegmentMappingCache::new(),
             segments,
-            lifter,
             blocks: Vec::new(),
             successors: Vec::new(),
             successor_kinds: Vec::new(),
@@ -484,7 +480,7 @@ impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
         );
 
         let operation_start = self.builder.emitter().op_count();
-        context.apply(source, self.lifter.context_mut());
+        context.apply(source, self.canonicaliser.lifter.context_mut());
         let view = self
             .mapping_cache
             .contiguous_view_from(self.segments, source)?;
@@ -525,9 +521,10 @@ impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
         while offset < bytes.len() {
             self.operations.clear();
             let remaining = bytes.len() - offset;
-            let lifted_size = self
-                .lifter
-                .lift(address, &bytes[offset..], &mut self.operations)?;
+            let lifted_size =
+                self.canonicaliser
+                    .lifter
+                    .lift(address, &bytes[offset..], &mut self.operations)?;
             if lifted_size == 0 || lifted_size > remaining {
                 return Err(PCodeError::invalid_insn_size(
                     address,
@@ -719,7 +716,6 @@ impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
                 true
             }
         };
-        self.canonicaliser.set_lifter(self.lifter);
         self.builder.set_graph(
             IlGraph::new(self.blocks, self.successors, self.successor_kinds)
                 .with_block_sources(self.block_sources),

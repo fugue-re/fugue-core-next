@@ -45,7 +45,7 @@ impl AnalysisPass<StructuredFunctionContext> for ExternalFunctions {
 
 #[fugue_core::extension]
 impl FunctionRecoveryExtension {
-    const NAME: &str = "external-functions";
+    const NAME: &str = EXTERNAL_FUNCTIONS_ANALYSER;
 
     fn configure(_: &Project, recovery: &mut FunctionRecovery) -> Result<(), AnalysisError> {
         recovery.add_post_structuring_pass(EXTERNAL_FUNCTIONS_ANALYSER, ExternalFunctions);

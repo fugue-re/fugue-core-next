@@ -361,7 +361,7 @@ impl<'a> ProjectView<'a> {
         &self,
         function: &IncompleteFunction,
     ) -> Result<Option<T>, IlGenerationError> {
-        let mut generation = IlGenerationSession::new(self.registry);
+        let mut generation = IlGenerationSession::new(self.registry, self.project.language());
         let input_revision = function.input_revision();
         self.generate_il(
             IlSubject::Speculative {

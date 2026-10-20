@@ -28,7 +28,7 @@ impl Lifter {
         }
     }
 
-    pub fn with_context(language: &'static Language, context: LiftingContext) -> Self {
+    pub fn new_with(language: &'static Language, context: LiftingContext) -> Self {
         debug_assert!(
             std::ptr::eq(context.language(), language),
             "lifter language and context language must match",

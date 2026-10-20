@@ -48,8 +48,8 @@ pub(crate) mod segments;
 pub use segments::{
     AddressSpace, AddressSpaceError, AddressSpaceId, AddressSpaceKind, DEFAULT_SPACE_ID,
     DefaultPersistentSegmentStorage, DefaultTransientSegmentStorage, InMemorySegmentStorage,
-    MappingHints, MemoryMappedSegmentStorage, SegmentMapping, SegmentMappingBuilder,
-    SegmentMappingCache, SegmentMappingFlags, SegmentMappingId, SegmentMappingKind,
+    MemoryMappedSegmentStorage, SegmentMapping, SegmentMappingBuilder, SegmentMappingCache,
+    SegmentMappingFlags, SegmentMappingHints, SegmentMappingId, SegmentMappingKind,
     SegmentMappingProvenance, SegmentMappingRef, SegmentMappingView, SegmentProperties,
     SegmentStorage, SegmentStorageDescriptor, SegmentStorageError, SegmentStorageProvider,
     SegmentStorageProviderDescriptor, SegmentStorageProviderEntry,

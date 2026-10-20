@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 use crate::arch::Arch;
-use crate::ir::{Address, Insn, InsnError};
+use crate::ir::{Address, AddressWithContext, Insn, InsnError};
 use crate::lifter::{
     Disassembler, DisassemblerError, Lifter, LifterError, LiftingContext, RawPCodeOp,
 };
@@ -86,6 +86,17 @@ impl InsnResolver {
 
     pub(crate) fn context_mut(&mut self) -> &mut LiftingContext {
         self.lifter.context_mut()
+    }
+
+    pub(crate) fn resolve_address(&self, address: Address) -> Option<AddressWithContext> {
+        let (canonical, context) = self
+            .lifter
+            .arch()
+            .canonicalise_address_with(address, self.context())?;
+        Some(AddressWithContext::new(
+            Address::new(address.space(), canonical),
+            context,
+        ))
     }
 
     pub(crate) fn reset(&mut self) {
