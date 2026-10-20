@@ -219,20 +219,20 @@ impl FunctionStructurer {
         local_targets: &IndexSet<FlowTarget, FxBuildHasher>,
     ) {
         for target in local_targets {
-            let Some(&from) = self.block_ends.get(&target.from()) else {
+            let Some(&from) = self.block_ends.get(&target.from().address()) else {
                 tracing::trace!(
                     "skipping local target: {} -> {} ({:?}): no block end",
-                    target.from(),
-                    target.to(),
+                    target.from().address(),
+                    target.to().address(),
                     target.kind(),
                 );
                 continue;
             };
-            let Some(&to) = self.block_starts.get(&target.to()) else {
+            let Some(&to) = self.block_starts.get(&target.to().address()) else {
                 tracing::trace!(
                     "skipping local target: {} -> {} ({:?}): no block start",
-                    target.from(),
-                    target.to(),
+                    target.from().address(),
+                    target.to().address(),
                     target.kind(),
                 );
                 continue;

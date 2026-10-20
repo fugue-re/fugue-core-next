@@ -2,6 +2,7 @@ use std::ops::RangeInclusive;
 
 pub use fugue_sleigh_language::processor::{DefaultSymbolKind, SegmentedAddressSpaceKind};
 
+use crate::context::TrackedContext;
 use crate::convention::InjectPayload;
 use crate::pcode::Varnode;
 
@@ -90,16 +91,14 @@ impl ContextSet {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct TrackedSetUpdate {
-    register: Varnode,
-    value: u32,
+    context: TrackedContext,
     description: Option<&'static str>,
 }
 
 impl TrackedSetUpdate {
-    pub const fn new(register: Varnode, value: u32) -> Self {
+    pub const fn new(register: Varnode, value: u64) -> Self {
         Self {
-            register,
-            value,
+            context: TrackedContext::new(register, value),
             description: None,
         }
     }
@@ -113,12 +112,16 @@ impl TrackedSetUpdate {
         self
     }
 
-    pub const fn register(&self) -> Varnode {
-        self.register
+    pub const fn context(&self) -> &TrackedContext {
+        &self.context
     }
 
-    pub const fn value(&self) -> u32 {
-        self.value
+    pub const fn register(&self) -> Varnode {
+        *self.context.location()
+    }
+
+    pub const fn value(&self) -> u64 {
+        self.context.value()
     }
 
     pub const fn description(&self) -> Option<&'static str> {

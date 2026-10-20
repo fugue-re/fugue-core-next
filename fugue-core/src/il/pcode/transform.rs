@@ -1,4 +1,4 @@
-use std::mem;
+use std::{fmt, mem};
 
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -21,25 +21,84 @@ use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::segments::{SegmentMappingCache, SegmentStorage};
 use crate::types::Revision;
 
-#[derive(Debug, Default)]
 pub struct PCodeCanonicaliser {
-    code_block_ids: Vec<CodeBlockId>,
     block_id_by_code_block: FxHashMap<CodeBlockId, IlBlockId>,
     block_addresses: Vec<Address>,
     block_successors: Vec<IlBlockId>,
     block_successor_kinds: Vec<IlEdgeKinds>,
+    lifter: Lifter,
+}
+
+impl fmt::Debug for PCodeCanonicaliser {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PCodeCanonicaliser")
+            .field("block_id_by_code_block", &self.block_id_by_code_block)
+            .field("block_addresses", &self.block_addresses)
+            .field("block_successors", &self.block_successors)
+            .field("block_successor_kinds", &self.block_successor_kinds)
+            .finish_non_exhaustive()
+    }
 }
 
 impl PCodeCanonicaliser {
+    pub fn new(language: &'static Language) -> Self {
+        Self {
+            block_id_by_code_block: FxHashMap::default(),
+            block_addresses: Vec::new(),
+            block_successors: Vec::new(),
+            block_successor_kinds: Vec::new(),
+            lifter: Lifter::new(language),
+        }
+    }
+
+    fn block_id(&self, code_block: CodeBlockId) -> Option<IlBlockId> {
+        self.block_id_by_code_block.get(&code_block).copied()
+    }
+
+    fn block_successors(&self) -> &[IlBlockId] {
+        &self.block_successors
+    }
+
+    fn block_successor_kinds(&self) -> &[IlEdgeKinds] {
+        &self.block_successor_kinds
+    }
+
+    fn clear_blocks(&mut self) {
+        self.block_id_by_code_block.clear();
+        self.block_addresses.clear();
+    }
+
+    fn push_block(&mut self, source: Address, code_block: CodeBlockId) -> Result<(), PCodeError> {
+        let block_id = IlBlockId::try_from_index(self.block_addresses.len())?;
+        self.block_id_by_code_block.insert(code_block, block_id);
+        self.block_addresses.push(source);
+        Ok(())
+    }
+
+    fn push_block_source(&mut self, source: Address) {
+        self.block_addresses.push(source);
+    }
+
+    fn clear_block_successors(&mut self) {
+        self.block_successors.clear();
+    }
+
+    fn push_block_successor(&mut self, successor: IlBlockId) {
+        self.block_successors.push(successor);
+    }
+
     fn collect_edge_kinds(&mut self, flows: impl Iterator<Item = FlowTarget>) {
         let mut by_target = SmallVec::<[(Address, IlEdgeKinds); 4]>::new();
         for flow in flows {
             let Some(kind) = IlEdgeKinds::from_flow(flow.kind()) else {
                 continue;
             };
-            match by_target.iter_mut().find(|(to, _)| *to == flow.to()) {
+            match by_target
+                .iter_mut()
+                .find(|(to, _)| *to == flow.to().address())
+            {
                 Some((_, kinds)) => *kinds |= kind,
-                None => by_target.push((flow.to(), kind)),
+                None => by_target.push((flow.to().address(), kind)),
             }
         }
 
@@ -102,6 +161,10 @@ fn remap_target_position(
 
 impl IlProducer for PCodeCanonicaliser {
     type Output = PCodeIr;
+
+    fn new(language: &'static Language) -> Self {
+        Self::new(language)
+    }
 
     fn produce(
         &mut self,
@@ -300,7 +363,6 @@ struct PCodeFunctionLifter<'source, 'scratch> {
     builder: PCodeBuilder,
     mapping_cache: SegmentMappingCache,
     segments: &'source SegmentStorage,
-    lifter: Lifter,
     blocks: Vec<IlBlock>,
     successors: Vec<IlBlockId>,
     successor_kinds: Vec<IlEdgeKinds>,
@@ -320,6 +382,7 @@ impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
         let language = source.language();
         let metadata = source.metadata();
         let segments = source.segments();
+        canonicaliser.lifter.context_mut().reset();
         Self {
             source: Some(source),
             canonicaliser,
@@ -327,7 +390,6 @@ impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
             builder: PCodeBuilder::new(metadata, IlGraph::default()),
             mapping_cache: SegmentMappingCache::new(),
             segments,
-            lifter: Lifter::new(language),
             blocks: Vec::new(),
             successors: Vec::new(),
             successor_kinds: Vec::new(),
@@ -345,92 +407,60 @@ impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
             return Err(IlError::missing_artefact(input.function, PCodeIr::FORM).into());
         };
 
-        self.canonicaliser.code_block_ids.clear();
-        self.canonicaliser.block_id_by_code_block.clear();
-        self.canonicaliser.block_addresses.clear();
+        self.canonicaliser.clear_blocks();
 
-        for (_, code_block) in function_body.blocks() {
-            let block_id = IlBlockId::try_from_index(self.canonicaliser.code_block_ids.len())?;
-            self.canonicaliser
-                .block_id_by_code_block
-                .insert(code_block, block_id);
-            self.canonicaliser.code_block_ids.push(code_block);
-        }
-
-        for &code_block_id in &self.canonicaliser.code_block_ids {
+        for (_, code_block_id) in function_body.blocks() {
             let Some(code_block) = input.blocks.get_by_id(code_block_id) else {
                 return Err(IlError::missing_artefact(input.function, PCodeIr::FORM).into());
             };
             self.canonicaliser
-                .block_addresses
-                .push(code_block.address());
+                .push_block(code_block.address(), code_block_id)?;
         }
 
-        for index in 0..self.canonicaliser.code_block_ids.len() {
-            let code_block_id = self.canonicaliser.code_block_ids[index];
+        for (_, code_block_id) in function_body.blocks() {
             let Some(code_block) = input.blocks.get_by_id(code_block_id) else {
                 return Err(IlError::missing_artefact(input.function, PCodeIr::FORM).into());
             };
 
-            self.canonicaliser.block_successors.clear();
-            self.canonicaliser.block_successors.extend(
-                function_body
-                    .successors(code_block_id)
-                    .filter_map(|successor| {
-                        self.canonicaliser
-                            .block_id_by_code_block
-                            .get(&successor)
-                            .copied()
-                    }),
-            );
+            self.canonicaliser.clear_block_successors();
+            for successor in function_body.successors(code_block_id) {
+                if let Some(successor) = self.canonicaliser.block_id(successor) {
+                    self.canonicaliser.push_block_successor(successor);
+                }
+            }
             self.canonicaliser
                 .collect_edge_kinds(code_block.flow_targets());
-            let successors = mem::take(&mut self.canonicaliser.block_successors);
-            let successor_kinds = mem::take(&mut self.canonicaliser.block_successor_kinds);
-            let result = self.lift_block(
+            self.lift_block(
                 code_block.address(),
                 code_block.context(),
                 code_block.size(),
-                &successors,
-                &successor_kinds,
                 code_block.address() == function_body.entry(),
-            );
-            self.canonicaliser.block_successors = successors;
-            self.canonicaliser.block_successor_kinds = successor_kinds;
-            result?;
+            )?;
         }
 
         Ok(())
     }
 
     fn lift_speculative(&mut self, function: &IncompleteFunction) -> Result<(), PCodeError> {
-        self.canonicaliser.block_addresses.clear();
-        self.canonicaliser
-            .block_addresses
-            .extend(function.blocks().iter().map(|block| block.address()));
+        self.canonicaliser.clear_blocks();
+        for block in function.blocks() {
+            self.canonicaliser.push_block_source(block.address());
+        }
 
         for block in function.blocks() {
-            self.canonicaliser.block_successors.clear();
+            self.canonicaliser.clear_block_successors();
             for successor in block.successors().iter() {
                 self.canonicaliser
-                    .block_successors
-                    .push(IlBlockId::try_from_index(successor.index())?);
+                    .push_block_successor(IlBlockId::try_from_index(successor.index())?);
             }
             self.canonicaliser
                 .collect_edge_kinds(function.block_flow_targets(block));
-            let successors = mem::take(&mut self.canonicaliser.block_successors);
-            let successor_kinds = mem::take(&mut self.canonicaliser.block_successor_kinds);
-            let result = self.lift_block(
+            self.lift_block(
                 block.address(),
                 block.context(),
                 block.size(),
-                &successors,
-                &successor_kinds,
                 block.address() == function.entry(),
-            );
-            self.canonicaliser.block_successors = successors;
-            self.canonicaliser.block_successor_kinds = successor_kinds;
-            result?;
+            )?;
         }
 
         Ok(())
@@ -441,18 +471,16 @@ impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
         source: Address,
         context: &ContextSet,
         size: usize,
-        successors: &[IlBlockId],
-        successor_kinds: &[IlEdgeKinds],
         is_entry: bool,
     ) -> Result<(), PCodeError> {
         debug_assert_eq!(
-            successors.len(),
-            successor_kinds.len(),
+            self.canonicaliser.block_successors().len(),
+            self.canonicaliser.block_successor_kinds().len(),
             "each successor edge carries exactly one kind"
         );
 
         let operation_start = self.builder.emitter().op_count();
-        context.apply(source, self.lifter.context_mut());
+        context.apply(source, self.canonicaliser.lifter.context_mut());
         let view = self
             .mapping_cache
             .contiguous_view_from(self.segments, source)?;
@@ -465,14 +493,16 @@ impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
         self.append_extent(source, bytes)?;
 
         let successor_start = self.successors.len();
-        self.successors.extend_from_slice(successors);
-        self.successor_kinds.extend_from_slice(successor_kinds);
+        self.successors
+            .extend_from_slice(self.canonicaliser.block_successors());
+        self.successor_kinds
+            .extend_from_slice(self.canonicaliser.block_successor_kinds());
 
         let mut properties = IlBlockProperties::empty();
         if is_entry {
             properties |= IlBlockProperties::ENTRY;
         }
-        if successors.is_empty() {
+        if self.canonicaliser.block_successors().is_empty() {
             properties |= IlBlockProperties::EXIT;
         }
 
@@ -491,9 +521,10 @@ impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
         while offset < bytes.len() {
             self.operations.clear();
             let remaining = bytes.len() - offset;
-            let lifted_size = self
-                .lifter
-                .lift(address, &bytes[offset..], &mut self.operations)?;
+            let lifted_size =
+                self.canonicaliser
+                    .lifter
+                    .lift(address, &bytes[offset..], &mut self.operations)?;
             if lifted_size == 0 || lifted_size > remaining {
                 return Err(PCodeError::invalid_insn_size(
                     address,
@@ -671,21 +702,31 @@ impl<'source, 'scratch> PCodeFunctionLifter<'source, 'scratch> {
     }
 
     fn lift(mut self) -> Result<PCodeIr, PCodeError> {
-        match self
+        let speculative = match self
             .source
             .take()
             .expect("a PCode function lifter owns exactly one source")
         {
-            PCodeFunctionSource::Admitted(input) => self.lift_admitted(input)?,
-            PCodeFunctionSource::Speculative { function, .. } => self.lift_speculative(function)?,
-        }
+            PCodeFunctionSource::Admitted(input) => {
+                self.lift_admitted(input)?;
+                false
+            }
+            PCodeFunctionSource::Speculative { function, .. } => {
+                self.lift_speculative(function)?;
+                true
+            }
+        };
         self.builder.set_graph(
             IlGraph::new(self.blocks, self.successors, self.successor_kinds)
                 .with_block_sources(self.block_sources),
         );
         self.builder.set_source_spans(self.source_spans);
 
-        Ok(self.builder.build()?)
+        if speculative {
+            Ok(self.builder.build()?)
+        } else {
+            Ok(self.builder.build_unchecked())
+        }
     }
 }
 

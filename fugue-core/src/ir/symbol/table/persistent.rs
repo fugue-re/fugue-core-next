@@ -597,7 +597,18 @@ impl SymbolTable {
         name: Symbol,
         properties: SymbolProperties,
     ) -> Result<SymbolId, EntityStorageError> {
-        let entry = SymbolEntry::new(address, name, properties).with_index(index);
+        self.insert_with(index, address, name, properties, None)
+    }
+
+    pub(crate) fn insert_with(
+        &mut self,
+        index: SymbolIndex,
+        address: Address,
+        name: Symbol,
+        properties: SymbolProperties,
+        size: impl Into<Option<u64>>,
+    ) -> Result<SymbolId, EntityStorageError> {
+        let entry = SymbolEntry::new_with(address, name, properties, size).with_index(index);
         let Some(existing_id) = self.get_id_by_index(index) else {
             return self.add_or_update(index, entry);
         };

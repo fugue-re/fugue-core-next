@@ -25,6 +25,7 @@ use fugue_core::il::registry::{
 use fugue_core::ir::{
     Address, FunctionId, SymbolEntry, SymbolIndex, SymbolProperties, SymbolTableSelector,
 };
+use fugue_core::lifter::Language;
 use fugue_core::loader::Loader;
 use fugue_core::project::{ChangeKinds, Project, ProjectError};
 use fugue_core::queries::{QueryError, QueryableIl};
@@ -958,6 +959,10 @@ struct ConfiguredFunctionSummaryProducer {
 
 impl IlProducer for ConfiguredFunctionSummaryProducer {
     type Output = ConfiguredFunctionSummary;
+
+    fn new(_: &'static Language) -> Self {
+        Self::default()
+    }
 
     fn produce(
         &mut self,

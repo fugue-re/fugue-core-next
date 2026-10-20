@@ -2,9 +2,9 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 use super::{SwitchIndex, SwitchTableError};
+use crate::ir::Address;
 use crate::ir::persistent::{PersistentIdAllocator, PersistentIndexRebuilder, PersistentTable};
 use crate::ir::switch::{Switch, SwitchId};
-use crate::ir::{Address, FunctionId};
 use crate::storage::entities::{
     CachedRef, Entity, EntityCache, EntityWrite, EntityWriteBatch, WriteBackWorker,
 };
@@ -41,7 +41,7 @@ impl SwitchTable {
 
         for entry in entries.try_iter_range(Bound::Unbounded)? {
             let (id, switch) = entry?;
-            index.insert(id, switch.function(), switch.branch());
+            index.insert(id, switch.branch());
             if let Some(rebuilder) = &mut rebuilder {
                 rebuilder.append(id, |_| Ok(()))?;
             }
@@ -59,13 +59,6 @@ impl SwitchTable {
             entries,
             storage,
         })
-    }
-
-    pub(crate) fn branches_for_function(
-        &self,
-        function: FunctionId,
-    ) -> impl Iterator<Item = Address> + '_ {
-        self.index.branches_for_function(function)
     }
 
     pub(crate) fn flush(&self) -> Result<(), EntityStorageError> {
@@ -148,16 +141,7 @@ impl SwitchTable {
             if switch.branch() != branch {
                 return Err(SwitchTableError::AddressMismatch);
             }
-            let previous_function = self
-                .entries
-                .try_get(&existing)?
-                .map(|previous| previous.function());
-            let function = switch.function();
             self.entries.try_insert(existing, switch)?;
-            if let Some(previous_function) = previous_function {
-                self.index.remove(previous_function, branch);
-            }
-            self.index.insert(existing, function, branch);
             return Ok(existing);
         }
 
@@ -166,7 +150,6 @@ impl SwitchTable {
         if switch.branch() != branch {
             return Err(SwitchTableError::AddressMismatch);
         }
-        let function = switch.function();
         let encoded =
             rkyv::to_bytes::<rkyv::rancor::Error>(&switch).map_err(EntityStorageError::encode)?;
         let encoded_size = encoded.len();
@@ -189,29 +172,23 @@ impl SwitchTable {
         self.entries.publish_insert(id, switch, encoded_size);
         self.allocator
             .publish_transition(&reservations, reservations.len(), releases.len());
-        self.index.insert(id, function, branch);
+        self.index.insert(id, branch);
 
         Ok(id)
     }
 
     pub(crate) fn try_modify_by_id<R>(
-        &mut self,
+        &self,
         id: SwitchId,
         f: impl FnOnce(&mut Switch) -> R,
     ) -> Result<Option<R>, EntityStorageError> {
         let Some(previous) = self.entries.try_get(&id)? else {
             return Ok(None);
         };
-        let previous_function = previous.function();
-        let branch = previous.branch();
         let mut switch = previous.as_ref().clone();
         drop(previous);
         let result = f(&mut switch);
-        let function = switch.function();
-
         self.entries.try_insert(id, switch)?;
-        self.index.remove(previous_function, branch);
-        self.index.insert(id, function, branch);
 
         Ok(Some(result))
     }
@@ -228,8 +205,8 @@ impl SwitchTable {
     }
 
     pub(crate) fn try_remove_by_id(&mut self, id: SwitchId) -> Result<bool, EntityStorageError> {
-        let (branch, function) = match self.entries.try_get(&id)? {
-            Some(switch) => (switch.branch(), switch.function()),
+        let branch = match self.entries.try_get(&id)? {
+            Some(switch) => switch.branch(),
             None => return Ok(false),
         };
 
@@ -241,7 +218,7 @@ impl SwitchTable {
         self.storage.write_batch(&writes)?;
         self.entries.publish_remove(&id);
         self.allocator.publish_transition(&[], 0, 1);
-        self.index.remove(function, branch);
+        self.index.remove(branch);
 
         Ok(true)
     }
@@ -266,24 +243,15 @@ impl SwitchTable {
             .publish_transition(reservations, added, removed);
     }
 
-    pub(crate) fn publish_upsert(
-        &mut self,
-        switch: Switch,
-        previous_function: Option<FunctionId>,
-        encoded_size: usize,
-    ) {
+    pub(crate) fn publish_upsert(&mut self, switch: Switch, encoded_size: usize) {
         let id = switch.id();
         let branch = switch.branch();
-        let function = switch.function();
         self.entries.publish_insert(id, switch, encoded_size);
-        if let Some(previous_function) = previous_function {
-            self.index.remove(previous_function, branch);
-        }
-        self.index.insert(id, function, branch);
+        self.index.insert(id, branch);
     }
 
-    pub(crate) fn publish_remove(&mut self, id: SwitchId, function: FunctionId, branch: Address) {
+    pub(crate) fn publish_remove(&mut self, id: SwitchId, branch: Address) {
         self.entries.publish_remove(&id);
-        self.index.remove(function, branch);
+        self.index.remove(branch);
     }
 }

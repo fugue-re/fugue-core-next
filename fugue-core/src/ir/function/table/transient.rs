@@ -2,10 +2,11 @@ use std::collections::BTreeMap;
 use std::ops::RangeBounds;
 
 use rustc_hash::FxHashMap;
-use smallvec::SmallVec;
 
 use super::{FunctionIndex, FunctionTableError};
-use crate::ir::{Address, CodeBlockId, Function, FunctionId, Id, IdAllocator, IdSet, RawAddress};
+use crate::ir::{
+    Address, CodeBlockId, Function, FunctionId, Id, IdAllocator, IdSet, RawAddress, SwitchId,
+};
 use crate::storage::segments::space::AddressSpaceId;
 
 pub struct FunctionTable {
@@ -82,6 +83,10 @@ impl FunctionTable {
         self.index.get_by_block_id(block)
     }
 
+    pub(crate) fn get_by_switch_id(&self, switch: SwitchId) -> IdSet<Function> {
+        self.index.get_by_switch_id(switch)
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &Function> + '_ {
         self.entries.iter().filter_map(Option::as_ref)
     }
@@ -113,20 +118,11 @@ impl FunctionTable {
                 return Err(FunctionTableError::AddressMismatch);
             }
 
-            let previous_blocks = self.entries[existing.index()].as_ref().map(|previous| {
-                previous
-                    .blocks()
-                    .map(|(_, block)| block)
-                    .collect::<SmallVec<[_; 8]>>()
-            });
-            let blocks = function
-                .blocks()
-                .map(|(_, block)| block)
-                .collect::<SmallVec<[_; 8]>>();
+            if let Some(previous) = self.entries[existing.index()].take() {
+                self.index.remove_membership(&previous);
+            }
+            self.index.insert_membership(&function);
             self.entries[existing.index()] = Some(function);
-            self.index
-                .remove_memberships(existing, previous_blocks.iter().flatten().copied());
-            self.index.insert_memberships(existing, blocks);
 
             return Ok((existing, value));
         }
@@ -231,7 +227,11 @@ impl FunctionTable {
         self.index.allocator.release(id);
     }
 
-    pub(crate) fn publish_membership(&mut self, by_block: FxHashMap<CodeBlockId, IdSet<Function>>) {
-        self.index.publish_membership(by_block);
+    pub(crate) fn publish_membership(
+        &mut self,
+        by_block: FxHashMap<CodeBlockId, IdSet<Function>>,
+        by_switch: FxHashMap<SwitchId, IdSet<Function>>,
+    ) {
+        self.index.publish_membership(by_block, by_switch);
     }
 }

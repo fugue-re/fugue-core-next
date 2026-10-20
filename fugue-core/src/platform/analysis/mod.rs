@@ -1,2 +1,2 @@
 pub mod non_returning;
-pub use non_returning::{NonReturningExternSet, is_non_returning_extern};
+pub use non_returning::{NonReturningExternalSet, is_non_returning_external};

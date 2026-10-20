@@ -497,8 +497,15 @@ impl<'a> ConventionAdaptor<'a, Prototype> {
     pub(crate) fn tokens(&self) -> TokenStream {
         let prototype = self.source;
         let name = prototype.name();
-        let extra_pop = prototype.extra_pop();
+        let extra_pop = prototype
+            .extra_pop()
+            .map_or_else(|| quote! { None }, |extra_pop| quote! { Some(#extra_pop) });
         let stack_shift = prototype.stack_shift();
+        let pointer_max = prototype.pointer_max().map_or_else(
+            || quote! { None },
+            |pointer_max| quote! { Some(#pointer_max) },
+        );
+        let this_before_ret_pointer = prototype.this_before_ret_pointer();
         let inputs = prototype
             .inputs()
             .iter()
@@ -546,6 +553,8 @@ impl<'a> ConventionAdaptor<'a, Prototype> {
                 .with_likely_trashed(&[#(#trashed),*])
                 .with_local_ranges(&[#(#local_ranges),*])
                 .with_internal_storage(&[#(#internal_storage),*])
+                .with_pointer_max(#pointer_max)
+                .with_this_before_ret_pointer(#this_before_ret_pointer)
         }
     }
 }

@@ -1,6 +1,7 @@
 use object::elf::{
-    R_AARCH64_CALL26, R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT, R_AARCH64_JUMP26,
-    R_AARCH64_P32_GLOB_DAT, R_AARCH64_P32_JUMP_SLOT, R_AARCH64_P32_RELATIVE, R_AARCH64_RELATIVE,
+    R_AARCH64_CALL26, R_AARCH64_GLOB_DAT, R_AARCH64_IRELATIVE, R_AARCH64_JUMP_SLOT,
+    R_AARCH64_JUMP26, R_AARCH64_P32_GLOB_DAT, R_AARCH64_P32_IRELATIVE, R_AARCH64_P32_JUMP_SLOT,
+    R_AARCH64_P32_RELATIVE, R_AARCH64_RELATIVE,
 };
 use object::read::elf::FileHeader;
 use object::{ReadRef, Relocation, RelocationEncoding, RelocationKind};
@@ -80,14 +81,14 @@ where
         };
 
         match reloc_type {
-            R_AARCH64_RELATIVE => {
+            R_AARCH64_RELATIVE | R_AARCH64_IRELATIVE => {
                 let value = self.base.offset().wrapping_add_signed(reloc.addend());
 
                 tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");
 
                 bytes.write_value(offset, value);
             }
-            R_AARCH64_P32_RELATIVE => {
+            R_AARCH64_P32_RELATIVE | R_AARCH64_P32_IRELATIVE => {
                 let value = self.base.offset().wrapping_add_signed(reloc.addend());
 
                 if value > u32::MAX as u64 {

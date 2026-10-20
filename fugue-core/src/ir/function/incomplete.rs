@@ -118,6 +118,7 @@ pub(crate) struct FunctionRecord {
     origin: ReferenceOrigin,
     properties: FunctionProperties,
     references: Vec<Reference>,
+    switches: Vec<Switch>,
     tail_call_sites: SmallVec<[Address; 1]>,
 }
 
@@ -132,6 +133,10 @@ impl FunctionRecord {
 
     pub(crate) fn entry(&self) -> Address {
         self.entry
+    }
+
+    pub(crate) fn switches_mut(&mut self) -> &mut [Switch] {
+        &mut self.switches
     }
 
     pub(crate) fn take_call_targets(&mut self) -> BTreeSet<Address> {
@@ -166,8 +171,16 @@ impl FunctionRecord {
         edges.sort_unstable();
         edges.dedup();
 
-        let mut function =
-            Function::new_with(id, self.entry, self.name).with_blocks(members, edges, entry_block);
+        let mut switches = self
+            .switches
+            .iter()
+            .map(|switch| (switch.branch(), switch.id()))
+            .collect::<Vec<_>>();
+        switches.sort_unstable();
+
+        let mut function = Function::new_with(id, self.entry, self.name)
+            .with_blocks(members, edges, entry_block)
+            .with_switches(switches);
         function.set_properties(self.properties);
         function.set_origin(self.origin);
         function.set_confidence(self.confidence);
@@ -523,7 +536,15 @@ impl IncompleteFunction {
             .iter()
             .filter_map(|id| self.insn(*id))
             .flat_map(Insn::flow_targets)
-            .filter(move |target| !target.kind().is_fall_through() || target.to() == end)
+            .filter(move |target| !target.kind().is_fall_through() || target.to().address() == end)
+            .map(move |target| {
+                let (from, to, kind) = target.into_parts();
+                FlowTarget::new(
+                    AddressWithContext::new(from.address(), block.context().clone()),
+                    to,
+                    kind,
+                )
+            })
     }
 
     pub fn properties(&self) -> FunctionProperties {
@@ -581,7 +602,7 @@ impl IncompleteFunction {
         self.properties.contains(FunctionProperties::EXTERNAL)
     }
 
-    pub fn thunk_target(&self) -> Option<Address> {
+    pub fn thunk_target(&self) -> Option<AddressWithContext> {
         let [block] = self.blocks.as_slice() else {
             return None;
         };
@@ -589,11 +610,14 @@ impl IncompleteFunction {
             .block_flow_targets(block)
             .filter(|target| !target.kind().is_fall_through());
         let target = targets.next()?;
-        let tail_call_site = self.tail_call_sites.binary_search(&target.from()).is_ok();
+        let tail_call_site = self
+            .tail_call_sites
+            .binary_search(&target.from().address())
+            .is_ok();
         (targets.next().is_none()
             && matches!(target.kind(), FlowKind::Branch | FlowKind::IBranch)
             && (tail_call_site || target.kind() == FlowKind::IBranch))
-            .then_some(target.to())
+            .then(|| target.into_parts().1)
     }
 
     pub fn sibling_successor_from_incoming(
@@ -643,10 +667,6 @@ impl IncompleteFunction {
         } else {
             self.pending_switches.push(switch);
         }
-    }
-
-    pub fn take_pending_switches(&mut self) -> Vec<Switch> {
-        mem::take(&mut self.pending_switches)
     }
 
     pub fn clear_name(&mut self) {
@@ -906,20 +926,21 @@ impl IncompleteFunction {
                 }
                 None => pending_coverage = Some(block_range),
             }
-            for mut target in normalised.flow_targets() {
-                if matches!(target.kind(), FlowKind::Branch | FlowKind::IBranch)
-                    && self.tail_call_sites.binary_search(&target.from()).is_ok()
+            for target in normalised.flow_targets() {
+                let (from, to, mut kind) = target.into_parts();
+                if matches!(kind, FlowKind::Branch | FlowKind::IBranch)
+                    && self.tail_call_sites.binary_search(&from.address()).is_ok()
                 {
-                    target = FlowTarget::new(target.from(), target.to(), FlowKind::TailCallBranch);
+                    kind = FlowKind::TailCallBranch;
                 }
-                if target.kind().is_call() {
-                    call_targets.insert(target.to());
+                if kind.is_call() {
+                    call_targets.insert(to.address());
                 }
-                if !target.kind().is_global() {
+                if !kind.is_global() {
                     continue;
                 }
                 references.push(
-                    Reference::from_flow(target.from(), target.to(), target.kind())
+                    Reference::from_flow(from.address(), to.address(), kind)
                         .with_origin(ReferenceOrigin::Derived),
                 );
             }
@@ -969,6 +990,7 @@ impl IncompleteFunction {
             origin: self.origin,
             properties: self.properties,
             references,
+            switches: self.pending_switches,
             tail_call_sites: self.tail_call_sites,
         })
     }

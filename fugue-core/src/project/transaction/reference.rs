@@ -54,7 +54,10 @@ mod test {
     use super::*;
     use crate::arch::Arch;
     use crate::engine::AnalysisEngine;
-    use crate::il::common::{IlArtefact, IlError, IlGraph, IlIndexRange, IlMetadata, IlSourceSpan};
+    use crate::il::common::{
+        IlArtefact, IlBlock, IlBlockProperties, IlError, IlGraph, IlIndexRange, IlMetadata,
+        IlSourceSpan,
+    };
     use crate::il::ecode::{ECodeIr, ECodeOpcode, PCodeToECode};
     use crate::il::pcode::{
         PCodeBuilder, PCodeIr, PCodeLifterSpaceHandle, PCodeLocation, PCodeLocationProperties,
@@ -63,9 +66,9 @@ mod test {
     use crate::ir::{
         Address, AddressRange, AddressWithContext, FunctionId, IncompleteCodeBlock,
         IncompleteFunction, Insn, InsnEntry, InsnProperties, ReferenceProperties, ReferenceTarget,
-        Switch, SwitchCase, SwitchModel,
+        Switch, SwitchCase, SwitchId, SwitchModel,
     };
-    use crate::lifter::{ContextSet, Op, RawPCodeOp, Varnode, resolve_language};
+    use crate::lifter::{ContextSet, Lifter, Op, RawPCodeOp, Varnode, resolve_language};
     use crate::project::{ChangeRecord, Project, ProjectTransaction};
     use crate::storage::{AddressSpaceId, DEFAULT_SPACE_ID};
 
@@ -81,7 +84,18 @@ mod test {
         opcode: PCodeOpcode,
     ) -> Result<PCodeIr, Box<dyn std::error::Error>> {
         let metadata = IlMetadata::new(function, 0);
-        let mut builder = PCodeBuilder::new(metadata, IlGraph::default());
+        let mut builder = PCodeBuilder::new(
+            metadata,
+            IlGraph::new(
+                vec![IlBlock::new(
+                    IlIndexRange::new(0, 1)?,
+                    IlIndexRange::EMPTY,
+                    IlBlockProperties::empty(),
+                )],
+                Vec::new(),
+                Vec::new(),
+            ),
+        );
 
         builder.set_source_spans(vec![IlSourceSpan::new(
             IlIndexRange::new(0, 1)?,
@@ -123,54 +137,24 @@ mod test {
         Ok(builder.build()?)
     }
 
-    fn pcode_copy_ir(
-        function: FunctionId,
-        source: Address,
-    ) -> Result<PCodeIr, Box<dyn std::error::Error>> {
-        let metadata = IlMetadata::new(function, 0);
-        let mut builder = PCodeBuilder::new(metadata, IlGraph::default());
-
-        builder.set_source_spans(vec![IlSourceSpan::new(
-            IlIndexRange::new(0, 1)?,
-            source,
-            0,
-            1,
-        )]);
-
-        let location = builder.emitter().intern_location(PCodeLocation::new(
-            PCodeLifterSpaceHandle::new(1),
-            0,
-            8,
-            PCodeLocationProperties::REGISTER,
-        ))?;
-        builder.emitter().emit(
-            PCodeOpSpec::new(PCodeOpcode::Copy),
-            Some(location),
-            [location],
-        )?;
-
-        Ok(builder.build()?)
-    }
-
     fn lift_test_ecode(source: &PCodeIr) -> Result<ECodeIr, IlError> {
         let arch = Arch::new(resolve_language("x86:LE:64").expect("test language should resolve"));
         let platform = arch.platform();
         PCodeToECode::default().transform(&arch, &platform, source)
     }
 
-    fn stage_pcode_with_references(
+    fn stage_data_references(
         transaction: &mut ProjectTransaction<'_>,
-        pcode: PCodeIr,
+        function: FunctionId,
+        source: Address,
+        references: impl IntoIterator<Item = Reference>,
     ) -> Result<(), ProjectError> {
         let mut coverage = AddressRangeSet::new();
-        pcode.reference_coverage_into(&mut coverage);
-        let references = pcode.data_references().collect::<Vec<_>>();
-        let provenance = ReferenceProvenance::Function(pcode.metadata().function());
-        transaction.replace_lifted(pcode)?;
+        coverage.insert_range(AddressRange::point(source));
         transaction.replace_derived_references(
             coverage,
             ReferenceKind::Data,
-            provenance,
+            ReferenceProvenance::Function(function),
             references,
         )?;
         Ok(())
@@ -188,7 +172,13 @@ mod test {
 
         {
             let mut transaction = project.transaction("test");
-            stage_pcode_with_references(&mut transaction, load.clone())?;
+            transaction.replace_lifted(load.clone())?;
+            stage_data_references(
+                &mut transaction,
+                function,
+                source,
+                [Reference::data(source, target, ReferenceProperties::READ)],
+            )?;
             transaction.commit()?;
         }
 
@@ -213,7 +203,13 @@ mod test {
 
         {
             let mut transaction = project.transaction("test");
-            stage_pcode_with_references(&mut transaction, load.clone())?;
+            transaction.replace_lifted(load.clone())?;
+            stage_data_references(
+                &mut transaction,
+                function,
+                source,
+                [Reference::data(source, target, ReferenceProperties::READ)],
+            )?;
             transaction.commit()?;
         }
 
@@ -239,17 +235,27 @@ mod test {
         let function = FunctionId::default();
         let source = Address::new(AddressSpaceId::new(1), 0x1000u64);
         let target_space = AddressSpaceId::new(2);
-        let load = pcode_reference_ir(function, source, target_space, 0x4000, PCodeOpcode::Load)?;
+        let target = Address::new(target_space, 0x4000u64);
 
         {
             let mut transaction = project.transaction("test");
-            stage_pcode_with_references(&mut transaction, load.clone())?;
+            stage_data_references(
+                &mut transaction,
+                function,
+                source,
+                [Reference::data(source, target, ReferenceProperties::READ)],
+            )?;
             transaction.commit()?;
         }
 
         let changes = {
             let mut transaction = project.transaction("test");
-            stage_pcode_with_references(&mut transaction, load.clone())?;
+            stage_data_references(
+                &mut transaction,
+                function,
+                source,
+                [Reference::data(source, target, ReferenceProperties::READ)],
+            )?;
             transaction.commit()?
         };
         assert!(
@@ -355,12 +361,15 @@ mod test {
         let source = Address::new(AddressSpaceId::new(1), 0x1000u64);
         let target_space = AddressSpaceId::new(2);
         let target = Address::new(target_space, 0x4000u64);
-        let load = pcode_reference_ir(function, source, target_space, 0x4000, PCodeOpcode::Load)?;
-        let copy = pcode_copy_ir(function, source)?;
 
         let changes = {
             let mut transaction = project.transaction("test");
-            stage_pcode_with_references(&mut transaction, load.clone())?;
+            stage_data_references(
+                &mut transaction,
+                function,
+                source,
+                [Reference::data(source, target, ReferenceProperties::READ)],
+            )?;
             transaction.commit()?
         };
 
@@ -396,7 +405,7 @@ mod test {
 
         {
             let mut transaction = project.transaction("test");
-            stage_pcode_with_references(&mut transaction, copy.clone())?;
+            stage_data_references(&mut transaction, function, source, [])?;
             transaction.commit()?;
         }
 
@@ -418,18 +427,26 @@ mod test {
         let source = Address::new(AddressSpaceId::new(1), 0x1000u64);
         let target_space = AddressSpaceId::new(2);
         let target = Address::new(target_space, 0x4000u64);
-        let load = pcode_reference_ir(function, source, target_space, 0x4000, PCodeOpcode::Load)?;
-        let store = pcode_reference_ir(function, source, target_space, 0x4000, PCodeOpcode::Store)?;
 
         {
             let mut transaction = project.transaction("test");
-            stage_pcode_with_references(&mut transaction, load.clone())?;
+            stage_data_references(
+                &mut transaction,
+                function,
+                source,
+                [Reference::data(source, target, ReferenceProperties::READ)],
+            )?;
             transaction.commit()?;
         }
 
         {
             let mut transaction = project.transaction("test");
-            stage_pcode_with_references(&mut transaction, store)?;
+            stage_data_references(
+                &mut transaction,
+                function,
+                source,
+                [Reference::data(source, target, ReferenceProperties::WRITE)],
+            )?;
             drop(transaction);
         }
 
@@ -455,7 +472,13 @@ mod test {
 
         {
             let mut transaction = project.transaction("test");
-            stage_pcode_with_references(&mut transaction, pcode.clone())?;
+            transaction.replace_lifted(pcode.clone())?;
+            stage_data_references(
+                &mut transaction,
+                function,
+                source,
+                [Reference::data(source, target, ReferenceProperties::READ)],
+            )?;
             transaction.commit()?;
         }
 
@@ -491,7 +514,7 @@ mod test {
             output: Varnode::new(language.register_space(), 0, 8),
         };
         let operations = [operation];
-        let insn = Insn::from_resolved_flow(language, entry, 1, &operations)?;
+        let insn = Insn::from_resolved_flow(&Lifter::new(language), entry, 1, &operations)?;
         let mut function = IncompleteFunction::new(entry);
 
         let insn = match function.insn_entry(entry) {
@@ -523,7 +546,7 @@ mod test {
             output: Varnode::INVALID,
         };
         let operations = [operation];
-        let insn = Insn::from_resolved_flow(language, entry, size, &operations)?;
+        let insn = Insn::from_resolved_flow(&Lifter::new(language), entry, size, &operations)?;
         let mut function = IncompleteFunction::new(entry);
 
         let insn = match function.insn_entry(entry) {
@@ -584,16 +607,14 @@ mod test {
 
         let (function_id, changes) = {
             let mut transaction = project.transaction("test");
-            let function_id =
-                transaction.add_function(flow_resolved_load_function(entry, 0x4000)?)?;
-            transaction.add_switch(entry, |id, branch| {
-                let mut switch = Switch::new(id, branch, SwitchModel::Explicit);
-                switch.add_case(SwitchCase::new(AddressWithContext::new(
-                    target,
-                    ContextSet::default(),
-                )));
-                switch
-            })?;
+            let mut function = flow_resolved_load_function(entry, 0x4000)?;
+            let mut switch = Switch::new(SwitchId::INVALID, entry, SwitchModel::Explicit);
+            switch.add_case(SwitchCase::new(AddressWithContext::new(
+                target,
+                ContextSet::default(),
+            )));
+            function.add_pending_switch(switch);
+            let function_id = transaction.add_function(function)?;
             assert!(
                 transaction
                     .modify_switch(entry, |switch| {
@@ -612,7 +633,12 @@ mod test {
             .switches()
             .get_by_branch(entry)
             .expect("switch present");
-        assert_eq!(switch.function(), function_id);
+        assert!(
+            project
+                .functions()
+                .get_by_switch_id(switch.id())
+                .contains(function_id)
+        );
         for destination in [target, default] {
             let reference =
                 project

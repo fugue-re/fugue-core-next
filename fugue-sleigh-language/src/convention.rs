@@ -261,8 +261,10 @@ impl PrototypeEntry {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct Prototype {
     name: String,
-    extra_pop: u64,
+    extra_pop: Option<u64>,
     stack_shift: u64,
+    pointer_max: Option<u64>,
+    this_before_ret_pointer: bool,
     inputs: Vec<PrototypeEntry>,
     outputs: Vec<PrototypeEntry>,
     input_rules: Vec<PrototypeRule>,
@@ -282,9 +284,9 @@ impl Prototype {
 
         let name = input.attribute_string("name")?;
         let extra_pop = if matches!(input.attribute("extrapop"), Some("unknown")) {
-            0
+            None
         } else {
-            input.attribute_int("extrapop")?
+            Some(input.attribute_int("extrapop")?)
         };
         let stack_shift = input.attribute_int("stackshift")?;
 
@@ -298,11 +300,17 @@ impl Prototype {
         let mut local_ranges = Vec::new();
         let mut internal_storage = Vec::new();
         let mut next_group = 0u32;
+        let mut pointer_max = None;
+        let mut this_before_ret_pointer = false;
 
         for child in input.children().filter(Node::is_element) {
             match child.tag_name().name() {
                 "input" => {
                     let killed = child.attribute_bool_opt("killedbycall", false)?;
+                    let max = child.attribute_int_opt::<u64>("pointermax", 0)?;
+                    pointer_max = (max != 0).then_some(max);
+                    this_before_ret_pointer =
+                        child.attribute_bool_opt("thisbeforeretpointer", false)?;
                     for c in child.children().filter(Node::is_element) {
                         match c.tag_name().name() {
                             "pentry" => inputs.push(PrototypeEntry::from_xml(language, killed, c)?),
@@ -377,6 +385,8 @@ impl Prototype {
             name,
             extra_pop,
             stack_shift,
+            pointer_max,
+            this_before_ret_pointer,
             inputs,
             outputs,
             input_rules,
@@ -393,12 +403,20 @@ impl Prototype {
         &self.name
     }
 
-    pub fn extra_pop(&self) -> u64 {
+    pub fn extra_pop(&self) -> Option<u64> {
         self.extra_pop
     }
 
     pub fn stack_shift(&self) -> u64 {
         self.stack_shift
+    }
+
+    pub fn pointer_max(&self) -> Option<u64> {
+        self.pointer_max
+    }
+
+    pub fn this_before_ret_pointer(&self) -> bool {
+        self.this_before_ret_pointer
     }
 
     pub fn inputs(&self) -> &[PrototypeEntry] {

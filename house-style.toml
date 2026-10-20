@@ -1070,6 +1070,11 @@ reason = "the extension configure function must match the fallible FunctionRecov
 
 [[exception]]
 rule = "unnecessary_wraps"
+path = "fugue-core/src/analysis/external.rs"
+reason = "the extension configure function must match the fallible FunctionRecoveryExtension callback contract"
+
+[[exception]]
+rule = "unnecessary_wraps"
 path = "fugue-core/src/analysis/switch/mod.rs"
 reason = "the extension configure function must match the fallible FunctionRecoveryExtension callback contract"
 
@@ -1084,6 +1089,12 @@ rule = "split_inherent_impl"
 path = "fugue-core/src/loader/elf/relocations"
 item = "crate::loader::elf::relocations::ElfSegmentRelocator"
 reason = "architecture-owned relocation methods deliberately share the relocator's private state; replacing the split impl with free functions would change syntax only and widen the state interface"
+
+[[exception]]
+rule = "split_inherent_impl"
+path = "fugue-core/src/loader/elf/exceptions"
+item = "crate::loader::elf::exceptions::ElfExceptionResolver"
+reason = "architecture-owned exception table methods deliberately share the resolver's private state; replacing the split impl with free functions would change syntax only and widen the state interface"
 
 [[exception]]
 rule = "split_inherent_impl"
@@ -1244,8 +1255,8 @@ reason = "#[fugue_core::extension] consumes the apparent impls and emits free fu
 
 [[exception]]
 rule = "split_inherent_impl"
-path = "fugue-core/src/platform/non_returning.rs"
-item = "crate::platform::non_returning::NonReturningExternSet"
+path = "fugue-core/src/platform/analysis/non_returning.rs"
+item = "crate::platform::analysis::non_returning::NonReturningExternalSet"
 reason = "#[fugue_core::extension] consumes the apparent impls and emits free functions plus registrations, so no split inherent impl exists after expansion"
 
 [[exception]]
@@ -1429,7 +1440,7 @@ reason = "candidate, function and output-byte ceilings are distinct recovery res
 
 [[exception]]
 rule = "macro_skipped"
-path = "fugue-core/src/analysis/non_returning/externs.rs"
+path = "fugue-core/src/analysis/non_returning/externals.rs"
 reason = "the skipped invocation registers the analyser provider; the analyser implementation itself is declared directly and remains auditable"
 
 [[exception]]

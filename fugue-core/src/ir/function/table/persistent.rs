@@ -6,9 +6,10 @@ use smallvec::SmallVec;
 
 use super::{FunctionTableError, PreparedFunctionRecord};
 use crate::ir::persistent::{PersistentIdAllocator, PersistentIndexRebuilder, PersistentTable};
-use crate::ir::{Address, CodeBlockId, Function, FunctionId, Id, IdSet, RawAddress};
+use crate::ir::{Address, CodeBlockId, Function, FunctionId, Id, IdSet, RawAddress, SwitchId};
 use crate::storage::entities::schema::{
-    ENTITY_FUNCTION_BLOCK_INDEX_ID, ENTITY_FUNCTION_ENTRY_INDEX_ID, ENTITY_KEY_FUNCTION_BLOCK_ID,
+    ENTITY_FUNCTION_BLOCK_INDEX_ID, ENTITY_FUNCTION_ENTRY_INDEX_ID,
+    ENTITY_FUNCTION_SWITCH_INDEX_ID, ENTITY_KEY_FUNCTION_BLOCK_ID, ENTITY_KEY_FUNCTION_SWITCH_ID,
 };
 use crate::storage::entities::{
     CachedMut, CachedRef, Entity, EntityCache, EntityId, EntityKey, EntityKeyCodec, EntityKeyId,
@@ -64,6 +65,42 @@ impl Entity for FunctionBlockRecord {
     const ID: EntityId = ENTITY_FUNCTION_BLOCK_INDEX_ID;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct FunctionSwitchKey {
+    switch: SwitchId,
+    function: FunctionId,
+}
+
+impl FunctionSwitchKey {
+    fn new(function: FunctionId, switch: SwitchId) -> Self {
+        Self { switch, function }
+    }
+}
+
+impl EntityKeyCodec for FunctionSwitchKey {
+    fn decode(input: &mut &[u8]) -> Option<Self> {
+        let switch = SwitchId::decode(input)?;
+        let function = FunctionId::decode(input)?;
+        Some(Self::new(function, switch))
+    }
+
+    fn encode(&self, output: &mut impl Extend<u8>) {
+        self.switch.encode(output);
+        self.function.encode(output);
+    }
+}
+
+impl EntityKey for FunctionSwitchKey {
+    const ID: EntityKeyId = ENTITY_KEY_FUNCTION_SWITCH_ID;
+}
+
+#[derive(Debug, Clone, Copy, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct FunctionSwitchRecord;
+
+impl Entity for FunctionSwitchRecord {
+    const ID: EntityId = ENTITY_FUNCTION_SWITCH_INDEX_ID;
+}
+
 pub struct FunctionTable {
     allocator: PersistentIdAllocator<Function>,
     entries: EntityCache<Id<Function>, Function>,
@@ -81,6 +118,9 @@ fn rebuild_indexes(
             writes.insert_entity(&function.entry(), &FunctionEntryRecord { id })?;
             for (_, block) in function.blocks() {
                 writes.insert_entity(&FunctionBlockKey::new(id, block), &FunctionBlockRecord)?;
+            }
+            for (_, switch) in function.switches() {
+                writes.insert_entity(&FunctionSwitchKey::new(id, switch), &FunctionSwitchRecord)?;
             }
             Ok(())
         })?;
@@ -209,6 +249,24 @@ impl FunctionTable {
         functions
     }
 
+    pub(crate) fn get_by_switch_id(&self, switch: SwitchId) -> IdSet<Function> {
+        let mut functions = IdSet::new();
+        for function in self
+            .storage
+            .iter_range::<FunctionSwitchKey, FunctionSwitchRecord>(Bound::Included(
+                &FunctionSwitchKey::new(FunctionId::with_generation(0, 0), switch),
+            ))
+            .unwrap_or_else(|error| error.into_fatal())
+            .map_while(|entry| {
+                let (key, _) = entry.unwrap_or_else(|error| error.into_fatal());
+                (key.switch == switch).then_some(key.function)
+            })
+        {
+            functions.insert(function);
+        }
+        functions
+    }
+
     pub(crate) fn try_iter(
         &self,
     ) -> Result<impl Iterator<Item = Result<Ref<'_>, EntityStorageError>>, EntityStorageError> {
@@ -243,6 +301,8 @@ impl FunctionTable {
         cancelled: &IdSet<Function>,
         by_block: &FxHashMap<CodeBlockId, IdSet<Function>>,
         original_by_block: &FxHashMap<CodeBlockId, IdSet<Function>>,
+        by_switch: &FxHashMap<SwitchId, IdSet<Function>>,
+        original_by_switch: &FxHashMap<SwitchId, IdSet<Function>>,
         writes: &mut EntityWriteBatch,
     ) -> Result<(), EntityStorageError> {
         let mut added = 0usize;
@@ -287,6 +347,28 @@ impl FunctionTable {
                 writes.insert_entity(
                     &FunctionBlockKey::new(function, block),
                     &FunctionBlockRecord,
+                )?;
+            }
+        }
+
+        for (&switch, final_functions) in by_switch {
+            let previous = original_by_switch.get(&switch);
+            for function in previous
+                .into_iter()
+                .flat_map(IdSet::iter)
+                .filter(|function| !final_functions.contains(*function))
+            {
+                writes.remove_entity::<_, FunctionSwitchRecord>(&FunctionSwitchKey::new(
+                    function, switch,
+                ));
+            }
+            for function in final_functions
+                .iter()
+                .filter(|function| previous.is_none_or(|previous| !previous.contains(*function)))
+            {
+                writes.insert_entity(
+                    &FunctionSwitchKey::new(function, switch),
+                    &FunctionSwitchRecord,
                 )?;
             }
         }

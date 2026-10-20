@@ -7,9 +7,10 @@ use crate::il::common::{
     IlArtefact, IlError, IlFormId, IlGenerationContext, IlGenerationError, IlProducer,
     IlTransformer,
 };
+use crate::lifter::Language;
 
 type IlTransformerFactory = fn() -> Box<dyn ErasedIlTransformer>;
-type IlProducerFactory = fn() -> Box<dyn ErasedIlProducer>;
+type IlProducerFactory = fn(&'static Language) -> Box<dyn ErasedIlProducer>;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum IlRecipe {
@@ -26,10 +27,10 @@ impl IlRecipe {
         Self::Producer(new_producer::<T>)
     }
 
-    fn instantiate(self) -> IlRecipeExecutor {
+    fn instantiate(self, language: &'static Language) -> IlRecipeExecutor {
         match self {
             Self::Transformer(factory) => IlRecipeExecutor::Transformer(factory()),
-            Self::Producer(factory) => IlRecipeExecutor::Producer(factory()),
+            Self::Producer(factory) => IlRecipeExecutor::Producer(factory(language)),
         }
     }
 }
@@ -76,8 +77,8 @@ fn new_transformer<T: IlTransformer>() -> Box<dyn ErasedIlTransformer> {
     Box::new(T::default())
 }
 
-fn new_producer<T: IlProducer>() -> Box<dyn ErasedIlProducer> {
-    Box::new(T::default())
+fn new_producer<T: IlProducer>(language: &'static Language) -> Box<dyn ErasedIlProducer> {
+    Box::new(T::new(language))
 }
 
 enum IlRecipeExecutor {
@@ -142,13 +143,13 @@ pub(crate) struct IlGenerationSession {
 }
 
 impl IlGenerationSession {
-    pub(crate) fn new(registry: &IlRegistry) -> Self {
+    pub(crate) fn new(registry: &IlRegistry, language: &'static Language) -> Self {
         let recipes = registry
             .forms()
             .filter_map(|registration| {
                 registration
                     .recipe()
-                    .map(|recipe| (registration.form().clone(), recipe.instantiate()))
+                    .map(|recipe| (registration.form().clone(), recipe.instantiate(language)))
             })
             .collect();
         Self { recipes }

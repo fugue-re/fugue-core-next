@@ -282,7 +282,13 @@ impl Project {
                         continue;
                     };
                     for &index in entry.indices() {
-                        resolved.insert(index, address, entry.symbol(), entry.properties());
+                        resolved.insert_with(
+                            index,
+                            address,
+                            entry.symbol(),
+                            entry.properties(),
+                            entry.size(),
+                        );
                     }
                 }
                 symbols.initialise(resolved)?;

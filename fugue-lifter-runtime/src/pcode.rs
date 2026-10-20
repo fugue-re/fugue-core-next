@@ -1,5 +1,5 @@
 use std::fmt::{self, Debug, Display};
-use std::mem;
+use std::{iter, mem};
 
 use arrayvec::ArrayVec;
 use fugue_sleigh_language::varnode::VarnodeData;
@@ -9,7 +9,7 @@ use crate::calculate_mask;
 use crate::constructor::Constructor;
 use crate::context::{ContextBitRange, ContextDatabase, TrackedSet};
 use crate::format::{InstructionFormatError, InstructionWriter};
-use crate::input::{FixedHandle, ParserInput, ParserInputs, INVALID_HANDLE};
+use crate::input::{FixedHandle, INVALID_HANDLE, ParserInput, ParserInputs};
 use crate::language::{Language, LanguageData, LanguageFormatter};
 use crate::operand::Operands;
 use crate::template::construct_tpl;
@@ -58,7 +58,9 @@ impl LiftingContext {
     ) -> Self {
         Self {
             language,
-            inputs: vec![ParserInput::empty(); ninputs],
+            inputs: iter::repeat_with(ParserInput::empty)
+                .take(ninputs)
+                .collect(),
             lifting_context: PCodeBuilderContext::new(unique_mask),
             parsing_context: context,
         }
@@ -70,15 +72,24 @@ impl LiftingContext {
 
     pub fn reset(&mut self) {
         for input in &mut self.inputs {
-            *input = ParserInput::empty();
+            input.reset();
         }
-        self.lifting_context = PCodeBuilderContext::new(self.lifting_context.unique_mask);
+        self.lifting_context.clear();
         self.parsing_context.clear();
     }
 
     #[inline(always)]
     pub fn data(&self) -> &'static LanguageData {
         self.language.data()
+    }
+
+    pub fn resolve(
+        &mut self,
+        address: u64,
+        bytes: impl AsRef<[u8]>,
+        apply_commits: bool,
+    ) -> Option<usize> {
+        self.language.resolve(address, bytes, self, apply_commits)
     }
 
     #[doc(hidden)]
@@ -282,9 +293,11 @@ impl<'a> LiftingContextState<'a> {
     #[inline]
     pub unsafe fn apply_commits(&mut self, data: &'static LanguageData) {
         unsafe {
-            for commit in mem::take(&mut self.inputs.input.context.commits) {
+            for index in 0..self.inputs.input.context.commits.len() {
+                let commit = self.inputs.input.context.commits[index].clone();
                 commit.action.apply(data, self, &commit);
             }
+            self.inputs.input.context.commits.clear();
         }
     }
 
@@ -402,8 +415,8 @@ impl<'a> LiftingContextState<'a> {
             self.resolve_relatives();
 
             self.context.inputs_count = 0;
+            self.context.labels[..self.context.label_count as usize].fill(INVALID_LABEL);
             self.context.label_count = 0;
-            self.context.labels.fill(INVALID_LABEL);
             self.context.label_refs.clear();
 
             Some(())
@@ -419,32 +432,20 @@ impl<'a> LiftingContextState<'a> {
         unsafe {
             let unique_offset = self.unique_offset;
 
-            let delay_slot_bytes = self.delay_slot_length();
+            let delay_slots = self.inputs.delay_slots().len();
 
-            let mut bytes = 0usize;
-            let mut index = 0usize;
+            if delay_slots == 0 {
+                return None;
+            }
 
-            loop {
-                let length = {
-                    let mut nself = self.nth_delay_slot(index)?;
-                    let length = nself.len();
+            for index in 0..delay_slots {
+                let mut nself = self.nth_delay_slot(index)?;
 
-                    nself.inputs.input.base_state();
+                nself.inputs.input.base_state();
 
-                    if let Some(builder) = nself.inputs.input.constructor().build_action {
-                        construct_tpl(data, builder).build(data, &mut nself)?;
-                    }
-
-                    length
-                };
-
-                bytes += length;
-
-                if bytes >= delay_slot_bytes {
-                    break;
+                if let Some(builder) = nself.inputs.input.constructor().build_action {
+                    construct_tpl(data, builder).build(data, &mut nself)?;
                 }
-
-                index += 1;
             }
 
             self.unique_offset = unique_offset;
@@ -682,6 +683,16 @@ impl PCodeBuilderContext {
     ) {
         issued.push(PCodeOp { op, inputs, output });
     }
+
+    fn clear(&mut self) {
+        self.inputs = Default::default();
+        self.inputs_count = 0;
+        self.inputs_spill.clear();
+        self.label_base = 0;
+        self.labels[..self.label_count as usize].fill(INVALID_LABEL);
+        self.label_count = 0;
+        self.label_refs.clear();
+    }
 }
 
 #[derive(
@@ -748,11 +759,7 @@ impl Varnode {
 
     #[inline]
     pub const fn valid(&self) -> Option<&Varnode> {
-        if self.is_invalid() {
-            None
-        } else {
-            Some(self)
-        }
+        if self.is_invalid() { None } else { Some(self) }
     }
 
     #[inline]
@@ -781,12 +788,20 @@ impl Default for Varnode {
 
 impl<'a> Display for LanguageFormatter<'a, Varnode> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.value.space() == self.language.register_space() {
-            let reg = self
+        if let Some(register) = self.language.containing_register(self.value) {
+            let name = self
                 .language
-                .register_name(self.value)
-                .expect("valid register");
-            return f.write_str(reg);
+                .register_name(&register)
+                .expect("a containing register is named");
+            f.write_str(name)?;
+            let delta = self.value.offset() - register.offset();
+            if delta != 0 {
+                write!(f, "+{delta}")?;
+            }
+            if self.value.size() != register.size() {
+                write!(f, ":{}", self.value.size())?;
+            }
+            return Ok(());
         }
 
         if self.value.space() == self.language.unique_space() {

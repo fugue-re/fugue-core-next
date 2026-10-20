@@ -501,9 +501,14 @@ impl<'a, 'b> ECodeToMCodeLifter<'a, 'b> {
             }
         }
 
-        let source_block = *self.source.graph().blocks().get(block.index()).ok_or(
-            IlError::range_out_of_bounds(block.index(), self.source.graph().blocks().len()),
-        )?;
+        let source_block = *self
+            .source
+            .graph()
+            .blocks()
+            .get(block.index())
+            .ok_or_else(|| {
+                IlError::range_out_of_bounds(block.index(), self.source.graph().blocks().len())
+            })?;
         let start = self.builder.emitter().op_count();
         self.allocate_missing_stack_arg_values(source_block, current)?;
 

@@ -15,7 +15,7 @@ use fugue_sleigh_language::symbol::sub_table::{
 };
 use indexmap::IndexMap;
 
-use crate::context::{ContextPostAction, ContextPostActionHandle, ContextPreAction};
+use crate::context::{ContextAction, ContextPostAction, ContextPostActionHandle, ContextPreAction};
 use crate::dynamic::constructor::Constructor;
 use crate::dynamic::operand::OperandFilter;
 use crate::dynamic::resolve::{DecisionNode, DecisionPair};
@@ -23,6 +23,7 @@ use crate::dynamic::symbol::Symbol;
 use crate::dynamic::template::{ConstructTpl, OpTpl};
 use crate::operand::{Operand, OperandHandleResolver, OperandResolver};
 use crate::pattern::{OperandOffset, PatternExpression, PatternOp};
+use crate::pcode;
 use crate::template::{ConstTpl, HandleKind, HandleTpl, Op, VarnodeTpl};
 
 pub(crate) struct Tables<'a> {
@@ -139,22 +140,27 @@ impl<'a> Tables<'a> {
     }
 
     pub(crate) fn varnode_tpl(&mut self, tpl: &'a SleighVarnodeTpl) -> u16 {
-        let space = self.const_tpl(tpl.space());
-        let offset = self.const_tpl(tpl.offset());
-        let size = self.const_tpl(tpl.size());
-        intern(
-            &mut self.varnode_tpls,
-            tpl,
-            VarnodeTpl {
-                space,
-                offset,
-                size,
+        let value = match (tpl.space(), tpl.offset(), tpl.size()) {
+            (
+                SleighConstTpl::SpaceId(space),
+                SleighConstTpl::Real(offset),
+                SleighConstTpl::Real(size),
+            ) => VarnodeTpl::Fixed {
+                space: space.index() as u8,
+                offset: *offset,
+                size: *size as u16,
             },
-        )
+            (space, offset, size) => VarnodeTpl::Computed {
+                space: self.const_tpl(space),
+                offset: self.const_tpl(offset),
+                size: self.const_tpl(size),
+            },
+        };
+        intern(&mut self.varnode_tpls, tpl, value)
     }
 
     pub(crate) fn op_tpl(&mut self, tpl: &'a SleighOpTpl) -> u16 {
-        let op = tpl.opcode().into();
+        let op = tpl.into();
         let inputs = tpl
             .inputs()
             .iter()
@@ -445,20 +451,14 @@ impl<'a> Tables<'a> {
     pub(crate) fn build_context_actions(
         &mut self,
         ctor: &SleighConstructor,
-    ) -> (Box<[ContextPreAction]>, Box<[ContextPostAction]>) {
-        let mut pre = Vec::new();
-        let mut post = Vec::new();
-        for action in ctor.context().iter() {
-            match action {
-                SleighContext::Operator { .. } => {
-                    pre.push(self.pre_action(action));
-                }
-                SleighContext::Commit { .. } => {
-                    post.push(self.post_action(action));
-                }
-            }
-        }
-        (pre.into_boxed_slice(), post.into_boxed_slice())
+    ) -> Box<[ContextAction]> {
+        ctor.context()
+            .iter()
+            .map(|action| match action {
+                SleighContext::Commit { .. } => ContextAction::Commit(self.post_action(action)),
+                SleighContext::Operator { .. } => ContextAction::Operator(self.pre_action(action)),
+            })
+            .collect()
     }
 
     pub(crate) fn operand_resolvers(
@@ -684,82 +684,88 @@ fn intern<K: Eq + Hash, V>(map: &mut IndexMap<K, V>, key: K, value: V) -> u16 {
     u16::try_from(idx).expect("interned id fits in u16")
 }
 
-impl From<Opcode> for Op {
-    fn from(opcode: Opcode) -> Self {
+impl From<&SleighOpTpl> for Op {
+    fn from(tpl: &SleighOpTpl) -> Self {
         use Opcode as O;
-        match opcode {
-            O::Copy => Op::Copy,
-            O::Load => Op::Load,
-            O::Store => Op::Store,
-            O::Branch => Op::Branch,
-            O::CBranch => Op::CBranch,
-            O::IBranch => Op::IBranch,
-            O::Call => Op::Call,
-            O::ICall => Op::ICall,
-            O::CallOther => Op::CallOther,
-            O::Return => Op::Return,
-            O::IntEq => Op::IntEq,
-            O::IntNotEq => Op::IntNotEq,
-            O::IntSLess => Op::IntSLess,
-            O::IntSLessEq => Op::IntSLessEq,
-            O::IntLess => Op::IntLess,
-            O::IntLessEq => Op::IntLessEq,
-            O::IntZExt => Op::IntZExt,
-            O::IntSExt => Op::IntSExt,
-            O::IntNeg => Op::IntNeg,
-            O::IntNot => Op::IntNot,
-            O::IntAdd => Op::IntAdd,
-            O::IntSub => Op::IntSub,
-            O::IntMul => Op::IntMul,
-            O::IntDiv => Op::IntDiv,
-            O::IntSDiv => Op::IntSDiv,
-            O::IntRem => Op::IntRem,
-            O::IntSRem => Op::IntSRem,
-            O::IntCarry => Op::IntCarry,
-            O::IntSCarry => Op::IntSCarry,
-            O::IntSBorrow => Op::IntSBorrow,
-            O::IntAnd => Op::IntAnd,
-            O::IntOr => Op::IntOr,
-            O::IntXor => Op::IntXor,
-            O::IntLShift => Op::IntLShift,
-            O::IntRShift => Op::IntRShift,
-            O::IntSRShift => Op::IntSRShift,
-            O::BoolNot => Op::BoolNot,
-            O::BoolAnd => Op::BoolAnd,
-            O::BoolOr => Op::BoolOr,
-            O::BoolXor => Op::BoolXor,
-            O::FloatEq => Op::FloatEq,
-            O::FloatNotEq => Op::FloatNotEq,
-            O::FloatLess => Op::FloatLess,
-            O::FloatLessEq => Op::FloatLessEq,
-            O::FloatIsNaN => Op::FloatIsNaN,
-            O::FloatAdd => Op::FloatAdd,
-            O::FloatSub => Op::FloatSub,
-            O::FloatMul => Op::FloatMul,
-            O::FloatDiv => Op::FloatDiv,
-            O::FloatNeg => Op::FloatNeg,
-            O::FloatAbs => Op::FloatAbs,
-            O::FloatSqrt => Op::FloatSqrt,
-            O::FloatOfInt => Op::FloatOfInt,
-            O::FloatOfFloat => Op::FloatOfFloat,
-            O::FloatTruncate => Op::FloatTruncate,
-            O::FloatCeiling => Op::FloatCeiling,
-            O::FloatFloor => Op::FloatFloor,
-            O::FloatRound => Op::FloatRound,
+        let space = || match tpl.inputs()[0].offset() {
+            SleighConstTpl::SpaceId(space) => space.index() as u8,
+            _ => unreachable!("load and store spaces are constant"),
+        };
+        match tpl.opcode() {
+            O::Load => Op::Issue(pcode::Op::Load(space())),
+            O::Store => Op::Issue(pcode::Op::Store(space())),
+            O::CallOther => {
+                let SleighConstTpl::Real(index) = tpl.inputs()[0].offset() else {
+                    unreachable!("user-defined operation indices are constant")
+                };
+                let count = tpl.inputs().len() as u8 - 1;
+                Op::Issue(pcode::Op::UserOp(*index as u16, count))
+            }
+            O::Copy => Op::Issue(pcode::Op::Copy),
+            O::Branch => Op::Issue(pcode::Op::Branch),
+            O::CBranch => Op::Issue(pcode::Op::CBranch),
+            O::IBranch => Op::Issue(pcode::Op::IBranch),
+            O::Call => Op::Issue(pcode::Op::Call),
+            O::ICall => Op::Issue(pcode::Op::ICall),
+            O::Return => Op::Issue(pcode::Op::Return),
+            O::IntEq => Op::Issue(pcode::Op::IntEq),
+            O::IntNotEq => Op::Issue(pcode::Op::IntNotEq),
+            O::IntSLess => Op::Issue(pcode::Op::IntSignedLess),
+            O::IntSLessEq => Op::Issue(pcode::Op::IntSignedLessEq),
+            O::IntLess => Op::Issue(pcode::Op::IntLess),
+            O::IntLessEq => Op::Issue(pcode::Op::IntLessEq),
+            O::IntZExt => Op::Issue(pcode::Op::ZeroExt),
+            O::IntSExt => Op::Issue(pcode::Op::SignExt),
+            O::IntNeg => Op::Issue(pcode::Op::IntNeg),
+            O::IntNot => Op::Issue(pcode::Op::IntNot),
+            O::IntAdd => Op::Issue(pcode::Op::IntAdd),
+            O::IntSub => Op::Issue(pcode::Op::IntSub),
+            O::IntMul => Op::Issue(pcode::Op::IntMul),
+            O::IntDiv => Op::Issue(pcode::Op::IntDiv),
+            O::IntSDiv => Op::Issue(pcode::Op::IntSignedDiv),
+            O::IntRem => Op::Issue(pcode::Op::IntRem),
+            O::IntSRem => Op::Issue(pcode::Op::IntSignedRem),
+            O::IntCarry => Op::Issue(pcode::Op::IntCarry),
+            O::IntSCarry => Op::Issue(pcode::Op::IntSignedCarry),
+            O::IntSBorrow => Op::Issue(pcode::Op::IntSignedBorrow),
+            O::IntAnd => Op::Issue(pcode::Op::IntAnd),
+            O::IntOr => Op::Issue(pcode::Op::IntOr),
+            O::IntXor => Op::Issue(pcode::Op::IntXor),
+            O::IntLShift => Op::Issue(pcode::Op::IntLeftShift),
+            O::IntRShift => Op::Issue(pcode::Op::IntRightShift),
+            O::IntSRShift => Op::Issue(pcode::Op::IntSignedRightShift),
+            O::BoolNot => Op::Issue(pcode::Op::BoolNot),
+            O::BoolAnd => Op::Issue(pcode::Op::BoolAnd),
+            O::BoolOr => Op::Issue(pcode::Op::BoolOr),
+            O::BoolXor => Op::Issue(pcode::Op::BoolXor),
+            O::FloatEq => Op::Issue(pcode::Op::FloatEq),
+            O::FloatNotEq => Op::Issue(pcode::Op::FloatNotEq),
+            O::FloatLess => Op::Issue(pcode::Op::FloatLess),
+            O::FloatLessEq => Op::Issue(pcode::Op::FloatLessEq),
+            O::FloatIsNaN => Op::Issue(pcode::Op::FloatIsNaN),
+            O::FloatAdd => Op::Issue(pcode::Op::FloatAdd),
+            O::FloatSub => Op::Issue(pcode::Op::FloatSub),
+            O::FloatMul => Op::Issue(pcode::Op::FloatMul),
+            O::FloatDiv => Op::Issue(pcode::Op::FloatDiv),
+            O::FloatNeg => Op::Issue(pcode::Op::FloatNeg),
+            O::FloatAbs => Op::Issue(pcode::Op::FloatAbs),
+            O::FloatSqrt => Op::Issue(pcode::Op::FloatSqrt),
+            O::FloatOfInt => Op::Issue(pcode::Op::IntToFloat),
+            O::FloatOfFloat => Op::Issue(pcode::Op::FloatToFloat),
+            O::FloatTruncate => Op::Issue(pcode::Op::FloatToInt),
+            O::FloatCeiling => Op::Issue(pcode::Op::FloatCeiling),
+            O::FloatFloor => Op::Issue(pcode::Op::FloatFloor),
+            O::FloatRound => Op::Issue(pcode::Op::FloatRound),
+            O::Subpiece => Op::Issue(pcode::Op::Subpiece),
+            O::PopCount => Op::Issue(pcode::Op::CountOnes),
+            O::LZCount => Op::Issue(pcode::Op::CountLeadingZeros),
             O::Build => Op::Build,
             O::DelaySlot => Op::DelaySlot,
-            O::Piece => Op::Piece,
-            O::Subpiece => Op::Subpiece,
-            O::Cast => Op::Cast,
             O::Label => Op::Label,
             O::CrossBuild => Op::CrossBuild,
-            O::SegmentOp => Op::SegmentOp,
-            O::CPoolRef => Op::CPoolRef,
-            O::New => Op::New,
-            O::Insert => Op::Insert,
-            O::Extract => Op::Extract,
-            O::PopCount => Op::PopCount,
-            O::LZCount => Op::LZCount,
+            O::Piece | O::Cast | O::SegmentOp | O::CPoolRef | O::New | O::Insert | O::Extract => {
+                unreachable!("opcode is not emitted by the SLEIGH compiler")
+            }
         }
     }
 }

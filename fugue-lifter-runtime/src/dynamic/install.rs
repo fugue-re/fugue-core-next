@@ -1,7 +1,7 @@
 use fugue_sleigh_language::compiler::PrototypeRuleAction;
 use fugue_sleigh_language::float_format::FloatFormat;
 
-use crate::context::{ContextBitRange, ContextPostAction, ContextPreAction};
+use crate::context::{ContextAction, ContextBitRange, ContextPostAction, ContextPreAction};
 use crate::convention::{JoinPiece, PreferredVarnodeSplit, PrototypeReference};
 use crate::operand::Operand;
 use crate::pattern::PatternOp;
@@ -75,6 +75,7 @@ macro_rules! install_identity {
 
 install_identity!(
     ConstTpl,
+    ContextAction,
     ContextBitRange,
     ContextPostAction,
     ContextPreAction,

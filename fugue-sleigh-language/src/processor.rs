@@ -82,7 +82,7 @@ impl ContextSet {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct TrackedSetUpdate {
     register: VarnodeData,
-    value: u32,
+    value: u64,
     description: Option<String>,
 }
 
@@ -105,7 +105,7 @@ impl TrackedSetUpdate {
         &self.register
     }
 
-    pub fn value(&self) -> u32 {
+    pub fn value(&self) -> u64 {
         self.value
     }
 

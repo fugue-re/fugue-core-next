@@ -183,7 +183,9 @@ impl ChangeKinds {
     pub(crate) fn for_problem(kind: ProblemKind) -> Self {
         let recovery = Self::BYTES_WRITTEN | Self::FUNCTIONS | Self::SEGMENTS | Self::SYMBOLS;
         match kind {
-            ProblemKind::AvoidedBytes => Self::BYTES_WRITTEN | Self::SEGMENTS,
+            ProblemKind::AvoidedBytes | ProblemKind::CannotCreateFunctionFromHint => {
+                Self::BYTES_WRITTEN | Self::SEGMENTS
+            }
             ProblemKind::CannotCreateFunction
             | ProblemKind::DecodeFailed
             | ProblemKind::FunctionTooLarge

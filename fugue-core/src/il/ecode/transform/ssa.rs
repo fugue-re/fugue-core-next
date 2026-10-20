@@ -335,15 +335,9 @@ impl<'a> PCodeToECodeSsaLifter<'a> {
             current.define(*domain, *value);
         }
 
-        let source_block =
-            *self
-                .graph
-                .blocks()
-                .get(block.index())
-                .ok_or(IlError::range_out_of_bounds(
-                    block.index(),
-                    self.graph.blocks().len(),
-                ))?;
+        let source_block = *self.graph.blocks().get(block.index()).ok_or_else(|| {
+            IlError::range_out_of_bounds(block.index(), self.graph.blocks().len())
+        })?;
         let start = self.builder.emitter().op_count();
 
         if self.entry_block == Some(block) {

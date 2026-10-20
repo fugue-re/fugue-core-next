@@ -1,4 +1,6 @@
-use object::elf::{R_386_32, R_386_32PLT, R_386_GLOB_DAT, R_386_JMP_SLOT, R_386_RELATIVE};
+use object::elf::{
+    R_386_32, R_386_32PLT, R_386_GLOB_DAT, R_386_IRELATIVE, R_386_JMP_SLOT, R_386_RELATIVE,
+};
 use object::read::elf::FileHeader;
 use object::{ReadRef, Relocation, RelocationKind};
 
@@ -28,7 +30,7 @@ where
         };
 
         match reloc_type {
-            R_386_RELATIVE => {
+            R_386_RELATIVE | R_386_IRELATIVE => {
                 let implicit = if reloc.has_implicit_addend() {
                     bytes.read_value::<u32>(offset).unwrap_or_default()
                 } else {

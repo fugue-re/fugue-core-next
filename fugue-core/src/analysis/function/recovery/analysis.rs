@@ -13,8 +13,8 @@ use crate::analysis::function::recovery::executor::{
     FunctionCandidateBatch, FunctionRecoveryExecutor,
 };
 use crate::analysis::function::recovery::{
-    FunctionBuilderContext, FunctionCommitContext, FunctionCommitPolicy, FunctionRecoveryConfig,
-    FunctionRecoveryError, StructuredFunctionContext,
+    FunctionBuilderContext, FunctionCandidate, FunctionCommitContext, FunctionCommitPolicy,
+    FunctionRecoveryConfig, FunctionRecoveryError, StructuredFunctionContext,
 };
 use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
 use crate::engine::{
@@ -40,22 +40,30 @@ pub(crate) struct FunctionRecoveryContext {
 }
 
 impl FunctionRecoveryContext {
-    fn new(project: &ProjectView<'_>, function_entries: Vec<Address>) -> Self {
-        let mut non_returning_targets = project
-            .functions()
-            .iter()
-            .filter(|function| function.is_non_returning())
-            .map(|function| function.entry())
-            .collect::<Vec<_>>();
-        non_returning_targets.extend(
-            project
-                .symbols()
-                .iter_by_address()
-                .filter(|(_, symbol)| symbol.is_non_returning())
-                .map(|(_, symbol)| symbol.address()),
-        );
-        non_returning_targets.sort_unstable();
-        non_returning_targets.dedup();
+    fn new(
+        config: &FunctionRecoveryConfig,
+        project: &ProjectView<'_>,
+        mut function_entries: Vec<Address>,
+    ) -> Self {
+        let mut non_returning_targets = Vec::new();
+        if config.non_returning_analysis() {
+            non_returning_targets.extend(
+                project
+                    .functions()
+                    .iter()
+                    .filter(|function| function.is_non_returning())
+                    .map(|function| function.entry()),
+            );
+            non_returning_targets.extend(
+                project
+                    .symbols()
+                    .iter_by_address()
+                    .filter(|(_, symbol)| symbol.is_non_returning())
+                    .map(|(_, symbol)| symbol.address()),
+            );
+            non_returning_targets.sort_unstable();
+            non_returning_targets.dedup();
+        }
 
         let excluded_candidates = project
             .problems()
@@ -66,6 +74,7 @@ impl FunctionRecoveryContext {
                     ProblemKind::HinderedByAssertedFact
                         | ProblemKind::AvoidedBytes
                         | ProblemKind::CannotCreateFunction
+                        | ProblemKind::CannotCreateFunctionFromHint
                         | ProblemKind::DecodeFailed
                         | ProblemKind::FunctionTooLarge
                         | ProblemKind::PassFailed
@@ -76,7 +85,18 @@ impl FunctionRecoveryContext {
                     None
                 }
             })
-            .collect();
+            .collect::<FxHashSet<_>>();
+
+        if config.segment_function_hints() {
+            function_entries.extend(
+                project
+                    .segments()
+                    .function_hints()
+                    .filter(|hint| !excluded_candidates.contains(hint)),
+            );
+            function_entries.sort_unstable();
+            function_entries.dedup();
+        }
 
         Self {
             excluded_candidates,
@@ -96,12 +116,18 @@ impl FunctionRecoveryContext {
     pub(crate) fn non_returning_targets(&self) -> &[Address] {
         &self.non_returning_targets
     }
+
+    pub(crate) fn add_non_returning_targets(&mut self, targets: impl IntoIterator<Item = Address>) {
+        self.non_returning_targets.extend(targets);
+        self.non_returning_targets.sort_unstable();
+        self.non_returning_targets.dedup();
+    }
 }
 
 pub struct FunctionRecovery {
     boundaries: Option<FunctionBoundaries>,
     boundary_update_pending: bool,
-    candidates: VecDeque<AddressWithContext>,
+    candidates: VecDeque<FunctionCandidate>,
     builder: FunctionBuilder,
     candidate_discovery_passes: AnalysisGroup<FunctionDiscoveryContext>,
     inter_function_structuring_passes: AnalysisGroup<InterFunctionStructuringContext>,
@@ -110,6 +136,7 @@ pub struct FunctionRecovery {
     project_candidates_added: bool,
     pending_functions: BTreeMap<Address, IncompleteFunction>,
     reanalysis_candidates: FxHashSet<Address>,
+    rejected_function_hints: BTreeSet<Address>,
     discovered_targets: Vec<AddressWithContext>,
     executor: FunctionRecoveryExecutor,
     context: Option<FunctionRecoveryContext>,
@@ -165,7 +192,7 @@ extension::collect!(FunctionRecoveryExtension);
 #[derive(Default)]
 pub struct FunctionDiscoveryContext {
     config: FunctionRecoveryConfig,
-    candidates: VecDeque<AddressWithContext>,
+    candidates: VecDeque<FunctionCandidate>,
     avoids: AddressRangeSet,
     coverage: FunctionCoverage,
     functions: FunctionConfidenceMap,
@@ -175,7 +202,7 @@ pub struct FunctionDiscoveryContext {
 pub struct FunctionDiscoveryRanges<'a, Ranges> {
     ranges: Ranges,
     avoids: &'a AddressRangeSet,
-    candidates: &'a mut VecDeque<AddressWithContext>,
+    candidates: &'a mut VecDeque<FunctionCandidate>,
 }
 
 impl<Ranges> FunctionDiscoveryRanges<'_, Ranges> {
@@ -183,7 +210,7 @@ impl<Ranges> FunctionDiscoveryRanges<'_, Ranges> {
         self.avoids.contains(address.into())
     }
 
-    pub fn add_candidate(&mut self, candidate: impl Into<AddressWithContext>) {
+    pub fn add_candidate(&mut self, candidate: impl Into<FunctionCandidate>) {
         self.candidates.push_back(candidate.into());
     }
 }
@@ -315,7 +342,7 @@ struct FunctionBoundaryChanges {
 pub struct InterFunctionStructuringContext {
     config: FunctionRecoveryConfig,
     avoids: AddressRangeSet,
-    candidates: VecDeque<AddressWithContext>,
+    candidates: VecDeque<FunctionCandidate>,
     functions: FunctionConfidenceMap,
     new_functions: FunctionConfidenceMap,
     pending_functions: BTreeMap<Address, IncompleteFunction>,
@@ -329,7 +356,7 @@ impl FunctionDiscoveryContext {
         &self.config
     }
 
-    pub fn candidates(&self) -> &VecDeque<AddressWithContext> {
+    pub fn candidates(&self) -> &VecDeque<FunctionCandidate> {
         &self.candidates
     }
 
@@ -364,13 +391,13 @@ impl FunctionDiscoveryContext {
         }
     }
 
-    pub fn add_candidate(&mut self, candidate: impl Into<AddressWithContext>) {
+    pub fn add_candidate(&mut self, candidate: impl Into<FunctionCandidate>) {
         self.candidates.push_back(candidate.into());
     }
 
     pub fn add_candidates(
         &mut self,
-        candidates: impl IntoIterator<Item = impl Into<AddressWithContext>>,
+        candidates: impl IntoIterator<Item = impl Into<FunctionCandidate>>,
     ) {
         self.candidates
             .extend(candidates.into_iter().map(|candidate| candidate.into()));
@@ -599,7 +626,7 @@ impl InterFunctionStructuringContext {
         &self.pending_functions
     }
 
-    pub fn add_candidate(&mut self, candidate: impl Into<AddressWithContext>) {
+    pub fn add_candidate(&mut self, candidate: impl Into<FunctionCandidate>) {
         self.candidates.push_back(candidate.into());
     }
 
@@ -675,9 +702,9 @@ impl InterFunctionStructuringContext {
         }
     }
 
-    pub fn reanalyse_function(&mut self, candidate: impl Into<AddressWithContext>) {
+    pub fn reanalyse_function(&mut self, candidate: impl Into<FunctionCandidate>) {
         let candidate = candidate.into();
-        self.remove_function(candidate.address());
+        self.remove_function(candidate.entry().address());
         self.add_candidate(candidate);
     }
 
@@ -714,6 +741,7 @@ impl FunctionRecovery {
             project_candidates_added: false,
             pending_functions: BTreeMap::new(),
             reanalysis_candidates: FxHashSet::default(),
+            rejected_function_hints: BTreeSet::new(),
             discovered_targets: Vec::new(),
             executor: FunctionRecoveryExecutor::new(),
             context: None,
@@ -770,13 +798,23 @@ impl FunctionRecovery {
         self.commit_policy = Some(Box::new(policy));
     }
 
-    pub fn add_candidate(&mut self, candidate: impl Into<AddressWithContext>) {
+    pub fn add_candidate(&mut self, candidate: impl Into<FunctionCandidate>) {
         self.candidates.push_back(candidate.into());
+    }
+
+    pub fn add_reanalysis_candidate(&mut self, candidate: impl Into<FunctionCandidate>) {
+        let candidate = candidate.into();
+        if self
+            .reanalysis_candidates
+            .insert(candidate.entry().address())
+        {
+            self.candidates.push_back(candidate);
+        }
     }
 
     pub fn add_candidates(
         &mut self,
-        candidates: impl IntoIterator<Item = impl Into<AddressWithContext>>,
+        candidates: impl IntoIterator<Item = impl Into<FunctionCandidate>>,
     ) {
         self.candidates
             .extend(candidates.into_iter().map(|candidate| candidate.into()));
@@ -845,7 +883,6 @@ impl FunctionRecovery {
             }
         }
 
-        let arch = project.arch();
         let blocks = project.blocks();
         let functions = project.functions();
         for function in functions.iter() {
@@ -853,14 +890,10 @@ impl FunctionRecovery {
                 .flow_targets(blocks)
                 .filter(|target| target.kind().is_global())
             {
-                let target = target.to();
-                let Some((address, context)) = arch.canonicalise_address(target.raw_address())
-                else {
-                    continue;
-                };
-                let address = Address::new(target.space(), address);
+                let target = target.into_parts().1;
+                let address = target.address();
                 if functions.get_by_address(address).is_none() {
-                    candidates.insert(AddressWithContext::new(address, context));
+                    candidates.insert(target.into());
                 }
             }
         }
@@ -887,6 +920,24 @@ impl FunctionRecovery {
             .filter(|address| regions.contains(*address))
         {
             self.add_candidate(address);
+        }
+
+        let functions = project.functions();
+        let blocks = project.blocks();
+        for branch in context
+            .causes()
+            .iter()
+            .filter(|cause| cause.kind().intersects(ChangeKinds::SWITCHES))
+            .filter_map(|cause| cause.range().map(|range| range.start_address()))
+        {
+            for function in functions.functions_containing(blocks, branch) {
+                if let Some(entry) = functions
+                    .get_by_id(function)
+                    .and_then(|function| function.entry_with_context(blocks))
+                {
+                    self.add_reanalysis_candidate(entry);
+                }
+            }
         }
 
         if self.config().symbol_table_function_hints() {
@@ -995,6 +1046,24 @@ impl FunctionRecovery {
             coverage.flush();
         }
         self.candidates.append(&mut state.candidates);
+
+        if let Some(context) = self.context.as_mut() {
+            let changed = state
+                .changed_functions
+                .iter()
+                .filter_map(|(&entry, properties)| {
+                    properties
+                        .contains(FunctionProperties::NON_RETURNING)
+                        .then_some(entry)
+                });
+            let pending = state
+                .pending_functions
+                .iter()
+                .filter_map(|(&entry, function)| function.is_non_returning().then_some(entry));
+
+            context.add_non_returning_targets(changed.chain(pending));
+        }
+
         for entry in state.removed_functions {
             if state.pending_functions.remove(&entry).is_none() {
                 analysis.updates.remove_function(entry);
@@ -1106,6 +1175,7 @@ impl FunctionRecovery {
             let mut batch = Vec::with_capacity(batch_capacity);
             let mut batch_addresses = FxHashSet::default();
             let mut replacements = BTreeMap::new();
+            let mut rejected_candidates = Vec::new();
             batch_addresses.reserve(batch_capacity);
 
             while batch.len() < batch_capacity {
@@ -1113,28 +1183,25 @@ impl FunctionRecovery {
                     break;
                 };
 
+                let (candidate, confidence) = candidate.into_parts();
                 let original_address = candidate.address();
                 let replacing = self.reanalysis_candidates.contains(&original_address);
 
                 budget.consume_candidate();
                 let at_limit = !self.candidates.is_empty() && budget.is_exhausted();
 
-                let candidate = match resolver_slot.as_mut() {
-                    Some(resolver) => {
-                        let confidence = candidate.confidence();
-                        let (address, context) = candidate.into_parts();
-                        self.builder
-                            .context_mut()
-                            .resolve_insn_after_alignment(&analysis.project, resolver, address)
-                            .map(|address| {
-                                AddressWithContext::new_with(address, context, confidence)
-                            })
-                    }
-                    None => Some(candidate),
-                };
+                let resolver = resolver_slot
+                    .as_mut()
+                    .expect("function recovery resolver must be available");
+                let candidate = self.builder.resolve_insn_after_alignment(
+                    &analysis.project,
+                    resolver,
+                    candidate,
+                );
 
                 let Some(candidate) = candidate else {
                     tracing::trace!("skipping {original_address}: invalid instruction");
+                    rejected_candidates.push(original_address);
                     if replacing {
                         self.reanalysis_candidates.remove(&original_address);
                         analysis.updates.remove_function(original_address);
@@ -1150,6 +1217,7 @@ impl FunctionRecovery {
 
                 if self.builder.avoids().contains(address) {
                     tracing::trace!("skipping {address}: in avoidance set");
+                    rejected_candidates.push(original_address);
                     if replacing {
                         self.reanalysis_candidates.remove(&original_address);
                         analysis.updates.remove_function(original_address);
@@ -1173,11 +1241,14 @@ impl FunctionRecovery {
                     || !batch_addresses.insert(address)
                 {
                     tracing::trace!("skipping {address}: already analysed");
+                    if replacing {
+                        self.reanalysis_candidates.remove(&original_address);
+                    }
                 } else {
                     if replacing {
                         replacements.insert(address, original_address);
                     }
-                    batch.push(candidate);
+                    batch.push(FunctionCandidate::new_with(candidate, confidence));
                 }
 
                 if at_limit {
@@ -1231,6 +1302,7 @@ impl FunctionRecovery {
                         let kind = error.problem_kind();
                         tracing::trace!("failed to analyse {address}: {error}");
                         analysis.updates.add_problem(address, kind);
+                        rejected_candidates.push(address);
                         if let Some(replacement) = replacement {
                             analysis.updates.remove_function(replacement);
                             function_changes = true;
@@ -1290,7 +1362,7 @@ impl FunctionRecovery {
                 batch,
                 |analysis, outcome| {
                     let budget_reached = process_candidate(analysis, outcome, discovered_targets)?;
-                    candidates.extend(discovered_targets.drain(..));
+                    candidates.extend(discovered_targets.drain(..).map(FunctionCandidate::from));
                     Ok(budget_reached)
                 },
             )?;
@@ -1300,6 +1372,23 @@ impl FunctionRecovery {
                     candidates.push_front(candidate);
                 }
                 yield_after_pass = true;
+            }
+
+            let segments = analysis.project.segments();
+            for address in rejected_candidates {
+                if self
+                    .builder
+                    .context_mut()
+                    .mapping_cache_mut()
+                    .view_containing(segments, address)
+                    .is_some_and(|view| view.contains_function_hint(address))
+                {
+                    analysis
+                        .updates
+                        .add_problem(address, ProblemKind::CannotCreateFunctionFromHint);
+                    self.rejected_function_hints.insert(address);
+                    function_changes = true;
+                }
             }
 
             if yield_after_pass || (!self.candidates.is_empty() && budget.is_exhausted()) {
@@ -1320,9 +1409,6 @@ impl FunctionRecovery {
             return Ok(());
         };
         let changes = boundaries.update(project.functions());
-        if changes.added.is_empty() && changes.removed.is_empty() {
-            return Ok(());
-        }
 
         let blocks = project.blocks();
         let functions = project.functions();
@@ -1334,12 +1420,20 @@ impl FunctionRecovery {
                     continue;
                 };
                 if function.entry() != boundary {
-                    callers.insert(function.entry());
+                    callers.insert(function.id());
                 }
             }
         }
 
-        for boundary in changes.removed {
+        let rejected_function_hints = mem::take(&mut self.rejected_function_hints);
+
+        // NOTE: functions that fall through into a removed entry are not re-analysed; only
+        // rejected hints repair fall-through cuts.
+        for boundary in changes
+            .removed
+            .into_iter()
+            .chain(rejected_function_hints.iter().copied())
+        {
             let references = project
                 .references()
                 .references_to(boundary.into(), None)
@@ -1352,17 +1446,32 @@ impl FunctionRecovery {
                     continue;
                 }
                 for function in functions.functions_containing(blocks, reference.from()) {
-                    let Some(function) = functions.get_by_id(function) else {
-                        continue;
-                    };
-                    callers.insert(function.entry());
+                    callers.insert(function);
+                }
+            }
+        }
+
+        for hint in rejected_function_hints {
+            for block in blocks
+                .overlaps_address(hint - 1usize)
+                .filter(|block| block.has_fall_through())
+            {
+                for function in functions.get_by_block_id(block.id()).iter() {
+                    if functions.get_by_id(function).is_some_and(|function| {
+                        function.blocks_at(block.next_address()).next().is_none()
+                    }) {
+                        callers.insert(function);
+                    }
                 }
             }
         }
 
         for caller in callers {
-            if self.reanalysis_candidates.insert(caller) {
-                self.candidates.push_back(caller.into());
+            if let Some(entry) = functions
+                .get_by_id(caller)
+                .and_then(|function| function.entry_with_context(blocks))
+            {
+                self.add_reanalysis_candidate(entry);
             }
         }
 
@@ -1399,6 +1508,7 @@ impl Analyser for FunctionRecovery {
             | ChangeKinds::BYTES_WRITTEN
             | ChangeKinds::FUNCTION_REMOVED
             | ChangeKinds::SYMBOL_CHANGED
+            | ChangeKinds::SWITCHES
     }
 
     fn phase(&self) -> AnalysisPhase {
@@ -1438,6 +1548,7 @@ impl Analyser for FunctionRecovery {
                 .entries()
                 .to_vec();
             self.context = Some(FunctionRecoveryContext::new(
+                self.config(),
                 &context.project,
                 function_entries,
             ));
@@ -1509,6 +1620,12 @@ impl Analyser for FunctionRecovery {
                 if budget.staged_functions != 0 {
                     break 'recovery true;
                 }
+            }
+
+            self.update_function_boundaries(&context.project)?;
+            if !self.candidates.is_empty() {
+                self.context = None;
+                break 'recovery false;
             }
 
             let elapsed = started.elapsed();

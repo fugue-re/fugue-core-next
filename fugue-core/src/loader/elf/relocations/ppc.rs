@@ -1,6 +1,6 @@
 use object::elf::{
-    R_PPC_ADDR16_HA, R_PPC_ADDR16_HI, R_PPC_ADDR16_LO, R_PPC_COPY, R_PPC_GLOB_DAT, R_PPC_JMP_SLOT,
-    R_PPC_REL24, R_PPC_REL32, R_PPC_RELATIVE,
+    R_PPC_ADDR16_HA, R_PPC_ADDR16_HI, R_PPC_ADDR16_LO, R_PPC_COPY, R_PPC_GLOB_DAT, R_PPC_IRELATIVE,
+    R_PPC_JMP_SLOT, R_PPC_REL24, R_PPC_REL32, R_PPC_RELATIVE,
 };
 use object::read::elf::FileHeader;
 use object::{ReadRef, Relocation, RelocationKind};
@@ -115,7 +115,7 @@ where
         };
 
         match reloc_type {
-            R_PPC_RELATIVE => {
+            R_PPC_RELATIVE | R_PPC_IRELATIVE => {
                 let Ok(value) =
                     u32::try_from(self.base.offset().wrapping_add_signed(reloc.addend()))
                 else {

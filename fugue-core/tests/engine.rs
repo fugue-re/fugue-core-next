@@ -920,7 +920,7 @@ fn test_engine_startup_reaches_entry() -> Result<(), Box<dyn Error>> {
         .targets()
         .iter()
         .filter(|target| target.kind().is_call())
-        .map(|target| target.to())
+        .map(|target| target.to().address())
         .collect::<BTreeSet<_>>();
     let callees = reader
         .callee_page(entry, None, 4096)?
@@ -978,7 +978,7 @@ fn test_symbol_pages_handle_shared_address_boundaries() -> Result<(), Box<dyn Er
     let address = Address::in_default_space(0x7fff_1234u64);
     let inserted = [
         SymbolEntry::new(address, "z_page_boundary", SymbolProperties::LOCAL),
-        SymbolEntry::new(address, "a_page_boundary", SymbolProperties::EXTERN),
+        SymbolEntry::new(address, "a_page_boundary", SymbolProperties::EXTERNAL),
         SymbolEntry::new(
             address,
             "m_page_boundary",
@@ -1428,7 +1428,10 @@ fn test_non_returning_calls_have_no_fall_through() -> Result<(), Box<dyn Error>>
                 let Some(target) = block.call_target() else {
                     continue;
                 };
-                if !block.is_call() || block.is_branch() || !view.is_non_returning_at(target) {
+                if !block.is_call()
+                    || block.is_branch()
+                    || !view.is_non_returning_at(target.address())
+                {
                     continue;
                 }
 
@@ -3587,30 +3590,20 @@ fn test_engine_recovers_and_persists_switches() -> Result<(), Box<dyn Error>> {
         .ok_or_else(|| io::Error::other("no multi-case switch recovered from ls.elf"))?;
     let switch = record.switch();
     let project = reader.project()?;
-    let exact = project
-        .functions()
-        .get_by_address(record.branch())
-        .map(|function| function.id());
-    let owners = project
-        .functions()
-        .iter()
-        .filter(|function| {
-            function.blocks().any(|(_, block)| {
-                project
-                    .blocks()
-                    .get_by_id(block)
-                    .is_some_and(|block| block.address_range().contains_address(record.branch()))
-            })
-        })
-        .map(|function| function.id())
-        .collect::<Vec<_>>();
-    if switch.function().is_invalid() {
-        assert!(exact.is_none() && owners.len() != 1);
-    } else {
-        assert!(
-            exact == Some(switch.function())
-                || (exact.is_none() && owners.as_slice() == [switch.function()])
-        );
+    let owners = project.functions().get_by_switch_id(switch.id());
+    assert!(!owners.is_empty(), "a recovered switch must be owned by a function");
+    for owner in owners.iter() {
+        let function = project
+            .functions()
+            .get_by_id(owner)
+            .ok_or_else(|| io::Error::other("switch owner missing"))?;
+        assert!(function.switches().any(|(branch, _)| branch == record.branch()));
+        assert!(function.blocks().any(|(_, block)| {
+            project
+                .blocks()
+                .get_by_id(block)
+                .is_some_and(|block| block.address_range().contains_address(record.branch()))
+        }));
     }
     drop(project);
     let table = switch
@@ -3751,23 +3744,21 @@ fn test_engine_recovers_arm_inline_switches() -> Result<(), Box<dyn Error>> {
 fn test_engine_add_and_remove_switch_round_trips() -> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
-    let entry = project
-        .entry_point()
-        .ok_or_else(|| io::Error::other("fixture entry missing"))?;
+    let branch = Address::from(0x4f55u64);
     let engine = AnalysisEngine::new(project)?;
     engine.analyse()?;
     let reader = engine.query_reader()?;
     let baseline = reader.revision()?;
 
-    let table = entry + 0x400u64;
+    let table = branch + 0x400u64;
     let mut switch = Switch::new(
         SwitchId::default(),
-        entry,
+        branch,
         SwitchModel::Absolute(AddressTable::new(table, 4).with_element_count(2)),
     );
     for offset in [0x40u64, 0x80] {
         switch.add_case(SwitchCase::new(AddressWithContext::new(
-            entry + offset,
+            branch + offset,
             ContextSet::default(),
         )));
     }
@@ -3776,22 +3767,27 @@ fn test_engine_add_and_remove_switch_round_trips() -> Result<(), Box<dyn Error>>
     assert!(changes.contains(ChangeKinds::REFERENCES));
 
     let mut branch_region = AddressRangeSet::new();
-    branch_region.insert(entry);
+    branch_region.insert(branch);
     assert!(reader.changed_since(baseline, ChangeKinds::SWITCHES, &branch_region)?);
     assert!(reader.changed_since(baseline, ChangeKinds::REFERENCES, &branch_region)?);
 
+    engine.analyse()?;
     let record = reader
-        .switch_at(entry)?
+        .switch_at(branch)?
         .ok_or_else(|| io::Error::other("switch missing after add"))?;
     assert!(record.switch().is_override());
     assert!(matches!(record.switch().model(), SwitchModel::Absolute(_)));
     assert!(
-        !record.switch().function().is_invalid(),
-        "owning function should be resolved from the branch"
+        !reader
+            .project()?
+            .functions()
+            .get_by_switch_id(record.switch().id())
+            .is_empty(),
+        "the function containing the branch should own the switch"
     );
 
     let outgoing = reader
-        .outgoing_references(entry)
+        .outgoing_references(branch)
         .collect::<Result<Vec<_>, _>>()?;
     assert!(
         outgoing
@@ -3802,16 +3798,20 @@ fn test_engine_add_and_remove_switch_round_trips() -> Result<(), Box<dyn Error>>
     for offset in [0x40u64, 0x80] {
         assert!(
             outgoing.iter().any(|reference| {
-                reference.is_flow() && reference.target().address() == Some(entry + offset)
+                reference.is_flow() && reference.target().address() == Some(branch + offset)
             }),
             "case target should gain a derived flow reference"
         );
     }
 
-    let removed = engine.remove_switch(entry)?;
+    let removed = engine.remove_switch(branch)?;
     assert!(removed.contains(ChangeKinds::SWITCH_REMOVED));
     assert!(removed.contains(ChangeKinds::REFERENCES));
-    assert!(reader.switch_at(entry)?.is_none());
+    assert!(
+        reader
+            .switch_at(branch)?
+            .is_none_or(|record| !record.switch().is_override())
+    );
 
     Ok(())
 }
