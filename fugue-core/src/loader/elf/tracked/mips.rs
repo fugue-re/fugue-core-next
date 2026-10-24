@@ -36,8 +36,8 @@ where
 
         let mut tracked = TrackedSet::default();
         tracked.insert(TrackedContext::new(register, self.rebase(gp).offset()));
-        self.tracked_sets
-            .insert_range(RawAddress::zero()..=RawAddress::MAX, tracked);
+        self.mapping_hints
+            .insert_tracked_set(RawAddress::zero()..=RawAddress::MAX, tracked);
     }
 
     fn mips_options_gp(&self) -> Option<u64> {

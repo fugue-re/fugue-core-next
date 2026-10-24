@@ -197,11 +197,18 @@ impl AnalysisDataStore {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkTrigger {
+    Change,
+    Dependency,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkCause {
     range: Option<AddressRange>,
     kind: ChangeKinds,
     provenance: ChangeProvenance,
+    trigger: WorkTrigger,
     revision: Revision,
 }
 
@@ -211,12 +218,31 @@ impl WorkCause {
         kind: ChangeKinds,
         revision: Revision,
     ) -> Self {
+        Self::new_with(range, kind, WorkTrigger::Change, revision)
+    }
+
+    pub fn new_with(
+        range: impl Into<Option<AddressRange>>,
+        kind: ChangeKinds,
+        trigger: WorkTrigger,
+        revision: Revision,
+    ) -> Self {
         Self {
             range: range.into(),
             kind,
             provenance: ChangeProvenance::empty(),
+            trigger,
             revision,
         }
+    }
+
+    pub fn with_trigger(mut self, trigger: WorkTrigger) -> Self {
+        self.set_trigger(trigger);
+        self
+    }
+
+    pub fn set_trigger(&mut self, trigger: WorkTrigger) {
+        self.trigger = trigger;
     }
 
     pub fn with_provenance(mut self, provenance: ChangeProvenance) -> Self {
@@ -240,6 +266,10 @@ impl WorkCause {
         &self.provenance
     }
 
+    pub fn trigger(&self) -> WorkTrigger {
+        self.trigger
+    }
+
     pub fn revision(&self) -> Revision {
         self.revision
     }
@@ -256,6 +286,9 @@ impl WorkCause {
         };
         self.kind |= other.kind;
         self.provenance.merge(&other.provenance);
+        if other.trigger == WorkTrigger::Dependency {
+            self.trigger = WorkTrigger::Dependency;
+        }
         if other.revision > self.revision {
             self.revision = other.revision;
         }

@@ -1,6 +1,6 @@
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, BTreeSet};
 use std::ops::RangeInclusive;
 use std::path::Path;
 use std::slice;
@@ -24,10 +24,10 @@ use smallvec::{SmallVec, smallvec};
 use crate::AnalysisData;
 use crate::arch::Arch;
 use crate::ir::{
-    Endian, RawAddress, RawAddressMap, RawAddressRangeSet, Symbol, SymbolIndex, SymbolProperties,
+    Endian, RawAddress, RawAddressRangeSet, Symbol, SymbolIndex, SymbolProperties,
     SymbolTableSelector, TransientSymbolTable,
 };
-use crate::lifter::{ContextHint, TrackedSet};
+use crate::lifter::ContextHint;
 use crate::loader::image::ImagePlacedRegion;
 use crate::loader::pe::extensions::ImageContext;
 use crate::loader::pe::read::permissive;
@@ -39,7 +39,7 @@ use crate::loader::{
 };
 use crate::platform::{Format, OperatingSystem, Platform};
 use crate::storage::segments::SegmentProperties;
-use crate::storage::segments::mapping::SegmentMappingProvenance;
+use crate::storage::segments::mapping::{SegmentMappingHints, SegmentMappingProvenance};
 use crate::types::attributes::{ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE};
 use crate::types::{AttributeMap, BytesOrMapping};
 
@@ -242,7 +242,7 @@ impl<'a> Pe<'a> {
         &self.object.borrow_loaded().view
     }
 
-    pub fn mapping_hints(&self) -> &BTreeMap<RawAddress, ContextHint> {
+    pub fn mapping_hints(&self) -> &SegmentMappingHints {
         &self.object.borrow_loaded().state.mapping_hints
     }
 
@@ -286,9 +286,7 @@ struct PeLoadState {
     preferred_base: RawAddress,
     entry: Option<ImageAddress>,
     layout: ImageLayout,
-    mapping_hints: BTreeMap<RawAddress, ContextHint>,
-    function_hints: BTreeSet<RawAddress>,
-    tracked_sets: RawAddressMap<TrackedSet>,
+    mapping_hints: SegmentMappingHints,
     symbols: TransientSymbolTable<ImageAddress>,
     external_thunks: ExternalThunkLayout,
     import_slots: BTreeMap<RawAddress, RawAddress>,
@@ -339,19 +337,6 @@ impl PeLoadState {
         let context = ImageContext::new(view, base, preferred_base, entry, attributes);
         let architecture = context.resolve_architecture()?;
 
-        let mut tracked_sets = RawAddressMap::new();
-        with_pe!(
-            view,
-            pe | PeTrackedSetResolver::new(
-                view,
-                pe,
-                &architecture,
-                base - preferred_base,
-                &mut tracked_sets,
-            )
-            .apply()
-        )?;
-
         let symbols = with_pe!(
             view,
             pe | PeSymbolLayout::from_pe(pe, &architecture, base, preferred_base, config)
@@ -365,25 +350,29 @@ impl PeLoadState {
             import_slots,
         } = symbols;
 
-        let mut function_hints = BTreeSet::new();
         with_pe!(
             view,
-            pe | PeExceptionResolver::new(
+            pe | PeTrackedSetResolver::new(
                 view,
                 pe,
                 &architecture,
-                base,
-                config,
-                &mut function_hints,
+                base - preferred_base,
                 &mut mapping_hints,
             )
             .apply()
         )?;
 
+        with_pe!(
+            view,
+            pe | PeExceptionResolver::new(view, pe, &architecture, base, &mut mapping_hints)
+                .apply()
+        )?;
+
         let image_entry = entry
             .map(|entry| match architecture.canonicalise_address(entry) {
                 Some((canonical, context)) if canonical != entry => {
-                    mapping_hints.insert(canonical, ContextHint::code().with_context(context));
+                    mapping_hints
+                        .insert_context_hint(canonical, ContextHint::code().with_context(context));
                     canonical
                 }
                 _ => entry,
@@ -471,8 +460,6 @@ impl PeLoadState {
             entry: image_entry,
             layout,
             mapping_hints,
-            function_hints,
-            tracked_sets,
             symbols: image_symbols,
             external_thunks,
             import_slots,
@@ -497,7 +484,7 @@ struct RawPeSymbol {
 
 struct PeSymbolLayout {
     bounds: RangeInclusive<RawAddress>,
-    mapping_hints: BTreeMap<RawAddress, ContextHint>,
+    mapping_hints: SegmentMappingHints,
     symbols: BTreeMap<SymbolIndex, RawPeSymbol>,
     external_thunks: ExternalThunkLayout,
     import_slots: BTreeMap<RawAddress, RawAddress>,
@@ -560,7 +547,7 @@ impl PeSymbolLayout {
         let mut import_slots = BTreeMap::new();
         let mut external_addresses = BTreeMap::<Symbol, RawAddress>::new();
 
-        let mut mapping_hints = BTreeMap::new();
+        let mut mapping_hints = SegmentMappingHints::default();
 
         let exports = (|| -> Result<(), LoaderError> {
             let Some(export_table) = permissive::read_exports(pe, config)? else {
@@ -589,7 +576,10 @@ impl PeSymbolLayout {
                     Some((canonical, context))
                         if properties.is_function() && canonical != address =>
                     {
-                        mapping_hints.insert(canonical, ContextHint::code().with_context(context));
+                        mapping_hints.insert_context_hint(
+                            canonical,
+                            ContextHint::code().with_context(context),
+                        );
                         canonical
                     }
                     _ => address,
@@ -687,6 +677,7 @@ impl PeSymbolLayout {
                         .ok_or_else(|| LoaderError::address_overflow(base))?;
 
                     import_slots.insert(slot, external_address);
+                    mapping_hints.insert_symbol_pointer(slot);
 
                     import_index += 1;
                     thunk_index = thunk_index
@@ -751,7 +742,8 @@ impl PeSymbolLayout {
 
             let address = match arch.canonicalise_address(address) {
                 Some((canonical, context)) if properties.is_function() && canonical != address => {
-                    mapping_hints.insert(canonical, ContextHint::code().with_context(context));
+                    mapping_hints
+                        .insert_context_hint(canonical, ContextHint::code().with_context(context));
                     canonical
                 }
                 _ => address,
@@ -1402,25 +1394,19 @@ where
 struct PeImageSegments<'a> {
     segments: slice::Iter<'a, PeImageSegment>,
     image_symbols: &'a TransientSymbolTable<ImageAddress>,
-    mapping_hints: &'a BTreeMap<RawAddress, ContextHint>,
-    function_hints: &'a BTreeSet<RawAddress>,
-    tracked_sets: &'a RawAddressMap<TrackedSet>,
+    mapping_hints: &'a SegmentMappingHints,
 }
 
 impl<'a> PeImageSegments<'a> {
     fn new(
         segments: &'a [PeImageSegment],
         image_symbols: &'a TransientSymbolTable<ImageAddress>,
-        mapping_hints: &'a BTreeMap<RawAddress, ContextHint>,
-        function_hints: &'a BTreeSet<RawAddress>,
-        tracked_sets: &'a RawAddressMap<TrackedSet>,
+        mapping_hints: &'a SegmentMappingHints,
     ) -> Self {
         Self {
             segments: segments.iter(),
             image_symbols,
             mapping_hints,
-            function_hints,
-            tracked_sets,
         }
     }
 
@@ -1428,16 +1414,11 @@ impl<'a> PeImageSegments<'a> {
         let seg_start = segment.address.offset();
         let seg_last = seg_start.checked_add(segment.size.saturating_sub(1));
 
-        let (mapping_hints, function_hints) = seg_last
+        let mapping_hints = seg_last
             .map(|seg_last| {
-                let mapping_hints = self
-                    .mapping_hints
-                    .range(seg_start..=seg_last)
-                    .map(|(addr, hint)| (*addr, hint.clone()))
-                    .collect::<BTreeMap<RawAddress, ContextHint>>();
-
+                let mut mapping_hints = self.mapping_hints.clamp(seg_start..=seg_last);
                 let space = segment.address.space();
-                let function_hints = self
+                for (_, entry) in self
                     .image_symbols
                     .range_by_address(
                         ImageAddress::new(space, seg_start)..=ImageAddress::new(space, seg_last),
@@ -1447,11 +1428,10 @@ impl<'a> PeImageSegments<'a> {
                             .properties()
                             .contains(SymbolProperties::FUNCTION | SymbolProperties::EXTERNAL)
                     })
-                    .map(|(_, entry)| entry.address().offset())
-                    .chain(self.function_hints.range(seg_start..=seg_last).copied())
-                    .collect::<BTreeSet<RawAddress>>();
-
-                (mapping_hints, function_hints)
+                {
+                    mapping_hints.insert_function(entry.address().offset());
+                }
+                mapping_hints
             })
             .unwrap_or_default();
 
@@ -1464,8 +1444,6 @@ impl<'a> PeImageSegments<'a> {
         .with_backing(ImageBacking::new(segment.bank, segment.backing_offset))
         .with_provenance(segment.provenance)
         .with_mapping_hints(mapping_hints)
-        .with_function_hints(function_hints)
-        .with_tracked_sets(self.tracked_sets.clone())
     }
 }
 
@@ -1553,8 +1531,6 @@ impl Loadable for Pe<'_> {
             &state.segments,
             &state.symbols,
             &state.mapping_hints,
-            &state.function_hints,
-            &state.tracked_sets,
         )) as ImageSegmentIterator<'b>
     }
 
@@ -2032,7 +2008,12 @@ mod test {
             let mut hints = Vec::new();
             let mut segments = pe.image_segments();
             while let Some(segment) = segments.next()? {
-                hints.extend(segment.function_hints().iter().map(|hint| hint.offset()));
+                hints.extend(
+                    segment
+                        .mapping_hints()
+                        .functions()
+                        .map(|hint| hint.offset()),
+                );
             }
             assert_eq!(hints, expected, "{path}");
         }

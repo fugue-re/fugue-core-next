@@ -179,6 +179,19 @@ impl LiftingContext {
             .set_context_change_point(address, num, mask, value);
     }
 
+    pub fn set_context_from_flow(&mut self, source: u64, target: u64) {
+        let source_point = self.parsing_context.get_context_change_point(source);
+        let target_point = self.parsing_context.get_context_change_point(target);
+        for (num, flow_mask) in self.language.context_vars_flow_mask.iter().enumerate() {
+            let mask = flow_mask & !target_point.change_mask()[num];
+            let value = source_point.values()[num] & mask;
+            if target_point.values()[num] & mask != value {
+                self.parsing_context
+                    .set_context_change_point(target, num, mask, value);
+            }
+        }
+    }
+
     pub fn set_context_region(
         &mut self,
         addr1: u64,

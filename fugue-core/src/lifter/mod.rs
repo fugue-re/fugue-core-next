@@ -257,11 +257,30 @@ impl ContextSet {
 
     #[inline]
     pub fn apply(&self, address: Address, context: &mut LiftingContext) {
+        self.apply_with(address, context, false);
+    }
+
+    #[inline]
+    pub fn apply_with(
+        &self,
+        address: Address,
+        context: &mut LiftingContext,
+        force_change_point: bool,
+    ) {
         for update in self.iter() {
             let bits = update.bits();
             let value = update.value();
             tracing::trace!("setting context bits {bits:?} to {value} at {address}");
-            context.set_variable_by_bits(&bits, address.offset(), value);
+            if force_change_point {
+                context.set_context_change_point(
+                    address.offset(),
+                    bits.word(),
+                    bits.mask().checked_shl(bits.shift()).unwrap_or(0),
+                    (value & bits.mask()).checked_shl(bits.shift()).unwrap_or(0),
+                );
+            } else {
+                context.set_variable_by_bits(bits, address.offset(), value);
+            }
         }
     }
 

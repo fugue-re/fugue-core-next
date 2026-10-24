@@ -26,12 +26,12 @@ where
             let address = match self.arch.canonicalise_address(address) {
                 Some((canonical, context)) if canonical != address => {
                     self.mapping_hints
-                        .insert(canonical, ContextHint::code().with_context(context));
+                        .insert_context_hint(canonical, ContextHint::code().with_context(context));
                     canonical
                 }
                 _ => address,
             };
-            self.function_hints.insert(address);
+            self.mapping_hints.insert_function(address);
         }
         Ok(())
     }

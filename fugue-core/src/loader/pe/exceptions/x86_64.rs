@@ -22,8 +22,9 @@ where
                 continue;
             }
 
-            self.function_hints
-                .extend(self.rebase(entry.begin_address.get(LE)));
+            if let Some(address) = self.rebase(entry.begin_address.get(LE)) {
+                self.mapping_hints.insert_function(address);
+            }
         }
         Ok(())
     }

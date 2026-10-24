@@ -1451,6 +1451,37 @@ fn test_non_returning_calls_have_no_fall_through() -> Result<(), Box<dyn Error>>
 }
 
 #[test]
+fn test_writable_thunk_pointers() -> Result<(), Box<dyn Error>> {
+    let loader = Loader::from_file("tests/thunk-hooks.so")?;
+    let mut project = Project::new_transient(&loader)?;
+    project
+        .attributes_mut()
+        .set_attr(TEST_NON_RETURNING_RECOVERY_ATTR, true);
+    let project = analyse_project(project)?;
+
+    let call_hook = project
+        .symbols()
+        .iter()
+        .find_map(|(_, symbol)| (symbol.symbol() == "call_hook").then(|| symbol.address()))
+        .expect("fixture must define call_hook");
+    let function = project
+        .functions()
+        .get_by_address(call_hook)
+        .expect("call_hook must be recovered");
+
+    assert!(!function.is_thunk());
+    assert!(!function.is_non_returning());
+    assert!(
+        project
+            .functions()
+            .iter()
+            .any(|function| function.is_thunk() && function.is_non_returning())
+    );
+
+    Ok(())
+}
+
+#[test]
 fn test_query_reader_reports_stopped_after_engine_drop() -> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
@@ -1578,7 +1609,7 @@ fn test_engine_startup_uses_segment_function_hints() -> Result<(), Box<dyn Error
         ) -> impl FallibleIterator<Item = ImageSegmentContents<'a>, Error = LoaderError> + 'a
         {
             let mut contents = ImageSegmentContents::new(0x1000u64, Endian::Little, vec![0xc3u8]);
-            contents.add_function_hint(0x1000u64);
+            contents.mapping_hints_mut().insert_function(0x1000u64);
 
             Box::new(convert(iter::once(Ok(contents)))) as ImageSegmentContentsIterator<'a>
         }
@@ -3591,13 +3622,20 @@ fn test_engine_recovers_and_persists_switches() -> Result<(), Box<dyn Error>> {
     let switch = record.switch();
     let project = reader.project()?;
     let owners = project.functions().get_by_switch_id(switch.id());
-    assert!(!owners.is_empty(), "a recovered switch must be owned by a function");
+    assert!(
+        !owners.is_empty(),
+        "a recovered switch must be owned by a function"
+    );
     for owner in owners.iter() {
         let function = project
             .functions()
             .get_by_id(owner)
             .ok_or_else(|| io::Error::other("switch owner missing"))?;
-        assert!(function.switches().any(|(branch, _)| branch == record.branch()));
+        assert!(
+            function
+                .switches()
+                .any(|(branch, _)| branch == record.branch())
+        );
         assert!(function.blocks().any(|(_, block)| {
             project
                 .blocks()

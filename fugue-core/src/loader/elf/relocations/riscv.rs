@@ -242,6 +242,8 @@ where
                 let value = symbol.wrapping_add_signed(reloc.addend());
 
                 if reloc_type == R_RISCV_JUMP_SLOT {
+                    let slot = bytes.address() + offset;
+                    bytes.mapping_hints_mut().insert_symbol_pointer(slot);
                     self.mark_function_symbol(value, bytes);
                 } else {
                     self.mark_data_symbol(reloc, is_dynamic, bytes);

@@ -69,8 +69,9 @@ where
         };
 
         let entry_size = if self.elf.is_64() { 8 } else { 4 };
+        let dynamic_symbols = self.elf.elf_dynamic_symbol_table().symbols();
 
-        for index in gotsym..symtabno {
+        for index in gotsym..symtabno.min(dynamic_symbols.len() as u64) {
             let Some(slot) = (index - gotsym)
                 .checked_add(local_gotno)
                 .and_then(|entry| entry.checked_mul(entry_size))
@@ -92,10 +93,7 @@ where
                 continue;
             };
 
-            let is_compressed = self
-                .elf
-                .elf_dynamic_symbol_table()
-                .symbols()
+            let is_compressed = dynamic_symbols
                 .get(index as usize)
                 .is_some_and(|symbol| mips::is_compressed(symbol.st_other()));
             let value = entry.address().raw_offset() | u64::from(is_compressed);
@@ -103,12 +101,15 @@ where
             if entry.is_function() {
                 self.mark_function_symbol(value, bytes);
             } else if entry.is_data() {
-                bytes.add_mapping_hint(value, ContextHint::data());
+                bytes
+                    .mapping_hints_mut()
+                    .insert_context_hint(value, ContextHint::data());
             }
 
             tracing::trace!("binding MIPS global GOT slot {slot:#x} to {value:#x}");
 
             let offset = slot - origin.start();
+            bytes.mapping_hints_mut().insert_symbol_pointer(slot);
 
             if self.elf.is_64() {
                 bytes.write_value(offset, value);
@@ -280,6 +281,8 @@ where
                     return;
                 }
 
+                let slot = bytes.address() + offset;
+                bytes.mapping_hints_mut().insert_symbol_pointer(slot);
                 self.mark_data_symbol(reloc, is_dynamic, bytes);
 
                 tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");
@@ -293,6 +296,8 @@ where
                 };
                 let value = symbol | self.mips_isa_bit(reloc, is_dynamic);
 
+                let slot = bytes.address() + offset;
+                bytes.mapping_hints_mut().insert_symbol_pointer(slot);
                 self.mark_function_symbol(value, bytes);
 
                 if value > u32::MAX as u64 {

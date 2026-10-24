@@ -252,16 +252,15 @@ impl FunctionRecoveryLinearSweep {
         bytes: &[u8],
     ) -> LinearSweepProperties {
         if self.use_mapping_hints
-            && let Some(hint) = view
-                .mapping_hints()
-                .range(..=address)
-                .next_back()
-                .map(|(_, hint)| hint)
+            && let Some(hint) = view.mapping_hints().context_hint_at(address)
         {
             if hint.is_data() {
                 let size = view
                     .mapping_hints()
-                    .range((Bound::Excluded(address), Bound::Unbounded))
+                    .context_hints_in_range((
+                        Bound::Excluded(address.raw_address()),
+                        Bound::Unbounded,
+                    ))
                     .map(|(hint_address, _)| hint_address)
                     .next()
                     .map_or_else(
@@ -274,7 +273,7 @@ impl FunctionRecoveryLinearSweep {
                         |boundary| {
                             usize::try_from(
                                 boundary
-                                    .checked_offset_from(address)
+                                    .checked_offset_from(address.raw_address())
                                     .expect("mapping hint follows the current address"),
                             )
                             .unwrap_or(usize::MAX)
@@ -589,10 +588,9 @@ impl FunctionRecoveryLinearSweep {
             return None;
         }
         if self.use_mapping_hints
-            && let Some((_, hint)) = candidate_view
+            && let Some(hint) = candidate_view
                 .mapping_hints()
-                .range(..=candidate_address)
-                .next_back()
+                .context_hint_at(candidate_address)
         {
             if hint.is_data() {
                 return None;
@@ -609,7 +607,7 @@ impl FunctionRecoveryLinearSweep {
         )?;
         let address = Address::new(candidate_address.space(), canonical);
         context.merge(&derived);
-        self.validation.apply_context(address, &context);
+        context.apply_with(address, self.validation.resolver.context_mut(), true);
 
         let view = if address == candidate_address {
             candidate_view
@@ -631,7 +629,7 @@ impl FunctionRecoveryLinearSweep {
 
         let mut mapping_hints = view
             .mapping_hints()
-            .range((Bound::Excluded(address), Bound::Unbounded))
+            .context_hints_in_range((Bound::Excluded(address.raw_address()), Bound::Unbounded))
             .peekable();
 
         let mut offset = 0usize;
@@ -643,7 +641,7 @@ impl FunctionRecoveryLinearSweep {
 
             if self.use_mapping_hints
                 && let Some((hint_address, hint)) = mapping_hints.peek().copied()
-                && hint_address == insn_address
+                && hint_address == insn_address.raw_address()
             {
                 if hint.is_data() {
                     break;
@@ -674,7 +672,7 @@ impl FunctionRecoveryLinearSweep {
 
             if self.use_mapping_hints
                 && mapping_hints.peek().is_some_and(|(hint_address, hint)| {
-                    hint.is_data() && *hint_address < insn.next_address()
+                    hint.is_data() && *hint_address < insn.next_address().raw_address()
                 })
             {
                 break;

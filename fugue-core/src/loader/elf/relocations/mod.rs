@@ -315,10 +315,11 @@ where
 
         match self.arch.canonicalise_address(value) {
             Some((entry, ctxset)) if entry != value => {
-                bytes.add_function_hint(entry);
-                bytes.add_mapping_hint(entry, ContextHint::code().with_context(ctxset));
+                let mapping_hints = bytes.mapping_hints_mut();
+                mapping_hints.insert_function(entry);
+                mapping_hints.insert_context_hint(entry, ContextHint::code().with_context(ctxset));
             }
-            _ => bytes.add_function_hint(value),
+            _ => bytes.mapping_hints_mut().insert_function(value),
         }
     }
 
@@ -340,6 +341,8 @@ where
 
         tracing::trace!("marking symbol {address} as data");
 
-        bytes.add_mapping_hint(address, ContextHint::data());
+        bytes
+            .mapping_hints_mut()
+            .insert_context_hint(address, ContextHint::data());
     }
 }

@@ -19,7 +19,7 @@ use crate::analysis::function::recovery::{
 use crate::analysis::{AnalysisError, AnalysisGroup, AnalysisPass};
 use crate::engine::{
     Analyser, AnalyserProvider, AnalysisContext, AnalysisEngineConfig, Priority, ProjectUpdates,
-    ProjectView,
+    ProjectView, WorkTrigger,
 };
 use crate::extension::{self, Registration};
 use crate::ir::{
@@ -911,6 +911,7 @@ impl FunctionRecovery {
         for address in context
             .causes()
             .iter()
+            .filter(|cause| cause.trigger() == WorkTrigger::Change)
             .filter(|cause| {
                 cause
                     .kind()
@@ -1381,7 +1382,7 @@ impl FunctionRecovery {
                     .context_mut()
                     .mapping_cache_mut()
                     .view_containing(segments, address)
-                    .is_some_and(|view| view.contains_function_hint(address))
+                    .is_some_and(|view| view.mapping_hints().contains_function(address))
                 {
                     analysis
                         .updates

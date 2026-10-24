@@ -42,8 +42,8 @@ where
             else {
                 continue;
             };
-            self.tracked_sets
-                .insert_range(start..=last, tracked.clone());
+            self.mapping_hints
+                .insert_tracked_set(start..=last, tracked.clone());
         }
     }
 }

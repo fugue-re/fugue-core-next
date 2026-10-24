@@ -233,9 +233,9 @@ impl FromStr for Lifter {
     type Err = LifterBuilderError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        resolve_language(s)
-            .map(Lifter::new)
-            .map_err(|_| LifterBuilderError::Unsupported)
+        let language = resolve_language(s).map_err(|_| LifterBuilderError::Unsupported)?;
+        let arch = Arch::try_new(language).map_err(|_| LifterBuilderError::Unsupported)?;
+        Ok(Self::from(arch))
     }
 }
 

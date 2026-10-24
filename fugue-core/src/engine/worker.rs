@@ -22,7 +22,7 @@ use crate::engine::view::DependencyIndex;
 use crate::engine::{
     AnalyserProvider, AnalysisContext, AnalysisData, AnalysisDataStore, AnalysisEngineConfig,
     EngineError, EngineMetrics, MAX_COMPLETION_ROUNDS, ProjectView, RETRACTED_BY_BYTE_CHANGE,
-    WORK_BATCH_ITEMS, WorkCause,
+    WORK_BATCH_ITEMS, WorkCause, WorkTrigger,
 };
 use crate::extension;
 use crate::il::common::{IlError, IlFormId, IlGenerationContext, IlSubject};
@@ -357,6 +357,7 @@ impl Worker {
                 id,
                 reanalysis.regions(),
                 ChangeKinds::empty(),
+                WorkTrigger::Change,
                 revision,
                 &provenance,
             );
@@ -649,11 +650,25 @@ impl Worker {
 
             if invalidated.has_addressless() {
                 self.metrics.record_dependency_reschedule();
-                self.schedule_analyser(id, &AddressRangeSet::new(), kind, revision, provenance);
+                self.schedule_analyser(
+                    id,
+                    &AddressRangeSet::new(),
+                    kind,
+                    WorkTrigger::Dependency,
+                    revision,
+                    provenance,
+                );
             }
             if !invalidated.regions().is_empty() {
                 self.metrics.record_dependency_reschedule();
-                self.schedule_analyser(id, invalidated.regions(), kind, revision, provenance);
+                self.schedule_analyser(
+                    id,
+                    invalidated.regions(),
+                    kind,
+                    WorkTrigger::Dependency,
+                    revision,
+                    provenance,
+                );
             }
         }
     }
@@ -672,7 +687,7 @@ impl Worker {
             if self_produced || !state.triggers().intersects(kind) {
                 continue;
             }
-            self.schedule_analyser(id, regions, kind, revision, provenance);
+            self.schedule_analyser(id, regions, kind, WorkTrigger::Change, revision, provenance);
         }
     }
 
@@ -718,7 +733,14 @@ impl Worker {
 
         let provenance = ChangeProvenance::of(ChangeSource::engine("generated IL"));
         for id in analysers {
-            self.schedule_analyser(id, &regions, ChangeKinds::empty(), revision, &provenance);
+            self.schedule_analyser(
+                id,
+                &regions,
+                ChangeKinds::empty(),
+                WorkTrigger::Change,
+                revision,
+                &provenance,
+            );
         }
     }
 
@@ -762,6 +784,7 @@ impl Worker {
                 id,
                 &regions,
                 ChangeKinds::SEGMENT_MAPPED,
+                WorkTrigger::Change,
                 revision,
                 &provenance,
             );
@@ -780,6 +803,7 @@ impl Worker {
         id: AnalyserId,
         regions: &AddressRangeSet,
         kind: ChangeKinds,
+        trigger: WorkTrigger,
         revision: Revision,
         provenance: &ChangeProvenance,
     ) {
@@ -790,7 +814,10 @@ impl Worker {
             state.phase(),
             state.priority(),
             regions,
-            |range| WorkCause::new(range, kind, revision).with_provenance(provenance.clone()),
+            |range| {
+                WorkCause::new_with(range, kind, trigger, revision)
+                    .with_provenance(provenance.clone())
+            },
         );
         self.defer_degradations(degradations);
     }

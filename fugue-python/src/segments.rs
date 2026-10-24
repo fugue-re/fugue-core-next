@@ -88,17 +88,17 @@ pub(crate) fn loadable_segments_from_loader(
 
         let mapping_hints = segment
             .mapping_hints()
-            .iter()
+            .context_hints_in_range(..)
             .map(|(hint_offset, hint)| MappingHint {
-                address: Address::from_core(CoreAddress::new(address.space(), *hint_offset)),
+                address: Address::from_core(CoreAddress::new(address.space(), hint_offset)),
                 hint: convert_context_hint(hint),
             })
             .collect();
 
         let function_hints = segment
-            .function_hints()
-            .iter()
-            .map(|hint_offset| Address::from_core(CoreAddress::new(address.space(), *hint_offset)))
+            .mapping_hints()
+            .functions()
+            .map(|hint_offset| Address::from_core(CoreAddress::new(address.space(), hint_offset)))
             .collect();
 
         segments.push(LoadableSegment {

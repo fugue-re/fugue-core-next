@@ -2,11 +2,11 @@ use object::read::elf::{Dyn, ElfFile, FileHeader, ProgramHeader, SectionHeader};
 use object::{Architecture, Object, ReadRef};
 
 use crate::arch::Arch;
-use crate::ir::{RawAddress, RawAddressMap};
-use crate::lifter::TrackedSet;
+use crate::ir::RawAddress;
 use crate::loader::LoaderError;
 use crate::loader::elf::ElfFileRepr;
 use crate::loader::elf::extensions::TrackedSetContext;
+use crate::storage::segments::mapping::SegmentMappingHints;
 
 mod mips;
 mod mips64;
@@ -22,7 +22,7 @@ where
     elf: &'file ElfFile<'data, Elf, R>,
     arch: &'file Arch,
     base: RawAddress,
-    tracked_sets: &'file mut RawAddressMap<TrackedSet>,
+    mapping_hints: &'file mut SegmentMappingHints,
 }
 
 impl<'data, 'file, 'image, Elf, R> ElfTrackedSetResolver<'data, 'file, 'image, Elf, R>
@@ -36,20 +36,20 @@ where
         elf: &'file ElfFile<'data, Elf, R>,
         arch: &'file Arch,
         base: RawAddress,
-        tracked_sets: &'file mut RawAddressMap<TrackedSet>,
+        mapping_hints: &'file mut SegmentMappingHints,
     ) -> Self {
         Self {
             view,
             elf,
             arch,
             base,
-            tracked_sets,
+            mapping_hints,
         }
     }
 
     pub(crate) fn apply(&mut self) -> Result<(), LoaderError> {
         let mut context =
-            TrackedSetContext::new(self.view, self.arch, self.base, self.tracked_sets);
+            TrackedSetContext::new(self.view, self.arch, self.base, self.mapping_hints);
 
         if context.apply_tracked_sets()? {
             return Ok(());

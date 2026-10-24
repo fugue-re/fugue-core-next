@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, btree_map};
+use std::collections::{BTreeMap, btree_map};
 use std::ops::{Add, RangeInclusive};
 use std::{fmt, mem};
 
@@ -8,10 +8,9 @@ use fallible_iterator::FallibleIterator;
 use fugue_bytes::{BE, ByteCast, LE};
 use smallvec::{SmallVec, smallvec};
 
-use crate::ir::{Address, Endian, RawAddress, RawAddressMap, RawAddressRangeSet};
-use crate::lifter::{ContextHint, TrackedSet};
+use crate::ir::{Address, Endian, RawAddress, RawAddressRangeSet};
 use crate::loader::LoaderError;
-use crate::storage::segments::mapping::SegmentMappingProvenance;
+use crate::storage::segments::mapping::{SegmentMappingHints, SegmentMappingProvenance};
 use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::segments::{SegmentProperties, SegmentStorageProviderId};
 
@@ -569,13 +568,11 @@ impl<'a> ImageWrite<'a> {
 pub struct ImageSegment<'a> {
     address: ImageAddress,
     backing: Option<ImageBacking>,
-    function_hints: BTreeSet<RawAddress>,
-    mapping_hints: BTreeMap<RawAddress, ContextHint>,
+    mapping_hints: SegmentMappingHints,
     name: Cow<'a, str>,
     properties: SegmentProperties,
     provenance: SegmentMappingProvenance,
     size: u64,
-    tracked_sets: RawAddressMap<TrackedSet>,
 }
 
 impl<'a> ImageSegment<'a> {
@@ -588,13 +585,11 @@ impl<'a> ImageSegment<'a> {
         Self {
             address,
             backing: None,
-            function_hints: BTreeSet::new(),
-            mapping_hints: BTreeMap::new(),
+            mapping_hints: SegmentMappingHints::default(),
             name: name.into(),
             properties,
             provenance: SegmentMappingProvenance::default(),
             size,
-            tracked_sets: RawAddressMap::new(),
         }
     }
 
@@ -623,11 +618,7 @@ impl<'a> ImageSegment<'a> {
         self.backing
     }
 
-    pub fn function_hints(&self) -> &BTreeSet<RawAddress> {
-        &self.function_hints
-    }
-
-    pub fn mapping_hints(&self) -> &BTreeMap<RawAddress, ContextHint> {
+    pub fn mapping_hints(&self) -> &SegmentMappingHints {
         &self.mapping_hints
     }
 
@@ -647,15 +638,8 @@ impl<'a> ImageSegment<'a> {
         self.backing = backing.into();
     }
 
-    pub fn set_function_hints(&mut self, function_hints: impl Into<BTreeSet<RawAddress>>) {
-        self.function_hints = function_hints.into();
-    }
-
-    pub fn set_mapping_hints(
-        &mut self,
-        mapping_hints: impl Into<BTreeMap<RawAddress, ContextHint>>,
-    ) {
-        self.mapping_hints = mapping_hints.into();
+    pub fn set_mapping_hints(&mut self, mapping_hints: SegmentMappingHints) {
+        self.mapping_hints = mapping_hints;
     }
 
     pub fn set_provenance(&mut self, provenance: impl Into<SegmentMappingProvenance>) {
@@ -666,28 +650,12 @@ impl<'a> ImageSegment<'a> {
         self.size
     }
 
-    pub fn tracked_sets(&self) -> &RawAddressMap<TrackedSet> {
-        &self.tracked_sets
-    }
-
-    pub fn set_tracked_sets(&mut self, tracked_sets: RawAddressMap<TrackedSet>) {
-        self.tracked_sets = tracked_sets;
-    }
-
     pub fn with_backing(mut self, backing: impl Into<Option<ImageBacking>>) -> Self {
         self.set_backing(backing);
         self
     }
 
-    pub fn with_function_hints(mut self, function_hints: impl Into<BTreeSet<RawAddress>>) -> Self {
-        self.set_function_hints(function_hints);
-        self
-    }
-
-    pub fn with_mapping_hints(
-        mut self,
-        mapping_hints: impl Into<BTreeMap<RawAddress, ContextHint>>,
-    ) -> Self {
+    pub fn with_mapping_hints(mut self, mapping_hints: SegmentMappingHints) -> Self {
         self.set_mapping_hints(mapping_hints);
         self
     }
@@ -697,25 +665,8 @@ impl<'a> ImageSegment<'a> {
         self
     }
 
-    pub fn with_tracked_sets(mut self, tracked_sets: RawAddressMap<TrackedSet>) -> Self {
-        self.set_tracked_sets(tracked_sets);
-        self
-    }
-
-    pub(crate) fn into_name_and_hints(
-        self,
-    ) -> (
-        Cow<'a, str>,
-        BTreeMap<RawAddress, ContextHint>,
-        BTreeSet<RawAddress>,
-        RawAddressMap<TrackedSet>,
-    ) {
-        (
-            self.name,
-            self.mapping_hints,
-            self.function_hints,
-            self.tracked_sets,
-        )
+    pub(crate) fn into_name_and_mapping_hints(self) -> (Cow<'a, str>, SegmentMappingHints) {
+        (self.name, self.mapping_hints)
     }
 }
 
@@ -724,8 +675,7 @@ pub struct ImageSegmentContents<'a> {
     address: RawAddress,
     size: u64,
     chunks: BTreeMap<usize, ImageSegmentChunk<'a>>,
-    function_hints: BTreeSet<RawAddress>,
-    mapping_hints: BTreeMap<RawAddress, ContextHint>,
+    mapping_hints: SegmentMappingHints,
     endian: Endian,
     bank: ImageBankHandle,
 }
@@ -798,8 +748,7 @@ impl<'a> ImageSegmentContents<'a> {
             address,
             size,
             chunks,
-            function_hints: BTreeSet::new(),
-            mapping_hints: BTreeMap::new(),
+            mapping_hints: SegmentMappingHints::default(),
             endian,
             bank,
         }
@@ -813,12 +762,12 @@ impl<'a> ImageSegmentContents<'a> {
         self.bank
     }
 
-    pub fn function_hints(&self) -> &BTreeSet<RawAddress> {
-        &self.function_hints
+    pub fn mapping_hints(&self) -> &SegmentMappingHints {
+        &self.mapping_hints
     }
 
-    pub fn mapping_hints(&self) -> &BTreeMap<RawAddress, ContextHint> {
-        &self.mapping_hints
+    pub fn mapping_hints_mut(&mut self) -> &mut SegmentMappingHints {
+        &mut self.mapping_hints
     }
 
     pub fn size(&self) -> u64 {
@@ -841,19 +790,7 @@ impl<'a> ImageSegmentContents<'a> {
         self.bank = bank;
     }
 
-    pub fn add_function_hint(&mut self, offset: impl Into<RawAddress>) {
-        self.function_hints.insert(offset.into());
-    }
-
-    pub fn add_mapping_hint(&mut self, offset: impl Into<RawAddress>, hint: ContextHint) {
-        self.mapping_hints.insert(offset.into(), hint);
-    }
-
-    pub fn take_function_hints(&mut self) -> BTreeSet<RawAddress> {
-        mem::take(&mut self.function_hints)
-    }
-
-    pub fn take_mapping_hints(&mut self) -> BTreeMap<RawAddress, ContextHint> {
+    pub fn take_mapping_hints(&mut self) -> SegmentMappingHints {
         mem::take(&mut self.mapping_hints)
     }
 

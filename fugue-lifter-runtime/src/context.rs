@@ -13,6 +13,12 @@ use crate::pcode::{LiftingContextState, Varnode};
 use crate::symbol::Symbol;
 use crate::wrap_offset;
 
+pub(crate) const MAX_CTXT_CHUNKS: usize = 2;
+
+pub const CONTEXT_CACHE_BITS: usize = 8;
+pub const CONTEXT_CACHE_SIZE: usize = 1 << CONTEXT_CACHE_BITS;
+const CONTEXT_CACHE_WORDS: usize = CONTEXT_CACHE_SIZE.div_ceil(u64::BITS as usize);
+
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct ContextPreAction {
     pub num: usize,
@@ -310,11 +316,21 @@ impl Default for FreeArray {
     }
 }
 
-pub(crate) const MAX_CTXT_CHUNKS: usize = 2;
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ContextChangePoint {
+    values: [u32; MAX_CTXT_CHUNKS],
+    change_mask: [u32; MAX_CTXT_CHUNKS],
+}
 
-pub const CONTEXT_CACHE_BITS: usize = 8;
-pub const CONTEXT_CACHE_SIZE: usize = 1 << CONTEXT_CACHE_BITS;
-const CONTEXT_CACHE_WORDS: usize = CONTEXT_CACHE_SIZE.div_ceil(u64::BITS as usize);
+impl ContextChangePoint {
+    pub fn values(&self) -> &[u32] {
+        &self.values
+    }
+
+    pub fn change_mask(&self) -> &[u32] {
+        &self.change_mask
+    }
+}
 
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -370,7 +386,7 @@ impl ContextCache {
         Self {
             entries: array::from_fn(|_| ContextCacheEntry::default()),
             occupied: [0; CONTEXT_CACHE_WORDS],
-            shift: u32::try_from(alignment.wrapping_sub(1)).expect("address alignment fits in u32"),
+            shift: alignment.trailing_zeros(),
         }
     }
 
@@ -550,16 +566,10 @@ impl ContextDatabase {
         let num = context.word();
         let mask = context.mask().checked_shl(context.shift()).unwrap_or(0);
 
-        let mut database_cache = self.database_cache.borrow_mut();
-
-        get_region_to_change_point(&mut self.database, address, num, mask, |point, change| {
+        get_region_to_change_point(&mut self.database, address, num, mask, |change| {
             context.set(change, value);
-            if point - address <= CONTEXT_CACHE_SIZE as u64 {
-                database_cache.update(point, change);
-            } else {
-                database_cache.invalidate(point);
-            }
         });
+        self.clear_cache();
 
         Some(())
     }
@@ -578,16 +588,10 @@ impl ContextDatabase {
         let num = bits.word();
         let mask = bits.mask().checked_shl(bits.shift()).unwrap_or(0);
 
-        let mut database_cache = self.database_cache.borrow_mut();
-
-        get_region_to_change_point(&mut self.database, address, num, mask, |point, change| {
+        get_region_to_change_point(&mut self.database, address, num, mask, |change| {
             bits.set(change, value);
-            if point - address <= CONTEXT_CACHE_SIZE as u64 {
-                database_cache.update(point, change);
-            } else {
-                database_cache.invalidate(point);
-            }
         });
+        self.clear_cache();
     }
 
     pub fn set_variable_default(&mut self, name: impl AsRef<str>, value: u32) -> Option<()> {
@@ -595,6 +599,7 @@ impl ContextDatabase {
         let default = self.database.default_value_mut();
 
         context.set_full(&mut default.values, &mut default.masks, value);
+        self.clear_cache();
 
         Some(())
     }
@@ -603,6 +608,7 @@ impl ContextDatabase {
         let default = self.database.default_value_mut();
         bits.as_ref()
             .set_full(&mut default.values, &mut default.masks, value);
+        self.clear_cache();
     }
 
     pub fn register_variable(
@@ -637,6 +643,23 @@ impl ContextDatabase {
         &self.database.get_or_default(address).values
     }
 
+    pub fn get_context_change_point(&self, address: u64) -> ContextChangePoint {
+        let mut change_point = ContextChangePoint::default();
+        match self.database.range(..=address).next_back() {
+            Some((&point, change)) => {
+                change_point.values[..change.values.len()].copy_from_slice(&change.values);
+                if point == address {
+                    change_point.change_mask[..change.masks.len()].copy_from_slice(&change.masks);
+                }
+            }
+            None => {
+                let default = self.database.default_value();
+                change_point.values[..default.values.len()].copy_from_slice(&default.values);
+            }
+        }
+        change_point
+    }
+
     pub fn get_context_bounds(&self, address: u64) -> (&[u32], u64, u64) {
         match self.database.bounds(address) {
             BoundKind::None(fa) => (&fa.values, 0, self.address_limit),
@@ -651,18 +674,12 @@ impl ContextDatabase {
     }
 
     pub fn set_context_change_point(&mut self, address: u64, num: usize, mask: u32, value: u32) {
-        let mut database_cache = self.database_cache.borrow_mut();
-
-        get_region_to_change_point(&mut self.database, address, num, mask, |point, change| {
+        get_region_to_change_point(&mut self.database, address, num, mask, |change| {
             let val = &mut change[num];
             *val &= !mask;
             *val |= value;
-            if point - address <= CONTEXT_CACHE_SIZE as u64 {
-                database_cache.update(point, change);
-            } else {
-                database_cache.invalidate(point);
-            }
-        })
+        });
+        self.clear_cache();
     }
 
     pub fn set_context_region(
@@ -673,23 +690,10 @@ impl ContextDatabase {
         mask: u32,
         value: u32,
     ) {
-        let mut database_cache = self.database_cache.borrow_mut();
-
-        get_region_for_set(
-            &mut self.database,
-            addr1,
-            addr2,
-            num,
-            mask,
-            |point, change| {
-                change[num] = (change[num] & !mask) | value;
-                if point - addr1 <= CONTEXT_CACHE_SIZE as u64 {
-                    database_cache.update(point, change);
-                } else {
-                    database_cache.invalidate(point);
-                }
-            },
-        )
+        get_region_for_set(&mut self.database, addr1, addr2, num, mask, |change| {
+            change[num] = (change[num] & !mask) | value;
+        });
+        self.clear_cache();
     }
 
     pub fn set_variable_region(
@@ -700,7 +704,6 @@ impl ContextDatabase {
         value: u32,
     ) -> Option<()> {
         let context = self.variables.get(name.as_ref())?;
-        let mut database_cache = self.database_cache.borrow_mut();
 
         get_region_for_set(
             &mut self.database,
@@ -708,15 +711,9 @@ impl ContextDatabase {
             addr2,
             context.word(),
             context.mask(),
-            |point, change| {
-                context.set(change, value);
-                if point - addr1 <= CONTEXT_CACHE_SIZE as u64 {
-                    database_cache.update(point, change);
-                } else {
-                    database_cache.invalidate(point);
-                }
-            },
+            |change| context.set(change, value),
         );
+        self.clear_cache();
 
         Some(())
     }
@@ -729,7 +726,6 @@ impl ContextDatabase {
         value: u32,
     ) {
         let bits = bits.as_ref();
-        let mut database_cache = self.database_cache.borrow_mut();
 
         get_region_for_set(
             &mut self.database,
@@ -737,15 +733,9 @@ impl ContextDatabase {
             addr2,
             bits.word(),
             bits.mask(),
-            |point, change| {
-                bits.set(change, value);
-                if point - addr1 <= CONTEXT_CACHE_SIZE as u64 {
-                    database_cache.update(point, change);
-                } else {
-                    database_cache.invalidate(point);
-                }
-            },
+            |change| bits.set(change, value),
         );
+        self.clear_cache();
     }
 
     pub fn clear_cache(&mut self) {
@@ -753,12 +743,9 @@ impl ContextDatabase {
     }
 
     pub fn clear(&mut self) {
-        let clear_cache = !self.database.is_empty();
         self.database.clear();
         self.trackbase.clear();
-        if clear_cache {
-            self.clear_cache();
-        }
+        self.clear_cache();
     }
 }
 
@@ -770,13 +757,13 @@ fn get_region_to_change_point<F>(
     mask: u32,
     mut f: F,
 ) where
-    F: FnMut(u64, &mut [u32]),
+    F: FnMut(&mut [u32]),
 {
     use itertools::Position;
 
     db.split(addr);
 
-    for (point, change) in db
+    for change in db
         .range_mut(addr..)
         .with_position()
         .take_while(move |pos| match pos {
@@ -784,14 +771,14 @@ fn get_region_to_change_point<F>(
             (Position::Middle | Position::Last, (_, fa)) => fa.masks[num] & mask == 0,
         })
         .map(move |pos| match pos {
-            (Position::First | Position::Only, (p, fa)) => {
+            (Position::First | Position::Only, (_, fa)) => {
                 fa.masks[num] |= mask;
-                (*p, &mut fa.values)
+                &mut fa.values
             }
-            (Position::Middle | Position::Last, (p, fa)) => (*p, &mut fa.values),
+            (Position::Middle | Position::Last, (_, fa)) => &mut fa.values,
         })
     {
-        f(point, change)
+        f(change)
     }
 }
 
@@ -804,7 +791,7 @@ fn get_region_for_set<'a, F>(
     mask: u32,
     mut f: F,
 ) where
-    F: FnMut(u64, &'a mut [u32]),
+    F: FnMut(&'a mut [u32]),
 {
     db.split(addr1);
 
@@ -815,10 +802,50 @@ fn get_region_for_set<'a, F>(
         db.range_mut(addr1..)
     };
 
-    for (point, change) in ranges.map(move |(p, fa)| {
+    for change in ranges.map(move |(_, fa)| {
         fa.masks[num] |= mask;
-        (*p, &mut fa.values)
+        &mut fa.values
     }) {
-        f(point, change)
+        f(change)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    const ALIGNMENT: usize = 2;
+    const REGION_START: u64 = 0x1000;
+    const REGION_END: u64 = 0x1100;
+
+    fn mode_database() -> (ContextDatabase, ContextBitRange) {
+        let mut database = ContextDatabase::new(u64::MAX, ALIGNMENT);
+        database
+            .register_variable("TMode", 0, 0)
+            .expect("TMode fits in one context word");
+        let bits = *database.variable("TMode").expect("TMode is registered");
+        (database, bits)
+    }
+
+    #[test]
+    fn cache_sees_region_writes() {
+        let (mut database, bits) = mode_database();
+        let inside = REGION_START + ALIGNMENT as u64;
+        assert_eq!(database.get_variable_by_bits(bits, inside), 0);
+
+        database.set_variable_region_by_bits(bits, REGION_START, Some(REGION_END), 1);
+
+        assert_eq!(database.get_variable_by_bits(bits, inside), 1);
+    }
+
+    #[test]
+    fn cache_sees_default_changes() {
+        let (mut database, bits) = mode_database();
+        assert_eq!(database.get_variable_by_bits(bits, REGION_START), 0);
+
+        database.clear();
+        database.set_variable_default_by_bits(bits, 1);
+
+        assert_eq!(database.get_variable_by_bits(bits, REGION_START), 1);
     }
 }

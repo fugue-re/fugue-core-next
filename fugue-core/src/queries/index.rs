@@ -1,7 +1,7 @@
 use std::array;
 use std::collections::BTreeMap;
 
-use crate::ir::{AddressRange, AddressRangeSet, RawAddressMap};
+use crate::ir::{AddressRange, AddressRangeSet, RawAddressRangeMap};
 use crate::project::{ChangeKinds, ChangeSet};
 use crate::storage::segments::space::AddressSpaceId;
 use crate::types::Revision;
@@ -67,7 +67,7 @@ impl RegionGroupKind {
 struct RegionGroup {
     floor: Revision,
     max: Revision,
-    spaces: BTreeMap<AddressSpaceId, RawAddressMap<Revision>>,
+    spaces: BTreeMap<AddressSpaceId, RawAddressRangeMap<Revision>>,
     inserts_since_census: usize,
 }
 
@@ -84,7 +84,7 @@ impl RegionGroup {
     fn run_count(&self) -> usize {
         self.spaces
             .values()
-            .map(RawAddressMap::run_count)
+            .map(RawAddressRangeMap::range_count)
             .sum::<usize>()
     }
 

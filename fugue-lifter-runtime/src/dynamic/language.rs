@@ -91,6 +91,7 @@ pub struct Language {
     pub(crate) register_ranges: Box<[(u64, u16, Box<str>)]>,
     pub(crate) user_ops: Box<[Box<str>]>,
     pub(crate) context_vars: Box<[(Box<str>, ContextBitRange)]>,
+    pub(crate) context_vars_flow_mask: Box<[u32]>,
     pub(crate) context_defaults: Box<[(Box<str>, u32)]>,
     #[allow(clippy::type_complexity)]
     pub(crate) call_preserved_registers: Box<[(Box<str>, Box<[Varnode]>)]>,
@@ -182,6 +183,7 @@ impl Language {
             register_ranges,
             user_ops,
             context_vars,
+            context_vars_flow_mask,
             context_defaults,
             call_preserved_registers,
             conventions,
@@ -252,6 +254,7 @@ impl Language {
             user_ops: user_ops.install(),
             space_names: space_names.install(),
             context_vars: context_vars.install(),
+            context_vars_flow_mask: context_vars_flow_mask.install(),
             context_defaults: context_defaults.install(),
             call_preserved_registers: call_preserved_registers.install(),
             conventions: conventions.install(),
@@ -402,6 +405,7 @@ impl Language {
             op_tpls,
             varnode_tpls,
             context_variables,
+            context_variables_flow_mask,
             ..
         } = tables;
 
@@ -444,6 +448,7 @@ impl Language {
             register_ranges: register_ranges.into_boxed_slice(),
             user_ops,
             context_vars: context_pairs.into_boxed_slice(),
+            context_vars_flow_mask: context_variables_flow_mask.into_boxed_slice(),
             context_defaults,
             call_preserved_registers,
             conventions,

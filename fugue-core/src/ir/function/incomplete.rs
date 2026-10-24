@@ -10,8 +10,8 @@ use thiserror::Error;
 use crate::ir::{
     Address, AddressRange, AddressRangeSet, AddressWithContext, CodeBlockId, CodeBlockRecord,
     FlowKind, FlowTarget, Function, FunctionId, FunctionProperties, IncompleteCodeBlock,
-    IncompleteCodeBlockId, Insn, InsnId, RawAddress, RawAddressMap, Reference, ReferenceOrigin,
-    Switch, SwitchCase, Symbol,
+    IncompleteCodeBlockId, Insn, InsnId, RawAddress, RawAddressRangeMap, Reference,
+    ReferenceOrigin, Switch, SwitchCase, Symbol,
 };
 use crate::storage::AddressSpaceId;
 use crate::types::{Confidence, EstimateSize, Revision};
@@ -19,7 +19,7 @@ use crate::types::{Confidence, EstimateSize, Revision};
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct FunctionInsnIndex {
     additional: FxHashMap<Address, SmallVec<[InsnId; 1]>>,
-    covering: BTreeMap<AddressSpaceId, RawAddressMap<InsnId>>,
+    covering: BTreeMap<AddressSpaceId, RawAddressRangeMap<InsnId>>,
     first: FxHashMap<Address, InsnId>,
 }
 
@@ -78,11 +78,11 @@ impl EstimateSize for FunctionInsnIndex {
         let covering_bytes = self
             .covering
             .len()
-            .saturating_mul(size_of::<(AddressSpaceId, RawAddressMap<InsnId>)>())
+            .saturating_mul(size_of::<(AddressSpaceId, RawAddressRangeMap<InsnId>)>())
             .saturating_add(
                 self.covering
                     .values()
-                    .map(RawAddressMap::run_count)
+                    .map(RawAddressRangeMap::range_count)
                     .sum::<usize>()
                     .saturating_mul(size_of::<(RawAddress, RawAddress, InsnId)>()),
             );

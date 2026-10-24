@@ -1,11 +1,12 @@
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
-use std::iter;
+use std::{fs, iter};
 
 use fallible_iterator::{FallibleIterator, convert};
 use fugue_core::analysis::function::{
-    FunctionCandidate, FunctionRecovery, FunctionRecoveryExtension, StructuredFunctionContext,
+    FunctionCandidate, FunctionRecovery, FunctionRecoveryConfig, FunctionRecoveryExtension,
+    LinearSweepConfig, StructuredFunctionContext,
 };
 use fugue_core::analysis::{AnalysisError, AnalysisPass};
 use fugue_core::arch::{Arch, Arm, Mips, Mips64, X86_64};
@@ -15,12 +16,17 @@ use fugue_core::ir::{Address, AddressWithContext, RawAddress};
 use fugue_core::lifter::{ContextBitRange, ContextHint, ContextSet, Language, RawPCodeOp, Varnode};
 use fugue_core::loader::{
     ImageAddress, ImageBacking, ImageLayout, ImageSegment, ImageSegmentContents,
-    ImageSegmentContentsIterator, ImageSegmentIterator, Loadable, LoadableMetadata, LoaderError,
+    ImageSegmentContentsIterator, ImageSegmentIterator, Loadable, LoadableMetadata, Loader,
+    LoaderError,
 };
 use fugue_core::project::Project;
-use fugue_core::storage::{AddressSpaceId, SegmentMappingProvenance, SegmentProperties};
+use fugue_core::storage::{
+    AddressSpaceId, SegmentMappingHints, SegmentMappingProvenance, SegmentProperties,
+};
 use fugue_core::types::{AttributeMap, Confidence};
+use object::{Object, ObjectSection, ObjectSymbol};
 
+const CANDIDATES_ATTRIBUTE: &str = "fugue.test.candidates";
 const MODE_CANDIDATES_ATTRIBUTE: &str = "fugue.test.mode-candidates";
 
 #[derive(Clone, Copy)]
@@ -76,13 +82,13 @@ impl Loadable for ModeImage {
                         .contains(&offset)
                         .then(|| RawAddress::from(segment.address + offset - segment.backing))
                 };
-                let mapping_hints = self
-                    .mapping_hints
-                    .iter()
-                    .filter_map(|(address, hint)| {
-                        translate(*address).map(|address| (address, hint.clone()))
-                    })
-                    .collect::<BTreeMap<_, _>>();
+                let last = RawAddress::from(segment.address + segment.size - 1);
+                let mut mapping_hints = SegmentMappingHints::default();
+                for (address, hint) in &self.mapping_hints {
+                    if let Some(address) = translate(*address) {
+                        mapping_hints.insert_context_hint_range(address..=last, hint.clone());
+                    }
+                }
                 Ok(ImageSegment::new(
                     format!("mode-{index}"),
                     ImageAddress::in_default_space(segment.address),
@@ -150,6 +156,20 @@ impl FunctionRecoveryExtension {
     const NAME: &str = "mips-mode-switching-test";
 
     fn configure(project: &Project, recovery: &mut FunctionRecovery) -> Result<(), AnalysisError> {
+        if let Some(candidates) = project
+            .attributes()
+            .get_attr::<Vec<u64>>(CANDIDATES_ATTRIBUTE)
+        {
+            for candidate in candidates {
+                recovery.add_candidate(FunctionCandidate::new_with(
+                    AddressWithContext::new(
+                        Address::in_default_space(candidate),
+                        ContextSet::new(),
+                    ),
+                    Confidence::somewhat_certain(),
+                ));
+            }
+        }
         let Some(candidates) = project
             .attributes()
             .get_attr::<Vec<u64>>(MODE_CANDIDATES_ATTRIBUTE)
@@ -588,5 +608,221 @@ fn recovery_preserves_candidate_confidence_and_resets_mode() -> Result<(), Box<d
             assert_eq!(function.confidence(), Confidence::somewhat_certain());
         }
     }
+    Ok(())
+}
+
+#[test]
+fn thumb_call_flow() -> Result<(), Box<dyn Error>> {
+    let loader = Loader::from_file("tests/thumb-calls.elf")?;
+    let engine = AnalysisEngine::new(Project::new_transient(&loader)?)?;
+    engine.analyse()?;
+    let project = engine.into_project()?;
+
+    let t_mode = project
+        .arch()
+        .language()
+        .context_variable_by_name("TMode")
+        .expect("ARM language must define TMode");
+    let thumb = ContextSet::single(t_mode, 1);
+
+    let mut calls = Vec::new();
+    for function in project.functions().iter() {
+        calls.extend(
+            function
+                .flow_targets(project.blocks())
+                .filter(|target| target.kind().is_call()),
+        );
+    }
+
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.to().address() < call.from().address())
+    );
+    assert!(calls.iter().all(|call| call.to().context() == &thumb));
+    assert!(calls.iter().all(|call| {
+        project
+            .functions()
+            .get_by_address(call.to().address())
+            .and_then(|function| function.entry_with_context(project.blocks()))
+            .is_some_and(|entry| entry.context() == &thumb)
+    }));
+    Ok(())
+}
+
+#[test]
+fn thumb_exidx_functions() -> Result<(), Box<dyn Error>> {
+    let loader = Loader::from_file("tests/thumb-exidx.elf")?;
+    let engine = AnalysisEngine::new(Project::new_transient(&loader)?)?;
+    engine.analyse()?;
+    let project = engine.into_project()?;
+
+    let t_mode = project
+        .arch()
+        .language()
+        .context_variable_by_name("TMode")
+        .expect("ARM language must define TMode");
+    let thumb = ContextSet::single(t_mode, 1);
+
+    let mut reached = project.entry_point().into_iter().collect::<BTreeSet<_>>();
+    for function in project.functions().iter() {
+        reached.extend(
+            function
+                .flow_targets(project.blocks())
+                .map(|target| target.to().address()),
+        );
+    }
+
+    let unreached = project
+        .functions()
+        .iter()
+        .filter(|function| !reached.contains(&function.entry()))
+        .filter_map(|function| function.entry_with_context(project.blocks()))
+        .collect::<Vec<_>>();
+
+    assert!(!unreached.is_empty());
+    assert!(unreached.iter().all(|entry| entry.context() == &thumb));
+    Ok(())
+}
+
+#[test]
+fn arm_caller_mode() -> Result<(), Box<dyn Error>> {
+    let loader = Loader::from_file("tests/thumb-below-caller.elf")?;
+    let engine = AnalysisEngine::new(Project::new_transient(&loader)?)?;
+    engine.analyse()?;
+    let project = engine.into_project()?;
+
+    let t_mode = project
+        .arch()
+        .language()
+        .context_variable_by_name("TMode")
+        .expect("ARM language must define TMode");
+    let arm = ContextSet::single(t_mode, 0);
+    let thumb = ContextSet::single(t_mode, 1);
+
+    let entry = project.entry_point().expect("fixture has an entry point");
+    let caller = project
+        .functions()
+        .get_by_address(entry)
+        .expect("entry function must be recovered");
+
+    for (_, id) in caller.blocks() {
+        let block = project
+            .blocks()
+            .get_by_id(id)
+            .expect("caller block must exist");
+        assert_eq!(block.context(), &arm, "caller block {}", block.address());
+    }
+
+    let calls = caller
+        .flow_targets(project.blocks())
+        .filter(|target| target.kind().is_call())
+        .collect::<Vec<_>>();
+    assert!(calls.iter().any(|call| {
+        call.to().context() == &thumb && call.to().address() < call.from().address()
+    }));
+    assert!(calls.iter().any(|call| call.to().context() == &arm));
+    Ok(())
+}
+
+#[test]
+fn function_symbol_modes() -> Result<(), Box<dyn Error>> {
+    let loader = Loader::from_file("tests/thumb-mapping-hints.elf")?;
+    let engine = AnalysisEngine::new(Project::new_transient(&loader)?)?;
+    engine.analyse()?;
+    let project = engine.into_project()?;
+
+    let t_mode = project
+        .arch()
+        .language()
+        .context_variable_by_name("TMode")
+        .expect("ARM language must define TMode");
+
+    for (name, mode) in [("caller", 1), ("callee", 0)] {
+        let address = project
+            .symbols()
+            .iter()
+            .find_map(|(_, symbol)| (symbol.symbol() == name).then(|| symbol.address()))
+            .expect("fixture must define the function symbol");
+        let entry = project
+            .functions()
+            .get_by_address(address)
+            .and_then(|function| function.entry_with_context(project.blocks()))
+            .expect("function must be recovered");
+        assert_eq!(entry.context(), &ContextSet::single(t_mode, mode), "{name}");
+    }
+    Ok(())
+}
+
+#[test]
+fn literal_pool_candidates() -> Result<(), Box<dyn Error>> {
+    let bytes = fs::read("tests/libipmi.so")?;
+    let elf = object::File::parse(bytes.as_slice())?;
+    let text = elf
+        .section_by_name(".text")
+        .expect("fixture must have a text section")
+        .index();
+    let mapping_symbols = elf
+        .symbols()
+        .filter(|symbol| symbol.section_index() == Some(text))
+        .filter_map(|symbol| {
+            let name = symbol.name().ok()?;
+            name.starts_with('$').then(|| (symbol.address(), name))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let candidates = mapping_symbols
+        .iter()
+        .zip(mapping_symbols.keys().skip(1))
+        .filter(|((start, name), next)| name.starts_with("$d") && **start + 4 < **next)
+        .map(|((start, _), _)| start + 4)
+        .collect::<Vec<_>>();
+    assert!(!candidates.is_empty());
+
+    let loader = Loader::from_file("tests/libipmi.so")?;
+    let mut project = Project::new_transient(&loader)?;
+    project
+        .attributes_mut()
+        .set_attr(CANDIDATES_ATTRIBUTE, candidates.clone());
+    let engine = AnalysisEngine::new(project)?;
+    engine.analyse()?;
+    let project = engine.into_project()?;
+
+    let recovered = candidates
+        .into_iter()
+        .map(Address::in_default_space)
+        .filter(|address| project.functions().get_by_address(*address).is_some())
+        .collect::<Vec<_>>();
+    assert!(recovered.is_empty(), "{recovered:?}");
+    Ok(())
+}
+
+#[test]
+fn linear_sweep_arm_mode() -> Result<(), Box<dyn Error>> {
+    let bytes = fs::read("tests/thumb-sweep.elf")?;
+    let elf = object::File::parse(bytes.as_slice())?;
+    let orphan = elf
+        .section_by_name("swept")
+        .expect("fixture must have a swept section")
+        .address();
+
+    let loader = Loader::from_file("tests/thumb-sweep.elf")?;
+    let config = AnalysisEngineConfig::default().with_analysis_config(
+        FunctionRecoveryConfig::default().with_linear_sweep(LinearSweepConfig::default()),
+    );
+    let engine = AnalysisEngine::with_config(Project::new_transient(&loader)?, config)?;
+    engine.analyse()?;
+    let project = engine.into_project()?;
+
+    let t_mode = project
+        .arch()
+        .language()
+        .context_variable_by_name("TMode")
+        .expect("ARM language must define TMode");
+    let entry = project
+        .functions()
+        .get_by_address(Address::in_default_space(orphan))
+        .and_then(|function| function.entry_with_context(project.blocks()))
+        .expect("linear sweep must recover the orphan");
+    assert_eq!(entry.context(), &ContextSet::single(t_mode, 0));
     Ok(())
 }

@@ -11,7 +11,8 @@ use fugue_core::lifter::ContextSet;
 use fugue_core::project::{ChangeRecord, Project};
 use fugue_core::queries::QueryReader;
 use fugue_core::storage::{
-    DEFAULT_SPACE_ID, SegmentMappingBuilder, SegmentProperties, TransientStorageProvider,
+    DEFAULT_SPACE_ID, SegmentMappingBuilder, SegmentMappingHints, SegmentProperties,
+    TransientStorageProvider,
 };
 use fugue_core::types::Confidence;
 
@@ -123,6 +124,8 @@ fn project_with_mutable_function(bytes: &[u8]) -> Result<(Project, Address), Box
         .mapping(view.mapping_ref().mapping_id())
         .ok_or("fixture mapping metadata missing")?;
     let entry = Address::in_default_space(0x7000_0000u64);
+    let mut mapping_hints = SegmentMappingHints::default();
+    mapping_hints.insert_function(entry.raw_address());
     let builder = SegmentMappingBuilder::new(
         entry,
         bytes.len() as u64,
@@ -134,7 +137,7 @@ fn project_with_mutable_function(bytes: &[u8]) -> Result<(Project, Address), Box
             | SegmentProperties::PERM_WRITE
             | SegmentProperties::PERM_EXECUTE,
     )
-    .with_function_hints([entry.raw_address()]);
+    .with_mapping_hints(mapping_hints);
 
     {
         let mut transaction = project.transaction("test");

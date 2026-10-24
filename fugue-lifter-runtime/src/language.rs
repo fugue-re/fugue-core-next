@@ -220,6 +220,7 @@ pub trait LanguageImpl {
     const USER_OPS: &'static [&'static str];
     const SPACE_NAMES: &'static [&'static str];
     const CONTEXT_VARS: &'static [(&'static str, ContextBitRange)];
+    const CONTEXT_VARS_FLOW_MASK: &'static [u32];
     const CONTEXT_DEFAULTS: &'static [(&'static str, u32)];
     const CALL_PRESERVED_REGISTERS: &'static [(&'static str, &'static [Varnode])] = &[];
     const CONVENTIONS: &'static [(&'static str, Convention)] = &[];
@@ -262,6 +263,7 @@ pub struct Language {
     pub(crate) user_ops: &'static [&'static str],
     pub(crate) space_names: &'static [&'static str],
     pub(crate) context_vars: &'static [(&'static str, ContextBitRange)],
+    pub(crate) context_vars_flow_mask: &'static [u32],
     pub(crate) context_defaults: &'static [(&'static str, u32)],
     pub(crate) call_preserved_registers: &'static [(&'static str, &'static [Varnode])],
     pub(crate) conventions: &'static [(&'static str, Convention)],
@@ -370,6 +372,7 @@ impl Language {
             user_ops: L::USER_OPS,
             space_names: L::SPACE_NAMES,
             context_vars: L::CONTEXT_VARS,
+            context_vars_flow_mask: L::CONTEXT_VARS_FLOW_MASK,
             context_defaults: L::CONTEXT_DEFAULTS,
             call_preserved_registers: L::CALL_PRESERVED_REGISTERS,
             conventions: L::CONVENTIONS,

@@ -9,7 +9,7 @@ use crate::ir::{
     Address, AddressRange, AddressWithContext, FlowKind, FlowTarget, Id, Location, Reference,
     ReferenceOrigin, ToRawAddress,
 };
-use crate::lifter::{Language, Lifter, LifterError, Op, RawPCodeOp};
+use crate::lifter::{ContextSet, Language, Lifter, LifterError, Op, RawPCodeOp};
 use crate::storage::schema::bitflags::archived_bitflags;
 use crate::types::EstimateSize;
 
@@ -151,11 +151,9 @@ impl Insn {
         let canonicalise = |address: Address| {
             let (canonical, context) = lifter
                 .arch()
-                .canonicalise_address_with(address.raw_address(), lifter.context())?;
-            Some(AddressWithContext::new(
-                Address::new(address.space(), canonical),
-                context,
-            ))
+                .canonicalise_address_with(address.raw_address(), lifter.context())
+                .unwrap_or_else(|| (address.raw_address(), ContextSet::new()));
+            AddressWithContext::new(Address::new(address.space(), canonical), context)
         };
         let operation_count = operations.len() as u16;
         let next_address = address + size;
@@ -164,54 +162,47 @@ impl Insn {
 
         let mut targets = SmallVec::<[(u16, InsnTarget); 1]>::new();
         for (index, flow) in RawPCodeFlows::new(language, address, size, operations).iter() {
-            let target = (|| {
-                Some(match flow {
-                    RawPCodeFlow::Branch(Some(location)) => {
-                        if is_local(&location) {
-                            InsnTarget::IntraIns(location, false)
-                        } else if is_fall_through(&location) {
-                            InsnTarget::IntraBlk(
-                                canonicalise(location.address())?,
-                                location.position(),
-                                false,
-                            )
-                        } else {
-                            InsnTarget::InterBlk(canonicalise(location.address())?)
-                        }
+            let target = match flow {
+                RawPCodeFlow::Branch(Some(location)) => {
+                    if is_local(&location) {
+                        InsnTarget::IntraIns(location, false)
+                    } else if is_fall_through(&location) {
+                        InsnTarget::IntraBlk(
+                            canonicalise(location.address()),
+                            location.position(),
+                            false,
+                        )
+                    } else {
+                        InsnTarget::InterBlk(canonicalise(location.address()))
                     }
-                    RawPCodeFlow::Branch(None) => InsnTarget::InterBlkIndirect(None),
-                    RawPCodeFlow::Call(Some(location)) => {
-                        if location.position() != 0 {
-                            InsnTarget::IntraIns(location, false)
-                        } else {
-                            InsnTarget::InterSub(canonicalise(location.address())?)
-                        }
+                }
+                RawPCodeFlow::Branch(None) => InsnTarget::InterBlkIndirect(None),
+                RawPCodeFlow::Call(Some(location)) => {
+                    if location.position() != 0 {
+                        InsnTarget::IntraIns(location, false)
+                    } else {
+                        InsnTarget::InterSub(canonicalise(location.address()))
                     }
-                    RawPCodeFlow::Call(None) => InsnTarget::InterSubIndirect(None),
-                    RawPCodeFlow::FallThrough(location) => {
-                        if is_local(&location) {
-                            InsnTarget::IntraIns(location, true)
-                        } else {
-                            InsnTarget::IntraBlk(
-                                canonicalise(location.address())?,
-                                location.position(),
-                                true,
-                            )
-                        }
+                }
+                RawPCodeFlow::Call(None) => InsnTarget::InterSubIndirect(None),
+                RawPCodeFlow::FallThrough(location) => {
+                    if is_local(&location) {
+                        InsnTarget::IntraIns(location, true)
+                    } else {
+                        InsnTarget::IntraBlk(
+                            canonicalise(location.address()),
+                            location.position(),
+                            true,
+                        )
                     }
-                    RawPCodeFlow::Intrinsic => InsnTarget::Intrinsic,
-                    RawPCodeFlow::Return(return_address) => InsnTarget::InterRet(
-                        match return_address {
-                            Some(address) => Some(canonicalise(address)?),
-                            None => None,
-                        },
-                        index + 1 == operation_count,
-                    ),
-                })
-            })();
-            if let Some(target) = target {
-                targets.push((index, target));
-            }
+                }
+                RawPCodeFlow::Intrinsic => InsnTarget::Intrinsic,
+                RawPCodeFlow::Return(return_address) => InsnTarget::InterRet(
+                    return_address.map(canonicalise),
+                    index + 1 == operation_count,
+                ),
+            };
+            targets.push((index, target));
         }
         let mut properties = InsnProperties::from_targets(&targets);
         if operations.is_empty() {
@@ -437,9 +428,23 @@ impl Insn {
         operations: &mut Vec<RawPCodeOp>,
     ) -> Result<(), InsnError> {
         operations.clear();
-        let size = lifter.lift(self.address(), bytes, operations)?;
+        let address = self.address();
+        let size = lifter.lift(address, bytes, operations)?;
+        for (_, flow) in RawPCodeFlows::new(lifter.language(), address, size, operations).iter() {
+            let (RawPCodeFlow::Branch(Some(location))
+            | RawPCodeFlow::Call(Some(location))
+            | RawPCodeFlow::FallThrough(location)) = flow
+            else {
+                continue;
+            };
+            if location.address() != address {
+                lifter
+                    .context_mut()
+                    .set_context_from_flow(address.offset(), location.address().offset());
+            }
+        }
         let encoded_size = self.size;
-        *self = Self::from_resolved_flow(lifter, self.address(), size, operations)?;
+        *self = Self::from_resolved_flow(lifter, address, size, operations)?;
         if encoded_size != 0 {
             self.delay_slot_size = self.size.saturating_sub(encoded_size);
         }

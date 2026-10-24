@@ -1,14 +1,13 @@
-use std::collections::{BTreeMap, BTreeSet};
-
 use object::read::elf::{ElfFile, FileHeader};
 use object::{ReadRef, elf};
 
 use crate::arch::Arch;
 use crate::extension::{self, Registration};
-use crate::ir::{RawAddress, RawAddressMap};
-use crate::lifter::{ContextHint, LanguageId, LanguageSource, TrackedSet};
+use crate::ir::RawAddress;
+use crate::lifter::{LanguageId, LanguageSource};
 use crate::loader::elf::ElfFileRepr;
 use crate::loader::{ImageSegmentContents, LanguageVariantOverride, LoaderError};
+use crate::storage::segments::mapping::SegmentMappingHints;
 use crate::types::{ATTRIBUTE_LANGUAGE_VARIANT, AttributeMap};
 
 pub struct ImageContext<'a> {
@@ -319,7 +318,7 @@ pub struct TrackedSetContext<'a, 'this, 'data> {
     view: &'a ElfFileRepr<'this, 'data>,
     arch: &'a Arch,
     base: RawAddress,
-    tracked_sets: &'a mut RawAddressMap<TrackedSet>,
+    mapping_hints: &'a mut SegmentMappingHints,
 }
 
 impl<'a, 'this, 'data> TrackedSetContext<'a, 'this, 'data> {
@@ -327,13 +326,13 @@ impl<'a, 'this, 'data> TrackedSetContext<'a, 'this, 'data> {
         view: &'a ElfFileRepr<'this, 'data>,
         arch: &'a Arch,
         base: RawAddress,
-        tracked_sets: &'a mut RawAddressMap<TrackedSet>,
+        mapping_hints: &'a mut SegmentMappingHints,
     ) -> Self {
         Self {
             view,
             arch,
             base,
-            tracked_sets,
+            mapping_hints,
         }
     }
 
@@ -349,12 +348,12 @@ impl<'a, 'this, 'data> TrackedSetContext<'a, 'this, 'data> {
         self.base
     }
 
-    pub fn tracked_sets(&self) -> &RawAddressMap<TrackedSet> {
-        self.tracked_sets
+    pub fn mapping_hints(&self) -> &SegmentMappingHints {
+        self.mapping_hints
     }
 
-    pub fn tracked_sets_mut(&mut self) -> &mut RawAddressMap<TrackedSet> {
-        self.tracked_sets
+    pub fn mapping_hints_mut(&mut self) -> &mut SegmentMappingHints {
+        self.mapping_hints
     }
 
     pub fn apply_tracked_sets(&mut self) -> Result<bool, LoaderError> {
@@ -397,8 +396,7 @@ pub struct ExceptionContext<'a, 'this, 'data> {
     view: &'a ElfFileRepr<'this, 'data>,
     arch: &'a Arch,
     base: RawAddress,
-    function_hints: &'a mut BTreeSet<RawAddress>,
-    mapping_hints: &'a mut BTreeMap<RawAddress, ContextHint>,
+    mapping_hints: &'a mut SegmentMappingHints,
 }
 
 impl<'a, 'this, 'data> ExceptionContext<'a, 'this, 'data> {
@@ -406,14 +404,12 @@ impl<'a, 'this, 'data> ExceptionContext<'a, 'this, 'data> {
         view: &'a ElfFileRepr<'this, 'data>,
         arch: &'a Arch,
         base: RawAddress,
-        function_hints: &'a mut BTreeSet<RawAddress>,
-        mapping_hints: &'a mut BTreeMap<RawAddress, ContextHint>,
+        mapping_hints: &'a mut SegmentMappingHints,
     ) -> Self {
         Self {
             view,
             arch,
             base,
-            function_hints,
             mapping_hints,
         }
     }
@@ -430,19 +426,11 @@ impl<'a, 'this, 'data> ExceptionContext<'a, 'this, 'data> {
         self.base
     }
 
-    pub fn function_hints(&self) -> &BTreeSet<RawAddress> {
-        self.function_hints
-    }
-
-    pub fn function_hints_mut(&mut self) -> &mut BTreeSet<RawAddress> {
-        self.function_hints
-    }
-
-    pub fn mapping_hints(&self) -> &BTreeMap<RawAddress, ContextHint> {
+    pub fn mapping_hints(&self) -> &SegmentMappingHints {
         self.mapping_hints
     }
 
-    pub fn mapping_hints_mut(&mut self) -> &mut BTreeMap<RawAddress, ContextHint> {
+    pub fn mapping_hints_mut(&mut self) -> &mut SegmentMappingHints {
         self.mapping_hints
     }
 

@@ -1,11 +1,12 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::ops::{Bound, RangeBounds};
+use std::ops::{RangeBounds, RangeInclusive};
 
 use bitflags::bitflags;
+use itertools::Itertools;
 
-use crate::ir::{Address, AddressRange, RawAddress, RawAddressMap};
+use crate::ir::{Address, AddressRange, RawAddress, RawAddressRangeMap};
 use crate::lifter::{ContextHint, TrackedSet};
 use crate::storage::schema::bitflags::archived_bitflags;
 use crate::storage::segments::provider::SegmentStorageProviderId;
@@ -110,10 +111,9 @@ bitflags! {
         const PAGED = 0x0001;
         const PRIVATE = 0x0002;
         const PERSISTENT = 0x0004;
-        const OVERLAY_ENABLED = 0x0008;
-        const COMPRESSED = 0x0010;
-        const ENCRYPTED = 0x0020;
-        const LARGE_PAGE = 0x0040;
+        const COMPRESSED = 0x0008;
+        const ENCRYPTED = 0x0010;
+        const LARGE_PAGE = 0x0020;
     }
 }
 
@@ -131,67 +131,119 @@ pub struct SegmentMapping {
     flags: SegmentMappingFlags,
     revision: Revision,
     name: String,
-    mapping_hints: BTreeMap<RawAddress, ContextHint>,
-    function_hints: BTreeSet<RawAddress>,
-    tracked_sets: RawAddressMap<TrackedSet>,
+    mapping_hints: SegmentMappingHints,
 }
 
-#[derive(Clone, Copy)]
-pub struct SegmentMappingHints<'a> {
-    hints: &'a BTreeMap<RawAddress, ContextHint>,
-    range: AddressRange,
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
+pub struct SegmentMappingHints {
+    context_hints: BTreeMap<RawAddress, ContextHint>,
+    context_hint_ranges: RawAddressRangeMap<ContextHint>,
+    functions: BTreeSet<RawAddress>,
+    symbol_pointers: BTreeSet<RawAddress>,
+    tracked_sets: RawAddressRangeMap<TrackedSet>,
 }
 
-impl<'a> SegmentMappingHints<'a> {
-    pub(crate) fn new(mapping: &'a SegmentMapping, range: AddressRange) -> Self {
-        Self {
-            hints: &mapping.mapping_hints,
-            range,
-        }
+impl SegmentMappingHints {
+    pub fn is_empty(&self) -> bool {
+        self.context_hints.is_empty()
+            && self.context_hint_ranges.is_empty()
+            && self.functions.is_empty()
+            && self.symbol_pointers.is_empty()
+            && self.tracked_sets.is_empty()
     }
 
-    pub fn get(&self, address: impl Into<Address>) -> Option<&'a ContextHint> {
+    pub fn context_hint_at(&self, address: impl Into<RawAddress>) -> Option<&ContextHint> {
         let address = address.into();
-        self.range
-            .contains_address(address)
-            .then(|| self.hints.get(&address.raw_address()))?
+        self.context_hints
+            .get(&address)
+            .or_else(|| self.context_hint_ranges.get(address))
     }
 
-    pub fn iter(&self) -> impl DoubleEndedIterator<Item = (Address, &'a ContextHint)> + use<'a> {
-        self.range(..)
-    }
-
-    pub fn range<R>(
+    pub fn context_hints_in_range(
         &self,
-        bounds: R,
-    ) -> impl DoubleEndedIterator<Item = (Address, &'a ContextHint)> + use<'a, R>
-    where
-        R: RangeBounds<Address>,
-    {
-        let start = match bounds.start_bound() {
-            Bound::Included(address) => Some(*address),
-            Bound::Excluded(address) => address.checked_add(1usize),
-            Bound::Unbounded => Some(self.range.start_address()),
-        };
-        let end = match bounds.end_bound() {
-            Bound::Included(address) => Some(*address),
-            Bound::Excluded(address) => address.checked_sub(1usize),
-            Bound::Unbounded => Some(self.range.end_address()),
-        };
-        let space = self.range.space();
-        let bounds = start.zip(end).and_then(|(start, end)| {
-            if start.space() != space || end.space() != space {
-                return None;
-            }
-            let start = start.raw_address().max(self.range.start());
-            let end = end.raw_address().min(self.range.end());
-            (start <= end).then_some(start..=end)
-        });
-        let hints = self.hints;
-        bounds
-            .into_iter()
-            .flat_map(move |bounds| hints.range(bounds))
-            .map(move |(&address, hint)| (Address::new(space, address), hint))
+        range: impl RangeBounds<RawAddress>,
+    ) -> impl Iterator<Item = (RawAddress, &ContextHint)> {
+        let bounds = (range.start_bound().cloned(), range.end_bound().cloned());
+        self.context_hints
+            .range(bounds)
+            .map(|(address, hint)| (*address, hint))
+            .merge_by(
+                self.context_hint_ranges
+                    .overlapping_ranges(bounds)
+                    .filter(move |(range, _)| bounds.contains(range.start()))
+                    .map(|(range, hint)| (*range.start(), hint)),
+                |(address, _), (start, _)| address <= start,
+            )
+    }
+
+    pub fn functions(&self) -> impl DoubleEndedIterator<Item = RawAddress> + '_ {
+        self.functions.iter().copied()
+    }
+
+    pub fn contains_function(&self, address: impl Into<RawAddress>) -> bool {
+        self.functions.contains(&address.into())
+    }
+
+    pub fn contains_symbol_pointer(&self, address: impl Into<RawAddress>) -> bool {
+        self.symbol_pointers.contains(&address.into())
+    }
+
+    pub fn tracked_set_at(&self, address: impl Into<RawAddress>) -> Option<&TrackedSet> {
+        self.tracked_sets.get(address)
+    }
+
+    pub fn insert_context_hint(&mut self, address: impl Into<RawAddress>, hint: ContextHint) {
+        self.context_hints.insert(address.into(), hint);
+    }
+
+    pub fn insert_context_hint_range(
+        &mut self,
+        range: impl Into<RangeInclusive<RawAddress>>,
+        hint: ContextHint,
+    ) {
+        self.context_hint_ranges.insert_range(range, hint);
+    }
+
+    pub fn insert_function(&mut self, address: impl Into<RawAddress>) {
+        self.functions.insert(address.into());
+    }
+
+    pub fn insert_symbol_pointer(&mut self, address: impl Into<RawAddress>) {
+        self.symbol_pointers.insert(address.into());
+    }
+
+    pub fn insert_tracked_set(
+        &mut self,
+        range: impl Into<RangeInclusive<RawAddress>>,
+        tracked_set: TrackedSet,
+    ) {
+        self.tracked_sets.insert_range(range, tracked_set);
+    }
+
+    pub fn merge(&mut self, other: SegmentMappingHints) {
+        self.context_hints.extend(other.context_hints);
+        self.context_hint_ranges.extend(other.context_hint_ranges);
+        self.functions.extend(other.functions);
+        self.symbol_pointers.extend(other.symbol_pointers);
+        self.tracked_sets.extend(other.tracked_sets);
+    }
+
+    pub fn clamp(&self, range: impl Into<RangeInclusive<RawAddress>>) -> Self {
+        let range = range.into();
+        let (start, last) = (*range.start(), *range.end());
+        Self {
+            context_hints: self
+                .context_hints
+                .range(start..=last)
+                .map(|(address, hint)| (*address, hint.clone()))
+                .collect(),
+            context_hint_ranges: self.context_hint_ranges.clamp(start..=last),
+            functions: self.functions.range(start..=last).copied().collect(),
+            symbol_pointers: self.symbol_pointers.range(start..=last).copied().collect(),
+            tracked_sets: self.tracked_sets.clamp(start..=last),
+        }
     }
 }
 
@@ -218,9 +270,7 @@ impl SegmentMapping {
             flags: SegmentMappingFlags::NONE,
             revision: Revision::default(),
             name: String::new(),
-            mapping_hints: BTreeMap::new(),
-            function_hints: BTreeSet::new(),
-            tracked_sets: RawAddressMap::new(),
+            mapping_hints: SegmentMappingHints::default(),
         })
     }
 
@@ -243,8 +293,6 @@ impl SegmentMapping {
         mapping.flags = builder.flags;
         mapping.name = builder.name;
         mapping.mapping_hints = builder.mapping_hints;
-        mapping.function_hints = builder.function_hints;
-        mapping.tracked_sets = builder.tracked_sets;
         Ok(mapping)
     }
 
@@ -347,33 +395,8 @@ impl SegmentMapping {
         self.touch();
     }
 
-    pub(crate) fn function_hint_offsets(&self) -> &BTreeSet<RawAddress> {
-        &self.function_hints
-    }
-
-    pub(crate) fn tracked_set_offsets(&self) -> &RawAddressMap<TrackedSet> {
-        &self.tracked_sets
-    }
-
-    pub fn tracked_set_at(&self, addr: impl Into<Address>) -> Option<&TrackedSet> {
-        let addr = addr.into();
-        (addr.space() == self.space() && self.range.contains(addr.raw_address()))
-            .then(|| self.tracked_sets.get(addr.raw_address()))
-            .flatten()
-    }
-
-    pub fn mapping_hints(&self) -> SegmentMappingHints<'_> {
-        SegmentMappingHints::new(
-            self,
-            AddressRange::new(self.space(), 0u64.into(), RawAddress::MAX),
-        )
-    }
-
-    pub fn function_hints(&self) -> impl Iterator<Item = Address> + '_ {
-        let space = self.space();
-        self.function_hints
-            .iter()
-            .map(move |&offset| Address::new(space, offset))
+    pub fn mapping_hints(&self) -> &SegmentMappingHints {
+        &self.mapping_hints
     }
 
     pub fn mapping_ref(&self) -> SegmentMappingRef {
@@ -573,9 +596,7 @@ pub struct SegmentMappingBuilder {
     provenance: SegmentMappingProvenance,
     flags: SegmentMappingFlags,
     name: String,
-    mapping_hints: BTreeMap<RawAddress, ContextHint>,
-    function_hints: BTreeSet<RawAddress>,
-    tracked_sets: RawAddressMap<TrackedSet>,
+    mapping_hints: SegmentMappingHints,
 }
 
 impl SegmentMappingBuilder {
@@ -595,9 +616,7 @@ impl SegmentMappingBuilder {
             provenance: SegmentMappingProvenance::default(),
             flags: SegmentMappingFlags::default(),
             name: String::new(),
-            mapping_hints: BTreeMap::new(),
-            function_hints: BTreeSet::new(),
-            tracked_sets: RawAddressMap::new(),
+            mapping_hints: SegmentMappingHints::default(),
         }
     }
 
@@ -718,77 +737,21 @@ impl SegmentMappingBuilder {
         self
     }
 
-    pub fn mapping_hints(&self) -> &BTreeMap<RawAddress, ContextHint> {
+    pub fn mapping_hints(&self) -> &SegmentMappingHints {
         &self.mapping_hints
     }
 
-    pub fn function_hints(&self) -> &BTreeSet<RawAddress> {
-        &self.function_hints
+    pub fn set_mapping_hints(&mut self, mapping_hints: SegmentMappingHints) {
+        self.mapping_hints = mapping_hints;
     }
 
-    pub fn set_mapping_hints(
-        &mut self,
-        mapping_hints: impl IntoIterator<Item = (RawAddress, ContextHint)>,
-    ) {
-        self.mapping_hints.clear();
-        self.mapping_hints.extend(mapping_hints);
-    }
-
-    pub fn with_mapping_hints(
-        mut self,
-        mapping_hints: impl IntoIterator<Item = (RawAddress, ContextHint)>,
-    ) -> Self {
+    pub fn with_mapping_hints(mut self, mapping_hints: SegmentMappingHints) -> Self {
         self.set_mapping_hints(mapping_hints);
-        self
-    }
-
-    pub fn set_function_hints(&mut self, function_hints: impl IntoIterator<Item = RawAddress>) {
-        self.function_hints.clear();
-        self.function_hints.extend(function_hints);
-    }
-
-    pub fn with_function_hints(
-        mut self,
-        function_hints: impl IntoIterator<Item = RawAddress>,
-    ) -> Self {
-        self.set_function_hints(function_hints);
-        self
-    }
-
-    pub fn tracked_sets(&self) -> &RawAddressMap<TrackedSet> {
-        &self.tracked_sets
-    }
-
-    pub fn set_tracked_sets(&mut self, tracked_sets: RawAddressMap<TrackedSet>) {
-        self.tracked_sets = tracked_sets;
-    }
-
-    pub fn with_tracked_sets(mut self, tracked_sets: RawAddressMap<TrackedSet>) -> Self {
-        self.set_tracked_sets(tracked_sets);
         self
     }
 
     pub fn range(&self) -> Option<AddressRange> {
         AddressRange::from_size(self.start, self.size)
-    }
-
-    pub fn extend_mapping_hints(
-        &mut self,
-        mapping_hints: impl IntoIterator<Item = (RawAddress, ContextHint)>,
-    ) {
-        self.mapping_hints.extend(mapping_hints);
-    }
-
-    pub fn add_mapping_hint(&mut self, offset: impl Into<RawAddress>, hint: ContextHint) {
-        self.mapping_hints.insert(offset.into(), hint);
-    }
-
-    pub fn extend_function_hints(&mut self, function_hints: impl IntoIterator<Item = RawAddress>) {
-        self.function_hints.extend(function_hints);
-    }
-
-    pub fn add_function_hint(&mut self, offset: impl Into<RawAddress>) {
-        self.function_hints.insert(offset.into());
     }
 
     pub fn build(

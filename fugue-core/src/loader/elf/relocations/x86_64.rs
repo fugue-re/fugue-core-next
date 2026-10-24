@@ -45,6 +45,9 @@ where
                     return;
                 };
 
+                let slot = bytes.address() + offset;
+                bytes.mapping_hints_mut().insert_symbol_pointer(slot);
+
                 if reloc_type == R_X86_64_JUMP_SLOT {
                     self.mark_function_symbol(value, bytes);
                 } else {

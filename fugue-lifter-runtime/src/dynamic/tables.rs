@@ -15,7 +15,9 @@ use fugue_sleigh_language::symbol::sub_table::{
 };
 use indexmap::IndexMap;
 
-use crate::context::{ContextAction, ContextPostAction, ContextPostActionHandle, ContextPreAction};
+use crate::context::{
+    ContextAction, ContextBitRange, ContextPostAction, ContextPostActionHandle, ContextPreAction,
+};
 use crate::dynamic::constructor::Constructor;
 use crate::dynamic::operand::OperandFilter;
 use crate::dynamic::resolve::{DecisionNode, DecisionPair};
@@ -47,6 +49,7 @@ pub(crate) struct Tables<'a> {
     pub(crate) symbol_id_mapping: BTreeMap<usize, usize>,
 
     pub(crate) context_variables: Vec<(Box<str>, usize, usize)>,
+    pub(crate) context_variables_flow_mask: Vec<u32>,
 }
 
 impl<'a> Tables<'a> {
@@ -68,6 +71,7 @@ impl<'a> Tables<'a> {
             subtable_id_mapping: BTreeMap::new(),
             symbol_id_mapping: BTreeMap::new(),
             context_variables: Vec::new(),
+            context_variables_flow_mask: Vec::new(),
         };
         tables.assign_indices();
         tables.build_symbols_and_subtables();
@@ -601,6 +605,7 @@ impl<'a> Tables<'a> {
             let SleighSymbol::Context {
                 name,
                 pattern_value,
+                flow,
                 ..
             } = symtab.symbol(sym_id).unwrap()
             else {
@@ -616,6 +621,14 @@ impl<'a> Tables<'a> {
                     *bit_start,
                     *bit_end,
                 ));
+
+                let bits = ContextBitRange::new(*bit_start, *bit_end);
+                if self.context_variables_flow_mask.len() <= bits.word() {
+                    self.context_variables_flow_mask.resize(bits.word() + 1, !0);
+                }
+                if !flow {
+                    self.context_variables_flow_mask[bits.word()] &= !(bits.mask() << bits.shift());
+                }
             }
         }
     }

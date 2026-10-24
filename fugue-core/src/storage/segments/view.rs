@@ -1,5 +1,4 @@
 use crate::ir::{Address, AddressRange};
-use crate::lifter::TrackedSet;
 use crate::storage::segments::mapping::{
     SegmentMapping, SegmentMappingHints, SegmentMappingKind, SegmentMappingProvenance,
     SegmentMappingRef, SegmentSubMapping,
@@ -101,36 +100,12 @@ impl<'a> SegmentMappingView<'a> {
         self.mapping_ref
     }
 
-    pub fn tracked_set_at(&self, addr: impl Into<Address>) -> Option<&TrackedSet> {
-        let addr = addr.into();
-        self.contains(addr).then(|| {
-            self.mapping
-                .tracked_set_at(Address::new(self.mapping.space(), addr.raw_address()))
-        })?
-    }
-
     pub fn is_valid(&self) -> bool {
         self.mapping.revision() == self.mapping_revision
     }
 
-    pub fn mapping_hints(&self) -> SegmentMappingHints<'a> {
-        SegmentMappingHints::new(self.mapping, self.range)
-    }
-
-    pub fn contains_function_hint(&self, addr: impl Into<Address>) -> bool {
-        let addr = addr.into();
-        self.contains(addr)
-            && self
-                .mapping
-                .function_hint_offsets()
-                .contains(&addr.raw_address())
-    }
-
-    pub fn function_hints(&self) -> impl Iterator<Item = Address> + '_ {
-        self.mapping.function_hints().filter_map(|address| {
-            let mapped = Address::new(self.space(), address.raw_address());
-            self.contains(mapped).then_some(mapped)
-        })
+    pub fn mapping_hints(&self) -> &'a SegmentMappingHints {
+        self.mapping.mapping_hints()
     }
 
     pub fn bytes_at(&self, addr: impl Into<Address>, size: usize) -> Option<SegmentView<'a>> {

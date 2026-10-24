@@ -1,14 +1,12 @@
-use std::collections::{BTreeMap, BTreeSet};
-
 use object::read::pe::{ImageNtHeaders, PeFile};
 use object::{Architecture, Object, ReadRef};
 
 use crate::arch::Arch;
 use crate::ir::RawAddress;
-use crate::lifter::ContextHint;
 use crate::loader::LoaderError;
+use crate::loader::pe::PeFileRepr;
 use crate::loader::pe::extensions::ExceptionContext;
-use crate::loader::pe::{PeFileRepr, PeLoaderProperties};
+use crate::storage::segments::mapping::SegmentMappingHints;
 
 mod aarch64;
 mod arm;
@@ -24,9 +22,7 @@ where
     pe: &'file PeFile<'data, Pe, R>,
     arch: &'file Arch,
     base: RawAddress,
-    config: PeLoaderProperties,
-    function_hints: &'file mut BTreeSet<RawAddress>,
-    mapping_hints: &'file mut BTreeMap<RawAddress, ContextHint>,
+    mapping_hints: &'file mut SegmentMappingHints,
 }
 
 impl<'data, 'file, 'image, Pe, R> PeExceptionResolver<'data, 'file, 'image, Pe, R>
@@ -40,29 +36,20 @@ where
         pe: &'file PeFile<'data, Pe, R>,
         arch: &'file Arch,
         base: RawAddress,
-        config: PeLoaderProperties,
-        function_hints: &'file mut BTreeSet<RawAddress>,
-        mapping_hints: &'file mut BTreeMap<RawAddress, ContextHint>,
+        mapping_hints: &'file mut SegmentMappingHints,
     ) -> Self {
         Self {
             view,
             pe,
             arch,
             base,
-            config,
-            function_hints,
             mapping_hints,
         }
     }
 
     pub(crate) fn apply(&mut self) -> Result<(), LoaderError> {
-        let mut context = ExceptionContext::new(
-            self.view,
-            self.arch,
-            self.base,
-            self.function_hints,
-            self.mapping_hints,
-        );
+        let mut context =
+            ExceptionContext::new(self.view, self.arch, self.base, self.mapping_hints);
 
         if context.apply_exceptions()? {
             return Ok(());
@@ -79,9 +66,6 @@ where
         };
 
         if let Err(error) = result {
-            if !self.config.is_permissive() {
-                return Err(error);
-            }
             tracing::warn!(
                 "unable to fully read PE exception directory ({error}); keeping partial function hints"
             );

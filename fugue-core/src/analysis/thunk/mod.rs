@@ -105,7 +105,7 @@ impl AnalysisPass<StructuredFunctionContext> for ThunkTargetRecovery {
         let mut mapping_cache = SegmentMappingCache::new();
         let seeds = mapping_cache
             .view_containing(segments, entry)
-            .and_then(|view| view.tracked_set_at(entry).cloned())
+            .and_then(|view| view.mapping_hints().tracked_set_at(entry).cloned())
             .map(|tracked| {
                 tracked
                     .iter()
@@ -142,6 +142,15 @@ impl AnalysisPass<StructuredFunctionContext> for ThunkTargetRecovery {
         let mut buffer = Vec::new();
 
         let Some(value) = evaluator.evaluate(target, |address, size| {
+            if !mapping_cache
+                .view_containing(segments, address)
+                .is_some_and(|view| {
+                    !view.properties().is_writable()
+                        || view.mapping_hints().contains_symbol_pointer(address)
+                })
+            {
+                return None;
+            }
             buffer.resize(size, 0);
             mapping_cache
                 .read_bytes_exact(segments, address, &mut buffer)

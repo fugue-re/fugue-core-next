@@ -243,9 +243,12 @@ where
                 })
                 .or_else(|| Self::relocation_symbol_count(header, endian, data, &relocations));
 
-            if let Some(mut dynsym) = value(DT_SYMTAB)
-                .zip(symbol_count)
-                .and_then(|(address, count)| section(SHT_DYNSYM, address, count * syment, syment))
+            if let Some(mut dynsym) =
+                value(DT_SYMTAB)
+                    .zip(symbol_count)
+                    .and_then(|(address, count)| {
+                        section(SHT_DYNSYM, address, count.checked_mul(syment)?, syment)
+                    })
             {
                 dynsym.sh_link = dynstr_index;
                 sections.push((&b".dynsym"[..], dynsym));

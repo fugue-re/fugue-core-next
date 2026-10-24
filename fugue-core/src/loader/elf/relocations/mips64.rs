@@ -113,6 +113,9 @@ where
                 };
                 let value = symbol | self.mips_isa_bit(reloc, is_dynamic);
 
+                let slot = bytes.address() + offset;
+                bytes.mapping_hints_mut().insert_symbol_pointer(slot);
+
                 if step == R_MIPS_JUMP_SLOT {
                     self.mark_function_symbol(value, bytes);
                 } else {

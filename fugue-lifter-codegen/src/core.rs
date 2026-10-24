@@ -22,6 +22,7 @@ use crate::{LanguageVariant, LifterGeneratorError};
 
 pub struct LifterGenerator<'a> {
     context_variables: Vec<(&'a str, usize, usize)>,
+    context_variables_flow_mask: Vec<u32>,
     language: &'a Language,
     tables: Tables<'a>,
     primary_variant: LanguageVariant,
@@ -151,6 +152,7 @@ impl<'a> LifterGenerator<'a> {
 
         let mut slf = Self {
             context_variables: Vec::new(),
+            context_variables_flow_mask: Vec::new(),
             language,
             tables: Tables::default(),
             primary_variant,
@@ -246,6 +248,7 @@ impl<'a> LifterGenerator<'a> {
             let Symbol::Context {
                 name,
                 pattern_value,
+                flow,
                 ..
             } = symtab.symbol(sym_id).unwrap()
             else {
@@ -257,6 +260,18 @@ impl<'a> LifterGenerator<'a> {
             } = pattern_value
             {
                 self.context_variables.push((name, *bit_start, *bit_end));
+
+                let word_bits = u32::BITS as usize;
+                let word = bit_start / word_bits;
+                if self.context_variables_flow_mask.len() <= word {
+                    self.context_variables_flow_mask.resize(word + 1, !0);
+                }
+                if !flow {
+                    let start = bit_start % word_bits;
+                    let end = bit_end % word_bits;
+                    self.context_variables_flow_mask[word] &=
+                        !((!0u32 >> start) & (!0u32 << (word_bits - 1 - end)));
+                }
             }
         }
 
@@ -972,13 +987,8 @@ impl<'a> ToTokens for LifterGenerator<'a> {
             }
         });
         let n_context_vars = self.context_variables.len();
-
-        let context_variable_registrations =
-            self.context_variables.iter().map(|(name, start, end)| {
-                quote! {
-                    context.register_variable(#name, #start, #end);
-                }
-            });
+        let context_variables_flow_mask = &self.context_variables_flow_mask;
+        let n_context_words = context_variables_flow_mask.len();
 
         let n_registers = self.language.registers().name_mapping().len();
 
@@ -1114,7 +1124,8 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                     const REGISTER_RANGES: &'static [(u64, u16, &'static str)] = &register::REGISTERS;
                     const USER_OPS: &'static [&'static str] = &user_op::USER_OPS;
                     const SPACE_NAMES: &'static [&'static str] = &space::SPACES;
-                    const CONTEXT_VARS: &'static [(&'static str, fugue_lifter_runtime::context::ContextBitRange)] = &context::CONTEXT_VARIABLES;
+                    const CONTEXT_VARS: &'static [(&'static str, fugue_lifter_runtime::context::ContextBitRange)] = &context::CONTEXT_VARS;
+                    const CONTEXT_VARS_FLOW_MASK: &'static [u32] = &context::CONTEXT_VARS_FLOW_MASK;
                     const CONTEXT_DEFAULTS: &'static [(&'static str, u32)] = &CONTEXT_DEFAULTS;
                     #metadata
 
@@ -1247,7 +1258,8 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                         const REGISTER_RANGES: &'static [(u64, u16, &'static str)] = &register::REGISTERS;
                         const USER_OPS: &'static [&'static str] = &user_op::USER_OPS;
                         const SPACE_NAMES: &'static [&'static str] = &space::SPACES;
-                        const CONTEXT_VARS: &'static [(&'static str, fugue_lifter_runtime::context::ContextBitRange)] = &context::CONTEXT_VARIABLES;
+                        const CONTEXT_VARS: &'static [(&'static str, fugue_lifter_runtime::context::ContextBitRange)] = &context::CONTEXT_VARS;
+                        const CONTEXT_VARS_FLOW_MASK: &'static [u32] = &context::CONTEXT_VARS_FLOW_MASK;
                         const CONTEXT_DEFAULTS: &'static [(&'static str, u32)] = &#defaults_static;
                         #metadata
 
@@ -1289,8 +1301,12 @@ impl<'a> ToTokens for LifterGenerator<'a> {
             pub mod context {
                 #(#context_variable_consts)*
 
-                pub const CONTEXT_VARIABLES: [(&'static str, fugue_lifter_runtime::context::ContextBitRange); #n_context_vars] = [
+                pub const CONTEXT_VARS: [(&'static str, fugue_lifter_runtime::context::ContextBitRange); #n_context_vars] = [
                     #(#context_variable_pairs,)*
+                ];
+
+                pub const CONTEXT_VARS_FLOW_MASK: [u32; #n_context_words] = [
+                    #(#context_variables_flow_mask,)*
                 ];
             }
 
@@ -1393,20 +1409,6 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 context: fugue_lifter_runtime::ContextDatabase,
             ) -> fugue_lifter_runtime::LiftingContext {
                 fugue_lifter_runtime::LiftingContext::new(language, ninputs, context, UNIQUE_MASK)
-            }
-
-            #[inline]
-            #[allow(unused_mut)]
-            pub fn default_context() -> fugue_lifter_runtime::ContextDatabase {
-                let mut context =
-                    fugue_lifter_runtime::ContextDatabase::new(
-                        ADDRESS_UPPER_BOUND,
-                        ADDRESS_ALIGNMENT,
-                    );
-
-                #(#context_variable_registrations)*
-
-                context
             }
 
             #(#variant_blocks)*

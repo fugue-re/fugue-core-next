@@ -1,14 +1,13 @@
-use std::collections::{BTreeMap, BTreeSet};
-
 use object::read::elf::{ElfFile, FileHeader, ProgramHeader, SectionHeader};
-use object::{Architecture, Object, ObjectSection, ReadRef};
+use object::{Architecture, Object, ObjectKind, ObjectSection, ReadRef};
 
 use crate::arch::Arch;
 use crate::ir::RawAddress;
 use crate::lifter::ContextHint;
 use crate::loader::LoaderError;
+use crate::loader::elf::ElfFileRepr;
 use crate::loader::elf::extensions::ExceptionContext;
-use crate::loader::elf::{ElfFileRepr, ElfLoaderProperties};
+use crate::storage::segments::mapping::SegmentMappingHints;
 
 mod arm;
 mod eh_frame;
@@ -23,9 +22,7 @@ where
     elf: &'file ElfFile<'data, Elf, R>,
     arch: &'file Arch,
     base: RawAddress,
-    config: ElfLoaderProperties,
-    function_hints: &'file mut BTreeSet<RawAddress>,
-    mapping_hints: &'file mut BTreeMap<RawAddress, ContextHint>,
+    mapping_hints: &'file mut SegmentMappingHints,
 }
 
 impl<'data, 'file, 'image, Elf, R> ElfExceptionResolver<'data, 'file, 'image, Elf, R>
@@ -39,17 +36,13 @@ where
         elf: &'file ElfFile<'data, Elf, R>,
         arch: &'file Arch,
         base: RawAddress,
-        config: ElfLoaderProperties,
-        function_hints: &'file mut BTreeSet<RawAddress>,
-        mapping_hints: &'file mut BTreeMap<RawAddress, ContextHint>,
+        mapping_hints: &'file mut SegmentMappingHints,
     ) -> Self {
         Self {
             view,
             elf,
             arch,
             base,
-            config,
-            function_hints,
             mapping_hints,
         }
     }
@@ -87,36 +80,29 @@ where
     }
 
     pub(crate) fn apply(&mut self) -> Result<(), LoaderError> {
-        let mut context = ExceptionContext::new(
-            self.view,
-            self.arch,
-            self.base,
-            self.function_hints,
-            self.mapping_hints,
-        );
+        let mut context =
+            ExceptionContext::new(self.view, self.arch, self.base, self.mapping_hints);
 
         if context.apply_exceptions()? {
             return Ok(());
         }
 
-        if self.config.is_object() {
+        if self.elf.kind() == ObjectKind::Relocatable {
             tracing::trace!("no exception table support for relocatable ELF objects");
             return Ok(());
         }
 
-        let result = self
-            .apply_eh_frame()
-            .and_then(|()| match self.elf.architecture() {
-                Architecture::Arm => self.apply_arm_exidx(),
-                _ => Ok(()),
-            });
-
-        if let Err(error) = result {
-            if !self.config.is_permissive() {
-                return Err(error);
-            }
+        if let Err(error) = self.apply_eh_frame() {
             tracing::warn!(
-                "unable to fully read ELF exception tables ({error}); keeping partial function hints"
+                "unable to fully read ELF exception frames ({error}); keeping partial function hints"
+            );
+        }
+
+        if self.elf.architecture() == Architecture::Arm
+            && let Err(error) = self.apply_arm_exidx()
+        {
+            tracing::warn!(
+                "unable to fully read ARM exception index ({error}); keeping partial function hints"
             );
         }
 
@@ -128,11 +114,11 @@ where
         let address = match self.arch.canonicalise_address(address) {
             Some((canonical, context)) if canonical != address => {
                 self.mapping_hints
-                    .insert(canonical, ContextHint::code().with_context(context));
+                    .insert_context_hint(canonical, ContextHint::code().with_context(context));
                 canonical
             }
             _ => address,
         };
-        self.function_hints.insert(address);
+        self.mapping_hints.insert_function(address);
     }
 }

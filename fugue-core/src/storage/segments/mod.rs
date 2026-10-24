@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter};
 use std::mem;
@@ -10,8 +10,7 @@ use rkyv::rancor::Error as RkyvError;
 use smallvec::SmallVec;
 use thiserror::Error;
 
-use crate::ir::{Address, AddressRange, AddressRangeExt, RawAddress, RawAddressMap};
-use crate::lifter::{ContextHint, TrackedSet};
+use crate::ir::{Address, AddressRange, AddressRangeExt, RawAddress};
 use crate::loader::{
     ImageAddress, ImageBankHandle, ImageResolution, ImageSpaceHandle, ImageSpaceKind, Loadable,
     LoaderError,
@@ -137,9 +136,7 @@ struct MappingMetadata {
     kind: SegmentMappingKind,
     provenance: SegmentMappingProvenance,
     flags: SegmentMappingFlags,
-    mapping_hints: BTreeMap<RawAddress, ContextHint>,
-    function_hints: BTreeSet<RawAddress>,
-    tracked_sets: RawAddressMap<TrackedSet>,
+    mapping_hints: SegmentMappingHints,
     provider_id: SegmentStorageProviderId,
 }
 
@@ -315,14 +312,12 @@ impl SegmentStorage {
             })
             .collect::<BTreeMap<ImageSpaceHandle, ImageBankHandle>>();
 
-        let mut discovered_hints = BTreeSet::<RawAddress>::new();
-        let mut discovered_mapping_hints = BTreeMap::<RawAddress, ContextHint>::new();
+        let mut discovered_hints = SegmentMappingHints::default();
 
         let mut contents = loader.image_contents();
 
         while let Some(mut content) = contents.next()? {
-            discovered_hints.extend(content.take_function_hints());
-            discovered_mapping_hints.extend(content.take_mapping_hints());
+            discovered_hints.merge(content.take_mapping_hints());
 
             let bank_base = *bank_bases
                 .get(&content.bank())
@@ -361,27 +356,21 @@ impl SegmentStorage {
             let size = segment.size();
             let properties = segment.properties();
             let provenance = segment.provenance();
-            let (name, segment_mapping_hints, segment_function_hints, tracked_sets) =
-                segment.into_name_and_hints();
+            let (name, mut mapping_hints) = segment.into_name_and_mapping_hints();
 
-            let start = address.raw_address();
-            let end = address.raw_address() + size;
-
-            let extra_hints = discovered_hints.range(start..end).copied();
-            let extra_mapping_hints = discovered_mapping_hints
-                .range(start..end)
-                .map(|(offset, hint)| (*offset, hint.clone()));
+            if let Some(last) = size
+                .checked_sub(1)
+                .and_then(|last| address.raw_address().checked_add(last))
+            {
+                mapping_hints.merge(discovered_hints.clamp(address.raw_address()..=last));
+            }
 
             let mapping_id = storage.create_mapping_from_builder(
                 SegmentMappingBuilder::new(address, size, backing_offset, provider_id)
                     .with_properties(properties)
                     .with_name(name)
                     .with_provenance(provenance)
-                    .with_mapping_hints(
-                        segment_mapping_hints.into_iter().chain(extra_mapping_hints),
-                    )
-                    .with_function_hints(segment_function_hints.into_iter().chain(extra_hints))
-                    .with_tracked_sets(tracked_sets),
+                    .with_mapping_hints(mapping_hints),
             )?;
 
             storage.add_mapping_to_space(address.space(), mapping_id)?;
@@ -530,9 +519,7 @@ impl SegmentStorage {
                 .with_kind(mapping_meta.kind)
                 .with_provenance(mapping_meta.provenance)
                 .with_flags(mapping_meta.flags)
-                .with_mapping_hints(mapping_meta.mapping_hints.clone())
-                .with_function_hints(mapping_meta.function_hints.clone())
-                .with_tracked_sets(mapping_meta.tracked_sets.clone()),
+                .with_mapping_hints(mapping_meta.mapping_hints.clone()),
             )?;
 
             mapping_map.insert(mapping_meta.id, mapping_id);
@@ -673,10 +660,13 @@ impl SegmentStorage {
                     .get(&submap.mapping_ref().mapping_id())
                     .into_iter()
                     .flat_map(move |mapping| {
-                        mapping.function_hints().filter_map(move |address| {
-                            let mapped = Address::new(space.id(), address.raw_address());
-                            submap.contains(mapped).then_some(mapped)
-                        })
+                        mapping
+                            .mapping_hints()
+                            .functions()
+                            .filter_map(move |address| {
+                                let mapped = Address::new(space.id(), address);
+                                submap.contains(mapped).then_some(mapped)
+                            })
                     })
             })
         })
@@ -874,13 +864,7 @@ impl SegmentStorage {
                 kind: m.kind(),
                 provenance: m.provenance(),
                 flags: m.flags(),
-                mapping_hints: m
-                    .mapping_hints()
-                    .iter()
-                    .map(|(address, hint)| (address.raw_address(), hint.clone()))
-                    .collect(),
-                function_hints: m.function_hint_offsets().clone(),
-                tracked_sets: m.tracked_set_offsets().clone(),
+                mapping_hints: m.mapping_hints().clone(),
                 provider_id: m.provider_id(),
             })
             .collect::<Vec<_>>();
@@ -1763,6 +1747,7 @@ mod test {
     use super::*;
     use crate::arch::Arch;
     use crate::ir::Endian;
+    use crate::lifter::ContextHint;
     use crate::loader::{
         ImageAddress, ImageBacking, ImageBank, ImageLayout, ImageSegment, ImageSegmentContents,
         ImageSegmentContentsIterator, ImageSegmentIterator, ImageSpace, ImageSpaceHandle,
@@ -2433,53 +2418,33 @@ mod test {
     }
 
     #[test]
-    fn mapping_hint_ranges_follow_visible_bounds_and_space() -> Result<(), SegmentStorageError> {
-        let mut storage = SegmentStorage::empty();
-        let provider = storage.open_provider(
-            InMemorySegmentStorage::from_bytes(vec![0; 16]),
-            SegmentProperties::PERM_ALL,
+    fn mapping_hint_lookup_and_clamp() {
+        let mut hints = SegmentMappingHints::default();
+        hints.insert_context_hint_range(
+            RawAddress::from(0x1000u64)..=RawAddress::from(0x100fu64),
+            ContextHint::data(),
         );
-        let mapping = storage.create_mapping_from_builder(
-            SegmentMappingBuilder::new(0x1000u64, 16, 0, provider).with_mapping_hints([
-                (RawAddress::from(0x1000u64), ContextHint::data()),
-                (RawAddress::from(0x1008u64), ContextHint::code()),
-                (RawAddress::from(0x100cu64), ContextHint::data()),
-            ]),
-        )?;
-        let covering = storage
-            .create_mapping_from_builder(SegmentMappingBuilder::new(0x1000u64, 8, 0, provider))?;
-        let space = storage.create_space()?;
-        storage.add_mapping_to_space_bottom(space, mapping)?;
-        storage.add_mapping_to_space_top(space, covering)?;
+        hints.insert_context_hint(0x1008u64, ContextHint::code());
 
-        let address = Address::new(space, 0x1009u64);
-        let view = storage.view_containing(address)?;
-        let hints = view.mapping_hints();
+        assert_eq!(hints.context_hint_at(0x1004u64), Some(&ContextHint::data()));
+        assert_eq!(hints.context_hint_at(0x1008u64), Some(&ContextHint::code()));
+        assert_eq!(hints.context_hint_at(0x100cu64), Some(&ContextHint::data()));
+        assert_eq!(hints.context_hint_at(0x1010u64), None);
+
+        let clamped = hints.clamp(RawAddress::from(0x100cu64)..=RawAddress::from(0x10ffu64));
         assert_eq!(
-            hints.iter().map(|(address, _)| address).collect::<Vec<_>>(),
-            vec![
-                Address::new(space, 0x1008u64),
-                Address::new(space, 0x100cu64)
-            ],
+            clamped.context_hint_at(0x100cu64),
+            Some(&ContextHint::data())
         );
+        assert_eq!(clamped.context_hint_at(0x100bu64), None);
+        assert_eq!(clamped.context_hint_at(0x1008u64), None);
         assert_eq!(
-            hints.range(..=address).next_back(),
-            Some((Address::new(space, 0x1008u64), &ContextHint::code())),
+            clamped
+                .context_hints_in_range(..)
+                .map(|(address, _)| address)
+                .collect::<Vec<_>>(),
+            vec![RawAddress::from(0x100cu64)],
         );
-        assert!(
-            hints
-                .range(..Address::new(space, 0x1008u64))
-                .next()
-                .is_none()
-        );
-        assert!(hints.get(Address::in_default_space(0x1008u64)).is_none());
-        assert!(
-            hints
-                .range(..=Address::in_default_space(0x100cu64))
-                .next()
-                .is_none()
-        );
-        Ok(())
     }
 
     #[test]
@@ -2665,8 +2630,9 @@ mod test {
             {
                 let mut contents =
                     ImageSegmentContents::new(0x1000u64, Endian::Little, vec![0u8; 0x100]);
-                contents.add_function_hint(0x1040u64);
-                contents.add_mapping_hint(0x1040u64, ContextHint::data());
+                let mapping_hints = contents.mapping_hints_mut();
+                mapping_hints.insert_function(0x1040u64);
+                mapping_hints.insert_context_hint(0x1040u64, ContextHint::data());
                 Box::new(fallible_iterator::convert(std::iter::once(Ok(contents))))
                     as ImageSegmentContentsIterator<'a>
             }
@@ -2692,9 +2658,8 @@ mod test {
                 .into_parts();
 
         let view = storage.view_containing(0x1000u64)?;
-        let hints = view.function_hints().collect::<Vec<_>>();
         assert!(
-            hints.iter().any(|hint| hint.offset() == 0x1040),
+            view.mapping_hints().contains_function(0x1040u64),
             "relocation-discovered function hint should reach the covering mapping",
         );
         assert!(
@@ -2705,7 +2670,7 @@ mod test {
         );
 
         assert_eq!(
-            view.mapping_hints().get(0x1040u64),
+            view.mapping_hints().context_hint_at(0x1040u64),
             Some(&ContextHint::data()),
             "relocation-discovered mapping hint should reach the covering mapping",
         );

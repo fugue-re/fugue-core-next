@@ -24,10 +24,10 @@ use smallvec::{SmallVec, smallvec};
 use crate::AnalysisData;
 use crate::arch::Arch;
 use crate::ir::{
-    RawAddress, RawAddressMap, RawAddressRangeSet, Symbol, SymbolIndex, SymbolProperties,
-    SymbolTableSelector, TransientSymbolTable,
+    RawAddress, RawAddressRangeSet, Symbol, SymbolIndex, SymbolProperties, SymbolTableSelector,
+    TransientSymbolTable,
 };
-use crate::lifter::{ContextHint, TrackedSet};
+use crate::lifter::ContextHint;
 use crate::loader::elf::extensions::ImageContext;
 use crate::loader::elf::read::image::ElfImageData;
 use crate::loader::elf::read::permissive;
@@ -40,7 +40,7 @@ use crate::loader::{
 };
 use crate::platform::{Format, OperatingSystem, Platform};
 use crate::storage::segments::SegmentProperties;
-use crate::storage::segments::mapping::SegmentMappingProvenance;
+use crate::storage::segments::mapping::{SegmentMappingHints, SegmentMappingProvenance};
 use crate::types::attributes::{ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE};
 use crate::types::{AttributeMap, BytesOrMapping};
 
@@ -177,9 +177,7 @@ pub struct Elf<'a> {
     entry: Option<ImageAddress>,
     layout: ImageLayout,
     image_symbols: TransientSymbolTable<ImageAddress>,
-    mapping_hints: BTreeMap<RawAddress, ContextHint>,
-    function_hints: BTreeSet<RawAddress>,
-    tracked_sets: RawAddressMap<TrackedSet>,
+    mapping_hints: SegmentMappingHints,
     segments: Vec<ElfImageSegment>,
     region_bank: ElfRegionBankMap,
     sections: ElfSectionMap,
@@ -255,7 +253,6 @@ impl<'a> Elf<'a> {
             elf | ElfSymbolLayout::from_elf(elf, &architecture, base, preferred_base, config)?
         );
 
-        let mut tracked_sets = RawAddressMap::new();
         with_elf!(
             view,
             elf | ElfTrackedSetResolver::new(
@@ -263,21 +260,6 @@ impl<'a> Elf<'a> {
                 elf,
                 &architecture,
                 base - preferred_base,
-                &mut tracked_sets,
-            )
-            .apply()
-        )?;
-
-        let mut function_hints = BTreeSet::new();
-        with_elf!(
-            view,
-            elf | ElfExceptionResolver::new(
-                view,
-                elf,
-                &architecture,
-                base - preferred_base,
-                config,
-                &mut function_hints,
                 &mut mapping_hints,
             )
             .apply()
@@ -285,11 +267,24 @@ impl<'a> Elf<'a> {
 
         let entry = entry.map(|entry| match architecture.canonicalise_address(entry) {
             Some((canonical, context)) if canonical != entry => {
-                mapping_hints.insert(canonical, ContextHint::code().with_context(context));
+                mapping_hints
+                    .insert_context_hint(canonical, ContextHint::code().with_context(context));
                 canonical
             }
             _ => entry,
         });
+
+        with_elf!(
+            view,
+            elf | ElfExceptionResolver::new(
+                view,
+                elf,
+                &architecture,
+                base - preferred_base,
+                &mut mapping_hints,
+            )
+            .apply()
+        )?;
 
         let header_last = config
             .load_headers()
@@ -386,8 +381,6 @@ impl<'a> Elf<'a> {
             image_symbols,
             layout,
             mapping_hints,
-            function_hints,
-            tracked_sets,
             segments: placements,
             region_bank,
             sections,
@@ -407,7 +400,7 @@ impl<'a> Elf<'a> {
         self.object.borrow_view()
     }
 
-    pub fn mapping_hints(&self) -> &BTreeMap<RawAddress, ContextHint> {
+    pub fn mapping_hints(&self) -> &SegmentMappingHints {
         &self.mapping_hints
     }
 
@@ -1102,9 +1095,7 @@ where
 
 struct ElfImageSegments<'a> {
     segments: slice::Iter<'a, ElfImageSegment>,
-    mapping_hints: &'a BTreeMap<RawAddress, ContextHint>,
-    function_hints: &'a BTreeSet<RawAddress>,
-    tracked_sets: &'a RawAddressMap<TrackedSet>,
+    mapping_hints: &'a SegmentMappingHints,
     image_symbols: &'a TransientSymbolTable<ImageAddress>,
 }
 
@@ -1112,15 +1103,11 @@ impl<'a> ElfImageSegments<'a> {
     fn new(
         segments: &'a [ElfImageSegment],
         image_symbols: &'a TransientSymbolTable<ImageAddress>,
-        mapping_hints: &'a BTreeMap<RawAddress, ContextHint>,
-        function_hints: &'a BTreeSet<RawAddress>,
-        tracked_sets: &'a RawAddressMap<TrackedSet>,
+        mapping_hints: &'a SegmentMappingHints,
     ) -> Self {
         Self {
             segments: segments.iter(),
             mapping_hints,
-            function_hints,
-            tracked_sets,
             image_symbols,
         }
     }
@@ -1129,16 +1116,11 @@ impl<'a> ElfImageSegments<'a> {
         let seg_start = segment.address.offset();
         let seg_last = seg_start.checked_add(segment.size.saturating_sub(1));
 
-        let (mapping_hints, function_hints) = seg_last
+        let mapping_hints = seg_last
             .map(|seg_last| {
-                let mapping_hints = self
-                    .mapping_hints
-                    .range(seg_start..=seg_last)
-                    .map(|(addr, hint)| (*addr, hint.clone()))
-                    .collect::<BTreeMap<RawAddress, ContextHint>>();
-
+                let mut mapping_hints = self.mapping_hints.clamp(seg_start..=seg_last);
                 let space = segment.address.space();
-                let function_hints = self
+                for (_, entry) in self
                     .image_symbols
                     .range_by_address(
                         ImageAddress::new(space, seg_start)..=ImageAddress::new(space, seg_last),
@@ -1148,11 +1130,10 @@ impl<'a> ElfImageSegments<'a> {
                             .properties()
                             .contains(SymbolProperties::FUNCTION | SymbolProperties::EXTERNAL)
                     })
-                    .map(|(_, entry)| entry.address().offset())
-                    .chain(self.function_hints.range(seg_start..=seg_last).copied())
-                    .collect::<BTreeSet<RawAddress>>();
-
-                (mapping_hints, function_hints)
+                {
+                    mapping_hints.insert_function(entry.address().offset());
+                }
+                mapping_hints
             })
             .unwrap_or_default();
 
@@ -1165,8 +1146,6 @@ impl<'a> ElfImageSegments<'a> {
         .with_backing(ImageBacking::new(segment.bank, segment.backing_offset))
         .with_provenance(segment.provenance)
         .with_mapping_hints(mapping_hints)
-        .with_function_hints(function_hints)
-        .with_tracked_sets(self.tracked_sets.clone())
     }
 }
 
@@ -1191,7 +1170,7 @@ struct RawElfSymbol {
 
 struct ElfSymbolLayout {
     bounds: RangeInclusive<RawAddress>,
-    mapping_hints: BTreeMap<RawAddress, ContextHint>,
+    mapping_hints: SegmentMappingHints,
     symbols: BTreeMap<SymbolIndex, RawElfSymbol>,
     sections: ElfSectionMap,
     external_thunks: ExternalThunkLayout,
@@ -1212,7 +1191,8 @@ impl ElfSymbolLayout {
         let addr_align = arch.language().address_alignment().max(addr_size);
 
         let mut sections = ElfSectionMap::new();
-        let mut mapping_hints = BTreeMap::new();
+        let mut mapping_hints = SegmentMappingHints::default();
+        let mut mapping_symbols = BTreeMap::new();
 
         let mut min_addr = base_addr;
         let mut max_addr = base_addr;
@@ -1289,7 +1269,13 @@ impl ElfSymbolLayout {
                 tracing::trace!(
                     "symbol {name} in section {section:?} at {address} is a mapping symbol"
                 );
-                mapping_hints.insert(address, context);
+                if let Ok(symbol_section) = elf.section_by_index(section)
+                    && let Some(last) = symbol_section.size().checked_sub(1)
+                {
+                    let section_start =
+                        address - symbol.address().wrapping_sub(symbol_section.address());
+                    mapping_symbols.insert(address, (section_start + last, context));
+                }
                 continue;
             }
 
@@ -1334,7 +1320,8 @@ impl ElfSymbolLayout {
                         && !properties.is_external()
                         && canonical != address =>
                 {
-                    mapping_hints.insert(canonical, ContextHint::code().with_context(context));
+                    mapping_hints
+                        .insert_context_hint(canonical, ContextHint::code().with_context(context));
                     canonical
                 }
                 _ => address,
@@ -1350,6 +1337,14 @@ impl ElfSymbolLayout {
                         .then_some(symbol.size()),
                 },
             );
+        }
+
+        let mut mapping_symbols = mapping_symbols.into_iter().peekable();
+        while let Some((start, (section_last, hint))) = mapping_symbols.next() {
+            let last = mapping_symbols
+                .peek()
+                .map_or(section_last, |(next, _)| (*next - 1u64).min(section_last));
+            mapping_hints.insert_context_hint_range(start..=last, hint);
         }
 
         let (syms, selector) = if is_object {
@@ -1434,7 +1429,8 @@ impl ElfSymbolLayout {
                         && !properties.is_external()
                         && canonical != address =>
                 {
-                    mapping_hints.insert(canonical, ContextHint::code().with_context(context));
+                    mapping_hints
+                        .insert_context_hint(canonical, ContextHint::code().with_context(context));
                     canonical
                 }
                 _ => address,
@@ -1886,8 +1882,9 @@ where
             self.context.arch().endian(),
             Cow::Owned(contents),
         );
+        let mapping_hints = bytes.mapping_hints_mut();
         for offset in function_offsets {
-            bytes.add_function_hint(offset);
+            mapping_hints.insert_function(offset);
         }
 
         Some(bytes)
@@ -2231,8 +2228,6 @@ impl Loadable for Elf<'_> {
             &self.segments,
             &self.image_symbols,
             &self.mapping_hints,
-            &self.function_hints,
-            &self.tracked_sets,
         )) as ImageSegmentIterator<'b>
     }
 
@@ -2499,7 +2494,7 @@ mod test {
                 tracing::info!("symbol {sym}");
             }
 
-            for (addr, hint) in elf.mapping_hints() {
+            for (addr, hint) in elf.mapping_hints().context_hints_in_range(..) {
                 tracing::info!("mapping hint {addr}: {hint}");
             }
 
@@ -2694,14 +2689,14 @@ mod test {
         let mut code_hints = 0usize;
         let mut data_hints = 0usize;
         while let Some(segment) = contents.next()? {
-            for hint in segment.function_hints() {
+            for hint in segment.mapping_hints().functions() {
                 assert_eq!(
                     hint.offset() & 1,
                     0,
                     "relocation-discovered function hint {hint} must land on an even entry",
                 );
             }
-            for (address, hint) in segment.mapping_hints() {
+            for (address, hint) in segment.mapping_hints().context_hints_in_range(..) {
                 if hint.is_data() {
                     data_hints += 1;
                     assert_eq!(
@@ -3006,6 +3001,37 @@ mod test {
     }
 
     #[test]
+    fn test_elf_tracked_set_clamping() -> Result<(), Box<dyn std::error::Error>> {
+        let elf = Elf::from_file("tests/libhello-mips64el.so")?;
+        let mut image_segments = elf.image_segments();
+        let mut clamped = 0usize;
+
+        while let Some(segment) = image_segments.next()? {
+            let mapping_hints = segment.mapping_hints();
+            let start = segment.address().offset().offset();
+            let last = start + (segment.size() - 1);
+            if mapping_hints.tracked_set_at(start).is_none() {
+                continue;
+            }
+
+            assert!(mapping_hints.tracked_set_at(last).is_some());
+            assert!(
+                start
+                    .checked_sub(1)
+                    .is_none_or(|before| mapping_hints.tracked_set_at(before).is_none())
+            );
+            assert!(
+                last.checked_add(1)
+                    .is_none_or(|after| mapping_hints.tracked_set_at(after).is_none())
+            );
+            clamped += 1;
+        }
+
+        assert!(clamped > 0);
+        Ok(())
+    }
+
+    #[test]
     fn test_elf_mips64_composite_relocations() -> Result<(), Box<dyn std::error::Error>> {
         let mut attributes = AttributeMap::new();
         let image_base = RawAddress::new(0x7000_0000u64);
@@ -3246,7 +3272,7 @@ mod test {
         let mut contents = elf.image_contents();
         let mut function_hints = 0usize;
         while let Some(segment) = contents.next()? {
-            function_hints += segment.function_hints().len();
+            function_hints += segment.mapping_hints().functions().count();
         }
 
         assert!(

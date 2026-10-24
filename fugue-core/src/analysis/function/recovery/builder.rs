@@ -309,12 +309,11 @@ impl FunctionBuilder {
             return None;
         }
         if self.config.segment_mapping_hints()
-            && let Some((hint_address, hint)) = candidate_view
+            && let Some(hint) = candidate_view
                 .mapping_hints()
-                .range(..=candidate_address)
-                .next_back()
+                .context_hint_at(candidate_address)
         {
-            if hint_address == candidate_address && hint.is_data() {
+            if hint.is_data() {
                 return None;
             }
             if let Some(hinted) = hint.context() {
@@ -620,7 +619,9 @@ impl FunctionBuilderContext {
                 continue 'outer;
             }
             if use_mapping_hints
-                && let Some(hint) = candidate_view.mapping_hints().get(candidate_block)
+                && let Some(hint) = candidate_view
+                    .mapping_hints()
+                    .context_hint_at(candidate_block)
             {
                 if hint.is_data() {
                     tracing::trace!(
@@ -651,7 +652,7 @@ impl FunctionBuilderContext {
             context.merge(&derived);
 
             // Applies the context updates to the lifter context.
-            context.apply(block, resolver.context_mut());
+            context.apply_with(block, resolver.context_mut(), block == self.entry);
 
             if block != self.entry && function_entries.binary_search(&block).is_ok() {
                 tracing::trace!("stopping at function boundary {block}");
@@ -698,7 +699,9 @@ impl FunctionBuilderContext {
             let bytes = &bytes[..bytes.len().min(remaining)];
             let mut insn_bytes = [0u8; MAX_INSN_BYTES];
             let mut offset = 0usize;
-            let mut mapping_hints = view.mapping_hints().range(block..);
+            let mut mapping_hints = view
+                .mapping_hints()
+                .context_hints_in_range(block.raw_address()..);
             let mut next_mapping_hint = mapping_hints.next();
             let next_function_entry = function_entries
                 .get(function_entries.partition_point(|entry| *entry <= block))
@@ -716,12 +719,12 @@ impl FunctionBuilderContext {
                 if use_mapping_hints && offset != 0 {
                     while next_mapping_hint
                         .as_ref()
-                        .is_some_and(|(hint_address, _)| *hint_address < address)
+                        .is_some_and(|(hint_address, _)| *hint_address < address.raw_address())
                     {
                         next_mapping_hint = mapping_hints.next();
                     }
                     if let Some((hint_address, hint)) = next_mapping_hint
-                        && hint_address == address
+                        && hint_address == address.raw_address()
                     {
                         if hint.is_data() {
                             tracing::trace!(
@@ -788,8 +791,15 @@ impl FunctionBuilderContext {
                         .then(|| {
                             resolved.resolve_indirect_target(|address, bytes| {
                                 self.mapping_cache
-                                    .read_bytes_exact(segments, address, bytes)
-                                    .is_ok()
+                                    .view_containing(segments, address)
+                                    .is_some_and(|view| {
+                                        !view.properties().is_writable()
+                                            || view.mapping_hints().contains_symbol_pointer(address)
+                                    })
+                                    && self
+                                        .mapping_cache
+                                        .read_bytes_exact(segments, address, bytes)
+                                        .is_ok()
                             })
                         })
                         .flatten();

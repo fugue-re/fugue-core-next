@@ -744,12 +744,9 @@ impl RawAddressRangeSet {
 
     pub fn overlapping_ranges(
         &self,
-        range: RangeInclusive<RawAddress>,
-    ) -> impl Iterator<Item = RangeInclusive<RawAddress>> + use<'_> {
-        let start = range.start().offset();
-        let end = range.end().offset();
-        (start <= end)
-            .then_some(start..=end)
+        range: impl RangeBounds<RawAddress>,
+    ) -> impl Iterator<Item = RangeInclusive<RawAddress>> {
+        raw_address_bounds(&range)
             .into_iter()
             .flat_map(move |range| {
                 self.0
@@ -1071,11 +1068,11 @@ impl AddressRangeSet {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RawAddressMap<V>(RangeInclusiveMap<u64, V>)
+pub struct RawAddressRangeMap<V>(RangeInclusiveMap<u64, V>)
 where
     V: Clone + Eq;
 
-impl<V> Default for RawAddressMap<V>
+impl<V> Default for RawAddressRangeMap<V>
 where
     V: Clone + Eq,
 {
@@ -1084,12 +1081,12 @@ where
     }
 }
 
-impl<V> FromIterator<(RawAddress, V)> for RawAddressMap<V>
+impl<V> FromIterator<(RawAddress, V)> for RawAddressRangeMap<V>
 where
     V: Clone + Eq,
 {
     fn from_iter<T: IntoIterator<Item = (RawAddress, V)>>(iter: T) -> Self {
-        let mut map = RawAddressMap::new();
+        let mut map = RawAddressRangeMap::new();
         for (addr, value) in iter {
             map.insert(addr, value);
         }
@@ -1097,7 +1094,7 @@ where
     }
 }
 
-impl<V> RawAddressMap<V>
+impl<V> RawAddressRangeMap<V>
 where
     V: Clone + Eq,
 {
@@ -1125,8 +1122,24 @@ where
         })
     }
 
-    pub fn run_count(&self) -> usize {
+    pub fn range_count(&self) -> usize {
         self.0.len()
+    }
+
+    pub fn overlapping_ranges(
+        &self,
+        range: impl RangeBounds<RawAddress>,
+    ) -> impl Iterator<Item = (RangeInclusive<RawAddress>, &V)> {
+        raw_address_bounds(&range)
+            .into_iter()
+            .flat_map(move |range| {
+                self.0.overlapping(range).map(|(range, value)| {
+                    (
+                        RawAddress::from(*range.start())..=RawAddress::from(*range.end()),
+                        value,
+                    )
+                })
+            })
     }
 
     pub fn range(
@@ -1143,6 +1156,22 @@ where
                     (start..=end).map(move |address| (RawAddress::from(address), value.clone()))
                 })
         })
+    }
+
+    pub fn clamp(&self, range: impl Into<RangeInclusive<RawAddress>>) -> Self {
+        let range = range.into();
+        let start = range.start().offset();
+        let end = range.end().offset();
+        let mut clamped = Self::new();
+        if start <= end {
+            for (stored, value) in self.0.overlapping(start..=end) {
+                clamped.0.insert(
+                    (*stored.start()).max(start)..=(*stored.end()).min(end),
+                    value.clone(),
+                );
+            }
+        }
+        clamped
     }
 
     pub fn insert(&mut self, address: impl Into<RawAddress>, value: V) -> Option<V> {
@@ -1168,9 +1197,15 @@ where
     pub fn clear(&mut self) {
         self.0.clear();
     }
+
+    pub fn extend(&mut self, other: Self) {
+        for (range, value) in other.0 {
+            self.0.insert(range, value);
+        }
+    }
 }
 
-impl<V> RawAddressMap<V>
+impl<V> RawAddressRangeMap<V>
 where
     V: Clone + Ord,
 {
@@ -1233,13 +1268,13 @@ where
 }
 
 #[repr(transparent)]
-pub struct ArchivedRawAddressMap<V>(rkyv::vec::ArchivedVec<ArchivedRawAddressRun<V>>)
+pub struct ArchivedRawAddressRangeMap<V>(rkyv::vec::ArchivedVec<ArchivedRawAddressRun<V>>)
 where
     V: rkyv::Archive;
 
-unsafe impl<V> rkyv::Portable for ArchivedRawAddressMap<V> where V: rkyv::Archive {}
+unsafe impl<V> rkyv::Portable for ArchivedRawAddressRangeMap<V> where V: rkyv::Archive {}
 
-impl<V> ArchivedRawAddressMap<V>
+impl<V> ArchivedRawAddressRangeMap<V>
 where
     V: rkyv::Archive,
 {
@@ -1261,7 +1296,7 @@ where
         self.0.is_empty()
     }
 
-    pub fn run_count(&self) -> usize {
+    pub fn range_count(&self) -> usize {
         self.0.len()
     }
 
@@ -1295,7 +1330,7 @@ where
     }
 }
 
-impl<V> ArchivedRawAddressMap<V>
+impl<V> ArchivedRawAddressRangeMap<V>
 where
     V: rkyv::Archive,
     V::Archived: Ord,
@@ -1319,7 +1354,7 @@ where
     }
 }
 
-unsafe impl<V, C> rkyv::bytecheck::CheckBytes<C> for ArchivedRawAddressMap<V>
+unsafe impl<V, C> rkyv::bytecheck::CheckBytes<C> for ArchivedRawAddressRangeMap<V>
 where
     V: rkyv::Archive,
     C: rkyv::rancor::Fallible + ?Sized,
@@ -1332,21 +1367,21 @@ where
     }
 }
 
-impl<V> rkyv::Archive for RawAddressMap<V>
+impl<V> rkyv::Archive for RawAddressRangeMap<V>
 where
     V: Clone + Eq + rkyv::Archive,
 {
-    type Archived = ArchivedRawAddressMap<V>;
+    type Archived = ArchivedRawAddressRangeMap<V>;
     type Resolver = rkyv::vec::VecResolver;
 
     fn resolve(&self, resolver: Self::Resolver, out: rkyv::Place<Self::Archived>) {
         let out =
             unsafe { out.cast_unchecked::<rkyv::vec::ArchivedVec<ArchivedRawAddressRun<V>>>() };
-        rkyv::vec::ArchivedVec::resolve_from_len(self.run_count(), resolver, out);
+        rkyv::vec::ArchivedVec::resolve_from_len(self.range_count(), resolver, out);
     }
 }
 
-impl<V, S> rkyv::Serialize<S> for RawAddressMap<V>
+impl<V, S> rkyv::Serialize<S> for RawAddressRangeMap<V>
 where
     V: Clone + Eq + rkyv::Serialize<S>,
     S: rkyv::rancor::Fallible + rkyv::ser::Writer + rkyv::ser::Allocator + ?Sized,
@@ -1363,14 +1398,14 @@ where
     }
 }
 
-impl<V, D> rkyv::Deserialize<RawAddressMap<V>, D> for ArchivedRawAddressMap<V>
+impl<V, D> rkyv::Deserialize<RawAddressRangeMap<V>, D> for ArchivedRawAddressRangeMap<V>
 where
     V: Clone + Eq + rkyv::Archive,
     V::Archived: rkyv::Deserialize<V, D>,
     D: rkyv::rancor::Fallible + ?Sized,
 {
-    fn deserialize(&self, deserialiser: &mut D) -> Result<RawAddressMap<V>, D::Error> {
-        let mut map = RawAddressMap::new();
+    fn deserialize(&self, deserialiser: &mut D) -> Result<RawAddressRangeMap<V>, D::Error> {
+        let mut map = RawAddressRangeMap::new();
         for run in self.0.iter() {
             let run = rkyv::Deserialize::<RawAddressRun<V>, D>::deserialize(run, deserialiser)?;
             map.insert_range(run.start..=run.last, run.value);
@@ -2037,8 +2072,8 @@ mod test {
     use super::*;
 
     #[test]
-    fn raw_address_map_round_trips_its_runs() {
-        let mut map = RawAddressMap::new();
+    fn raw_address_range_map_round_trips_its_ranges() {
+        let mut map = RawAddressRangeMap::new();
         map.insert_range(
             RawAddress::from(0x1000u64)..=RawAddress::from(0x1fffu64),
             1u32,
@@ -2050,13 +2085,14 @@ mod test {
         map.insert_range(RawAddress::from(u64::MAX - 1)..=RawAddress::MAX, 3u32);
 
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&map).unwrap();
-        let decoded = rkyv::from_bytes::<RawAddressMap<u32>, rkyv::rancor::Error>(&bytes).unwrap();
+        let decoded =
+            rkyv::from_bytes::<RawAddressRangeMap<u32>, rkyv::rancor::Error>(&bytes).unwrap();
 
         assert_eq!(decoded, map);
-        assert_eq!(decoded.run_count(), 4);
+        assert_eq!(decoded.range_count(), 4);
 
         let archived =
-            rkyv::access::<ArchivedRawAddressMap<u32>, rkyv::rancor::Error>(&bytes).unwrap();
+            rkyv::access::<ArchivedRawAddressRangeMap<u32>, rkyv::rancor::Error>(&bytes).unwrap();
         assert_eq!(archived.get(0xfffu64), None);
         assert_eq!(
             archived.get(0x1000u64).map(|value| value.to_native()),
@@ -2310,12 +2346,12 @@ mod test {
     }
 
     #[test]
-    fn raw_address_map_bounds_and_overlaps_preserve_point_semantics() {
-        let mut map = RawAddressMap::new();
+    fn raw_address_range_map_bounds_and_overlaps_preserve_point_semantics() {
+        let mut map = RawAddressRangeMap::new();
         map.insert_range(RawAddress::from(2u64)..=RawAddress::from(5u64), 1u32);
         map.insert_range(RawAddress::from(8u64)..=RawAddress::from(10u64), 2u32);
         assert_eq!(map.insert(RawAddress::from(4u64), 3), Some(1));
-        assert_eq!(map.run_count(), 4);
+        assert_eq!(map.range_count(), 4);
 
         let bounded = map
             .range((
