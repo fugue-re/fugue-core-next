@@ -26,6 +26,9 @@ bitflags! {
     #[repr(transparent)]
     pub struct FunctionProperties: u8 {
         const NON_RETURNING = 0b0000_0001;
+
+        const TAIL = 0b0000_0010;
+        const RETURN_THUNK = Self::TAIL.bits();
     }
 }
 
@@ -33,6 +36,8 @@ bitflags! {
 #[serde(rename_all = "kebab-case")]
 enum FunctionProperty {
     NonReturning,
+    ReturnThunk,
+    Tail,
 }
 
 impl From<OneOrMany<FunctionProperty>> for FunctionProperties {
@@ -49,6 +54,9 @@ impl From<Vec<FunctionProperty>> for FunctionProperties {
                 FunctionProperty::NonReturning => {
                     props.insert(FunctionProperties::NON_RETURNING);
                 }
+                FunctionProperty::ReturnThunk | FunctionProperty::Tail => {
+                    props.insert(FunctionProperties::TAIL);
+                }
             }
         }
         props
@@ -61,6 +69,8 @@ impl From<FunctionProperties> for Vec<FunctionProperty> {
         for prop in value.iter() {
             if prop == FunctionProperties::NON_RETURNING {
                 props.push(FunctionProperty::NonReturning);
+            } else if prop == FunctionProperties::TAIL {
+                props.push(FunctionProperty::Tail);
             }
         }
         props
@@ -121,6 +131,17 @@ impl Serialize for FunctionPatterns {
             }
         }
         seq.end()
+    }
+}
+
+impl FunctionPatterns {
+    pub fn matches(&self, language: &LanguageSpec, bytes: impl AsRef<[u8]>) -> bool {
+        let bytes = bytes.as_ref();
+        self.0
+            .iter()
+            .filter(|(spec, _)| spec.as_ref().is_none_or(|spec| spec.matches(language)))
+            .flat_map(|(_, patterns)| patterns)
+            .any(|patterns| patterns.matches_exact(bytes))
     }
 }
 
@@ -459,6 +480,35 @@ fixup: |
         assert_eq!(fspec.name, "get_pc_thunk_bx");
         assert_eq!(fspec.patterns.0.len(), 1);
         assert!(fspec.fixup.is_some());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_return_thunk_patterns() -> Result<(), Box<dyn std::error::Error>> {
+        let input1 = r#"
+name: __x86_return_thunk
+properties: return-thunk
+patterns:
+- x86:LE:64:
+    patterns:
+    - c3 cc
+- 90 c3
+"#;
+
+        let x86 = LanguageSpec::new_with("x86", Endian::Little, 32, None, None);
+        let x86_64 = LanguageSpec::new_with("x86", Endian::Little, 64, None, None);
+
+        let fspec = serde_yaml::from_str::<FunctionSpec>(input1)?;
+        let round_trip = serde_yaml::from_str::<FunctionSpec>(&serde_yaml::to_string(&fspec)?)?;
+
+        for fspec in [fspec, round_trip] {
+            assert!(fspec.properties.contains(FunctionProperties::RETURN_THUNK));
+            assert!(fspec.patterns.matches(&x86_64, [0xc3, 0xcc]));
+            assert!(fspec.patterns.matches(&x86, [0x90, 0xc3]));
+            assert!(!fspec.patterns.matches(&x86, [0xc3, 0xcc]));
+            assert!(!fspec.patterns.matches(&x86_64, [0xc3, 0xcc, 0x90]));
+        }
 
         Ok(())
     }
