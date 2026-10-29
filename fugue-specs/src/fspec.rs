@@ -110,12 +110,15 @@ impl Serialize for FunctionPatterns {
     where
         S: Serializer,
     {
-        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
-        for (k, v) in self.0.iter() {
-            seq.serialize_element(&match k {
-                None => AttrOptWithVal::Val(v),
-                Some(k) => AttrOptWithVal::AttrWithVal(AttrWithVal { attr: k, val: v }),
-            })?;
+        let mut seq =
+            serializer.serialize_seq(Some(self.0.values().map(Vec::len).sum::<usize>()))?;
+        for (k, vs) in self.0.iter() {
+            for v in vs {
+                seq.serialize_element(&match k {
+                    None => AttrOptWithVal::Val(v),
+                    Some(k) => AttrOptWithVal::AttrWithVal(AttrWithVal { attr: k, val: v }),
+                })?;
+            }
         }
         seq.end()
     }
