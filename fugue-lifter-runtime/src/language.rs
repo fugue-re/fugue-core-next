@@ -5,6 +5,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use fugue_sleigh_language::float_format::FloatFormat;
+use fugue_sleigh_language::spaces::AddressSpaceId;
 use thiserror::Error;
 
 use crate::constructor::Constructor;
@@ -533,6 +534,21 @@ impl Language {
 
     pub fn space_name(&self, space: u8) -> Option<&'static str> {
         self.space_names.get(space as usize).copied()
+    }
+
+    pub fn space_id(&self, space: u8) -> AddressSpaceId {
+        let index = space as usize;
+        if space == self.constant_space {
+            AddressSpaceId::constant_id(index)
+        } else if space == self.default_space {
+            AddressSpaceId::default_id(index)
+        } else if space == self.register_space {
+            AddressSpaceId::register_id(index)
+        } else if space == self.unique_space {
+            AddressSpaceId::unique_id(index)
+        } else {
+            AddressSpaceId::other_id(index)
+        }
     }
 
     pub fn space_by_name(&self, name: impl AsRef<str>) -> Option<u8> {
