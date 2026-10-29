@@ -70,6 +70,10 @@ impl LiftingContext {
         self.language
     }
 
+    pub fn delay_slot_length(&self) -> usize {
+        self.inputs.first().map_or(0, ParserInput::delay_slot_length)
+    }
+
     pub fn reset(&mut self) {
         for input in &mut self.inputs {
             input.reset();
