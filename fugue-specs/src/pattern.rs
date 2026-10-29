@@ -235,6 +235,11 @@ impl Pattern {
         self.is_match(suffix)
     }
 
+    pub fn matches_exact(&self, bytes: impl AsRef<[u8]>) -> bool {
+        let bytes = bytes.as_ref();
+        bytes.len() == self.data.len() && self.is_match(bytes)
+    }
+
     pub fn normalised_matcher(&self) -> &Regex {
         &self.norm
     }
@@ -607,6 +612,12 @@ impl PatternsWithContext {
                     }
                 })
         })
+    }
+
+    pub fn matches_exact(&self, bytes: &[u8]) -> bool {
+        self.patterns
+            .iter()
+            .any(|pattern| pattern.matches_exact(bytes))
     }
 }
 
