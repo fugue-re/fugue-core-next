@@ -217,6 +217,7 @@ pub trait LanguageImpl {
 
     const REGISTERS: &'static [(&'static str, Varnode)];
     const REGISTER_RANGES: &'static [(u64, u16, &'static str)];
+    const PROGRAM_COUNTER: Varnode;
     const USER_OPS: &'static [&'static str];
     const SPACE_NAMES: &'static [&'static str];
     const CONTEXT_VARS: &'static [(&'static str, ContextBitRange)];
@@ -260,6 +261,7 @@ pub struct Language {
     pub(crate) space_upper_bounds: &'static [u64],
     pub(crate) registers: &'static [(&'static str, Varnode)],
     pub(crate) register_ranges: &'static [(u64, u16, &'static str)],
+    pub(crate) program_counter: Varnode,
     pub(crate) user_ops: &'static [&'static str],
     pub(crate) space_names: &'static [&'static str],
     pub(crate) context_vars: &'static [(&'static str, ContextBitRange)],
@@ -369,6 +371,7 @@ impl Language {
 
             registers: L::REGISTERS,
             register_ranges: L::REGISTER_RANGES,
+            program_counter: L::PROGRAM_COUNTER,
             user_ops: L::USER_OPS,
             space_names: L::SPACE_NAMES,
             context_vars: L::CONTEXT_VARS,
@@ -619,6 +622,10 @@ impl Language {
             }
         }
         db
+    }
+
+    pub fn program_counter(&self) -> Varnode {
+        self.program_counter
     }
 
     pub fn register_by_name(&self, name: impl AsRef<str>) -> Option<Varnode> {

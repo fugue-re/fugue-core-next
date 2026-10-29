@@ -887,6 +887,11 @@ impl<'a> ToTokens for LifterGenerator<'a> {
         let register_space_size = self.language.register_space_size();
         let unique_space_size = self.language.unique_space_size();
 
+        let program_counter = self.language.program_counter();
+        let program_counter_space = program_counter.space().index() as u8;
+        let program_counter_offset = program_counter.offset();
+        let program_counter_size = program_counter.size() as u16;
+
         let mut userops = Vec::new();
         let mut userop_to_names = Vec::new();
         let mut userop_idents = BTreeSet::new();
@@ -1122,6 +1127,7 @@ impl<'a> ToTokens for LifterGenerator<'a> {
 
                     const REGISTERS: &'static [(&'static str, fugue_lifter_runtime::pcode::Varnode)] = &register::REGISTERS_BY_NAME;
                     const REGISTER_RANGES: &'static [(u64, u16, &'static str)] = &register::REGISTERS;
+                    const PROGRAM_COUNTER: fugue_lifter_runtime::pcode::Varnode = register::PROGRAM_COUNTER;
                     const USER_OPS: &'static [&'static str] = &user_op::USER_OPS;
                     const SPACE_NAMES: &'static [&'static str] = &space::SPACES;
                     const CONTEXT_VARS: &'static [(&'static str, fugue_lifter_runtime::context::ContextBitRange)] = &context::CONTEXT_VARS;
@@ -1256,6 +1262,7 @@ impl<'a> ToTokens for LifterGenerator<'a> {
 
                         const REGISTERS: &'static [(&'static str, fugue_lifter_runtime::pcode::Varnode)] = &register::REGISTERS_BY_NAME;
                         const REGISTER_RANGES: &'static [(u64, u16, &'static str)] = &register::REGISTERS;
+                        const PROGRAM_COUNTER: fugue_lifter_runtime::pcode::Varnode = register::PROGRAM_COUNTER;
                         const USER_OPS: &'static [&'static str] = &user_op::USER_OPS;
                         const SPACE_NAMES: &'static [&'static str] = &space::SPACES;
                         const CONTEXT_VARS: &'static [(&'static str, fugue_lifter_runtime::context::ContextBitRange)] = &context::CONTEXT_VARS;
@@ -1326,6 +1333,9 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 pub const REGISTERS_BY_NAME: [(&'static str, fugue_lifter_runtime::pcode::Varnode); #n_registers] = [
                     #(#register_pairs),*
                 ];
+
+                pub const PROGRAM_COUNTER: fugue_lifter_runtime::pcode::Varnode =
+                    fugue_lifter_runtime::pcode::Varnode::new(#program_counter_space, #program_counter_offset, #program_counter_size);
             }
 
             pub mod user_op {
