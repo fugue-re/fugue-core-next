@@ -685,17 +685,13 @@ impl BitVec {
         }
     }
 
-    fn cmp_with(&self, other: &Self, lneg: bool, rneg: bool) -> Ordering {
-        match (lneg, rneg) {
+    pub fn signed_cmp(&self, other: &Self) -> Ordering {
+        self.expect_comparable(other);
+        match (self.msb(), other.msb()) {
             (true, false) => Ordering::Less,
             (false, true) => Ordering::Greater,
             _ => self.cmp_residue(other),
         }
-    }
-
-    pub fn signed_cmp(&self, other: &Self) -> Ordering {
-        self.expect_comparable(other);
-        self.cmp_with(other, self.msb(), other.msb())
     }
 
     fn shift_amount(&self, width: u32) -> Option<u32> {
@@ -1030,7 +1026,7 @@ impl PartialOrd for BitVec {
 impl Ord for BitVec {
     fn cmp(&self, other: &Self) -> Ordering {
         self.expect_comparable(other);
-        self.cmp_with(other, self.is_negative(), other.is_negative())
+        self.cmp_residue(other)
     }
 }
 
