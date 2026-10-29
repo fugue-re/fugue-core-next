@@ -19,6 +19,27 @@ pub trait InstructionFormatter {
     fn begin_operand(&mut self) -> fmt::Result;
 
     fn end_operand(&mut self) -> fmt::Result;
+
+    fn write_operand_piece(
+        &mut self,
+        piece: OperandPiece,
+        _bits: Option<Range<u32>>,
+    ) -> fmt::Result {
+        match piece {
+            OperandPiece::Text(text) => self.write_literal(text),
+            OperandPiece::Register(register) => self.write_register(register.name()),
+            OperandPiece::Scalar(scalar) => {
+                let mut text = ArrayString::<32>::new();
+                write!(&mut text, "{scalar}")?;
+                self.write_value(scalar.value(), &text)
+            }
+            OperandPiece::Address(address) => {
+                let mut text = ArrayString::<32>::new();
+                write!(&mut text, "{address:#x}")?;
+                self.write_address(address, &text)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -92,22 +113,9 @@ impl<F: InstructionFormatter + ?Sized> InstructionWriter for F {
     fn write_operand_piece(
         &mut self,
         piece: OperandPiece,
-        _bits: Option<Range<u32>>,
+        bits: Option<Range<u32>>,
     ) -> fmt::Result {
-        match piece {
-            OperandPiece::Text(text) => self.write_literal(text),
-            OperandPiece::Register(register) => self.write_register(register.name()),
-            OperandPiece::Scalar(scalar) => {
-                let mut text = ArrayString::<32>::new();
-                write!(&mut text, "{scalar}")?;
-                self.write_value(scalar.value(), &text)
-            }
-            OperandPiece::Address(address) => {
-                let mut text = ArrayString::<32>::new();
-                write!(&mut text, "{address:#x}")?;
-                self.write_address(address, &text)
-            }
-        }
+        InstructionFormatter::write_operand_piece(self, piece, bits)
     }
 
     fn begin_operand(&mut self) -> fmt::Result {
