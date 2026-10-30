@@ -1,3 +1,4 @@
+use fugue_bytes::Endian;
 #[cfg(feature = "static-lifters")]
 pub use fugue_lifter::x86::*;
 use memchr::arch::all::is_prefix;
@@ -258,7 +259,7 @@ impl X86 {
             None | Some("default") => return Ok(variants::DEFAULT),
             _ => {}
         }
-        let lid = LanguageId::new_with("x86", false, 32, variant);
+        let lid = LanguageId::new_with("x86", Endian::Little, 32, variant);
         loader.load(&lid)
     }
 }
@@ -284,7 +285,7 @@ impl LanguageProvider {
         id: &LanguageId,
         source: &LanguageSource<'_>,
     ) -> Result<Option<&'static Language>, LanguageError> {
-        if id.processor() != "x86" || id.bits() != 32 || id.is_big_endian() {
+        if id.processor() != "x86" || id.bits() != 32 || id.endian().is_big() {
             return Ok(None);
         }
 

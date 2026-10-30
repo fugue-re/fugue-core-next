@@ -1063,7 +1063,15 @@ impl<'a> ToTokens for LifterGenerator<'a> {
 
         let language_id = self.language.architecture().to_string();
         let processor = self.language.architecture().processor();
-        let little_endian = self.language.architecture().endian().is_little();
+        let endian_tokens = |is_big: bool| {
+            if is_big {
+                quote! { fugue_lifter_runtime::Endian::Big }
+            } else {
+                quote! { fugue_lifter_runtime::Endian::Little }
+            }
+        };
+        let endian = endian_tokens(self.language.architecture().endian().is_big());
+        let insn_endian = endian_tokens(self.language.endian().is_big());
 
         let constructors = &self.tables.ctors;
         let root_dtree = u16::try_from(self.tables.subtable_id_mapping[&(0, 0)])
@@ -1103,7 +1111,8 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                     const ID: &'static str = LANGUAGE_ID;
 
                     const PROCESSOR: &'static str = #processor;
-                    const LITTLE_ENDIAN: bool = #little_endian;
+                    const ENDIAN: fugue_lifter_runtime::Endian = #endian;
+                    const INSN_ENDIAN: fugue_lifter_runtime::Endian = #insn_endian;
                     const VARIANT: &'static str = #primary_variant_str;
                     const BITS: u32 = #arch_bits;
 
@@ -1240,7 +1249,8 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                         const ID: &'static str = #language_id_lit;
 
                         const PROCESSOR: &'static str = #processor;
-                        const LITTLE_ENDIAN: bool = #little_endian;
+                        const ENDIAN: fugue_lifter_runtime::Endian = #endian;
+                        const INSN_ENDIAN: fugue_lifter_runtime::Endian = #insn_endian;
                         const VARIANT: &'static str = #variant_name;
                         const BITS: u32 = #arch_bits;
 

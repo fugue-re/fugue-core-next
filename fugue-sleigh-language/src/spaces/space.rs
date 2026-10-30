@@ -3,6 +3,7 @@ use std::mem;
 use std::ops::{Deref, DerefMut};
 
 use bitflags::bitflags;
+use fugue_bytes::Endian;
 use fugue_sleigh_marshal::Decoder;
 use fugue_sleigh_marshal::sla::*;
 
@@ -40,8 +41,12 @@ impl AddressSpaceProperty {
         !self.is_empty()
     }
 
-    pub fn is_big_endian(&self) -> bool {
-        self.contains(Self::BigEndian)
+    pub fn endian(&self) -> Endian {
+        if self.contains(Self::BigEndian) {
+            Endian::Big
+        } else {
+            Endian::Little
+        }
     }
 
     pub fn is_heritaged(&self) -> bool {

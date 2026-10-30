@@ -1,6 +1,8 @@
 #[cfg(feature = "static-lifters")]
 pub use fugue_lifter::ppc::*;
 
+use fugue_bytes::Endian;
+
 use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
 use crate::arch::{Arch, ExternalThunkTemplate};
@@ -42,7 +44,7 @@ impl ArchT for Ppc {
 
     fn external_thunk_template(&self) -> ExternalThunkTemplate {
         let mut bytes = [0x20, 0x00, 0x80, 0x4e];
-        if self.language().is_big_endian() {
+        if self.language().endian().is_big() {
             bytes.reverse();
         }
         ExternalThunkTemplate::new(bytes)
@@ -64,48 +66,46 @@ impl Ppc {
         Arch::from(Box::new(Self { data, language }) as Box<dyn ArchT>)
     }
 
-    pub fn resolve_default_variant(is_be: bool) -> Result<&'static Language, LanguageError> {
-        Self::resolve_variant(is_be, None)
+    pub fn resolve_default_variant(endian: Endian) -> Result<&'static Language, LanguageError> {
+        Self::resolve_variant(endian, None)
     }
 
     pub fn resolve_variant<'a>(
-        is_be: bool,
+        endian: Endian,
         variant: impl Into<Option<&'a str>>,
     ) -> Result<&'static Language, LanguageError> {
         let variant = variant.into();
         #[cfg(feature = "static-lifters")]
         match variant {
             None | Some("default") => {
-                return Ok(if is_be {
-                    be::variants::DEFAULT
-                } else {
-                    le::variants::DEFAULT
+                return Ok(match endian {
+                    Endian::Big => be::variants::DEFAULT,
+                    Endian::Little => le::variants::DEFAULT,
                 });
             }
             _ => {}
         }
         let loader = LanguageLoader::from_env()?;
-        Self::resolve_variant_with(&loader, is_be, variant)
+        Self::resolve_variant_with(&loader, endian, variant)
     }
 
     pub fn resolve_variant_with<'a>(
         loader: &LanguageLoader,
-        is_be: bool,
+        endian: Endian,
         variant: impl Into<Option<&'a str>>,
     ) -> Result<&'static Language, LanguageError> {
         let variant = variant.into();
         #[cfg(feature = "static-lifters")]
         match variant {
             None | Some("default") => {
-                return Ok(if is_be {
-                    be::variants::DEFAULT
-                } else {
-                    le::variants::DEFAULT
+                return Ok(match endian {
+                    Endian::Big => be::variants::DEFAULT,
+                    Endian::Little => le::variants::DEFAULT,
                 });
             }
             _ => {}
         }
-        let lid = LanguageId::new_with("PowerPC", is_be, 32, variant);
+        let lid = LanguageId::new_with("PowerPC", endian, 32, variant);
         loader.load(&lid)
     }
 }
@@ -136,8 +136,8 @@ impl LanguageProvider {
         }
 
         let language = match source.loader() {
-            Some(loader) => Ppc::resolve_variant_with(loader, id.is_big_endian(), id.variant())?,
-            None => Ppc::resolve_variant(id.is_big_endian(), id.variant())?,
+            Some(loader) => Ppc::resolve_variant_with(loader, id.endian(), id.variant())?,
+            None => Ppc::resolve_variant(id.endian(), id.variant())?,
         };
 
         Ok(Some(language))

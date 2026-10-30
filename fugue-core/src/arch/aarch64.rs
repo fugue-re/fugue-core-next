@@ -1,3 +1,4 @@
+use fugue_bytes::Endian;
 #[cfg(feature = "static-lifters")]
 pub use fugue_lifter::aarch64::*;
 use memchr::arch::all::is_prefix;
@@ -131,49 +132,47 @@ impl AArch64 {
         Arch::from(Box::new(Self { language, data }) as Box<dyn ArchT>)
     }
 
-    pub fn resolve_default_variant(is_be: bool) -> Result<&'static Language, LanguageError> {
-        Self::resolve_variant(is_be, None)
+    pub fn resolve_default_variant(endian: Endian) -> Result<&'static Language, LanguageError> {
+        Self::resolve_variant(endian, None)
     }
 
     pub fn resolve_variant<'a>(
-        is_be: bool,
+        endian: Endian,
         variant: impl Into<Option<&'a str>>,
     ) -> Result<&'static Language, LanguageError> {
         let variant = variant.into();
         #[cfg(feature = "static-lifters")]
         match variant {
             None | Some("v8A") => {
-                return Ok(if is_be {
-                    be::variants::V8A
-                } else {
-                    le::variants::V8A
+                return Ok(match endian {
+                    Endian::Big => be::variants::V8A,
+                    Endian::Little => le::variants::V8A,
                 });
             }
             _ => {}
         }
         let loader = LanguageLoader::from_env()?;
-        Self::resolve_variant_with(&loader, is_be, variant)
+        Self::resolve_variant_with(&loader, endian, variant)
     }
 
     pub fn resolve_variant_with<'a>(
         loader: &LanguageLoader,
-        is_be: bool,
+        endian: Endian,
         variant: impl Into<Option<&'a str>>,
     ) -> Result<&'static Language, LanguageError> {
         let variant = variant.into();
         #[cfg(feature = "static-lifters")]
         match variant {
             None | Some("v8A") => {
-                return Ok(if is_be {
-                    be::variants::V8A
-                } else {
-                    le::variants::V8A
+                return Ok(match endian {
+                    Endian::Big => be::variants::V8A,
+                    Endian::Little => le::variants::V8A,
                 });
             }
             _ => {}
         }
         let variant = variant.or(Some("v8A"));
-        let lid = LanguageId::new_with("AARCH64", is_be, 64, variant);
+        let lid = LanguageId::new_with("AARCH64", endian, 64, variant);
         loader.load(&lid)
     }
 }
@@ -204,10 +203,8 @@ impl LanguageProvider {
         }
 
         let language = match source.loader() {
-            Some(loader) => {
-                AArch64::resolve_variant_with(loader, id.is_big_endian(), id.variant())?
-            }
-            None => AArch64::resolve_variant(id.is_big_endian(), id.variant())?,
+            Some(loader) => AArch64::resolve_variant_with(loader, id.endian(), id.variant())?,
+            None => AArch64::resolve_variant(id.endian(), id.variant())?,
         };
 
         Ok(Some(language))

@@ -233,7 +233,7 @@ impl RegisterBank {
         else {
             return Ok(None);
         };
-        let offset_bytes = if self.language.is_little_endian() {
+        let offset_bytes = if self.language.endian().is_little() {
             range.start - root.start
         } else {
             root.end - range.end

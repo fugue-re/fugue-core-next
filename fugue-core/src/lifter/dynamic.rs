@@ -1,7 +1,6 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
-use fugue_bytes::Endian;
 use fugue_lifter::runtime::Language;
 use fugue_sleigh_language::LanguageDB;
 
@@ -41,11 +40,7 @@ impl LanguageLoader {
             return Ok(existing);
         }
 
-        let endian = if lid.is_big_endian() {
-            Endian::Big
-        } else {
-            Endian::Little
-        };
+        let endian = lid.endian();
         let processor = lid.processor();
         let bits = lid.bits();
         let builder = match lid.variant() {
@@ -57,9 +52,7 @@ impl LanguageLoader {
         let sla = builder.language().sla_file();
         let parent = sla.parent().unwrap_or_else(|| Path::new("."));
 
-        let endian_tag = if lid.is_big_endian() { "BE" } else { "LE" };
-        let variant = lid.variant().unwrap_or("default");
-        let candidate = parent.join(format!("{processor}-{endian_tag}-{bits}-{variant}.flift"));
+        let candidate = parent.join(format!("{}.flift", lid.to_string().replace(':', "-")));
         if candidate.is_file() {
             return Ok(Language::from_file(&candidate)?);
         }
@@ -100,12 +93,8 @@ impl LanguageLoader {
 
                 let arch = builder.language().architecture();
                 let variant = (arch.variant() != "default").then(|| arch.variant());
-                let lid = LanguageId::new_with(
-                    arch.processor(),
-                    arch.endian().is_big(),
-                    arch.bits(),
-                    variant,
-                );
+                let lid =
+                    LanguageId::new_with(arch.processor(), arch.endian(), arch.bits(), variant);
                 self.load(&lid)
             }
             _ => Err(LanguageError::unsupported_extension(path)),
@@ -203,7 +192,7 @@ mod test {
         let db = loader.database();
 
         for variant in ["default", "64-32addr", "A2ALT", "A2ALT-32addr"] {
-            let id = LanguageId::new_with("PowerPC", true, 64, Some(variant));
+            let id = LanguageId::new_with("PowerPC", Endian::Big, 64, Some(variant));
             assert!(
                 db.lookup("PowerPC", Endian::Big, 64, variant).is_some(),
                 "{id} must resolve against the language database",

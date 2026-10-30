@@ -108,7 +108,7 @@ impl<'a> ImageContext<'a> {
 
         let id = LanguageId::new_with(
             language.processor(),
-            language.is_big_endian(),
+            language.endian(),
             language.bits(),
             Some(variant),
         );
@@ -172,14 +172,22 @@ impl ArchResolver {
         let id = match context.machine() {
             pe::IMAGE_FILE_MACHINE_ARM
             | pe::IMAGE_FILE_MACHINE_THUMB
-            | pe::IMAGE_FILE_MACHINE_ARMNT => LanguageId::new_with("ARM", false, 32, variant),
-            pe::IMAGE_FILE_MACHINE_ARM64 => LanguageId::new_with("AARCH64", false, 64, variant),
-            pe::IMAGE_FILE_MACHINE_I386 => LanguageId::new_with("x86", false, 32, variant),
-            pe::IMAGE_FILE_MACHINE_AMD64 => LanguageId::new_with("x86", false, 64, variant),
+            | pe::IMAGE_FILE_MACHINE_ARMNT => {
+                LanguageId::new_with("ARM", Endian::Little, 32, variant)
+            }
+            pe::IMAGE_FILE_MACHINE_ARM64 => {
+                LanguageId::new_with("AARCH64", Endian::Little, 64, variant)
+            }
+            pe::IMAGE_FILE_MACHINE_I386 => LanguageId::new_with("x86", Endian::Little, 32, variant),
+            pe::IMAGE_FILE_MACHINE_AMD64 => {
+                LanguageId::new_with("x86", Endian::Little, 64, variant)
+            }
             pe::IMAGE_FILE_MACHINE_R3000
             | pe::IMAGE_FILE_MACHINE_R4000
             | pe::IMAGE_FILE_MACHINE_R10000
-            | pe::IMAGE_FILE_MACHINE_WCEMIPSV2 => LanguageId::new_with("MIPS", false, 32, variant),
+            | pe::IMAGE_FILE_MACHINE_WCEMIPSV2 => {
+                LanguageId::new_with("MIPS", Endian::Little, 32, variant)
+            }
             _ => return Ok(None),
         };
 

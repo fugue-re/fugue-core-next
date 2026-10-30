@@ -126,7 +126,7 @@ impl InsnResolver {
             .map(|pointer| IndirectTarget {
                 pointer,
                 size: language.address_size(),
-                big_endian: language.is_big_endian(),
+                big_endian: language.endian().is_big(),
             });
 
         Ok(ResolvedInsn {

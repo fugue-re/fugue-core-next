@@ -3,6 +3,7 @@ use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use flate2::read::GzDecoder;
+use fugue_bytes::Endian;
 use fugue_sleigh_language::float_format::FloatFormat;
 use fugue_sleigh_language::processor::Processor as SleighProcessor;
 use fugue_sleigh_language::{Language as SleighLanguage, LanguageDB, LanguageDef, LanguageError};
@@ -62,7 +63,8 @@ pub struct Language {
     pub(crate) id: Box<str>,
     pub(crate) processor: Box<str>,
     pub(crate) variant: Box<str>,
-    pub(crate) little_endian: bool,
+    pub(crate) endian: Endian,
+    pub(crate) insn_endian: Endian,
     pub(crate) bits: u32,
     pub(crate) address_alignment: usize,
     pub(crate) address_bits: u32,
@@ -155,7 +157,8 @@ impl Language {
             id,
             processor,
             variant,
-            little_endian,
+            endian,
+            insn_endian,
             bits,
             address_alignment,
             address_bits,
@@ -235,7 +238,8 @@ impl Language {
         Box::leak(Box::new(crate::language::Language {
             id: id.install(),
             processor: processor.install(),
-            little_endian,
+            endian,
+            insn_endian,
             variant: variant.install(),
             bits,
             address_alignment,
@@ -422,7 +426,8 @@ impl Language {
             id: Box::<str>::from(definition.id()),
             processor: Box::<str>::from(arch.processor()),
             variant: Box::<str>::from(arch.variant()),
-            little_endian: arch.endian().is_little(),
+            endian: arch.endian(),
+            insn_endian: sleigh.endian(),
             bits: declared_bits,
             address_alignment: sleigh.alignment(),
             address_bits,

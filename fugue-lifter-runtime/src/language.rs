@@ -4,6 +4,7 @@ use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::str::FromStr;
 
+use fugue_bytes::Endian;
 use fugue_sleigh_language::float_format::FloatFormat;
 use fugue_sleigh_language::spaces::AddressSpaceId;
 use thiserror::Error;
@@ -29,25 +30,27 @@ use crate::{LiftingContextState, calculate_mask, entry, wrap_offset};
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct LanguageId {
     processor: String,
-    is_big: bool,
+    endian: Endian,
+    insn_endian: Endian,
     bits: u32,
     variant: Option<String>,
 }
 
 impl LanguageId {
-    pub fn new(processor: impl Into<String>, is_big: bool, bits: u32) -> Self {
-        Self::new_with(processor, is_big, bits, None::<String>)
+    pub fn new(processor: impl Into<String>, endian: Endian, bits: u32) -> Self {
+        Self::new_with(processor, endian, bits, None::<String>)
     }
 
     pub fn new_with(
         processor: impl Into<String>,
-        is_big: bool,
+        endian: Endian,
         bits: u32,
         variant: Option<impl Into<String>>,
     ) -> Self {
         Self {
             processor: processor.into(),
-            is_big,
+            endian,
+            insn_endian: endian,
             bits,
             variant: variant.map(Into::into),
         }
@@ -57,12 +60,21 @@ impl LanguageId {
         &self.processor
     }
 
-    pub fn is_big_endian(&self) -> bool {
-        self.is_big
+    pub fn endian(&self) -> Endian {
+        self.endian
     }
 
-    pub fn is_little_endian(&self) -> bool {
-        !self.is_big
+    pub fn insn_endian(&self) -> Endian {
+        self.insn_endian
+    }
+
+    pub fn set_insn_endian(&mut self, endian: Endian) {
+        self.insn_endian = endian;
+    }
+
+    pub fn with_insn_endian(mut self, endian: Endian) -> Self {
+        self.set_insn_endian(endian);
+        self
     }
 
     pub fn bits(&self) -> u32 {
@@ -80,7 +92,12 @@ impl Display for LanguageId {
             f,
             "{}:{}:{}:{}",
             self.processor,
-            if self.is_big_endian() { "BE" } else { "LE" },
+            match (self.insn_endian, self.endian) {
+                (Endian::Little, Endian::Little) => "LE",
+                (Endian::Big, Endian::Big) => "BE",
+                (Endian::Little, Endian::Big) => "LEBE",
+                (Endian::Big, Endian::Little) => "BELE",
+            },
             self.bits,
             self.variant.as_deref().unwrap_or("default"),
         )
@@ -194,7 +211,8 @@ pub trait LanguageImpl {
     const ID: &'static str;
 
     const PROCESSOR: &'static str;
-    const LITTLE_ENDIAN: bool;
+    const ENDIAN: Endian;
+    const INSN_ENDIAN: Endian;
     const VARIANT: &'static str;
     const BITS: u32;
 
@@ -244,7 +262,8 @@ pub trait LanguageImpl {
 pub struct Language {
     pub(crate) id: &'static str,
     pub(crate) processor: &'static str,
-    pub(crate) little_endian: bool,
+    pub(crate) endian: Endian,
+    pub(crate) insn_endian: Endian,
     pub(crate) variant: &'static str,
     pub(crate) bits: u32,
     pub(crate) address_alignment: usize,
@@ -348,7 +367,8 @@ impl Language {
             id: L::ID,
 
             processor: L::PROCESSOR,
-            little_endian: L::LITTLE_ENDIAN,
+            endian: L::ENDIAN,
+            insn_endian: L::INSN_ENDIAN,
             variant: L::VARIANT,
             bits: L::BITS,
 
@@ -456,12 +476,12 @@ impl Language {
         self.processor
     }
 
-    pub fn is_big_endian(&self) -> bool {
-        !self.little_endian
+    pub fn endian(&self) -> Endian {
+        self.endian
     }
 
-    pub fn is_little_endian(&self) -> bool {
-        self.little_endian
+    pub fn insn_endian(&self) -> Endian {
+        self.insn_endian
     }
 
     pub fn variant(&self) -> &'static str {
@@ -807,9 +827,11 @@ impl FromStr for LanguageId {
             return Err(LanguageParseError::ParseFormat);
         };
 
-        let is_big = match endian {
-            "le" | "LE" => false,
-            "be" | "BE" => true,
+        let (insn_endian, endian) = match endian {
+            "le" | "LE" => (Endian::Little, Endian::Little),
+            "be" | "BE" => (Endian::Big, Endian::Big),
+            "lebe" | "LEBE" => (Endian::Little, Endian::Big),
+            "bele" | "BELE" => (Endian::Big, Endian::Little),
             _ => {
                 return Err(LanguageParseError::ParseEndian);
             }
@@ -834,7 +856,8 @@ impl FromStr for LanguageId {
 
         Ok(Self {
             processor: processor.to_owned(),
-            is_big,
+            endian,
+            insn_endian,
             bits,
             variant,
         })

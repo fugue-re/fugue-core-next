@@ -41,7 +41,7 @@ pub enum LanguageError {
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
 pub struct Language {
     alignment: usize,
-    big_endian: bool,
+    endian: Endian,
     unique_base: u64,
     unique_mask: u64,
     maximum_delay: usize,
@@ -61,12 +61,8 @@ pub struct Language {
 }
 
 impl Language {
-    pub fn is_big_endian(&self) -> bool {
-        self.big_endian
-    }
-
-    pub fn is_little_endian(&self) -> bool {
-        !self.big_endian
+    pub fn endian(&self) -> Endian {
+        self.endian
     }
 
     pub fn alignment(&self) -> usize {
@@ -283,7 +279,11 @@ impl Language {
         let sleigh = input.open_element_with_id(&ELEM_SLEIGH)?;
 
         let alignment = input.read_signed_integer_with_id(&ATTRIB_ALIGN)? as usize;
-        let big_endian = input.read_bool_with_id(&ATTRIB_BIGENDIAN)?;
+        let endian = if input.read_bool_with_id(&ATTRIB_BIGENDIAN)? {
+            Endian::Big
+        } else {
+            Endian::Little
+        };
         let unique_base = input.read_unsigned_integer_with_id(&ATTRIB_UNIQBASE)?;
         let _version = input
             .try_read_signed_integer_with_id(&ATTRIB_VERSION)?
@@ -363,7 +363,7 @@ impl Language {
 
         let mut slf = Self {
             alignment,
-            big_endian,
+            endian,
             unique_base,
             unique_mask,
             maximum_delay,
@@ -398,7 +398,11 @@ impl Language {
         }
 
         let alignment = input.attribute_int("align")?;
-        let big_endian = input.attribute_bool("bigendian")?;
+        let endian = if input.attribute_bool("bigendian")? {
+            Endian::Big
+        } else {
+            Endian::Little
+        };
         let unique_base = input.attribute_int("uniqbase")?;
         let version = input.attribute_int_opt("version", 2)?;
 
@@ -477,7 +481,7 @@ impl Language {
 
         let mut slf = Self {
             alignment,
-            big_endian,
+            endian,
             unique_base,
             unique_mask,
             maximum_delay,
@@ -766,8 +770,11 @@ impl LanguageDB {
         &'a self,
         definition: S,
     ) -> Result<Option<LanguageDefBuilder<'a>>, ArchDefParseError> {
-        let def = definition.as_ref().parse::<ArchitectureDef>()?;
-        Ok(self.lookup_def(&def))
+        let definition = definition.as_ref();
+        match definition.parse::<ArchitectureDef>() {
+            Ok(def) => Ok(self.lookup_def(&def)),
+            Err(error) => self.lookup_id(definition).map(Some).ok_or(error),
+        }
     }
 
     pub fn lookup<'a, P: Into<String>, V: Into<String>>(
@@ -785,7 +792,10 @@ impl LanguageDB {
             return Some(LanguageDefBuilder { language });
         }
 
-        let id = def.to_string();
+        self.lookup_id(&def.to_string())
+    }
+
+    fn lookup_id<'a>(&'a self, id: &str) -> Option<LanguageDefBuilder<'a>> {
         self.db
             .values()
             .find(|language| language.id == id)

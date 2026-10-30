@@ -12,7 +12,7 @@ use fugue_core::analysis::{AnalysisError, AnalysisPass};
 use fugue_core::arch::{Arch, Arm, Mips, Mips64, X86_64};
 use fugue_core::engine::{AnalysisContext, AnalysisEngine, AnalysisEngineConfig};
 use fugue_core::extension;
-use fugue_core::ir::{Address, AddressWithContext, RawAddress};
+use fugue_core::ir::{Address, AddressWithContext, Endian, RawAddress};
 use fugue_core::lifter::{ContextBitRange, ContextHint, ContextSet, Language, RawPCodeOp, Varnode};
 use fugue_core::loader::{
     ImageAddress, ImageBacking, ImageLayout, ImageSegment, ImageSegmentContents,
@@ -204,12 +204,12 @@ fn mips16_context(language: &Language) -> ContextSet {
 
 fn mips_variants() -> Result<Vec<&'static Language>, Box<dyn Error>> {
     Ok(vec![
-        Mips::resolve_default_variant(true)?,
-        Mips::resolve_default_variant(false)?,
-        Mips64::resolve_default_variant(true)?,
-        Mips64::resolve_default_variant(false)?,
-        Mips64::resolve_variant(true, "64-32addr")?,
-        Mips64::resolve_variant(false, "64-32addr")?,
+        Mips::resolve_default_variant(Endian::Big)?,
+        Mips::resolve_default_variant(Endian::Little)?,
+        Mips64::resolve_default_variant(Endian::Big)?,
+        Mips64::resolve_default_variant(Endian::Little)?,
+        Mips64::resolve_variant(Endian::Big, "64-32addr")?,
+        Mips64::resolve_variant(Endian::Little, "64-32addr")?,
     ])
 }
 
@@ -246,7 +246,7 @@ fn archived_context_preserves_word_positions_values_and_update_order() -> Result
     assert_ne!(ContextSet::single(bit, 0), ContextSet::new());
     assert!(ContextSet::single(bit, 255) < ContextSet::single(bit, 256));
 
-    let language = Mips::resolve_default_variant(true)?;
+    let language = Mips::resolve_default_variant(Endian::Big)?;
     let mut lifter = Arch::new(language).lifter();
     lifter
         .context_mut()
@@ -325,7 +325,7 @@ fn mips_canonicalisation_tracks_isa_mode_for_every_variant() -> Result<(), Box<d
 
 #[test]
 fn generic_disassembler_uses_the_supplied_mips_context() -> Result<(), Box<dyn Error>> {
-    let language = Mips::resolve_default_variant(true)?;
+    let language = Mips::resolve_default_variant(Endian::Big)?;
     let arch = Arch::new(language);
     let isa_mode = language
         .context_variable_by_name("ISA_MODE")
@@ -345,7 +345,7 @@ fn generic_disassembler_uses_the_supplied_mips_context() -> Result<(), Box<dyn E
 
 #[test]
 fn mips_jalx_uses_the_address_after_its_delay_slot() -> Result<(), Box<dyn Error>> {
-    let language = Mips::resolve_default_variant(true)?;
+    let language = Mips::resolve_default_variant(Endian::Big)?;
     let arch = Arch::new(language);
     let isa_mode = language
         .context_variable_by_name("ISA_MODE")
@@ -385,7 +385,7 @@ fn mips_jalx_uses_the_address_after_its_delay_slot() -> Result<(), Box<dyn Error
 
 #[test]
 fn thumb_blx_commits_arm_mode_at_its_target() -> Result<(), Box<dyn Error>> {
-    let language = Arm::resolve_default_variant(false)?;
+    let language = Arm::resolve_default_variant(Endian::Little)?;
     let arch = Arch::new(language);
     let t_mode = language
         .context_variable_by_name("TMode")
@@ -439,7 +439,7 @@ fn assert_mode_switching_function(project: &Project, entry: Address) {
 
 #[test]
 fn recovery_preserves_explicit_mode_across_a_jalx_fallthrough() -> Result<(), Box<dyn Error>> {
-    let language = Mips::resolve_default_variant(true)?;
+    let language = Mips::resolve_default_variant(Endian::Big)?;
     let mut image = ModeImage::new(
         language,
         vec![0x1c, 0x00, 0x08, 0x00, 0x65, 0x00, 0x68, 0x01],
@@ -478,7 +478,7 @@ fn recovery_preserves_explicit_mode_across_a_jalx_fallthrough() -> Result<(), Bo
 
 #[test]
 fn recovery_applies_mapping_mode_before_entry_canonicalisation() -> Result<(), Box<dyn Error>> {
-    let language = Mips::resolve_default_variant(true)?;
+    let language = Mips::resolve_default_variant(Endian::Big)?;
     let isa_mode = language
         .context_variable_by_name("ISA_MODE")
         .expect("MIPS language must define ISA_MODE");
@@ -507,7 +507,7 @@ fn recovery_applies_mapping_mode_before_entry_canonicalisation() -> Result<(), B
 
 #[test]
 fn recovery_rejects_tagged_candidates_in_data_regions() -> Result<(), Box<dyn Error>> {
-    let language = Mips::resolve_default_variant(true)?;
+    let language = Mips::resolve_default_variant(Endian::Big)?;
     let mut image = ModeImage::new(
         language,
         vec![0x68, 0x01],
@@ -530,7 +530,7 @@ fn recovery_rejects_tagged_candidates_in_data_regions() -> Result<(), Box<dyn Er
 
 #[test]
 fn recovery_preserves_supplied_context_across_mapping_boundaries() -> Result<(), Box<dyn Error>> {
-    let language = Mips::resolve_default_variant(true)?;
+    let language = Mips::resolve_default_variant(Endian::Big)?;
     let mut image = ModeImage::new(
         language,
         vec![0x68, 0x01, 0x68, 0x02],
@@ -573,7 +573,7 @@ fn recovery_preserves_supplied_context_across_mapping_boundaries() -> Result<(),
 
 #[test]
 fn recovery_preserves_candidate_confidence_and_resets_mode() -> Result<(), Box<dyn Error>> {
-    let language = Mips::resolve_default_variant(true)?;
+    let language = Mips::resolve_default_variant(Endian::Big)?;
     let mut image = ModeImage::new(
         language,
         vec![0x68, 0x01, 0x68, 0x02],

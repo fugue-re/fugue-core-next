@@ -89,12 +89,12 @@ impl Language {
 
     #[getter]
     fn big_endian(&self) -> bool {
-        self.inner.is_big_endian()
+        self.inner.endian().is_big()
     }
 
     #[getter]
     fn little_endian(&self) -> bool {
-        self.inner.is_little_endian()
+        self.inner.endian().is_little()
     }
 
     #[getter]

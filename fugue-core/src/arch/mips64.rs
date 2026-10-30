@@ -1,6 +1,8 @@
 #[cfg(feature = "static-lifters")]
 pub use fugue_lifter::mips64::*;
 
+use fugue_bytes::Endian;
+
 use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
 use crate::arch::{Arch, ExternalThunkTemplate};
@@ -64,7 +66,7 @@ impl ArchT for Mips64 {
 
     fn external_thunk_template(&self) -> ExternalThunkTemplate {
         let mut bytes = [0x08, 0x00, 0xe0, 0x03, 0x00, 0x00, 0x00, 0x00];
-        if self.language().is_big_endian() {
+        if self.language().endian().is_big() {
             bytes[..4].reverse();
         }
         ExternalThunkTemplate::new(bytes)
@@ -86,62 +88,58 @@ impl Mips64 {
         Arch::from(Box::new(Self { data, language }) as Box<dyn ArchT>)
     }
 
-    pub fn resolve_default_variant(is_be: bool) -> Result<&'static Language, LanguageError> {
-        Self::resolve_variant(is_be, None)
+    pub fn resolve_default_variant(endian: Endian) -> Result<&'static Language, LanguageError> {
+        Self::resolve_variant(endian, None)
     }
 
     pub fn resolve_variant<'a>(
-        is_be: bool,
+        endian: Endian,
         variant: impl Into<Option<&'a str>>,
     ) -> Result<&'static Language, LanguageError> {
         let variant = variant.into();
         #[cfg(feature = "static-lifters")]
         match variant {
             None | Some("default") => {
-                return Ok(if is_be {
-                    be::variants::DEFAULT
-                } else {
-                    le::variants::DEFAULT
+                return Ok(match endian {
+                    Endian::Big => be::variants::DEFAULT,
+                    Endian::Little => le::variants::DEFAULT,
                 });
             }
             Some("64-32addr") => {
-                return Ok(if is_be {
-                    be::variants::V64_32ADDR
-                } else {
-                    le::variants::V64_32ADDR
+                return Ok(match endian {
+                    Endian::Big => be::variants::V64_32ADDR,
+                    Endian::Little => le::variants::V64_32ADDR,
                 });
             }
             _ => {}
         }
         let loader = LanguageLoader::from_env()?;
-        Self::resolve_variant_with(&loader, is_be, variant)
+        Self::resolve_variant_with(&loader, endian, variant)
     }
 
     pub fn resolve_variant_with<'a>(
         loader: &LanguageLoader,
-        is_be: bool,
+        endian: Endian,
         variant: impl Into<Option<&'a str>>,
     ) -> Result<&'static Language, LanguageError> {
         let variant = variant.into();
         #[cfg(feature = "static-lifters")]
         match variant {
             None | Some("default") => {
-                return Ok(if is_be {
-                    be::variants::DEFAULT
-                } else {
-                    le::variants::DEFAULT
+                return Ok(match endian {
+                    Endian::Big => be::variants::DEFAULT,
+                    Endian::Little => le::variants::DEFAULT,
                 });
             }
             Some("64-32addr") => {
-                return Ok(if is_be {
-                    be::variants::V64_32ADDR
-                } else {
-                    le::variants::V64_32ADDR
+                return Ok(match endian {
+                    Endian::Big => be::variants::V64_32ADDR,
+                    Endian::Little => le::variants::V64_32ADDR,
                 });
             }
             _ => {}
         }
-        let lid = LanguageId::new_with("MIPS", is_be, 64, variant);
+        let lid = LanguageId::new_with("MIPS", endian, 64, variant);
         loader.load(&lid)
     }
 
@@ -184,8 +182,8 @@ impl LanguageProvider {
         }
 
         let language = match source.loader() {
-            Some(loader) => Mips64::resolve_variant_with(loader, id.is_big_endian(), id.variant())?,
-            None => Mips64::resolve_variant(id.is_big_endian(), id.variant())?,
+            Some(loader) => Mips64::resolve_variant_with(loader, id.endian(), id.variant())?,
+            None => Mips64::resolve_variant(id.endian(), id.variant())?,
         };
 
         Ok(Some(language))

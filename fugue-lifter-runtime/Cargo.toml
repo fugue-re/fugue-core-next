@@ -11,6 +11,7 @@ serde = ["dep:serde", "dep:serde-big-array", "smallvec/serde"]
 arrayvec = "0.7"
 bitflags = "2"
 flate2 = "1.1"
+fugue-bytes = { version = "0.3", path = "../fugue-bytes" }
 fugue-sleigh-language = { version = "0.3", path = "../fugue-sleigh-language" }
 indexmap = "2"
 itertools = "0.14"

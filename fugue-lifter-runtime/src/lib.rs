@@ -27,6 +27,7 @@ pub use convention::{
     UserOpFixup,
 };
 pub use format::InstructionFormatter;
+pub use fugue_bytes::Endian;
 pub use fugue_sleigh_language::convention::PrototypeReference;
 pub use fugue_sleigh_language::float_format::FloatFormat;
 pub use fugue_sleigh_language::processor::SegmentedAddressSpaceKind;

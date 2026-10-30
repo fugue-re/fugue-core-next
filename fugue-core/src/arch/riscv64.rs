@@ -1,6 +1,8 @@
 #[cfg(feature = "static-lifters")]
 pub use fugue_lifter::riscv64::*;
 
+use fugue_bytes::Endian;
+
 use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
 use crate::arch::{Arch, ExternalThunkTemplate};
@@ -86,7 +88,7 @@ impl RiscV64 {
             None | Some("default") => return Ok(variants::DEFAULT),
             _ => {}
         }
-        let lid = LanguageId::new_with("RISCV", false, 64, variant);
+        let lid = LanguageId::new_with("RISCV", Endian::Little, 64, variant);
         loader.load(&lid)
     }
 }
