@@ -34,12 +34,14 @@ pub use mapping::{
     SegmentMappingId, SegmentMappingKind, SegmentMappingProvenance, SegmentMappingRef,
     SegmentSubMapping,
 };
+pub use overlay::{OverlayChunk, OverlayTree};
 pub use properties::SegmentProperties;
 pub use provider::{
-    InMemorySegmentStorage, MemoryMappedSegmentStorage, SegmentStorageDescriptor,
+    InMemorySegmentStorage, MemoryMappedSegmentStorage, SegmentChunk, SegmentStorageDescriptor,
     SegmentStorageProvider, SegmentStorageProviderDescriptor, SegmentStorageProviderEntry,
     SegmentStorageProviderFromLoadable, SegmentStorageProviderFromSegmentRange,
     SegmentStorageProviderFromStorage, SegmentStorageProviderId, SegmentStorageProviderRegistry,
+    SegmentView,
 };
 pub use space::{AddressSpace, AddressSpaceError, AddressSpaceId, AddressSpaceKind};
 pub use view::SegmentMappingView;
