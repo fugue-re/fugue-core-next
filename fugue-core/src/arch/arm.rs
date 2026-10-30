@@ -65,7 +65,7 @@ pub struct Arm {
 
 impl ArchT for Arm {
     fn disassembler(&self) -> Disassembler {
-        ArmDisassembler::new(self.is_thumb, self.endian(), self.data.t_mode)
+        ArmDisassembler::new(self.is_thumb, self.insn_endian(), self.data.t_mode)
     }
 
     fn lifter(&self) -> Lifter {
@@ -89,8 +89,8 @@ impl ArchT for Arm {
     }
 
     fn classify_bytes(&self, bytes: &[u8]) -> BytesProperties {
-        let arm = Self::nop_insn_size(bytes, self.language().is_big_endian(), false);
-        let thumb = Self::nop_insn_size(bytes, self.language().is_big_endian(), true);
+        let arm = Self::nop_insn_size(bytes, self.insn_endian().is_big(), false);
+        let thumb = Self::nop_insn_size(bytes, self.insn_endian().is_big(), true);
         if (arm != 0 && arm == bytes.len()) || (thumb != 0 && thumb == bytes.len()) {
             BytesProperties::NOP_INSN
         } else {
@@ -105,7 +105,7 @@ impl ArchT for Arm {
         bytes: &[u8],
     ) -> (usize, BytesProperties) {
         let thumb = context.get_variable_by_bits(self.data.t_mode, address.offset()) == 1;
-        let size = Self::nop_insn_size(bytes, self.language().is_big_endian(), thumb);
+        let size = Self::nop_insn_size(bytes, self.insn_endian().is_big(), thumb);
         (
             size,
             if size == 0 {
@@ -119,13 +119,13 @@ impl ArchT for Arm {
     fn external_thunk_template(&self) -> ExternalThunkTemplate {
         if self.is_thumb {
             let mut bytes = [0x70, 0x47];
-            if self.language().is_big_endian() {
+            if self.insn_endian().is_big() {
                 bytes.reverse();
             }
             ExternalThunkTemplate::new_with(bytes, ContextSet::single(self.data.t_mode, 1))
         } else {
             let mut bytes = [0x1e, 0xff, 0x2f, 0xe1];
-            if self.language().is_big_endian() {
+            if self.insn_endian().is_big() {
                 bytes.reverse();
             }
             ExternalThunkTemplate::new_with(bytes, ContextSet::single(self.data.t_mode, 0))
@@ -169,63 +169,59 @@ impl Arm {
         }) as Box<dyn ArchT>)
     }
 
-    pub fn resolve_default_variant(is_be: bool) -> Result<&'static Language, LanguageError> {
-        Self::resolve_variant(is_be, None)
+    pub fn resolve_default_variant(endian: Endian) -> Result<&'static Language, LanguageError> {
+        Self::resolve_variant(endian, None)
     }
 
     pub fn resolve_variant<'a>(
-        is_be: bool,
+        endian: Endian,
         variant: impl Into<Option<&'a str>>,
     ) -> Result<&'static Language, LanguageError> {
         let variant = variant.into();
         #[cfg(feature = "static-lifters")]
         match variant {
             None | Some("v8") => {
-                return Ok(if is_be {
-                    be::variants::V8
-                } else {
-                    le::variants::V8
+                return Ok(match endian {
+                    Endian::Big => be::variants::V8,
+                    Endian::Little => le::variants::V8,
                 });
             }
             Some("v8T") => {
-                return Ok(if is_be {
-                    be::variants::V8T
-                } else {
-                    le::variants::V8T
+                return Ok(match endian {
+                    Endian::Big => be::variants::V8T,
+                    Endian::Little => le::variants::V8T,
                 });
             }
             _ => {}
         }
         let loader = LanguageLoader::from_env()?;
-        Self::resolve_variant_with(&loader, is_be, variant)
+        Self::resolve_variant_with(&loader, endian, variant)
     }
 
     pub fn resolve_variant_with<'a>(
         loader: &LanguageLoader,
-        is_be: bool,
+        endian: Endian,
         variant: impl Into<Option<&'a str>>,
     ) -> Result<&'static Language, LanguageError> {
         let variant = variant.into();
         #[cfg(feature = "static-lifters")]
         match variant {
             None | Some("v8") => {
-                return Ok(if is_be {
-                    be::variants::V8
-                } else {
-                    le::variants::V8
+                return Ok(match endian {
+                    Endian::Big => be::variants::V8,
+                    Endian::Little => le::variants::V8,
                 });
             }
             Some("v8T") => {
-                return Ok(if is_be {
-                    be::variants::V8T
-                } else {
-                    le::variants::V8T
+                return Ok(match endian {
+                    Endian::Big => be::variants::V8T,
+                    Endian::Little => le::variants::V8T,
                 });
             }
             _ => {}
         }
         let variant = variant.or(Some("v8"));
-        let lid = LanguageId::new_with("ARM", is_be, 32, variant);
+        let lid = LanguageId::new_with("ARM", endian, 32, variant);
         loader.load(&lid)
     }
 
@@ -289,9 +285,16 @@ impl LanguageProvider {
             return Ok(None);
         }
 
-        let language = match source.loader() {
-            Some(loader) => Arm::resolve_variant_with(loader, id.is_big_endian(), id.variant())?,
-            None => Arm::resolve_variant(id.is_big_endian(), id.variant())?,
+        let language = if id.insn_endian() != id.endian() {
+            match source.loader() {
+                Some(loader) => loader.load(id)?,
+                None => LanguageLoader::from_env()?.load(id)?,
+            }
+        } else {
+            match source.loader() {
+                Some(loader) => Arm::resolve_variant_with(loader, id.endian(), id.variant())?,
+                None => Arm::resolve_variant(id.endian(), id.variant())?,
+            }
         };
 
         Ok(Some(language))
@@ -526,12 +529,12 @@ mod test {
     use yaxpeax_arch::{Decoder, LengthedInstruction, U8Reader};
     use yaxpeax_arm::armv7::InstDecoder;
 
-    use super::{Arm, ArmDisassembler};
+    use super::{Arm, ArmDisassembler, Endian};
     use crate::arch::BytesProperties;
     use crate::ir::{Address, Insn, RawAddress};
 
     fn assert_direct_flow_matches_lifter(bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-        let language = Arm::resolve_default_variant(false)?;
+        let language = Arm::resolve_default_variant(Endian::Little)?;
         let arch = Arm::new(language);
         let address = Address::in_default_space(0x1000u64);
         let mut disassembly_context = arch.lifter();
@@ -558,7 +561,7 @@ mod test {
 
     #[test]
     fn canonicalise_address_decodes_thumb_mode() {
-        let language = Arm::resolve_default_variant(false).expect("arm language");
+        let language = Arm::resolve_default_variant(Endian::Little).expect("arm language");
         let arch = Arm::new(language);
 
         let (thumb_entry, thumb_ctx) = arch
@@ -591,7 +594,7 @@ mod test {
 
     #[test]
     fn contiguous_nop_insns_respect_arm_mode() {
-        let language = Arm::resolve_default_variant(false).expect("arm language");
+        let language = Arm::resolve_default_variant(Endian::Little).expect("arm language");
         let arch = Arm::new(language);
         let address = Address::in_default_space(0x1000u64);
         let mut lifter = arch.lifter();

@@ -26,8 +26,8 @@ use fugue_core::il::ecode::{ECodeIr, ECodeOpcode, PCodeToECode};
 use fugue_core::il::mcode::{ECodeToMCode, MCodeIr};
 use fugue_core::il::pcode::PCodeIr;
 use fugue_core::ir::{
-    Address, AddressRange, AddressRangeSet, CodeBlock, IncompleteCodeBlock, IncompleteFunction,
-    Reference, ReferenceProperties, SymbolEntry, SymbolIndex, SymbolProperties,
+    Address, AddressRange, AddressRangeSet, CodeBlock, Endian, IncompleteCodeBlock,
+    IncompleteFunction, Reference, ReferenceProperties, SymbolEntry, SymbolIndex, SymbolProperties,
     SymbolTableSelector,
 };
 use fugue_core::loader::{Loadable, Loader};
@@ -719,7 +719,7 @@ fn bench_initial_analysis(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn 
 }
 
 fn bench_mips_mode_resolution(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
-    let arch = Arch::new(Mips::resolve_default_variant(true)?);
+    let arch = Arch::new(Mips::resolve_default_variant(Endian::Big)?);
     let mut disassembler = arch.disassembler();
     let mut lifter = arch.lifter();
 

@@ -139,7 +139,11 @@ impl LanguageVariantOverride {
         match self {
             Self::Any(variant) => Some(variant),
             Self::ByLanguage(variants) => {
-                let endian = if language.is_big_endian() { "BE" } else { "LE" };
+                let endian = if language.endian().is_big() {
+                    "BE"
+                } else {
+                    "LE"
+                };
                 let key = format!("{}:{endian}:{}", language.processor(), language.bits());
                 variants.get(&key).map(String::as_str)
             }

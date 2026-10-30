@@ -7,6 +7,7 @@ use std::sync::OnceLock;
 
 use bitflags::bitflags;
 use fallible_iterator::FallibleIterator;
+use fugue_bytes::Endian;
 use object::elf::{
     ELFOSABI_FREEBSD, FileHeader32, FileHeader64, PF_R, PF_W, PF_X, SHF_ALLOC, SHF_EXECINSTR,
     SHF_TLS, SHF_WRITE, STB_GLOBAL, STB_WEAK, STT_COMMON, STT_FUNC, STT_GNU_IFUNC, STT_LOOS,
@@ -153,8 +154,15 @@ impl<'this, 'data> ElfFileRepr<'this, 'data> {
         with_elf!(self, elf | elf.is_64())
     }
 
-    pub(crate) fn is_big_endian(&self) -> bool {
-        with_elf!(self, elf | !elf.is_little_endian())
+    pub(crate) fn endian(&self) -> Endian {
+        with_elf!(
+            self,
+            elf | if elf.is_little_endian() {
+                Endian::Little
+            } else {
+                Endian::Big
+            }
+        )
     }
 
     pub(crate) fn machine(&self) -> u16 {
@@ -2834,7 +2842,7 @@ mod test {
         assert_eq!(language.variant(), "A2ALT");
         assert_eq!(language.processor(), "PowerPC");
         assert_eq!(language.bits(), 64);
-        assert!(!language.is_big_endian());
+        assert!(language.endian().is_little());
 
         let mut attributes = AttributeMap::new();
         attributes.set_attr(ATTRIBUTE_LANGUAGE_VARIANT, "nonexistent");
@@ -3045,7 +3053,7 @@ mod test {
 
         assert_eq!(elf.architecture().language().processor(), "MIPS");
         assert_eq!(elf.architecture().language().bits(), 64);
-        assert!(elf.architecture().language().is_big_endian());
+        assert!(elf.architecture().language().endian().is_big());
 
         let relocation_offset = with_elf!(
             elf.loaded_view(),
@@ -3099,7 +3107,7 @@ mod test {
 
         assert_eq!(elf.architecture().language().processor(), "PowerPC");
         assert_eq!(elf.architecture().language().address_bits(), 32);
-        assert!(elf.architecture().language().is_big_endian());
+        assert!(elf.architecture().language().endian().is_big());
 
         let (relocation_offset, expected_value) = with_elf!(
             elf.loaded_view(),
@@ -3219,7 +3227,7 @@ mod test {
 
         assert_eq!(elf.architecture().language().processor(), "PowerPC");
         assert_eq!(elf.architecture().language().address_bits(), 64);
-        assert!(!elf.architecture().language().is_big_endian());
+        assert!(!elf.architecture().language().endian().is_big());
 
         let (relocation_offset, relocation_value) = with_elf!(
             elf.loaded_view(),

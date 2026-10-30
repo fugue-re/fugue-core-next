@@ -15,7 +15,7 @@ pub(crate) fn apply(
 ) -> Result<(), AnalysisError> {
     let language = arch.language();
     let processor = language.processor();
-    let is_be = language.is_big_endian();
+    let is_be = language.endian().is_big();
     let bits = language.address_bits();
 
     let patterns = match (processor, is_be, bits, convention) {

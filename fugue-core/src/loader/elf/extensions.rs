@@ -1,3 +1,4 @@
+use fugue_bytes::Endian;
 use object::read::elf::{ElfFile, FileHeader};
 use object::{ReadRef, elf};
 
@@ -12,7 +13,7 @@ use crate::types::{ATTRIBUTE_LANGUAGE_VARIANT, AttributeMap};
 
 pub struct ImageContext<'a> {
     is_64: bool,
-    is_be: bool,
+    endian: Endian,
     machine: u16,
     flags: u32,
     base: RawAddress,
@@ -31,7 +32,7 @@ impl<'a> ImageContext<'a> {
     ) -> Self {
         Self {
             is_64: view.is_64(),
-            is_be: view.is_big_endian(),
+            endian: view.endian(),
             machine: view.machine(),
             flags: view.flags(),
             base,
@@ -45,8 +46,8 @@ impl<'a> ImageContext<'a> {
         self.is_64
     }
 
-    pub fn is_big_endian(&self) -> bool {
-        self.is_be
+    pub fn endian(&self) -> Endian {
+        self.endian
     }
 
     pub fn machine(&self) -> u16 {
@@ -113,10 +114,11 @@ impl<'a> ImageContext<'a> {
 
         let id = LanguageId::new_with(
             language.processor(),
-            language.is_big_endian(),
+            language.endian(),
             language.bits(),
             Some(variant),
-        );
+        )
+        .with_insn_endian(language.insn_endian());
 
         Arch::try_new(source.load(&id)?).map_err(LoaderError::extension)
     }
@@ -158,9 +160,13 @@ impl ArchResolver {
         context: &ImageContext<'_>,
         source: &LanguageSource<'_>,
     ) -> Result<Option<Arch>, LoaderError> {
-        let is_be = context.is_big_endian();
+        let endian = context.endian();
+        let is_be8 = context.machine() == elf::EM_ARM
+            && endian == Endian::Big
+            && context.flags() & elf::EF_ARM_BE8 != 0;
         let variant = match context.machine() {
             elf::EM_AARCH64 if context.is_64() => None,
+            elf::EM_ARM if is_be8 => Some("v8LEInstruction"),
             elf::EM_ARM => context
                 .entry()
                 .and_then(|entry| (entry.offset() & 1 == 1).then_some("v8T")),
@@ -174,16 +180,19 @@ impl ArchResolver {
         };
 
         let id = match context.machine() {
-            elf::EM_AARCH64 => LanguageId::new_with("AARCH64", is_be, 64, variant),
-            elf::EM_ARM => LanguageId::new_with("ARM", is_be, 32, variant),
-            elf::EM_386 => LanguageId::new_with("x86", false, 32, variant),
-            elf::EM_MIPS if context.is_64() => LanguageId::new_with("MIPS", is_be, 64, variant),
-            elf::EM_MIPS => LanguageId::new_with("MIPS", is_be, 32, variant),
-            elf::EM_PPC => LanguageId::new_with("PowerPC", is_be, 32, variant),
-            elf::EM_PPC64 => LanguageId::new_with("PowerPC", is_be, 64, variant),
-            elf::EM_RISCV if context.is_64() => LanguageId::new_with("RISCV", false, 64, variant),
-            elf::EM_RISCV => LanguageId::new_with("RISCV", false, 32, variant),
-            elf::EM_X86_64 => LanguageId::new_with("x86", false, 64, variant),
+            elf::EM_AARCH64 => LanguageId::new_with("AARCH64", endian, 64, variant),
+            elf::EM_ARM => LanguageId::new_with("ARM", endian, 32, variant)
+                .with_insn_endian(if is_be8 { Endian::Little } else { endian }),
+            elf::EM_386 => LanguageId::new_with("x86", Endian::Little, 32, variant),
+            elf::EM_MIPS if context.is_64() => LanguageId::new_with("MIPS", endian, 64, variant),
+            elf::EM_MIPS => LanguageId::new_with("MIPS", endian, 32, variant),
+            elf::EM_PPC => LanguageId::new_with("PowerPC", endian, 32, variant),
+            elf::EM_PPC64 => LanguageId::new_with("PowerPC", endian, 64, variant),
+            elf::EM_RISCV if context.is_64() => {
+                LanguageId::new_with("RISCV", Endian::Little, 64, variant)
+            }
+            elf::EM_RISCV => LanguageId::new_with("RISCV", Endian::Little, 32, variant),
+            elf::EM_X86_64 => LanguageId::new_with("x86", Endian::Little, 64, variant),
             _ => return Ok(None),
         };
 
