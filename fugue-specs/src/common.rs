@@ -568,7 +568,7 @@ impl<'de> Deserialize<'de> for PlatformConstraint {
     {
         let av = AttrWithVal::<String, String>::deserialize(deserializer)?;
         match av.attr.as_ref() {
-            "language" => {
+            "language" | "arch" => {
                 Ok(Self::Language(LanguageSpec::deserialize(StringDeserializer::new(av.val))?))
             }
             "platform" => {
