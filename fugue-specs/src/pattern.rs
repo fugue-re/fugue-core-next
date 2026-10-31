@@ -13,6 +13,9 @@ use nom::sequence::delimited;
 use nom::{Err, Finish, IResult, Parser};
 use regex::bytes::RegexBuilder;
 pub use regex::bytes::{Match, Regex};
+use regex_cursor::engines::meta::Regex as CursorRegex;
+use regex_cursor::regex_automata::util::syntax::Config as SyntaxConfig;
+use regex_cursor::{Cursor, Input};
 use serde::de::{SeqAccess, Visitor};
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -31,6 +34,7 @@ pub struct Pattern {
     data: Vec<u8>,
     mask: Vec<u8>,
     norm: Regex,
+    cursor_norm: CursorRegex,
     bits: u32,
 }
 
@@ -194,6 +198,17 @@ impl Pattern {
             .build()
             .map_err(|_| Err::Error(Error::new(input, ErrorKind::MapRes)))?;
 
+        let cursor_norm = CursorRegex::builder()
+            .configure(CursorRegex::config().utf8_empty(false))
+            .syntax(
+                SyntaxConfig::new()
+                    .unicode(false)
+                    .utf8(false)
+                    .dot_matches_new_line(true),
+            )
+            .build(regex.as_ref())
+            .map_err(|_| Err::Error(Error::new(input, ErrorKind::MapRes)))?;
+
         let bits = mask.iter().map(|b| b.count_ones()).sum::<u32>();
 
         Ok((
@@ -202,6 +217,7 @@ impl Pattern {
                 data,
                 mask,
                 norm,
+                cursor_norm,
                 bits,
             },
         ))
@@ -216,6 +232,23 @@ impl Pattern {
                 .iter()
                 .zip(bytes.iter().zip(self.mask.iter()))
                 .all(|(v, (b, m))| *v == b & m)
+    }
+
+    fn is_match_cursor_at<C: Cursor>(&self, cursor: &mut C, offset: usize) -> bool {
+        while cursor.offset() > offset && cursor.backtrack() {}
+        self.data
+            .iter()
+            .zip(self.mask.iter())
+            .enumerate()
+            .all(|(index, (v, m))| {
+                let position = offset + index;
+                while cursor.offset() + cursor.chunk().len() <= position {
+                    if !cursor.advance() {
+                        return false;
+                    }
+                }
+                *v == cursor.chunk()[position - cursor.offset()] & m
+            })
     }
 
     pub fn is_match(&self, bytes: impl AsRef<[u8]>) -> bool {
@@ -248,6 +281,17 @@ impl Pattern {
         self.normalised_matcher()
             .find_iter(bytes)
             .filter(|m| self.is_match(m.as_bytes()))
+    }
+
+    pub fn find_iter_cursor<'a, C: Cursor + Clone + 'a>(
+        &'a self,
+        cursor: C,
+    ) -> impl Iterator<Item = Range<usize>> + 'a {
+        let mut verifier = cursor.clone();
+        self.cursor_norm
+            .find_iter(Input::new(cursor))
+            .filter(move |m| self.is_match_cursor_at(&mut verifier, m.start()))
+            .map(|m| m.range())
     }
 
     pub fn bits(&self) -> u32 {
@@ -367,6 +411,20 @@ impl Patterns {
                     self.patterns
                         .iter()
                         .flat_map(|pattern| pattern.matches(bytes)),
+                ),
+        )
+    }
+
+    pub fn matches_cursor<'a, C: Cursor + Clone + 'a>(&'a self, cursor: C) -> PatternMatchIter<'a> {
+        let groups_cursor = cursor.clone();
+        PatternMatchIter::new(
+            self.groups
+                .iter()
+                .flat_map(move |group| group.matches_cursor(groups_cursor.clone()))
+                .chain(
+                    self.patterns
+                        .iter()
+                        .flat_map(move |pattern| pattern.matches_cursor(cursor.clone())),
                 ),
         )
     }
@@ -545,6 +603,34 @@ impl PatternGroup {
                 })
         })
     }
+
+    pub fn matches_cursor<'a, C: Cursor + Clone + 'a>(
+        &'a self,
+        cursor: C,
+    ) -> impl Iterator<Item = (Range<usize>, &'a PatternContext, Confidence)> + 'a {
+        self.post_patterns.patterns.iter().flat_map(move |pattern| {
+            let mut verifier = cursor.clone();
+            pattern
+                .find_iter_cursor(cursor.clone())
+                .filter(move |range| {
+                    self.pre_patterns.iter().any(|pre_pattern| {
+                        range.start >= pre_pattern.data.len()
+                            && pre_pattern.is_match_cursor_at(
+                                &mut verifier,
+                                range.start - pre_pattern.data.len(),
+                            )
+                            && pre_pattern.bits() + pattern.bits() >= self.total_bits
+                    })
+                })
+                .map(|range| {
+                    (
+                        range,
+                        &self.post_patterns.context,
+                        self.post_patterns.confidence,
+                    )
+                })
+        })
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -614,10 +700,28 @@ impl PatternsWithContext {
         })
     }
 
+    pub fn matches_cursor<'a, C: Cursor + Clone + 'a>(
+        &'a self,
+        cursor: C,
+    ) -> impl Iterator<Item = (Range<usize>, &'a PatternContext, Confidence)> + 'a {
+        self.patterns.iter().flat_map(move |pattern| {
+            pattern
+                .find_iter_cursor(cursor.clone())
+                .map(|range| (range, &self.context, self.confidence))
+        })
+    }
+
     pub fn matches_exact(&self, bytes: &[u8]) -> bool {
         self.patterns
             .iter()
             .any(|pattern| pattern.matches_exact(bytes))
+    }
+
+    pub fn matches_exact_cursor<C: Cursor>(&self, mut cursor: C) -> bool {
+        let total_bytes = cursor.total_bytes();
+        self.patterns.iter().any(|pattern| {
+            total_bytes == Some(pattern.data.len()) && pattern.is_match_cursor_at(&mut cursor, 0)
+        })
     }
 }
 
