@@ -22,7 +22,7 @@ nom = "8"
 regex = "1"
 rkyv = { version = "0.8", optional = true }
 serde = "1"
-serde-yaml = { version = "0.0.12", package = "serde-saphyr" }
+serde-yaml = { version = "2.0", package = "serde-saphyr" }
 thiserror = "2"
 
 [lints]
