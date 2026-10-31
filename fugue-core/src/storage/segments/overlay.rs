@@ -45,9 +45,40 @@ impl OverlayTree {
         }
 
         let addr = addr.into();
-        self.clear_range(addr, data.len());
-        self.chunks.insert(addr, OverlayChunk::new(data));
-        self.merge_adjacent(addr);
+        let start = match self.chunks.range_mut(..=addr).next_back() {
+            Some((&start, chunk)) if start + chunk.size() >= addr => {
+                let offset = usize::from(addr - start);
+                let overlap = (chunk.size() - offset).min(data.len());
+                chunk.data[offset..offset + overlap].copy_from_slice(&data[..overlap]);
+                chunk.data.extend_from_slice(&data[overlap..]);
+                start
+            }
+            _ => {
+                self.chunks.insert(addr, OverlayChunk::new(data));
+                addr
+            }
+        };
+
+        let mut end = start + self.chunks[&start].size();
+        while let Some((&next, _)) = self
+            .chunks
+            .range((Bound::Excluded(start), Bound::Unbounded))
+            .next()
+            .filter(|&(&next, _)| next <= end)
+        {
+            let next_chunk = self
+                .chunks
+                .remove(&next)
+                .expect("following overlay chunk exists");
+            if let Some(tail) = next_chunk.data.get(usize::from(end - next)..) {
+                let chunk = self
+                    .chunks
+                    .get_mut(&start)
+                    .expect("current overlay chunk exists");
+                chunk.data.extend_from_slice(tail);
+                end = start + chunk.size();
+            }
+        }
     }
 
     pub fn clear_range(&mut self, addr: impl Into<RawAddress>, size: usize) {
@@ -56,7 +87,7 @@ impl OverlayTree {
         }
 
         let addr = addr.into();
-        let write_end = u128::from(addr.offset()) + size as u128;
+        let end = addr + size;
         let first = self
             .chunks
             .range(..=addr)
@@ -65,11 +96,8 @@ impl OverlayTree {
         let overlapping = self
             .chunks
             .range(first..)
-            .take_while(|(start, _)| u128::from(start.offset()) < write_end)
-            .filter_map(|(&start, chunk)| {
-                let chunk_end = u128::from(start.offset()) + chunk.size() as u128;
-                (chunk_end > u128::from(addr.offset())).then_some(start)
-            })
+            .take_while(|&(&start, _)| start < end)
+            .filter_map(|(&start, chunk)| (start + chunk.size() > addr).then_some(start))
             .collect::<SmallVec<[_; 4]>>();
 
         for start in overlapping {
@@ -77,62 +105,15 @@ impl OverlayTree {
                 .chunks
                 .remove(&start)
                 .expect("overlapping overlay chunk exists");
-            let chunk_end = u128::from(start.offset()) + chunk.size() as u128;
 
-            if chunk_end > write_end {
-                let right_offset = usize::try_from(write_end - u128::from(start.offset()))
-                    .expect("overlay split offset fits the chunk size");
-                let right = chunk.data.split_off(right_offset);
-                let right_start =
-                    RawAddress::from(u64::try_from(write_end).expect("overlay address is valid"));
-                self.chunks.insert(right_start, OverlayChunk::new(right));
+            if start + chunk.size() > end {
+                let right = chunk.data.split_off(usize::from(end - start));
+                self.chunks.insert(end, OverlayChunk::new(right));
             }
             if start < addr {
                 chunk.data.truncate(usize::from(addr - start));
                 self.chunks.insert(start, chunk);
             }
-        }
-    }
-
-    fn merge_adjacent(&mut self, addr: RawAddress) {
-        let Some(chunk) = self.chunks.get(&addr) else {
-            return;
-        };
-        let chunk_end = addr + chunk.size();
-
-        if let Some((&next_start, _)) = self
-            .chunks
-            .range((Bound::Excluded(addr), Bound::Unbounded))
-            .next()
-            && next_start == chunk_end
-        {
-            let next = self
-                .chunks
-                .remove(&next_start)
-                .expect("adjacent overlay chunk exists");
-            let current = self
-                .chunks
-                .get_mut(&addr)
-                .expect("current overlay chunk exists");
-            current.data.extend_from_slice(&next.data);
-        }
-
-        let prev_start = self
-            .chunks
-            .range(..addr)
-            .next_back()
-            .and_then(|(&start, chunk)| (start + chunk.size() == addr).then_some(start));
-
-        if let Some(prev_start) = prev_start {
-            let current = self
-                .chunks
-                .remove(&addr)
-                .expect("current overlay chunk exists");
-            let prev = self
-                .chunks
-                .get_mut(&prev_start)
-                .expect("adjacent overlay chunk exists");
-            prev.data.extend_from_slice(&current.data);
         }
     }
 
