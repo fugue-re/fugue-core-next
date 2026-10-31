@@ -9,6 +9,7 @@ use std::str::FromStr;
 use bitflags::bitflags;
 use fugue_lifter::{Language, PCodeOp};
 use fugue_sleigh::semantics::{CodeBlock, IRBuilder, IRBuilderError};
+use regex_cursor::Cursor;
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
@@ -142,6 +143,14 @@ impl FunctionPatterns {
             .filter(|(spec, _)| spec.as_ref().is_none_or(|spec| spec.matches(language)))
             .flat_map(|(_, patterns)| patterns)
             .any(|patterns| patterns.matches_exact(bytes))
+    }
+
+    pub fn matches_cursor<C: Cursor>(&self, language: &LanguageSpec, mut cursor: C) -> bool {
+        self.0
+            .iter()
+            .filter(|(spec, _)| spec.as_ref().is_none_or(|spec| spec.matches(language)))
+            .flat_map(|(_, patterns)| patterns)
+            .any(|patterns| patterns.matches_exact_cursor(&mut cursor))
     }
 }
 

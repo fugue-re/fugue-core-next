@@ -4,6 +4,7 @@ use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use regex_cursor::Cursor;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
@@ -100,6 +101,20 @@ impl PatternSpecs {
                     self.patterns
                         .iter()
                         .flat_map(|pattern| pattern.matches(bytes)),
+                ),
+        )
+    }
+
+    pub fn matches_cursor<'a, C: Cursor + Clone + 'a>(&'a self, cursor: C) -> PatternMatchIter<'a> {
+        let groups_cursor = cursor.clone();
+        PatternMatchIter::new(
+            self.groups
+                .iter()
+                .flat_map(move |group| group.matches_cursor(groups_cursor.clone()))
+                .chain(
+                    self.patterns
+                        .iter()
+                        .flat_map(move |pattern| pattern.matches_cursor(cursor.clone())),
                 ),
         )
     }
