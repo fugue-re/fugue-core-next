@@ -13,7 +13,6 @@ use crate::il::ecode::ECodeIr;
 use crate::il::mcode::MCodeIr;
 use crate::il::pcode::PCodeIr;
 use crate::il::registry::IlRegistry;
-use crate::ir::cfg::FlowTargets;
 use crate::ir::{
     Address, AddressRangeSet, FunctionId, ProblemKey, ProblemKind, Reference, ReferenceTarget,
 };
@@ -347,28 +346,6 @@ impl QueryReader {
     ) -> Result<bool, QueryError> {
         let _query_guard = self.enter_query()?;
         Ok(self.changes.read().changed_since(since, kinds, region))
-    }
-
-    pub fn flow_targets(&self, entry: Address) -> Result<Option<Arc<FlowTargets>>, QueryError> {
-        let _query_guard = self.enter_query()?;
-
-        match self.cache.flow_targets(entry) {
-            CacheLookup::Hit(cached) => return Ok(Some(cached)),
-            CacheLookup::Absent => return Ok(None),
-            CacheLookup::Miss => {}
-        }
-
-        let targets = {
-            let project = self.project.read();
-            let read = ProjectQuery::new(&project);
-            project
-                .functions()
-                .get_by_address(entry)
-                .map(|function| read.flow_targets(function))
-        };
-
-        self.cache.insert_flow_targets(entry, targets.clone());
-        Ok(targets)
     }
 
     pub fn lifted<T>(&self, function: FunctionId) -> Result<Option<Arc<T>>, QueryError>

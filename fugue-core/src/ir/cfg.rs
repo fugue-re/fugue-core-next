@@ -1,22 +1,5 @@
 use crate::ir::{AddressWithContext, Insn, InsnTarget};
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct FlowTargets {
-    targets: Vec<FlowTarget>,
-}
-
-impl FlowTargets {
-    pub fn new(targets: impl Into<Vec<FlowTarget>>) -> Self {
-        Self {
-            targets: targets.into(),
-        }
-    }
-
-    pub fn targets(&self) -> &[FlowTarget] {
-        &self.targets
-    }
-}
-
 #[derive(
     Debug,
     Copy,

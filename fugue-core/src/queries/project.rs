@@ -1,11 +1,9 @@
 use std::ops::Bound;
-use std::sync::Arc;
 
 use super::{
     CallEdge, MAX_QUERY_PAGE_SIZE, MappingEntity, ProblemEntity, QueryPage, SwitchEntity,
     SymbolEntity,
 };
-use crate::ir::cfg::FlowTargets;
 use crate::ir::{
     Address, CallGraphEdgeKey, FunctionId, FunctionRef, ProblemKey, ProblemKind, Reference,
     ReferenceTarget,
@@ -236,14 +234,6 @@ impl<'p> ProjectQuery<'p> {
         rows.sort();
 
         Self::page(rows, limit)
-    }
-
-    pub(crate) fn flow_targets(&self, function: FunctionRef<'_>) -> Arc<FlowTargets> {
-        let targets = function
-            .flow_targets(self.project.blocks())
-            .collect::<Vec<_>>();
-
-        Arc::new(FlowTargets::new(targets))
     }
 
     fn push_ordered_group<T>(rows: &mut Vec<T>, group: &mut Vec<T>, after: Option<T>, limit: usize)

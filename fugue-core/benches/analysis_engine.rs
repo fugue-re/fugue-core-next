@@ -1056,52 +1056,6 @@ fn bench_parallel_il_transforms(results: &mut Vec<BenchResult>) -> Result<(), Bo
     Ok(())
 }
 
-fn bench_repeated_flow_targets(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
-    let (engine, entry) = load_engine()?;
-    let reader = engine.query_reader()?;
-    let disjoint_entry = entry
-        .checked_add(0x30_000u64)
-        .ok_or_else(|| std::io::Error::other("disjoint function address overflow"))?;
-
-    black_box(reader.flow_targets(entry)?);
-    let (hit, _) = measure_repeated("repeated_flow_targets_query_hit", || {
-        black_box(reader.flow_targets(entry)?);
-        Ok(((), 1))
-    })?;
-    results.push(hit);
-
-    add_empty_function(&engine, entry)?;
-    engine.analyse()?;
-    let (after_same_entry, _) = measure("flow_targets_after_same_entry_edit", || {
-        black_box(reader.flow_targets(entry)?);
-        Ok(((), 1))
-    })?;
-    results.push(after_same_entry);
-
-    add_empty_function(&engine, disjoint_entry)?;
-    engine.analyse()?;
-    let (after_disjoint_range, _) =
-        measure_repeated("flow_targets_after_disjoint_range_edit", || {
-            black_box(reader.flow_targets(entry)?);
-            Ok(((), 1))
-        })?;
-    results.push(after_disjoint_range);
-
-    engine.add_symbol(
-        SymbolIndex::new(SymbolTableSelector::new(241), 0),
-        SymbolEntry::new(entry, "bench_unrelated_symbol", SymbolProperties::LOCAL),
-    )?;
-    engine.analyse()?;
-
-    let (after_unrelated_kind, _) =
-        measure_repeated("flow_targets_after_unrelated_kind_edit", || {
-            black_box(reader.flow_targets(entry)?);
-            Ok(((), 1))
-        })?;
-    results.push(after_unrelated_kind);
-    Ok(())
-}
-
 fn bench_page_scans(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
     let (engine, entry) = load_engine()?;
     add_symbols(&engine, entry, SYNTHETIC_SYMBOLS)?;
@@ -1169,7 +1123,7 @@ fn bench_single_function_edit(results: &mut Vec<BenchResult>) -> Result<(), Box<
     results.push(edit);
 
     let (related, _) = measure("single_function_edit_related_query", || {
-        black_box(reader.flow_targets(new_entry)?);
+        black_box(reader.function_at(new_entry)?);
         Ok(((), 1))
     })?;
     results.push(related);
@@ -1289,7 +1243,7 @@ fn bench_byte_writes(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error
 }
 
 fn bench_mapping_changes(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
-    let mapping_count = u64::try_from(SEGMENT_MAPPING_REMOVALS)?;
+    let mapping_count = SEGMENT_MAPPING_REMOVALS as u64;
     let provider_size = usize::try_from(mapping_count * SEGMENT_MAPPING_SIZE)?;
     let mut storage = SegmentStorage::empty();
     let provider = storage.open_provider(
@@ -1474,7 +1428,7 @@ fn bench_cached_derived(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Er
 fn bench_multi_client(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
     let (engine, entry) = load_engine()?;
     let reader = engine.query_reader()?;
-    black_box(reader.flow_targets(entry)?);
+    black_box(reader.function_at(entry)?);
 
     let mut region = AddressRangeSet::new();
     region.insert_range(AddressRange::new(
@@ -1486,7 +1440,7 @@ fn bench_multi_client(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Erro
     let client_count = 8usize;
     let queries_per_client = 512usize;
 
-    let (result, _) = measure("multi_client_flow_targets_and_latest_change", || {
+    let (result, _) = measure("multi_client_function_at_and_latest_change", || {
         thread::scope(|scope| -> Result<(), Box<dyn Error>> {
             let mut clients = Vec::new();
             for _ in 0..client_count {
@@ -1497,7 +1451,7 @@ fn bench_multi_client(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Erro
                         for _ in 0..queries_per_client {
                             black_box(
                                 reader
-                                    .flow_targets(entry)
+                                    .function_at(entry)
                                     .map_err(|error| std::io::Error::other(error.to_string()))?,
                             );
                             black_box(
@@ -1693,7 +1647,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         bench_parallel_il_transforms(&mut results)?;
     }
     if selected_group(selected.as_deref(), "queries") {
-        bench_repeated_flow_targets(&mut results)?;
         bench_page_scans(&mut results)?;
         bench_call_graph_pages(&mut results)?;
         bench_cached_derived(&mut results)?;

@@ -913,15 +913,18 @@ fn test_engine_startup_reaches_entry() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    let flow_graph = reader
-        .flow_targets(entry)?
-        .ok_or_else(|| io::Error::other("fixture entry flow graph missing"))?;
-    let expected_callees = flow_graph
-        .targets()
-        .iter()
-        .filter(|target| target.kind().is_call())
-        .map(|target| target.to().address())
-        .collect::<BTreeSet<_>>();
+    let expected_callees = {
+        let project = reader.project()?;
+        let function = project
+            .functions()
+            .get_by_address(entry)
+            .ok_or_else(|| io::Error::other("fixture entry function missing"))?;
+        function
+            .flow_targets(project.blocks())
+            .filter(|target| target.kind().is_call())
+            .map(|target| target.to().address())
+            .collect::<BTreeSet<_>>()
+    };
     let callees = reader
         .callee_page(entry, None, 4096)?
         .entries()
@@ -2122,7 +2125,7 @@ fn test_engine_remove_function_updates_queries() -> Result<(), Box<dyn Error>> {
     let reader = engine.query_reader()?;
     let changes = engine.subscribe().with_capacity(16).build()?;
     consume_initial_resynchronisation(&changes, reader.revision()?)?;
-    assert!(reader.flow_targets(entry)?.is_some());
+    assert!(reader.function_at(entry)?.is_some());
 
     let removed = engine.remove_function(entry)?;
 
@@ -2131,7 +2134,7 @@ fn test_engine_remove_function_updates_queries() -> Result<(), Box<dyn Error>> {
         ChangeRecord::FunctionRemoved { entry: removed_entry, .. } if *removed_entry == entry
     )));
     assert_eq!(&*changes.recv_timeout(Duration::from_secs(1))?, &removed);
-    assert!(reader.flow_targets(entry)?.is_none());
+    assert!(reader.function_at(entry)?.is_none());
     assert!(
         !reader
             .function_page(DEFAULT_SPACE_ID, None, 4096)?
@@ -2154,7 +2157,7 @@ fn test_engine_remove_function_updates_queries() -> Result<(), Box<dyn Error>> {
         ChangeRecord::FunctionAdded { entry: added_entry, .. } if *added_entry == entry
     )));
     assert_eq!(&*changes.recv_timeout(Duration::from_secs(1))?, &added);
-    assert!(reader.flow_targets(entry)?.is_some());
+    assert!(reader.function_at(entry)?.is_some());
     assert!(
         reader
             .function_page(DEFAULT_SPACE_ID, None, 4096)?
@@ -3601,7 +3604,7 @@ fn test_query_readers_serve_multiple_concurrent_clients() -> Result<(), Box<dyn 
                     let anywhere = AddressRangeSet::new();
                     for _ in 0..200 {
                         for entry in &entries {
-                            reader.flow_targets(*entry)?;
+                            reader.function_at(*entry)?;
                             reader.latest_change(ChangeKinds::all(), &anywhere)?;
                         }
                     }
@@ -3618,9 +3621,7 @@ fn test_query_readers_serve_multiple_concurrent_clients() -> Result<(), Box<dyn 
         Ok(())
     })?;
 
-    let first = reader.flow_targets(entries[0])?.ok_or("entry missing")?;
-    let second = reader.flow_targets(entries[0])?.ok_or("entry missing")?;
-    assert!(Arc::ptr_eq(&first, &second));
+    assert!(reader.function_at(entries[0])?.is_some());
 
     Ok(())
 }
@@ -3649,14 +3650,8 @@ fn test_engine_recovers_derived_references() -> Result<(), Box<dyn Error>> {
         .iter()
         .find(|reference| reference.is_call())
         .ok_or_else(|| {
-            let flow_targets = reader
-                .flow_targets(edge.source())
-                .ok()
-                .flatten()
-                .map(|targets| targets.targets().to_vec());
             io::Error::other(format!(
-                "no incoming call reference for {edge:?}; incoming={incoming:?}; \
-                 flow_targets={flow_targets:?}",
+                "no incoming call reference for {edge:?}; incoming={incoming:?}"
             ))
         })?;
     assert!(call_reference.origin().is_derived());

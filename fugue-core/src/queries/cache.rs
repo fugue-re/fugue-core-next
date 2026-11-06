@@ -9,10 +9,8 @@ use crate::il::common::{IlArtefact, IlError, IlFormId};
 use crate::il::ecode::ECodeIr;
 use crate::il::mcode::MCodeIr;
 use crate::il::pcode::PCodeIr;
-use crate::ir::cfg::FlowTargets;
-use crate::ir::{Address, FunctionId};
+use crate::ir::FunctionId;
 
-const CFG_CACHE_CAPACITY: usize = 1024;
 const ESTIMATED_LIFTED_CACHE_ENTRIES: usize = 256;
 
 #[derive(Clone)]
@@ -48,7 +46,6 @@ impl Weighter<IlCacheKey, Option<CachedIl>> for LiftedWeigher {
 type IlCacheKey = (FunctionId, IlFormId);
 
 pub(crate) struct QueryCache {
-    flow_targets: Cache<Address, Option<Arc<FlowTargets>>>,
     lifted: Cache<IlCacheKey, Option<CachedIl>, LiftedWeigher>,
     lifted_cache_bytes: usize,
 }
@@ -57,16 +54,6 @@ pub(crate) enum CacheLookup<T: ?Sized> {
     Absent,
     Hit(Arc<T>),
     Miss,
-}
-
-impl<T: ?Sized> CacheLookup<T> {
-    fn from_cached(cached: Option<Option<Arc<T>>>) -> Self {
-        match cached {
-            None => Self::Miss,
-            Some(None) => Self::Absent,
-            Some(Some(value)) => Self::Hit(value),
-        }
-    }
 }
 
 pub trait QueryableIl: IlArtefact {}
@@ -88,7 +75,6 @@ impl QueryCache {
             .expect("valid lifted cache configuration");
 
         Self {
-            flow_targets: Cache::new(CFG_CACHE_CAPACITY),
             lifted: Cache::with_options(
                 lifted_options,
                 LiftedWeigher,
@@ -97,10 +83,6 @@ impl QueryCache {
             ),
             lifted_cache_bytes,
         }
-    }
-
-    pub(crate) fn flow_targets(&self, entry: Address) -> CacheLookup<FlowTargets> {
-        CacheLookup::from_cached(self.flow_targets.get(&entry))
     }
 
     pub(crate) fn lifted<T: IlArtefact>(
@@ -150,14 +132,6 @@ impl QueryCache {
         }
     }
 
-    pub(crate) fn insert_flow_targets(&self, entry: Address, targets: Option<Arc<FlowTargets>>) {
-        self.flow_targets.insert(entry, targets);
-    }
-
-    pub(crate) fn remove_flow_targets(&self, entry: Address) {
-        self.flow_targets.remove(&entry);
-    }
-
     pub(crate) fn remove_lifted(&self, function: FunctionId, form: &IlFormId) {
         self.lifted.remove(&(function, form.clone()));
     }
@@ -167,7 +141,6 @@ impl QueryCache {
     }
 
     pub(crate) fn clear(&self) {
-        self.flow_targets.clear();
         self.clear_lifted();
     }
 }
