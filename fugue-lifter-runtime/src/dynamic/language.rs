@@ -3,7 +3,11 @@ use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use flate2::read::GzDecoder;
+use fugue_bytes::Endian;
+use fugue_sleigh_language::float_format::FloatFormat;
+use fugue_sleigh_language::processor::Processor as SleighProcessor;
 use fugue_sleigh_language::{Language as SleighLanguage, LanguageDB, LanguageDef, LanguageError};
+use itertools::Itertools;
 use rkyv::rancor::Error as RkyvError;
 use thiserror::Error;
 
@@ -13,6 +17,9 @@ use crate::dynamic::constructor::Constructor;
 use crate::dynamic::convention::Convention;
 use crate::dynamic::install::Install;
 use crate::dynamic::operand::OperandFilter;
+use crate::dynamic::processor::{
+    ContextSet, DefaultSymbol, RegisterLanes, SegmentOp, TrackedSet, VolatileRange,
+};
 use crate::dynamic::resolve::DecisionNode;
 use crate::dynamic::space::AddressSpace;
 use crate::dynamic::symbol::Symbol;
@@ -22,6 +29,7 @@ use crate::dynamic::{LanguageLoadError, registry};
 use crate::language::Language as StaticLanguage;
 use crate::pattern::PatternOp;
 use crate::pcode::Varnode;
+use crate::processor::SegmentedAddressSpace;
 use crate::template::{ConstTpl, HandleTpl, VarnodeTpl};
 
 #[derive(Debug, Error)]
@@ -40,6 +48,12 @@ pub enum LanguageBuildError {
         #[source]
         source: LanguageError,
     },
+    #[error("cannot resolve processor specification for `{language}`: {source}")]
+    ProcessorSpec {
+        language: String,
+        #[source]
+        source: LanguageError,
+    },
     #[error("missing compiled .sla for `{language}`: expected `{path}`")]
     SleighSlaMissing { language: String, path: PathBuf },
 }
@@ -49,7 +63,8 @@ pub struct Language {
     pub(crate) id: Box<str>,
     pub(crate) processor: Box<str>,
     pub(crate) variant: Box<str>,
-    pub(crate) little_endian: bool,
+    pub(crate) endian: Endian,
+    pub(crate) insn_endian: Endian,
     pub(crate) bits: u32,
     pub(crate) address_alignment: usize,
     pub(crate) address_bits: u32,
@@ -78,10 +93,20 @@ pub struct Language {
     pub(crate) register_ranges: Box<[(u64, u16, Box<str>)]>,
     pub(crate) user_ops: Box<[Box<str>]>,
     pub(crate) context_vars: Box<[(Box<str>, ContextBitRange)]>,
+    pub(crate) context_vars_flow_mask: Box<[u32]>,
     pub(crate) context_defaults: Box<[(Box<str>, u32)]>,
     #[allow(clippy::type_complexity)]
     pub(crate) call_preserved_registers: Box<[(Box<str>, Box<[Varnode]>)]>,
     pub(crate) conventions: Box<[(Box<str>, Convention)]>,
+    pub(crate) context_sets: Box<[ContextSet]>,
+    pub(crate) tracked_sets: Box<[TrackedSet]>,
+    pub(crate) volatile_ranges: Box<[VolatileRange]>,
+    pub(crate) register_lanes: Box<[RegisterLanes]>,
+    pub(crate) default_symbols: Box<[DefaultSymbol]>,
+    pub(crate) float_formats: Box<[FloatFormat]>,
+    pub(crate) properties: Box<[(Box<str>, Box<str>)]>,
+    pub(crate) segment_ops: Box<[SegmentOp]>,
+    pub(crate) segmented_address_space: Option<SegmentedAddressSpace>,
     pub(crate) space_names: Box<[Box<str>]>,
 }
 
@@ -131,7 +156,8 @@ impl Language {
             id,
             processor,
             variant,
-            little_endian,
+            endian,
+            insn_endian,
             bits,
             address_alignment,
             address_bits,
@@ -160,9 +186,19 @@ impl Language {
             register_ranges,
             user_ops,
             context_vars,
+            context_vars_flow_mask,
             context_defaults,
             call_preserved_registers,
             conventions,
+            context_sets,
+            tracked_sets,
+            volatile_ranges,
+            register_lanes,
+            default_symbols,
+            float_formats,
+            properties,
+            segment_ops,
+            segmented_address_space,
             space_names,
         } = self;
 
@@ -200,7 +236,8 @@ impl Language {
         Box::leak(Box::new(crate::language::Language {
             id: id.install(),
             processor: processor.install(),
-            little_endian,
+            endian,
+            insn_endian,
             variant: variant.install(),
             bits,
             address_alignment,
@@ -221,17 +258,31 @@ impl Language {
             user_ops: user_ops.install(),
             space_names: space_names.install(),
             context_vars: context_vars.install(),
+            context_vars_flow_mask: context_vars_flow_mask.install(),
             context_defaults: context_defaults.install(),
             call_preserved_registers: call_preserved_registers.install(),
             conventions: conventions.install(),
+            context_sets: context_sets.install(),
+            tracked_sets: tracked_sets.install(),
+            volatile_ranges: volatile_ranges.install(),
+            register_lanes: register_lanes.install(),
+            default_symbols: default_symbols.install(),
+            float_formats: float_formats.install(),
+            properties: properties.install(),
+            segment_ops: segment_ops.install(),
+            segmented_address_space,
             data: language_data,
         }))
     }
 
-    pub(crate) fn from_sleigh(sleigh: &SleighLanguage, definition: &LanguageDef) -> Self {
+    pub(crate) fn from_sleigh(
+        sleigh: &SleighLanguage,
+        definition: &LanguageDef,
+        processor: &SleighProcessor,
+    ) -> Self {
         let tables = Tables::new(sleigh);
-        let context_defaults = definition
-            .context_set()
+        let context_defaults = processor
+            .context_defaults()
             .map(|(name, value)| (Box::<str>::from(name), value))
             .collect();
         let truncated_spaces = definition.truncated_spaces();
@@ -311,7 +362,7 @@ impl Language {
                 let registers = sleigh
                     .call_preserved_registers(compiler)
                     .expect("compiler convention comes from the language")
-                    .into_iter()
+                    .iter()
                     .map(|varnode| {
                         Varnode::new(
                             u8::try_from(varnode.space().index())
@@ -358,6 +409,7 @@ impl Language {
             op_tpls,
             varnode_tpls,
             context_variables,
+            context_variables_flow_mask,
             ..
         } = tables;
 
@@ -371,7 +423,8 @@ impl Language {
             id: Box::<str>::from(definition.id()),
             processor: Box::<str>::from(arch.processor()),
             variant: Box::<str>::from(arch.variant()),
-            little_endian: arch.endian().is_little(),
+            endian: arch.endian(),
+            insn_endian: sleigh.endian(),
             bits: declared_bits,
             address_alignment: sleigh.alignment(),
             address_bits,
@@ -400,9 +453,34 @@ impl Language {
             register_ranges: register_ranges.into_boxed_slice(),
             user_ops,
             context_vars: context_pairs.into_boxed_slice(),
+            context_vars_flow_mask: context_variables_flow_mask.into_boxed_slice(),
             context_defaults,
             call_preserved_registers,
             conventions,
+            context_sets: processor.context_sets().iter().map(Into::into).collect(),
+            tracked_sets: processor.tracked_sets().iter().map(Into::into).collect(),
+            volatile_ranges: processor.volatile_ranges().iter().map(Into::into).collect(),
+            register_lanes: processor.register_lanes().iter().map(Into::into).collect(),
+            default_symbols: processor.default_symbols().iter().map(Into::into).collect(),
+            properties: processor
+                .properties()
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        Box::<str>::from(key.as_str()),
+                        Box::<str>::from(value.as_str()),
+                    )
+                })
+                .sorted_unstable_by(|(a, _), (b, _)| a.cmp(b))
+                .collect(),
+            segment_ops: processor.segment_ops().iter().map(Into::into).collect(),
+            segmented_address_space: processor.segmented_address_space().map(Into::into),
+            float_formats: sleigh
+                .float_formats()
+                .values()
+                .map(|format| (**format).clone())
+                .sorted_unstable_by_key(FloatFormat::size)
+                .collect(),
             space_names,
         }
     }
@@ -443,7 +521,17 @@ impl Language {
             source,
         })?;
 
-        Ok(Self::from_sleigh(&sleigh, definition.language()))
+        let processor =
+            SleighProcessor::from_file(&sleigh, definition.language().processor_spec_file())
+                .map_err(|source| LanguageBuildError::ProcessorSpec {
+                    language: language_def.to_owned(),
+                    source,
+                })?;
+        Ok(Self::from_sleigh(
+            &sleigh,
+            definition.language(),
+            &processor,
+        ))
     }
 }
 

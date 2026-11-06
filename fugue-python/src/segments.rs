@@ -3,8 +3,8 @@ use fugue_core::ir::Address as CoreAddress;
 use fugue_core::lifter::{ContextHint as CoreContextHint, ContextHintKind};
 use fugue_core::loader::{Loadable, Loader as CoreLoader};
 use fugue_core::storage::{
-    InMemorySegmentStorage, SegmentMappingBuilder, SegmentProperties as CoreSegmentProperties,
-    SegmentStorage as CoreSegmentStorage,
+    AddressSpaceKind as CoreAddressSpaceKind, InMemorySegmentStorage, SegmentMappingBuilder,
+    SegmentProperties as CoreSegmentProperties, SegmentStorage as CoreSegmentStorage,
 };
 use fugue_core::types::AttributeMap;
 use pyo3::exceptions::PyOverflowError;
@@ -14,7 +14,7 @@ use pyo3::types::{PyBytes, PyModule};
 use crate::address::Address;
 use crate::attributes::attribute_map_from_py;
 use crate::binary::Binary;
-use crate::convert::{address_from_any, bytes_from_any};
+use crate::convert::{address_from_any, address_space_id, bytes_from_any};
 use crate::errors::{BindingError, loader_error, storage_error};
 
 fn properties_from_bits(bits: u8) -> CoreSegmentProperties {
@@ -88,17 +88,17 @@ pub(crate) fn loadable_segments_from_loader(
 
         let mapping_hints = segment
             .mapping_hints()
-            .iter()
+            .context_hints_in_range(..)
             .map(|(hint_offset, hint)| MappingHint {
-                address: Address::from_core(CoreAddress::new(address.space(), *hint_offset)),
+                address: Address::from_core(CoreAddress::new(address.space(), hint_offset)),
                 hint: convert_context_hint(hint),
             })
             .collect();
 
         let function_hints = segment
-            .function_hints()
-            .iter()
-            .map(|hint_offset| Address::from_core(CoreAddress::new(address.space(), *hint_offset)))
+            .mapping_hints()
+            .functions()
+            .map(|hint_offset| Address::from_core(CoreAddress::new(address.space(), hint_offset)))
             .collect();
 
         segments.push(LoadableSegment {
@@ -160,6 +160,26 @@ impl MappingHint {
         let address = self.address.display_text();
         let hint = self.hint.__str__();
         format!("MappingHint(address={address}, hint={hint:?})")
+    }
+}
+
+#[pyclass(frozen, skip_from_py_object)]
+#[derive(Clone)]
+pub(crate) enum AddressSpaceKind {
+    Base(),
+    Overlay { base: usize },
+}
+
+impl TryFrom<&AddressSpaceKind> for CoreAddressSpaceKind {
+    type Error = PyErr;
+
+    fn try_from(kind: &AddressSpaceKind) -> PyResult<Self> {
+        match kind {
+            AddressSpaceKind::Base() => Ok(Self::Base),
+            AddressSpaceKind::Overlay { base } => Ok(Self::Overlay {
+                base: address_space_id(*base)?,
+            }),
+        }
     }
 }
 
@@ -232,7 +252,7 @@ impl SegmentProperties {
 
     #[getter]
     fn big_endian(&self) -> bool {
-        self.inner.is_big_endian()
+        self.inner.endian().is_big()
     }
 
     #[getter]
@@ -423,6 +443,7 @@ impl SegmentStorage {
 }
 
 pub(crate) fn add_classes(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<AddressSpaceKind>()?;
     module.add_class::<ContextHint>()?;
     module.add_class::<MappingHint>()?;
     module.add_class::<SegmentProperties>()?;

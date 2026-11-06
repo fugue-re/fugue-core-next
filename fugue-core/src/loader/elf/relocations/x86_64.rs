@@ -1,7 +1,7 @@
 use object::elf::{
     R_X86_64_32, R_X86_64_32S, R_X86_64_64, R_X86_64_GLOB_DAT, R_X86_64_GOT64, R_X86_64_GOTPCREL,
-    R_X86_64_GOTPCRELX, R_X86_64_JUMP_SLOT, R_X86_64_PC32, R_X86_64_PLT32, R_X86_64_RELATIVE,
-    R_X86_64_RELATIVE64, R_X86_64_REX_GOTPCRELX,
+    R_X86_64_GOTPCRELX, R_X86_64_IRELATIVE, R_X86_64_JUMP_SLOT, R_X86_64_PC32, R_X86_64_PLT32,
+    R_X86_64_RELATIVE, R_X86_64_RELATIVE64, R_X86_64_REX_GOTPCRELX,
 };
 use object::read::elf::FileHeader;
 use object::{ReadRef, Relocation, RelocationKind};
@@ -32,7 +32,7 @@ where
         };
 
         match reloc_type {
-            R_X86_64_RELATIVE | R_X86_64_RELATIVE64 => {
+            R_X86_64_RELATIVE | R_X86_64_RELATIVE64 | R_X86_64_IRELATIVE => {
                 let value = self.base.offset().wrapping_add_signed(reloc.addend());
 
                 tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}",);
@@ -44,6 +44,9 @@ where
                     tracing::warn!("failed to resolve relocation {reloc_type:#x} at {offset:#x}");
                     return;
                 };
+
+                let slot = bytes.address() + offset;
+                bytes.mapping_hints_mut().insert_symbol_pointer(slot);
 
                 if reloc_type == R_X86_64_JUMP_SLOT {
                     self.mark_function_symbol(value, bytes);

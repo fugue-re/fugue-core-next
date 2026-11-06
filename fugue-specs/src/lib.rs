@@ -11,3 +11,4 @@ pub use fspec::{
 };
 pub use pattern::{Pattern, PatternContext, PatternError, Patterns, PatternsWithContext};
 pub use pspec::{PatternSpecError, PatternSpecs};
+pub use regex_cursor::Cursor;

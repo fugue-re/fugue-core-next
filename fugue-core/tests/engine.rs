@@ -38,13 +38,13 @@ use fugue_core::loader::{
 use fugue_core::project::{ChangeCategory, ChangeKinds, ChangeRecord, ChangeSource, Project};
 use fugue_core::queries::{CallEdge, MappingEntity, QueryError, QueryPage, SymbolEntity};
 use fugue_core::storage::{
-    BufferedEntityWriter, DEFAULT_SPACE_ID, ENTITY_PROJECT_REVISION_ID, EntityBytesReadTransaction,
-    EntityBytesWriteTransaction, EntityStorage, EntityStorageError, EntityStorageProvider,
-    EntityStorageProviderFromLoadable, EntityStorageWriteTransaction, InMemoryEntityStorage,
-    InMemorySegmentStorage, PERSISTENT, ProjectEntity, SegmentMappingBuilder, SegmentMappingFlags,
-    SegmentMappingKind, SegmentMappingProvenance, SegmentProperties, SegmentStorage,
-    StorageContainer, StoragePersistence, StorageProvider, StorageProviderError,
-    TransientStorageProvider,
+    AddressSpace, AddressSpaceKind, BufferedEntityWriter, DEFAULT_SPACE_ID,
+    ENTITY_PROJECT_REVISION_ID, EntityBytesReadTransaction, EntityBytesWriteTransaction,
+    EntityStorage, EntityStorageError, EntityStorageProvider, EntityStorageProviderFromLoadable,
+    EntityStorageWriteTransaction, InMemoryEntityStorage, InMemorySegmentStorage, PERSISTENT,
+    ProjectEntity, SegmentMappingBuilder, SegmentMappingFlags, SegmentMappingKind,
+    SegmentMappingProvenance, SegmentProperties, SegmentStorage, StorageContainer,
+    StoragePersistence, StorageProvider, StorageProviderError, TransientStorageProvider,
 };
 #[cfg(feature = "sqlite")]
 use fugue_core::storage::{
@@ -913,15 +913,18 @@ fn test_engine_startup_reaches_entry() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    let flow_graph = reader
-        .flow_targets(entry)?
-        .ok_or_else(|| io::Error::other("fixture entry flow graph missing"))?;
-    let expected_callees = flow_graph
-        .targets()
-        .iter()
-        .filter(|target| target.kind().is_call())
-        .map(|target| target.to())
-        .collect::<BTreeSet<_>>();
+    let expected_callees = {
+        let project = reader.project()?;
+        let function = project
+            .functions()
+            .get_by_address(entry)
+            .ok_or_else(|| io::Error::other("fixture entry function missing"))?;
+        function
+            .flow_targets(project.blocks())
+            .filter(|target| target.kind().is_call())
+            .map(|target| target.to().address())
+            .collect::<BTreeSet<_>>()
+    };
     let callees = reader
         .callee_page(entry, None, 4096)?
         .entries()
@@ -978,7 +981,7 @@ fn test_symbol_pages_handle_shared_address_boundaries() -> Result<(), Box<dyn Er
     let address = Address::in_default_space(0x7fff_1234u64);
     let inserted = [
         SymbolEntry::new(address, "z_page_boundary", SymbolProperties::LOCAL),
-        SymbolEntry::new(address, "a_page_boundary", SymbolProperties::EXTERN),
+        SymbolEntry::new(address, "a_page_boundary", SymbolProperties::EXTERNAL),
         SymbolEntry::new(
             address,
             "m_page_boundary",
@@ -1428,7 +1431,10 @@ fn test_non_returning_calls_have_no_fall_through() -> Result<(), Box<dyn Error>>
                 let Some(target) = block.call_target() else {
                     continue;
                 };
-                if !block.is_call() || block.is_branch() || !view.is_non_returning_at(target) {
+                if !block.is_call()
+                    || block.is_branch()
+                    || !view.is_non_returning_at(target.address())
+                {
                     continue;
                 }
 
@@ -1443,6 +1449,37 @@ fn test_non_returning_calls_have_no_fall_through() -> Result<(), Box<dyn Error>>
 
         assert!(suppressed > 0, "no non-returning calls found in {path}");
     }
+
+    Ok(())
+}
+
+#[test]
+fn test_writable_thunk_pointers() -> Result<(), Box<dyn Error>> {
+    let loader = Loader::from_file("tests/thunk-hooks.so")?;
+    let mut project = Project::new_transient(&loader)?;
+    project
+        .attributes_mut()
+        .set_attr(TEST_NON_RETURNING_RECOVERY_ATTR, true);
+    let project = analyse_project(project)?;
+
+    let call_hook = project
+        .symbols()
+        .iter()
+        .find_map(|(_, symbol)| (symbol.symbol() == "call_hook").then(|| symbol.address()))
+        .expect("fixture must define call_hook");
+    let function = project
+        .functions()
+        .get_by_address(call_hook)
+        .expect("call_hook must be recovered");
+
+    assert!(!function.is_thunk());
+    assert!(!function.is_non_returning());
+    assert!(
+        project
+            .functions()
+            .iter()
+            .any(|function| function.is_thunk() && function.is_non_returning())
+    );
 
     Ok(())
 }
@@ -1575,7 +1612,7 @@ fn test_engine_startup_uses_segment_function_hints() -> Result<(), Box<dyn Error
         ) -> impl FallibleIterator<Item = ImageSegmentContents<'a>, Error = LoaderError> + 'a
         {
             let mut contents = ImageSegmentContents::new(0x1000u64, Endian::Little, vec![0xc3u8]);
-            contents.add_function_hint(0x1000u64);
+            contents.mapping_hints_mut().insert_function(0x1000u64);
 
             Box::new(convert(iter::once(Ok(contents)))) as ImageSegmentContentsIterator<'a>
         }
@@ -2088,7 +2125,7 @@ fn test_engine_remove_function_updates_queries() -> Result<(), Box<dyn Error>> {
     let reader = engine.query_reader()?;
     let changes = engine.subscribe().with_capacity(16).build()?;
     consume_initial_resynchronisation(&changes, reader.revision()?)?;
-    assert!(reader.flow_targets(entry)?.is_some());
+    assert!(reader.function_at(entry)?.is_some());
 
     let removed = engine.remove_function(entry)?;
 
@@ -2097,7 +2134,7 @@ fn test_engine_remove_function_updates_queries() -> Result<(), Box<dyn Error>> {
         ChangeRecord::FunctionRemoved { entry: removed_entry, .. } if *removed_entry == entry
     )));
     assert_eq!(&*changes.recv_timeout(Duration::from_secs(1))?, &removed);
-    assert!(reader.flow_targets(entry)?.is_none());
+    assert!(reader.function_at(entry)?.is_none());
     assert!(
         !reader
             .function_page(DEFAULT_SPACE_ID, None, 4096)?
@@ -2120,7 +2157,7 @@ fn test_engine_remove_function_updates_queries() -> Result<(), Box<dyn Error>> {
         ChangeRecord::FunctionAdded { entry: added_entry, .. } if *added_entry == entry
     )));
     assert_eq!(&*changes.recv_timeout(Duration::from_secs(1))?, &added);
-    assert!(reader.flow_targets(entry)?.is_some());
+    assert!(reader.function_at(entry)?.is_some());
     assert!(
         reader
             .function_page(DEFAULT_SPACE_ID, None, 4096)?
@@ -2268,7 +2305,7 @@ fn test_engine_mapping_edits_materialise_changes() -> Result<(), Box<dyn Error>>
         created_space
             .changes()
             .records()
-            .contains(&ChangeRecord::SpaceCreated { space: extra_space })
+            .contains(&ChangeRecord::AddressSpaceCreated { space: extra_space })
     );
 
     let placed = engine.add_mapping_to_space(extra_space, created_id)?;
@@ -2385,6 +2422,101 @@ fn test_engine_mapping_edits_materialise_changes() -> Result<(), Box<dyn Error>>
             .iter()
             .any(|record| record.mapping() == mapping_id)
     );
+
+    Ok(())
+}
+
+#[test]
+fn test_synthetic_mapping_in_named_overlay() -> Result<(), Box<dyn Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let project = Project::new_transient(&loader)?;
+    let site = project.entry_point().expect("fixture has an entry point");
+    let engine = AnalysisEngine::new(project)?;
+
+    let created = engine.create_space_with(
+        "stack-strings",
+        AddressSpaceKind::Overlay { base: site.space() },
+    )?;
+    let space = created.space();
+    assert!(
+        created
+            .changes()
+            .records()
+            .contains(&ChangeRecord::AddressSpaceCreated { space })
+    );
+
+    let start = Address::new(space, site.offset());
+    let bytes = b"stack string";
+    let created =
+        engine.create_synthetic_mapping(start, &bytes[..], SegmentProperties::PERM_READ)?;
+    let mapping = created.mapping();
+    let range = AddressRange::from_size(start, bytes.len() as u64).expect("range is valid");
+    assert!(
+        created
+            .changes()
+            .records()
+            .contains(&ChangeRecord::SegmentMappingCreated { mapping })
+    );
+    assert!(
+        created
+            .changes()
+            .records()
+            .contains(&ChangeRecord::SegmentMapped { mapping, range })
+    );
+
+    let project = engine.into_project()?;
+    assert_eq!(
+        project
+            .segments()
+            .address_space_by_name("stack-strings")
+            .map(AddressSpace::id),
+        Some(space)
+    );
+    let mut read = [0u8; 12];
+    project.segments().read_bytes_exact(start, &mut read)?;
+    assert_eq!(&read, bytes);
+
+    Ok(())
+}
+
+#[test]
+fn test_synthetic_mapping_after_removal_keeps_live_bytes() -> Result<(), Box<dyn Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let engine = AnalysisEngine::new(Project::new_transient(&loader)?)?;
+    let space = engine
+        .create_space_with("synthetic", AddressSpaceKind::Base)?
+        .space();
+
+    let first = engine
+        .create_synthetic_mapping(
+            Address::new(space, 0x1000u64),
+            &b"first"[..],
+            SegmentProperties::PERM_READ,
+        )?
+        .mapping();
+    engine.create_synthetic_mapping(
+        Address::new(space, 0x2000u64),
+        &b"second"[..],
+        SegmentProperties::PERM_READ,
+    )?;
+    engine.remove_mapping(first)?;
+    engine.create_synthetic_mapping(
+        Address::new(space, 0x3000u64),
+        &b"third"[..],
+        SegmentProperties::PERM_READ,
+    )?;
+
+    let project = engine.into_project()?;
+    let mut second = [0u8; 6];
+    project
+        .segments()
+        .read_bytes_exact(Address::new(space, 0x2000u64), &mut second)?;
+    assert_eq!(&second, b"second");
+    let mut third = [0u8; 5];
+    project
+        .segments()
+        .read_bytes_exact(Address::new(space, 0x3000u64), &mut third)?;
+    assert_eq!(&third, b"third");
 
     Ok(())
 }
@@ -3194,7 +3326,7 @@ fn test_subscription_region_filter_wakes_only_inside_region() -> Result<(), Box<
 
     let inside_region = engine
         .subscribe()
-        .with_kinds(ChangeKinds::BYTES_WRITTEN | ChangeKinds::SPACE_CREATED)
+        .with_kinds(ChangeKinds::BYTES_WRITTEN | ChangeKinds::ADDRESS_SPACE_CREATED)
         .with_region(region)
         .with_capacity(16)
         .build()?;
@@ -3213,7 +3345,7 @@ fn test_subscription_region_filter_wakes_only_inside_region() -> Result<(), Box<
 
     engine.create_space()?;
     let global = inside_region.recv_timeout(Duration::from_secs(1))?;
-    assert!(global.contains(ChangeKinds::SPACE_CREATED));
+    assert!(global.contains(ChangeKinds::ADDRESS_SPACE_CREATED));
 
     Ok(())
 }
@@ -3472,7 +3604,7 @@ fn test_query_readers_serve_multiple_concurrent_clients() -> Result<(), Box<dyn 
                     let anywhere = AddressRangeSet::new();
                     for _ in 0..200 {
                         for entry in &entries {
-                            reader.flow_targets(*entry)?;
+                            reader.function_at(*entry)?;
                             reader.latest_change(ChangeKinds::all(), &anywhere)?;
                         }
                     }
@@ -3489,9 +3621,7 @@ fn test_query_readers_serve_multiple_concurrent_clients() -> Result<(), Box<dyn 
         Ok(())
     })?;
 
-    let first = reader.flow_targets(entries[0])?.ok_or("entry missing")?;
-    let second = reader.flow_targets(entries[0])?.ok_or("entry missing")?;
-    assert!(Arc::ptr_eq(&first, &second));
+    assert!(reader.function_at(entries[0])?.is_some());
 
     Ok(())
 }
@@ -3520,14 +3650,8 @@ fn test_engine_recovers_derived_references() -> Result<(), Box<dyn Error>> {
         .iter()
         .find(|reference| reference.is_call())
         .ok_or_else(|| {
-            let flow_targets = reader
-                .flow_targets(edge.source())
-                .ok()
-                .flatten()
-                .map(|targets| targets.targets().to_vec());
             io::Error::other(format!(
-                "no incoming call reference for {edge:?}; incoming={incoming:?}; \
-                 flow_targets={flow_targets:?}",
+                "no incoming call reference for {edge:?}; incoming={incoming:?}"
             ))
         })?;
     assert!(call_reference.origin().is_derived());
@@ -3587,30 +3711,27 @@ fn test_engine_recovers_and_persists_switches() -> Result<(), Box<dyn Error>> {
         .ok_or_else(|| io::Error::other("no multi-case switch recovered from ls.elf"))?;
     let switch = record.switch();
     let project = reader.project()?;
-    let exact = project
-        .functions()
-        .get_by_address(record.branch())
-        .map(|function| function.id());
-    let owners = project
-        .functions()
-        .iter()
-        .filter(|function| {
-            function.blocks().any(|(_, block)| {
-                project
-                    .blocks()
-                    .get_by_id(block)
-                    .is_some_and(|block| block.address_range().contains_address(record.branch()))
-            })
-        })
-        .map(|function| function.id())
-        .collect::<Vec<_>>();
-    if switch.function().is_invalid() {
-        assert!(exact.is_none() && owners.len() != 1);
-    } else {
+    let owners = project.functions().get_by_switch_id(switch.id());
+    assert!(
+        !owners.is_empty(),
+        "a recovered switch must be owned by a function"
+    );
+    for owner in owners.iter() {
+        let function = project
+            .functions()
+            .get_by_id(owner)
+            .ok_or_else(|| io::Error::other("switch owner missing"))?;
         assert!(
-            exact == Some(switch.function())
-                || (exact.is_none() && owners.as_slice() == [switch.function()])
+            function
+                .switches()
+                .any(|(branch, _)| branch == record.branch())
         );
+        assert!(function.blocks().any(|(_, block)| {
+            project
+                .blocks()
+                .get_by_id(block)
+                .is_some_and(|block| block.address_range().contains_address(record.branch()))
+        }));
     }
     drop(project);
     let table = switch
@@ -3751,23 +3872,21 @@ fn test_engine_recovers_arm_inline_switches() -> Result<(), Box<dyn Error>> {
 fn test_engine_add_and_remove_switch_round_trips() -> Result<(), Box<dyn Error>> {
     let loader = Loader::from_file("tests/ls.elf")?;
     let project = Project::new_transient(&loader)?;
-    let entry = project
-        .entry_point()
-        .ok_or_else(|| io::Error::other("fixture entry missing"))?;
+    let branch = Address::from(0x4f55u64);
     let engine = AnalysisEngine::new(project)?;
     engine.analyse()?;
     let reader = engine.query_reader()?;
     let baseline = reader.revision()?;
 
-    let table = entry + 0x400u64;
+    let table = branch + 0x400u64;
     let mut switch = Switch::new(
         SwitchId::default(),
-        entry,
+        branch,
         SwitchModel::Absolute(AddressTable::new(table, 4).with_element_count(2)),
     );
     for offset in [0x40u64, 0x80] {
         switch.add_case(SwitchCase::new(AddressWithContext::new(
-            entry + offset,
+            branch + offset,
             ContextSet::default(),
         )));
     }
@@ -3776,22 +3895,27 @@ fn test_engine_add_and_remove_switch_round_trips() -> Result<(), Box<dyn Error>>
     assert!(changes.contains(ChangeKinds::REFERENCES));
 
     let mut branch_region = AddressRangeSet::new();
-    branch_region.insert(entry);
+    branch_region.insert(branch);
     assert!(reader.changed_since(baseline, ChangeKinds::SWITCHES, &branch_region)?);
     assert!(reader.changed_since(baseline, ChangeKinds::REFERENCES, &branch_region)?);
 
+    engine.analyse()?;
     let record = reader
-        .switch_at(entry)?
+        .switch_at(branch)?
         .ok_or_else(|| io::Error::other("switch missing after add"))?;
     assert!(record.switch().is_override());
     assert!(matches!(record.switch().model(), SwitchModel::Absolute(_)));
     assert!(
-        !record.switch().function().is_invalid(),
-        "owning function should be resolved from the branch"
+        !reader
+            .project()?
+            .functions()
+            .get_by_switch_id(record.switch().id())
+            .is_empty(),
+        "the function containing the branch should own the switch"
     );
 
     let outgoing = reader
-        .outgoing_references(entry)
+        .outgoing_references(branch)
         .collect::<Result<Vec<_>, _>>()?;
     assert!(
         outgoing
@@ -3802,16 +3926,20 @@ fn test_engine_add_and_remove_switch_round_trips() -> Result<(), Box<dyn Error>>
     for offset in [0x40u64, 0x80] {
         assert!(
             outgoing.iter().any(|reference| {
-                reference.is_flow() && reference.target().address() == Some(entry + offset)
+                reference.is_flow() && reference.target().address() == Some(branch + offset)
             }),
             "case target should gain a derived flow reference"
         );
     }
 
-    let removed = engine.remove_switch(entry)?;
+    let removed = engine.remove_switch(branch)?;
     assert!(removed.contains(ChangeKinds::SWITCH_REMOVED));
     assert!(removed.contains(ChangeKinds::REFERENCES));
-    assert!(reader.switch_at(entry)?.is_none());
+    assert!(
+        reader
+            .switch_at(branch)?
+            .is_none_or(|record| !record.switch().is_override())
+    );
 
     Ok(())
 }

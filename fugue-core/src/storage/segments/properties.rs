@@ -1,4 +1,5 @@
 use bitflags::bitflags;
+use fugue_bytes::Endian;
 
 use crate::storage::schema::bitflags::archived_bitflags;
 
@@ -41,7 +42,11 @@ impl SegmentProperties {
         self.contains(Self::UNINITIALISED)
     }
 
-    pub fn is_big_endian(&self) -> bool {
-        self.contains(Self::BIG_ENDIAN)
+    pub fn endian(&self) -> Endian {
+        if self.contains(Self::BIG_ENDIAN) {
+            Endian::Big
+        } else {
+            Endian::Little
+        }
     }
 }

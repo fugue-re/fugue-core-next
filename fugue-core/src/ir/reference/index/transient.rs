@@ -3,11 +3,8 @@ use std::ops::Bound;
 
 use rustc_hash::FxHashSet;
 
-use super::{InverseReferenceKey, PreparedReferenceIndexRecord};
-use crate::ir::Address;
-use crate::ir::reference::{
-    Reference, ReferenceEntry, ReferenceKey, ReferenceKind, ReferenceTarget,
-};
+use crate::ir::reference::index::{InverseReferenceKey, PreparedReferenceIndexRecord};
+use crate::ir::reference::{Reference, ReferenceEntry, ReferenceKey};
 use crate::storage::entities::EntityStorageError;
 
 pub struct ReferenceIndex {
@@ -35,22 +32,16 @@ impl ReferenceIndex {
 
     pub(crate) fn references_from(
         &self,
-        from: Address,
-        after: Option<ReferenceKey>,
+        bounds: (Bound<ReferenceKey>, Bound<ReferenceKey>),
     ) -> impl Iterator<Item = Result<Reference, EntityStorageError>> + '_ {
-        let start = after.map_or_else(
-            || {
-                Bound::Included(ReferenceKey::new(
-                    from,
-                    ReferenceTarget::minimum(),
-                    ReferenceKind::Flow,
-                ))
-            },
-            Bound::Excluded,
-        );
+        let (start, end) = bounds;
         self.forward
             .range((start, Bound::Unbounded))
-            .take_while(move |(key, _)| key.from() == from)
+            .take_while(move |(key, _)| match end {
+                Bound::Included(end) => **key <= end,
+                Bound::Excluded(end) => **key < end,
+                Bound::Unbounded => true,
+            })
             .map(|(key, entry)| {
                 Ok(entry
                     .materialise(*key)
@@ -60,51 +51,21 @@ impl ReferenceIndex {
 
     pub(crate) fn references_to(
         &self,
-        target: ReferenceTarget,
-        after: Option<ReferenceKey>,
+        bounds: (Bound<InverseReferenceKey>, Bound<InverseReferenceKey>),
     ) -> impl Iterator<Item = Result<Reference, EntityStorageError>> + '_ {
-        let start = after.map_or_else(
-            || {
-                Bound::Included(InverseReferenceKey::new(
-                    target,
-                    Address::MINIMUM,
-                    ReferenceKind::Flow,
-                ))
-            },
-            |after| {
-                Bound::Excluded(InverseReferenceKey::new(
-                    after.target(),
-                    after.from(),
-                    after.kind(),
-                ))
-            },
-        );
+        let (start, end) = bounds;
         self.inverse
             .range((start, Bound::Unbounded))
-            .take_while(move |(key, _)| key.target() == target)
+            .take_while(move |(key, _)| match end {
+                Bound::Included(end) => **key <= end,
+                Bound::Excluded(end) => **key < end,
+                Bound::Unbounded => true,
+            })
             .map(|(key, entry)| {
                 Ok(entry
                     .materialise(ReferenceKey::new(key.from(), key.target(), key.kind()))
                     .expect("stored reference entry must contain a visible reference"))
             })
-    }
-
-    pub(crate) fn collect_range(
-        &self,
-        start: &ReferenceKey,
-        end: Address,
-        references: &mut Vec<Reference>,
-    ) {
-        references.extend(
-            self.forward
-                .range((Bound::Included(*start), Bound::Unbounded))
-                .take_while(|(key, _)| key.from() <= end)
-                .map(|(key, entry)| {
-                    entry
-                        .materialise(*key)
-                        .expect("stored reference entry must contain a visible reference")
-                }),
-        );
     }
 
     pub(crate) fn insert(&mut self, key: ReferenceKey, entry: ReferenceEntry) {

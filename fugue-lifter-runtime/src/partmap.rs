@@ -1,7 +1,7 @@
 use std::borrow::Borrow;
 use std::collections::BTreeMap as Map;
 use std::collections::btree_map::{Range, RangeMut};
-use std::ops::Bound::Excluded;
+use std::ops::Bound::{Excluded, Unbounded};
 use std::ops::RangeBounds;
 
 #[derive(Debug, Clone)]
@@ -84,13 +84,20 @@ where
         self.mapping = Map::new();
     }
 
-    pub fn clear_range(&mut self, start: K, end: K) -> &mut V {
+    pub fn clear_range(&mut self, start: K, end: Option<K>) -> &mut V {
         self.split(start);
-        self.split(end);
+
+        let upper = match end {
+            Some(end) => {
+                self.split(end);
+                Excluded(end)
+            }
+            None => Unbounded,
+        };
 
         let keys = self
             .mapping
-            .range((Excluded(start), Excluded(end)))
+            .range((Excluded(start), upper))
             .map(|(&k, _)| k)
             .collect::<Vec<K>>();
 

@@ -32,6 +32,7 @@ pub const ENTITY_KEY_SYMBOL_NAME_ID: EntityKeyId = EntityKeyId::new(18);
 pub const ENTITY_KEY_SYMBOL_ADDRESS_ID: EntityKeyId = EntityKeyId::new(19);
 pub const ENTITY_KEY_SYMBOL_LOADER_ID: EntityKeyId = EntityKeyId::new(20);
 pub const ENTITY_KEY_IL_OVERRIDE_ID: EntityKeyId = EntityKeyId::new(21);
+pub const ENTITY_KEY_FUNCTION_SWITCH_ID: EntityKeyId = EntityKeyId::new(22);
 
 // Entity identifiers
 pub const ENTITY_ARCHITECTURE_ID: EntityId = EntityId::new(0);
@@ -63,6 +64,7 @@ pub const ENTITY_CODE_BLOCK_SIZE_BUCKETS_INDEX_ID: EntityId = EntityId::new(30);
 pub const ENTITY_SYMBOL_NAME_INDEX_ID: EntityId = EntityId::new(31);
 pub const ENTITY_SYMBOL_ADDRESS_INDEX_ID: EntityId = EntityId::new(32);
 pub const ENTITY_SYMBOL_LOADER_INDEX_ID: EntityId = EntityId::new(33);
+pub const ENTITY_FUNCTION_SWITCH_INDEX_ID: EntityId = EntityId::new(34);
 
 const INLINE_ENTITY_KEY_SIZE: usize = 16;
 

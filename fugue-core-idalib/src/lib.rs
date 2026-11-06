@@ -10,7 +10,7 @@ use fugue_core::analysis::{AnalysisError, AnalysisPass};
 use fugue_core::arch::{AArch64, Arch, Arm, X86, X86_64};
 use fugue_core::engine::AnalysisContext;
 use fugue_core::ir::{
-    Address, AddressWithContext, FlowKind, RawAddress, SymbolIndex, SymbolProperties,
+    Address, AddressWithContext, Endian, FlowKind, RawAddress, SymbolIndex, SymbolProperties,
     SymbolTableSelector, TransientSymbolTable,
 };
 use fugue_core::lifter::{ContextBitRange, ContextSet, Language};
@@ -160,7 +160,7 @@ fn ida_symbols(
                 .0
                 .allocate_at(addr)
                 .map_err(LoaderError::other)?;
-            symbols.insert_extern_with(
+            symbols.insert_external_with(
                 SymbolIndex::new(FUNCTIONS_SELECTOR, n),
                 addr,
                 name.unwrap_or_default(),
@@ -193,7 +193,7 @@ fn ida_symbols(
                 .0
                 .allocate_at(addr)
                 .map_err(LoaderError::other)?;
-            symbols.insert_extern_with(
+            symbols.insert_external_with(
                 SymbolIndex::new(NAMES_SELECTOR, n),
                 addr,
                 name,
@@ -219,19 +219,23 @@ fn ida_language(database: &IDB) -> Result<&'static Language, LoaderError> {
     let processor = database.processor();
     let is_32 = database.meta().is_32bit_exactly();
     let is_64 = database.meta().is_64bit();
-    let is_be = database.meta().is_be();
+    let endian = if database.meta().is_be() {
+        Endian::Big
+    } else {
+        Endian::Little
+    };
 
     if processor.family().is_arm() && is_64 {
-        return Ok(AArch64::resolve_default_variant(is_be)?);
+        return Ok(AArch64::resolve_default_variant(endian)?);
     }
 
     if processor.family().is_arm() && is_32 {
         let is_thumb =
             matches!(database.meta().start_address(), Some(addr) if processor.is_thumb_at(addr));
         return Ok(if is_thumb {
-            Arm::resolve_variant(is_be, "v8T")?
+            Arm::resolve_variant(endian, "v8T")?
         } else {
-            Arm::resolve_default_variant(is_be)?
+            Arm::resolve_default_variant(endian)?
         });
     }
 

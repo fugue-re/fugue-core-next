@@ -1,28 +1,28 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use fugue_sleigh_language::Language;
 use fugue_sleigh_language::construct::{ConstTpl, ConstructTpl, HandleTpl, OpTpl, VarnodeTpl};
-use fugue_sleigh_language::convention::{
-    Prototype, PrototypeEntry, PrototypeOperand, ReturnAddress,
-};
 use fugue_sleigh_language::pattern::PatternExpression;
 use fugue_sleigh_language::symbol::sub_table::{
     Context, DecisionPair, DisjointPattern, PatternBlock,
 };
 use fugue_sleigh_language::symbol::{Constructor, DecisionNode, Symbol};
-use fugue_sleigh_language::varnode::VarnodeData;
-use fugue_sleigh_language::Language;
 use indexmap::IndexMap;
+use itertools::Itertools;
 use proc_macro2::{Ident, Span, TokenStream};
-use quote::{quote, ToTokens, TokenStreamExt};
+use quote::{ToTokens, TokenStreamExt, quote};
 
 use crate::types::context::ContextAdaptor;
+use crate::types::convention::ConventionAdaptor;
 use crate::types::pattern::PatternExpressionAdaptor;
+use crate::types::processor::{FloatFormatAdaptor, ProcessorAdaptor};
 use crate::types::symbol::SymbolAdaptor;
 use crate::types::template::TplAdaptor;
 use crate::{LanguageVariant, LifterGeneratorError};
 
 pub struct LifterGenerator<'a> {
     context_variables: Vec<(&'a str, usize, usize)>,
+    context_variables_flow_mask: Vec<u32>,
     language: &'a Language,
     tables: Tables<'a>,
     primary_variant: LanguageVariant,
@@ -152,6 +152,7 @@ impl<'a> LifterGenerator<'a> {
 
         let mut slf = Self {
             context_variables: Vec::new(),
+            context_variables_flow_mask: Vec::new(),
             language,
             tables: Tables::default(),
             primary_variant,
@@ -245,8 +246,9 @@ impl<'a> LifterGenerator<'a> {
 
         for &sym_id in symtab.global_scope().unwrap().iter() {
             let Symbol::Context {
-                ref name,
-                ref pattern_value,
+                name,
+                pattern_value,
+                flow,
                 ..
             } = symtab.symbol(sym_id).unwrap()
             else {
@@ -258,6 +260,18 @@ impl<'a> LifterGenerator<'a> {
             } = pattern_value
             {
                 self.context_variables.push((name, *bit_start, *bit_end));
+
+                let word_bits = u32::BITS as usize;
+                let word = bit_start / word_bits;
+                if self.context_variables_flow_mask.len() <= word {
+                    self.context_variables_flow_mask.resize(word + 1, !0);
+                }
+                if !flow {
+                    let start = bit_start % word_bits;
+                    let end = bit_end % word_bits;
+                    self.context_variables_flow_mask[word] &=
+                        !((!0u32 >> start) & (!0u32 << (word_bits - 1 - end)));
+                }
             }
         }
 
@@ -394,31 +408,22 @@ impl<'a> LifterGenerator<'a> {
         operands
     }
 
-    fn generate_constructor_context_actions(
-        &mut self,
-        ctor: &'a Constructor,
-    ) -> (Vec<TokenStream>, Vec<TokenStream>) {
-        let mut pre_actions = Vec::new();
-        let mut post_actions = Vec::new();
-
-        for action in ctor.context().iter() {
-            match action {
-                Context::Operator { .. } => {
-                    pre_actions.push(
-                        ContextAdaptor::new(&self.language, action, &mut self.tables)
-                            .context_action_tokens(),
-                    );
+    fn generate_constructor_context_actions(&mut self, ctor: &'a Constructor) -> Vec<TokenStream> {
+        ctor.context()
+            .iter()
+            .map(|action| {
+                let tokens = ContextAdaptor::new(&self.language, action, &mut self.tables)
+                    .context_action_tokens();
+                match action {
+                    Context::Commit { .. } => {
+                        quote! { fugue_lifter_runtime::context::ContextAction::Commit(#tokens) }
+                    }
+                    Context::Operator { .. } => {
+                        quote! { fugue_lifter_runtime::context::ContextAction::Operator(#tokens) }
+                    }
                 }
-                Context::Commit { .. } => {
-                    post_actions.push(
-                        ContextAdaptor::new(&self.language, action, &mut self.tables)
-                            .context_action_tokens(),
-                    );
-                }
-            }
-        }
-
-        (pre_actions, post_actions)
+            })
+            .collect()
     }
 
     fn generate_handle_template(&mut self, tmpl: &'a HandleTpl) -> u16 {
@@ -481,7 +486,7 @@ impl<'a> LifterGenerator<'a> {
                 .map_or_else(|| quote! { None }, |index| quote! { Some(#index) });
 
             let operands = self.generate_constructor_operand_resolvers(ctor);
-            let (pre_actions, post_actions) = self.generate_constructor_context_actions(ctor);
+            let context_actions = self.generate_constructor_context_actions(ctor);
 
             let template_result = self.generate_constructor_template_resolvers(ctor);
             let lifting_action = self.generate_constructor_lifting_actions(ctor);
@@ -491,8 +496,7 @@ impl<'a> LifterGenerator<'a> {
             self.tables.ctors.push(quote! {
                 fugue_lifter_runtime::Constructor {
                     id: #cid,
-                    context_pre_actions: &[#(#pre_actions),*],
-                    context_post_actions: &[#(#post_actions),*],
+                    context_actions: &[#(#context_actions),*],
                     operands: &[#(#operands),*],
                     result: #template_result,
                     build_action: #lifting_action,
@@ -983,13 +987,8 @@ impl<'a> ToTokens for LifterGenerator<'a> {
             }
         });
         let n_context_vars = self.context_variables.len();
-
-        let context_variable_registrations =
-            self.context_variables.iter().map(|(name, start, end)| {
-                quote! {
-                    context.register_variable(#name, #start, #end);
-                }
-            });
+        let context_variables_flow_mask = &self.context_variables_flow_mask;
+        let n_context_words = context_variables_flow_mask.len();
 
         let n_registers = self.language.registers().name_mapping().len();
 
@@ -1029,163 +1028,45 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 (#nm, #ident)
             }
         });
-        let mut compiler_ids = self
+        let variant_metadata = |variant: &LanguageVariant| {
+            let conventions = &variant.conventions;
+            let convention_tokens = conventions.iter().map(|(id, convention)| {
+                let convention = ConventionAdaptor::new(convention).convention_tokens();
+                quote! { (#id, #convention) }
+            });
+            let preserved = conventions.iter().map(|(id, convention)| {
+                let registers = convention
+                    .call_preserved_registers()
+                    .iter()
+                    .map(|varnode| ConventionAdaptor::new(varnode).tokens());
+                quote! { (#id, &[#(#registers),*]) }
+            });
+            let processor = ProcessorAdaptor::new(&variant.processor).processor_tokens();
+            quote! {
+                const CONVENTIONS: &'static [(&'static str, fugue_lifter_runtime::convention::Convention)] = &[#(#convention_tokens),*];
+                const CALL_PRESERVED_REGISTERS: &'static [(&'static str, &'static [fugue_lifter_runtime::pcode::Varnode])] = &[#(#preserved),*];
+                #processor
+                const FLOAT_FORMATS: &'static [fugue_lifter_runtime::FloatFormat] = FLOAT_FORMATS;
+            }
+        };
+        let float_formats = self
             .language
-            .compiler_conventions()
-            .keys()
-            .collect::<Vec<_>>();
-        compiler_ids.sort_unstable();
-
-        let varnode_tokens = |varnode: &VarnodeData| {
-            let space =
-                u8::try_from(varnode.space().index()).expect("address-space identifier fits in u8");
-            let offset = varnode.offset();
-            let size = u16::try_from(varnode.size()).expect("register size fits in u16");
-            quote! {
-                fugue_lifter_runtime::pcode::Varnode::new(#space, #offset, #size)
-            }
-        };
-
-        let operand_tokens = |operand: &PrototypeOperand| match operand {
-            PrototypeOperand::Register { varnode, .. } => {
-                let varnode = varnode_tokens(varnode);
-                quote! {
-                    fugue_lifter_runtime::convention::PrototypeOperand::Register(#varnode)
-                }
-            }
-            PrototypeOperand::RegisterJoin {
-                first_varnode,
-                second_varnode,
-                ..
-            } => {
-                let first = varnode_tokens(first_varnode);
-                let second = varnode_tokens(second_varnode);
-                quote! {
-                    fugue_lifter_runtime::convention::PrototypeOperand::RegisterJoin(#first, #second)
-                }
-            }
-            PrototypeOperand::StackRelative(offset) => quote! {
-                fugue_lifter_runtime::convention::PrototypeOperand::StackRelative(#offset)
-            },
-        };
-
-        let entry_tokens = |entry: &PrototypeEntry| {
-            let min_size = entry.min_size();
-            let max_size = entry.max_size();
-            let alignment = entry.alignment();
-            let operand = operand_tokens(entry.operand());
-            let mut tokens = quote! {
-                fugue_lifter_runtime::convention::PrototypeEntry::new(#min_size, #max_size, #alignment, #operand)
-            };
-            if let Some(meta_type) = entry.meta_type() {
-                tokens = quote! { #tokens.with_meta_type(#meta_type) };
-            }
-            if let Some(extension) = entry.extension() {
-                tokens = quote! { #tokens.with_extension(#extension) };
-            }
-            tokens
-        };
-
-        let prototype_tokens = |prototype: &Prototype| {
-            let name = prototype.name();
-            let extra_pop = prototype.extra_pop();
-            let stack_shift = prototype.stack_shift();
-            let inputs = prototype
-                .inputs()
-                .iter()
-                .map(&entry_tokens)
-                .collect::<Vec<_>>();
-            let outputs = prototype
-                .outputs()
-                .iter()
-                .map(&entry_tokens)
-                .collect::<Vec<_>>();
-            let unaffected = prototype
-                .unaffected()
-                .iter()
-                .map(&operand_tokens)
-                .collect::<Vec<_>>();
-            let killed_by_call = prototype
-                .killed_by_call()
-                .iter()
-                .map(&operand_tokens)
-                .collect::<Vec<_>>();
-            let likely_trashed = prototype
-                .likely_trashed()
-                .iter()
-                .map(&operand_tokens)
-                .collect::<Vec<_>>();
-            quote! {
-                fugue_lifter_runtime::convention::Prototype::new(#name, #extra_pop, #stack_shift)
-                    .with_inputs(&[#(#inputs,)*])
-                    .with_outputs(&[#(#outputs,)*])
-                    .with_unaffected(&[#(#unaffected,)*])
-                    .with_killed_by_call(&[#(#killed_by_call,)*])
-                    .with_likely_trashed(&[#(#likely_trashed,)*])
-            }
-        };
-
-        let conventions = compiler_ids
-            .iter()
-            .map(|compiler| {
-                let convention = self
-                    .language
-                    .compiler_conventions()
-                    .get(*compiler)
-                    .expect("compiler convention comes from the language");
-                let name = convention.name();
-                let stack_pointer = varnode_tokens(convention.stack_pointer().varnode());
-                let prototypes = convention
-                    .prototypes()
-                    .map(&prototype_tokens)
-                    .collect::<Vec<_>>();
-                let mut tokens = quote! {
-                    fugue_lifter_runtime::convention::Convention::new(#name, #stack_pointer)
-                };
-                if let Some(return_address) = convention.return_address() {
-                    let return_address = match return_address {
-                        ReturnAddress::Register { varnode, .. } => {
-                            let varnode = varnode_tokens(varnode);
-                            quote! {
-                                fugue_lifter_runtime::convention::ReturnAddress::Register(#varnode)
-                            }
-                        }
-                        ReturnAddress::StackRelative { offset, size } => quote! {
-                            fugue_lifter_runtime::convention::ReturnAddress::StackRelative {
-                                offset: #offset,
-                                size: #size,
-                            }
-                        },
-                    };
-                    tokens = quote! { #tokens.with_return_address(#return_address) };
-                }
-                quote! {
-                    (#compiler, #tokens.with_prototypes(&[#(#prototypes,)*]))
-                }
-            })
-            .collect::<Vec<_>>();
-        let n_conventions = conventions.len();
-
-        let call_preserved_registers = compiler_ids
-            .into_iter()
-            .map(|compiler| {
-                let registers = self
-                    .language
-                    .call_preserved_registers(compiler)
-                    .expect("compiler convention comes from the language")
-                    .into_iter()
-                    .map(|varnode| varnode_tokens(&varnode))
-                    .collect::<Vec<_>>();
-                quote! {
-                    (#compiler, &[#(#registers,)*])
-                }
-            })
-            .collect::<Vec<_>>();
-        let n_call_preserved_registers = call_preserved_registers.len();
+            .float_formats()
+            .values()
+            .sorted_unstable_by_key(|format| format.size())
+            .map(|format| FloatFormatAdaptor::new(format).float_format_tokens());
 
         let language_id = self.language.architecture().to_string();
         let processor = self.language.architecture().processor();
-        let little_endian = self.language.architecture().endian().is_little();
+        let endian_tokens = |is_big: bool| {
+            if is_big {
+                quote! { fugue_lifter_runtime::Endian::Big }
+            } else {
+                quote! { fugue_lifter_runtime::Endian::Little }
+            }
+        };
+        let endian = endian_tokens(self.language.architecture().endian().is_big());
+        let insn_endian = endian_tokens(self.language.endian().is_big());
 
         let constructors = &self.tables.ctors;
         let root_dtree = u16::try_from(self.tables.subtable_id_mapping[&(0, 0)])
@@ -1213,6 +1094,7 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 .iter()
                 .map(|(name, value)| quote! { (#name, #value) });
             let n_defaults = primary.context_defaults.len();
+            let metadata = variant_metadata(primary);
             let primary_variant_str = primary.name.clone();
             vec![quote! {
                 static CONTEXT_DEFAULTS: [(&'static str, u32); #n_defaults] = [
@@ -1224,7 +1106,8 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                     const ID: &'static str = LANGUAGE_ID;
 
                     const PROCESSOR: &'static str = #processor;
-                    const LITTLE_ENDIAN: bool = #little_endian;
+                    const ENDIAN: fugue_lifter_runtime::Endian = #endian;
+                    const INSN_ENDIAN: fugue_lifter_runtime::Endian = #insn_endian;
                     const VARIANT: &'static str = #primary_variant_str;
                     const BITS: u32 = #arch_bits;
 
@@ -1250,10 +1133,10 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                     const REGISTER_RANGES: &'static [(u64, u16, &'static str)] = &register::REGISTERS;
                     const USER_OPS: &'static [&'static str] = &user_op::USER_OPS;
                     const SPACE_NAMES: &'static [&'static str] = &space::SPACES;
-                    const CONTEXT_VARS: &'static [(&'static str, fugue_lifter_runtime::context::ContextBitRange)] = &context::CONTEXT_VARIABLES;
+                    const CONTEXT_VARS: &'static [(&'static str, fugue_lifter_runtime::context::ContextBitRange)] = &context::CONTEXT_VARS;
+                    const CONTEXT_VARS_FLOW_MASK: &'static [u32] = &context::CONTEXT_VARS_FLOW_MASK;
                     const CONTEXT_DEFAULTS: &'static [(&'static str, u32)] = &CONTEXT_DEFAULTS;
-                    const CALL_PRESERVED_REGISTERS: &'static [(&'static str, &'static [fugue_lifter_runtime::pcode::Varnode])] = &CALL_PRESERVED_REGISTERS;
-                    const CONVENTIONS: &'static [(&'static str, fugue_lifter_runtime::convention::Convention)] = &CONVENTIONS;
+                    #metadata
 
                     const DATA: &'static fugue_lifter_runtime::language::LanguageData = &LANGUAGE_DATA;
                 }
@@ -1281,6 +1164,7 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                     .iter()
                     .map(|(name, value)| quote! { (#name, #value) });
                 let n_defaults = variant.context_defaults.len();
+                let metadata = variant_metadata(variant);
 
                 let bounds = bounds_for(variant);
 
@@ -1359,7 +1243,8 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                         const ID: &'static str = #language_id_lit;
 
                         const PROCESSOR: &'static str = #processor;
-                        const LITTLE_ENDIAN: bool = #little_endian;
+                        const ENDIAN: fugue_lifter_runtime::Endian = #endian;
+                        const INSN_ENDIAN: fugue_lifter_runtime::Endian = #insn_endian;
                         const VARIANT: &'static str = #variant_name;
                         const BITS: u32 = #arch_bits;
 
@@ -1383,10 +1268,10 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                         const REGISTER_RANGES: &'static [(u64, u16, &'static str)] = &register::REGISTERS;
                         const USER_OPS: &'static [&'static str] = &user_op::USER_OPS;
                         const SPACE_NAMES: &'static [&'static str] = &space::SPACES;
-                        const CONTEXT_VARS: &'static [(&'static str, fugue_lifter_runtime::context::ContextBitRange)] = &context::CONTEXT_VARIABLES;
+                        const CONTEXT_VARS: &'static [(&'static str, fugue_lifter_runtime::context::ContextBitRange)] = &context::CONTEXT_VARS;
+                        const CONTEXT_VARS_FLOW_MASK: &'static [u32] = &context::CONTEXT_VARS_FLOW_MASK;
                         const CONTEXT_DEFAULTS: &'static [(&'static str, u32)] = &#defaults_static;
-                        const CALL_PRESERVED_REGISTERS: &'static [(&'static str, &'static [fugue_lifter_runtime::pcode::Varnode])] = &CALL_PRESERVED_REGISTERS;
-                        const CONVENTIONS: &'static [(&'static str, fugue_lifter_runtime::convention::Convention)] = &CONVENTIONS;
+                        #metadata
 
                         const DATA: &'static fugue_lifter_runtime::language::LanguageData = &#data_ref;
                     }
@@ -1426,8 +1311,12 @@ impl<'a> ToTokens for LifterGenerator<'a> {
             pub mod context {
                 #(#context_variable_consts)*
 
-                pub const CONTEXT_VARIABLES: [(&'static str, fugue_lifter_runtime::context::ContextBitRange); #n_context_vars] = [
+                pub const CONTEXT_VARS: [(&'static str, fugue_lifter_runtime::context::ContextBitRange); #n_context_vars] = [
                     #(#context_variable_pairs,)*
+                ];
+
+                pub const CONTEXT_VARS_FLOW_MASK: [u32; #n_context_words] = [
+                    #(#context_variables_flow_mask,)*
                 ];
             }
 
@@ -1501,13 +1390,7 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 #(#spaces,)*
             ];
 
-            static CALL_PRESERVED_REGISTERS: [(&str, &[fugue_lifter_runtime::pcode::Varnode]); #n_call_preserved_registers] = [
-                #(#call_preserved_registers,)*
-            ];
-
-            static CONVENTIONS: [(&str, fugue_lifter_runtime::convention::Convention); #n_conventions] = [
-                #(#conventions,)*
-            ];
+            static FLOAT_FORMATS: &[fugue_lifter_runtime::FloatFormat] = &[#(#float_formats),*];
 
             pub static LANGUAGE_DATA: fugue_lifter_runtime::language::LanguageData =
                 fugue_lifter_runtime::language::LanguageData {
@@ -1536,20 +1419,6 @@ impl<'a> ToTokens for LifterGenerator<'a> {
                 context: fugue_lifter_runtime::ContextDatabase,
             ) -> fugue_lifter_runtime::LiftingContext {
                 fugue_lifter_runtime::LiftingContext::new(language, ninputs, context, UNIQUE_MASK)
-            }
-
-            #[inline]
-            #[allow(unused_mut)]
-            pub fn default_context() -> fugue_lifter_runtime::ContextDatabase {
-                let mut context =
-                    fugue_lifter_runtime::ContextDatabase::new(
-                        ADDRESS_UPPER_BOUND,
-                        ADDRESS_ALIGNMENT,
-                    );
-
-                #(#context_variable_registrations)*
-
-                context
             }
 
             #(#variant_blocks)*

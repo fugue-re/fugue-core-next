@@ -4,7 +4,7 @@ use iset::{Entry, IntervalMap};
 use smallvec::SmallVec;
 
 use super::{CodeBlockIds, CodeBlockIdsByAddress, CodeBlockIndex};
-use crate::ir::{Address, AddressRange, CodeBlock, Id, IdAllocator, IdSet};
+use crate::ir::{Address, AddressRange, CodeBlock, CodeBlockId, Id, IdAllocator, IdSet};
 use crate::lifter::ContextSet;
 
 pub struct CodeBlockTable {
@@ -131,6 +131,14 @@ impl CodeBlockTable {
     }
 
     pub fn overlaps(&self, range: &AddressRange) -> impl Iterator<Item = &CodeBlock> + '_ {
+        self.ids_overlapping(range)
+            .filter_map(move |id| self.get_raw(id))
+    }
+
+    pub(crate) fn ids_overlapping(
+        &self,
+        range: &AddressRange,
+    ) -> impl Iterator<Item = CodeBlockId> + '_ {
         let space = range.space();
         let start = range.start();
         let end = range.end();
@@ -139,7 +147,7 @@ impl CodeBlockTable {
             .get(&space)
             .into_iter()
             .flat_map(move |bounds| bounds.values(start..=end))
-            .flat_map(move |ids| ids.iter().filter_map(move |id| self.get_raw(id)))
+            .flat_map(move |ids| ids.iter())
     }
 
     pub(crate) fn find_by_range_and_context(

@@ -14,7 +14,7 @@ use crate::types::Revision;
 pub(crate) mod address;
 pub use address::{
     Address, AddressRange, AddressRangeExt, AddressRangeSet, AddressTable, AddressWithContext,
-    RawAddress, RawAddressMap, RawAddressRangeSet, ToRawAddress,
+    RawAddress, RawAddressRangeMap, RawAddressRangeSet, ToRawAddress,
 };
 
 pub(crate) mod block;

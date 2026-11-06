@@ -4,9 +4,13 @@ use super::combinator::{ConditionalAnalysis, IteratedAnalysis, OneShotAnalysis, 
 use super::condition::AnalysisCondition;
 use super::error::AnalysisError;
 use super::group::AnalysisGroup;
-use crate::engine::AnalysisContext;
+use crate::engine::{AnalysisContext, Priority};
 
 pub trait AnalysisPass<S = ()>: Downcast + Send {
+    fn priority(&self) -> Priority {
+        Priority::default()
+    }
+
     fn can_analyse(&self, _context: &AnalysisContext<'_, '_>) -> bool {
         true
     }

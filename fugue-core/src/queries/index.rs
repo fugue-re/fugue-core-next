@@ -1,7 +1,7 @@
 use std::array;
 use std::collections::BTreeMap;
 
-use crate::ir::{AddressRange, AddressRangeSet, RawAddressMap};
+use crate::ir::{AddressRange, AddressRangeSet, RawAddressRangeMap};
 use crate::project::{ChangeKinds, ChangeSet};
 use crate::storage::segments::space::AddressSpaceId;
 use crate::types::Revision;
@@ -67,7 +67,7 @@ impl RegionGroupKind {
 struct RegionGroup {
     floor: Revision,
     max: Revision,
-    spaces: BTreeMap<AddressSpaceId, RawAddressMap<Revision>>,
+    spaces: BTreeMap<AddressSpaceId, RawAddressRangeMap<Revision>>,
     inserts_since_census: usize,
 }
 
@@ -84,7 +84,7 @@ impl RegionGroup {
     fn run_count(&self) -> usize {
         self.spaces
             .values()
-            .map(RawAddressMap::run_count)
+            .map(RawAddressRangeMap::range_count)
             .sum::<usize>()
     }
 
@@ -161,7 +161,7 @@ impl GlobalWatermarks {
         if kind.intersects(ChangeKinds::LIFTED) {
             self.lifted = self.lifted.max(revision);
         }
-        if kind.intersects(ChangeKinds::SPACE_CREATED) {
+        if kind.intersects(ChangeKinds::ADDRESS_SPACE_CREATED) {
             self.space_created = self.space_created.max(revision);
         }
         if kind.intersects(ChangeKinds::SEGMENT_MAPPING_CREATED) {
@@ -180,7 +180,7 @@ impl GlobalWatermarks {
         if kinds.intersects(ChangeKinds::RESYNCHRONISE) {
             latest = latest.max(self.resynchronised);
         }
-        if kinds.intersects(ChangeKinds::SPACE_CREATED) {
+        if kinds.intersects(ChangeKinds::ADDRESS_SPACE_CREATED) {
             latest = latest.max(self.space_created);
         }
         if kinds.intersects(ChangeKinds::SEGMENT_MAPPING_CREATED) {

@@ -103,20 +103,9 @@ impl Location {
             return None;
         }
 
-        let offset = address.offset() as i64;
-        let position = if offset.is_negative() {
-            position
-                .checked_sub(offset.unsigned_abs() as u16)
-                .expect("negative offset from position in valid range")
-        } else {
-            position
-                .checked_add(offset as u16)
-                .expect("positive offset from position in valid range")
-        };
-
         Some(Self {
             address: base,
-            position,
+            position: position.wrapping_add(address.offset() as u16),
         })
     }
 

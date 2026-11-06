@@ -90,7 +90,13 @@ where
     }
 
     pub fn add_pass(&mut self, name: impl Into<String>, pass: impl AnalysisPass<S> + 'static) {
-        self.passes.insert(name.into(), Box::new(pass));
+        let index = self
+            .passes
+            .values()
+            .position(|existing| existing.priority() > pass.priority())
+            .unwrap_or(self.passes.len());
+        self.passes
+            .insert_before(index, name.into(), Box::new(pass));
     }
 
     pub fn insert_after(

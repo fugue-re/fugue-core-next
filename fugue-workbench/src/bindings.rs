@@ -119,7 +119,7 @@ impl SymbolRow {
             function: properties.contains(SymbolProperties::FUNCTION),
             data: properties.contains(SymbolProperties::DATA),
             export: properties.contains(SymbolProperties::EXPORT),
-            import: properties.contains(SymbolProperties::EXTERN),
+            import: properties.contains(SymbolProperties::EXTERNAL),
         }
     }
 }

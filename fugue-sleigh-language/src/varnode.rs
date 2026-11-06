@@ -1,5 +1,8 @@
 use std::fmt;
 
+use roxmltree::Node;
+
+use crate::deserialise::{DeserialiseError, XmlExt};
 use crate::language::Language;
 use crate::spaces::{AddressSpace, AddressSpaceId};
 
@@ -64,6 +67,28 @@ impl<'a> fmt::Display for VarnodeDataFormatter<'a> {
 }
 
 impl VarnodeData {
+    pub fn from_xml(language: &Language, input: Node) -> Result<Self, DeserialiseError> {
+        match input.tag_name().name() {
+            "register" => language
+                .register_by_name(input.attribute_str("name")?)
+                .ok_or(DeserialiseError::invariant("named register is invalid")),
+            "varnode" => {
+                let space = language
+                    .spaces()
+                    .space_by_name(input.attribute_str("space")?)
+                    .ok_or(DeserialiseError::invariant(
+                        "varnode address space is invalid",
+                    ))?;
+                Ok(Self::new(
+                    &space,
+                    input.attribute_int("offset")?,
+                    input.attribute_int::<u16>("size")? as _,
+                ))
+            }
+            tag => Err(DeserialiseError::tag_unexpected(tag)),
+        }
+    }
+
     pub fn display<'a>(&'a self, language: &'a Language) -> VarnodeDataFormatter<'a> {
         VarnodeDataFormatter::new(self, language)
     }

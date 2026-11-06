@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::mem::size_of;
 
 use fugue_bv::BitVec;
@@ -144,10 +145,11 @@ fn test_compare() {
     let v3 = BitVec::from(0xffff_ffffu32).signed();
 
     assert!(v1 < v2);
-    assert!(v1 >= v3);
-    assert!(v3 < v1);
-    assert!(v3 < v2);
+    assert!(v2 < v3);
+    assert_eq!(v1.signed_cmp(&v2), Ordering::Less);
+    assert_eq!(v3.signed_cmp(&v1), Ordering::Greater);
     assert_eq!(v1.clone().signed(), v1);
+    assert_eq!(v1.clone().signed().cmp(&v1), Ordering::Equal);
 }
 
 #[test]
@@ -535,7 +537,10 @@ fn test_sub_byte_bytes_and_casts() {
     assert_eq!(BitVec::from_u64(7, 3).to_u8(), Some(7));
     assert_eq!(BitVec::from_u64(3, 3).to_i8(), Some(3));
 
-    assert!(BitVec::from_u64(7, 3).signed() < BitVec::one(3).signed());
+    assert_eq!(
+        BitVec::from_u64(7, 3).signed_cmp(&BitVec::one(3)),
+        Ordering::Less
+    );
 }
 
 #[test]

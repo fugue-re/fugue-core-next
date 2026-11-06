@@ -49,7 +49,7 @@ impl FromStr for LifterBuilder {
 
         Ok(Self {
             processor: language.processor().to_owned(),
-            is_big: language.is_big_endian(),
+            is_big: language.endian().is_big(),
             bits: Some(language.bits()),
             variant: language.variant().map(ToOwned::to_owned),
         })

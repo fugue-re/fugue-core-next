@@ -203,13 +203,13 @@ mod test {
         let subscriber = Subscriber::new(tx, rx.clone(), ChangeFilter::new());
         let first = Arc::new(ChangeSet::with_records(
             Revision::new(1),
-            [ChangeRecord::SpaceCreated {
+            [ChangeRecord::AddressSpaceCreated {
                 space: AddressSpaceId::from(0u8),
             }],
         ));
         let second = Arc::new(ChangeSet::with_records(
             Revision::new(2),
-            [ChangeRecord::SpaceCreated {
+            [ChangeRecord::AddressSpaceCreated {
                 space: AddressSpaceId::from(0u8),
             }],
         ));

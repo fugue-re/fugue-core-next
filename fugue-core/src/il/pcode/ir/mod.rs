@@ -7,13 +7,9 @@ use crate::il::common::{
     PersistableIl,
 };
 use crate::il::pcode::{
-    PCodeIrDisplay, PCodeLocation, PCodeLocationId, PCodeOp, PCodeOpcode, PCodeSourceDisplay,
-    PCodeTargetId,
+    PCodeIrDisplay, PCodeLocation, PCodeLocationId, PCodeOp, PCodeSourceDisplay, PCodeTargetId,
 };
-use crate::ir::{
-    Address, AddressRange, AddressRangeSet, Location, Reference, ReferenceOrigin,
-    ReferenceProperties,
-};
+use crate::ir::{Address, AddressRange, AddressRangeSet, Location};
 use crate::types::EstimateSize;
 
 mod builder;
@@ -93,34 +89,6 @@ impl PCodeIr {
         IlSourceSpan::ops(&self.source_spans, &self.operations, address)
     }
 
-    pub fn data_references(&self) -> impl Iterator<Item = Reference> + '_ {
-        self.operations
-            .iter()
-            .enumerate()
-            .filter_map(move |(index, operation)| {
-                let properties = match operation.opcode() {
-                    PCodeOpcode::Load => ReferenceProperties::READ,
-                    PCodeOpcode::Store => ReferenceProperties::WRITE,
-                    _ => return None,
-                };
-                let source = self.source_span_for(index)?;
-                let pointer = self.op_operands_for(operation).first().copied()?;
-                let pointer = self.location(pointer)?;
-                if !pointer.is_constant() {
-                    return None;
-                }
-                let space = operation.address_space()?;
-                Some(
-                    Reference::data(
-                        source.address(),
-                        Address::new(space, pointer.offset()),
-                        properties,
-                    )
-                    .with_origin(ReferenceOrigin::Derived),
-                )
-            })
-    }
-
     pub fn shrink_to_fit(&mut self) {
         self.graph.shrink_to_fit();
         self.source_spans.shrink_to_fit();
@@ -131,8 +99,27 @@ impl PCodeIr {
     }
 
     pub fn reference_coverage_into(&self, coverage: &mut AddressRangeSet) {
-        for span in &self.source_spans {
-            coverage.insert_range(AddressRange::point(span.address()));
+        for block in self.graph.blocks() {
+            let operations = block.ops();
+            let first = self
+                .source_spans
+                .partition_point(|span| span.destination().start() < operations.start());
+            let last = self
+                .source_spans
+                .partition_point(|span| span.destination().start() < operations.end());
+            let Some((head, tail)) = self.source_spans[first..last].split_first() else {
+                continue;
+            };
+            let (mut start, mut end) = (head.address(), head.address());
+            for span in tail {
+                start = start.min(span.address());
+                end = end.max(span.address());
+            }
+            coverage.insert_range(AddressRange::new(
+                start.space(),
+                start.raw_address(),
+                end.raw_address(),
+            ));
         }
     }
 

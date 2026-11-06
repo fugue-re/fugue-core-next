@@ -11,6 +11,7 @@ mod convention;
 mod install;
 mod language;
 mod operand;
+mod processor;
 mod resolve;
 mod space;
 mod symbol;

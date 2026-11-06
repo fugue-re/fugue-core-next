@@ -145,6 +145,7 @@ struct MappingPlacement {
 pub struct AddressSpace {
     id: AddressSpaceId,
     kind: AddressSpaceKind,
+    name: Option<String>,
     submaps: IntervalMap<Address, SegmentSubMapping>,
     mapping_extents: IntervalMap<Address, SegmentMappingId>,
     mappings_by_priority: BTreeMap<MappingPriority, SegmentMappingRef>,
@@ -163,6 +164,7 @@ impl AddressSpace {
         Self {
             id,
             kind,
+            name: None,
             submaps: IntervalMap::new(),
             mapping_extents: IntervalMap::new(),
             mappings_by_priority: BTreeMap::new(),
@@ -203,6 +205,19 @@ impl AddressSpace {
 
     pub fn kind(&self) -> AddressSpaceKind {
         self.kind
+    }
+
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    pub fn set_name(&mut self, name: impl Into<String>) {
+        self.name = Some(name.into());
+    }
+
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.set_name(name);
+        self
     }
 
     pub fn priority_list(

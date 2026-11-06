@@ -4,16 +4,22 @@ use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::str::FromStr;
 
+use fugue_bytes::Endian;
+use fugue_sleigh_language::float_format::FloatFormat;
 use thiserror::Error;
 
 use crate::constructor::Constructor;
-use crate::context::{ContextBitRange, ContextDatabase};
+use crate::context::{ContextBitRange, ContextDatabase, ContextDatabaseBuilder};
 use crate::convention::Convention;
 use crate::dynamic::{Language as DynamicLanguage, LanguageLoadError, registry};
 use crate::format::InstructionFormatter;
 use crate::operand::{OperandFilter, Operands, OperandsContext};
 use crate::pattern::PatternOp;
 use crate::pcode::{LiftingContext, PCodeBuilderContext, PCodeOp, Varnode};
+use crate::processor::{
+    ContextSet, DefaultSymbol, RegisterLanes, SegmentOp, SegmentedAddressSpace, TrackedSet,
+    VolatileRange,
+};
 use crate::resolve::DecisionNode;
 use crate::space::{AddressSpace, AddressSpaceKind};
 use crate::symbol::Symbol;
@@ -23,25 +29,27 @@ use crate::{LiftingContextState, calculate_mask, entry, wrap_offset};
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct LanguageId {
     processor: String,
-    is_big: bool,
+    endian: Endian,
+    insn_endian: Endian,
     bits: u32,
     variant: Option<String>,
 }
 
 impl LanguageId {
-    pub fn new(processor: impl Into<String>, is_big: bool, bits: u32) -> Self {
-        Self::new_with(processor, is_big, bits, None::<String>)
+    pub fn new(processor: impl Into<String>, endian: Endian, bits: u32) -> Self {
+        Self::new_with(processor, endian, bits, None::<String>)
     }
 
     pub fn new_with(
         processor: impl Into<String>,
-        is_big: bool,
+        endian: Endian,
         bits: u32,
         variant: Option<impl Into<String>>,
     ) -> Self {
         Self {
             processor: processor.into(),
-            is_big,
+            endian,
+            insn_endian: endian,
             bits,
             variant: variant.map(Into::into),
         }
@@ -51,12 +59,21 @@ impl LanguageId {
         &self.processor
     }
 
-    pub fn is_big_endian(&self) -> bool {
-        self.is_big
+    pub fn endian(&self) -> Endian {
+        self.endian
     }
 
-    pub fn is_little_endian(&self) -> bool {
-        !self.is_big
+    pub fn insn_endian(&self) -> Endian {
+        self.insn_endian
+    }
+
+    pub fn set_insn_endian(&mut self, endian: Endian) {
+        self.insn_endian = endian;
+    }
+
+    pub fn with_insn_endian(mut self, endian: Endian) -> Self {
+        self.set_insn_endian(endian);
+        self
     }
 
     pub fn bits(&self) -> u32 {
@@ -74,7 +91,12 @@ impl Display for LanguageId {
             f,
             "{}:{}:{}:{}",
             self.processor,
-            if self.is_big_endian() { "BE" } else { "LE" },
+            match (self.insn_endian, self.endian) {
+                (Endian::Little, Endian::Little) => "LE",
+                (Endian::Big, Endian::Big) => "BE",
+                (Endian::Little, Endian::Big) => "LEBE",
+                (Endian::Big, Endian::Little) => "BELE",
+            },
             self.bits,
             self.variant.as_deref().unwrap_or("default"),
         )
@@ -188,7 +210,8 @@ pub trait LanguageImpl {
     const ID: &'static str;
 
     const PROCESSOR: &'static str;
-    const LITTLE_ENDIAN: bool;
+    const ENDIAN: Endian;
+    const INSN_ENDIAN: Endian;
     const VARIANT: &'static str;
     const BITS: u32;
 
@@ -215,9 +238,20 @@ pub trait LanguageImpl {
     const USER_OPS: &'static [&'static str];
     const SPACE_NAMES: &'static [&'static str];
     const CONTEXT_VARS: &'static [(&'static str, ContextBitRange)];
+    const CONTEXT_VARS_FLOW_MASK: &'static [u32];
     const CONTEXT_DEFAULTS: &'static [(&'static str, u32)];
     const CALL_PRESERVED_REGISTERS: &'static [(&'static str, &'static [Varnode])] = &[];
     const CONVENTIONS: &'static [(&'static str, Convention)] = &[];
+
+    const CONTEXT_SETS: &'static [ContextSet] = &[];
+    const TRACKED_SETS: &'static [TrackedSet] = &[];
+    const VOLATILE_RANGES: &'static [VolatileRange] = &[];
+    const REGISTER_LANES: &'static [RegisterLanes] = &[];
+    const DEFAULT_SYMBOLS: &'static [DefaultSymbol] = &[];
+    const FLOAT_FORMATS: &'static [FloatFormat] = &[];
+    const PROPERTIES: &'static [(&'static str, &'static str)] = &[];
+    const SEGMENT_OPS: &'static [SegmentOp] = &[];
+    const SEGMENTED_ADDRESS_SPACE: Option<SegmentedAddressSpace> = None;
 
     const DATA: &'static LanguageData;
 }
@@ -226,7 +260,8 @@ pub trait LanguageImpl {
 pub struct Language {
     pub(crate) id: &'static str,
     pub(crate) processor: &'static str,
-    pub(crate) little_endian: bool,
+    pub(crate) endian: Endian,
+    pub(crate) insn_endian: Endian,
     pub(crate) variant: &'static str,
     pub(crate) bits: u32,
     pub(crate) address_alignment: usize,
@@ -247,9 +282,19 @@ pub struct Language {
     pub(crate) user_ops: &'static [&'static str],
     pub(crate) space_names: &'static [&'static str],
     pub(crate) context_vars: &'static [(&'static str, ContextBitRange)],
+    pub(crate) context_vars_flow_mask: &'static [u32],
     pub(crate) context_defaults: &'static [(&'static str, u32)],
     pub(crate) call_preserved_registers: &'static [(&'static str, &'static [Varnode])],
     pub(crate) conventions: &'static [(&'static str, Convention)],
+    pub(crate) context_sets: &'static [ContextSet],
+    pub(crate) tracked_sets: &'static [TrackedSet],
+    pub(crate) volatile_ranges: &'static [VolatileRange],
+    pub(crate) register_lanes: &'static [RegisterLanes],
+    pub(crate) default_symbols: &'static [DefaultSymbol],
+    pub(crate) float_formats: &'static [FloatFormat],
+    pub(crate) properties: &'static [(&'static str, &'static str)],
+    pub(crate) segment_ops: &'static [SegmentOp],
+    pub(crate) segmented_address_space: Option<SegmentedAddressSpace>,
     pub(crate) data: &'static LanguageData,
 }
 
@@ -319,7 +364,8 @@ impl Language {
             id: L::ID,
 
             processor: L::PROCESSOR,
-            little_endian: L::LITTLE_ENDIAN,
+            endian: L::ENDIAN,
+            insn_endian: L::INSN_ENDIAN,
             variant: L::VARIANT,
             bits: L::BITS,
 
@@ -346,12 +392,71 @@ impl Language {
             user_ops: L::USER_OPS,
             space_names: L::SPACE_NAMES,
             context_vars: L::CONTEXT_VARS,
+            context_vars_flow_mask: L::CONTEXT_VARS_FLOW_MASK,
             context_defaults: L::CONTEXT_DEFAULTS,
             call_preserved_registers: L::CALL_PRESERVED_REGISTERS,
             conventions: L::CONVENTIONS,
 
+            context_sets: L::CONTEXT_SETS,
+            tracked_sets: L::TRACKED_SETS,
+            volatile_ranges: L::VOLATILE_RANGES,
+            register_lanes: L::REGISTER_LANES,
+            default_symbols: L::DEFAULT_SYMBOLS,
+            float_formats: L::FLOAT_FORMATS,
+            properties: L::PROPERTIES,
+            segment_ops: L::SEGMENT_OPS,
+            segmented_address_space: L::SEGMENTED_ADDRESS_SPACE,
             data: L::DATA,
         }
+    }
+
+    pub const fn context_sets(&self) -> &'static [ContextSet] {
+        self.context_sets
+    }
+
+    pub const fn tracked_sets(&self) -> &'static [TrackedSet] {
+        self.tracked_sets
+    }
+
+    pub const fn volatile_ranges(&self) -> &'static [VolatileRange] {
+        self.volatile_ranges
+    }
+
+    pub const fn register_lanes(&self) -> &'static [RegisterLanes] {
+        self.register_lanes
+    }
+
+    pub const fn default_symbols(&self) -> &'static [DefaultSymbol] {
+        self.default_symbols
+    }
+
+    pub const fn properties(&self) -> &'static [(&'static str, &'static str)] {
+        self.properties
+    }
+
+    pub fn property(&self, key: &str) -> Option<&'static str> {
+        self.properties
+            .binary_search_by_key(&key, |(name, _)| *name)
+            .ok()
+            .map(|index| self.properties[index].1)
+    }
+
+    pub const fn segment_ops(&self) -> &'static [SegmentOp] {
+        self.segment_ops
+    }
+
+    pub const fn segmented_address_space(&self) -> Option<SegmentedAddressSpace> {
+        self.segmented_address_space
+    }
+
+    pub const fn float_formats(&self) -> &'static [FloatFormat] {
+        self.float_formats
+    }
+
+    pub fn float_format(&self, bits: u32) -> Option<&'static FloatFormat> {
+        self.float_formats
+            .iter()
+            .find(|format| format.bits() == bits as _)
     }
 
     #[inline(always)]
@@ -367,12 +472,12 @@ impl Language {
         self.processor
     }
 
-    pub fn is_big_endian(&self) -> bool {
-        !self.little_endian
+    pub fn endian(&self) -> Endian {
+        self.endian
     }
 
-    pub fn is_little_endian(&self) -> bool {
-        self.little_endian
+    pub fn insn_endian(&self) -> Endian {
+        self.insn_endian
     }
 
     pub fn variant(&self) -> &'static str {
@@ -512,19 +617,25 @@ impl Language {
     }
 
     pub fn default_context(&self) -> ContextDatabase {
-        let mut db = ContextDatabase::new(self.address_upper_bound, self.address_alignment);
-        let bits_per_word = u32::BITS as usize;
-        for (name, bits) in self.context_vars {
-            let word_offset = bits.word() * bits_per_word;
-            db.register_variable(
-                *name,
-                word_offset + bits.start_bit(),
-                word_offset + bits.end_bit(),
-            );
-        }
+        let mut db = ContextDatabaseBuilder::new(self.address_upper_bound, self.address_alignment)
+            .with_variables(self.context_vars.iter().copied())
+            .build();
         for (name, value) in self.context_defaults {
             if let Some(bits) = self.context_variable_by_name(name) {
                 db.set_variable_default_by_bits(bits, *value);
+            }
+        }
+        for tracked in self
+            .tracked_sets
+            .iter()
+            .filter(|tracked| tracked.space() == self.default_space)
+        {
+            let set = match tracked.range() {
+                Some(range) => db.new_tracked_set(*range.start(), range.end().checked_add(1)),
+                None => db.tracked_default_mut(),
+            };
+            for update in tracked.updates() {
+                set.insert(*update.context());
             }
         }
         db
@@ -551,6 +662,18 @@ impl Language {
             .binary_search_by_key(&key, |(off, sz, _)| (*off, *sz))
             .ok()
             .map(|idx| self.register_ranges[idx].2)
+    }
+
+    pub fn containing_register(&self, vnd: &Varnode) -> Option<Varnode> {
+        if vnd.space() != self.register_space {
+            return None;
+        }
+        let end = vnd.offset().checked_add(u64::from(vnd.size))?;
+        self.register_ranges
+            .iter()
+            .filter(|(off, sz, _)| *off <= vnd.offset() && end <= off + u64::from(*sz))
+            .min_by_key(|(_, sz, _)| *sz)
+            .map(|(off, sz, _)| Varnode::new(self.register_space, *off, *sz))
     }
 
     pub fn user_op_by_name(&self, name: impl AsRef<str>) -> Option<u16> {
@@ -681,9 +804,11 @@ impl FromStr for LanguageId {
             return Err(LanguageParseError::ParseFormat);
         };
 
-        let is_big = match endian {
-            "le" | "LE" => false,
-            "be" | "BE" => true,
+        let (insn_endian, endian) = match endian {
+            "le" | "LE" => (Endian::Little, Endian::Little),
+            "be" | "BE" => (Endian::Big, Endian::Big),
+            "lebe" | "LEBE" => (Endian::Little, Endian::Big),
+            "bele" | "BELE" => (Endian::Big, Endian::Little),
             _ => {
                 return Err(LanguageParseError::ParseEndian);
             }
@@ -708,7 +833,8 @@ impl FromStr for LanguageId {
 
         Ok(Self {
             processor: processor.to_owned(),
-            is_big,
+            endian,
+            insn_endian,
             bits,
             variant,
         })
