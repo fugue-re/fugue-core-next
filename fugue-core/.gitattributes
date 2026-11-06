@@ -3,3 +3,4 @@ tests/*.exe filter=lfs diff=lfs merge=lfs -text
 tests/*.elf filter=lfs diff=lfs merge=lfs -text
 tests/*.so filter=lfs diff=lfs merge=lfs -text
 tests/*.o filter=lfs diff=lfs merge=lfs -text
+tests/*.macho filter=lfs diff=lfs merge=lfs -text
