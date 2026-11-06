@@ -1,3 +1,5 @@
+use std::iter;
+
 use super::ProjectTransaction;
 use crate::il::common::IlArtefact;
 use crate::il::pcode::PCodeIr;
@@ -14,19 +16,40 @@ struct StagedFunctionReferenceRecord {
     references: Vec<Reference>,
 }
 
+impl StagedFunctionReferenceRecord {
+    fn into_batches(self) -> impl Iterator<Item = DerivedReferenceBatch> {
+        let provenance = ReferenceProvenance::Function(self.id);
+        let data = self
+            .references
+            .iter()
+            .any(|reference| !reference.is_flow())
+            .then(|| {
+                DerivedReferenceBatch::new(
+                    self.coverage.clone(),
+                    ReferenceKind::Data,
+                    provenance,
+                    self.references.iter().copied().filter(|r| !r.is_flow()),
+                )
+            });
+        iter::once(DerivedReferenceBatch::new(
+            self.coverage,
+            ReferenceKind::Flow,
+            provenance,
+            self.references.into_iter().filter(Reference::is_flow),
+        ))
+        .chain(data)
+    }
+}
+
 impl ProjectTransaction<'_> {
     pub fn add_function(
         &mut self,
         function: IncompleteFunction,
     ) -> Result<FunctionId, ProjectError> {
         let record = self.stage_incomplete_function(function)?;
-        self.replace_derived_references(
-            record.coverage,
-            ReferenceKind::Flow,
-            ReferenceProvenance::Function(record.id),
-            record.references,
-        )?;
-        Ok(record.id)
+        let id = record.id;
+        self.replace_derived_reference_batches(record.into_batches())?;
+        Ok(id)
     }
 
     pub(crate) fn add_functions(
@@ -49,16 +72,11 @@ impl ProjectTransaction<'_> {
         let expected = functions.size_hint().0;
         self.function_staging.reserve_functions(expected);
         self.changes.reserve(expected);
-        let mut batches = Vec::with_capacity(expected);
+        let mut batches = Vec::with_capacity(expected.saturating_mul(2));
         for function in functions {
             let function = function?;
             let record = self.stage_normalised_function(function)?;
-            batches.push(DerivedReferenceBatch::new(
-                record.coverage,
-                ReferenceKind::Flow,
-                ReferenceProvenance::Function(record.id),
-                record.references,
-            ));
+            batches.extend(record.into_batches());
         }
         self.replace_derived_reference_batches(batches)?;
         Ok(())

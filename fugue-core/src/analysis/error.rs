@@ -3,6 +3,7 @@ use std::error::Error;
 use thiserror::Error;
 
 use crate::engine::AnalysisDataError;
+use crate::storage::segments::SegmentStorageError;
 
 #[derive(Debug, Error)]
 pub enum AnalysisError {
@@ -16,6 +17,8 @@ pub enum AnalysisError {
     PassFailed { name: String, error: anyhow::Error },
     #[error("analysis pass not found: {0}")]
     PassNotFound(String),
+    #[error(transparent)]
+    SegmentStorage(#[from] SegmentStorageError),
 }
 
 impl AnalysisError {

@@ -1,6 +1,7 @@
 use fugue_bv::BitVec;
 use fugue_bytes::Endian;
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 
 use evaluator::ThunkTargetEvaluator;
 
@@ -12,7 +13,7 @@ use crate::engine::AnalysisContext;
 use crate::il::common::{IlArtefact, IlError, RegisterId};
 use crate::il::ecode::analysis::ECodeBlockArgInputs;
 use crate::il::ecode::{ECodeIr, ECodeOpcode};
-use crate::ir::{Address, AddressWithContext, FunctionId};
+use crate::ir::{Address, AddressWithContext, FunctionId, Reference, ReferenceProperties};
 use crate::lifter::TrackedContext;
 use crate::project::Project;
 use crate::storage::SegmentMappingCache;
@@ -140,6 +141,7 @@ impl AnalysisPass<StructuredFunctionContext> for ThunkTargetRecovery {
         let mut evaluator =
             ThunkTargetEvaluator::new(&ssa, &block_arg_inputs, &seeds, entry.space(), self.config);
         let mut buffer = Vec::new();
+        let mut slots = SmallVec::<[Address; 2]>::new();
 
         let Some(value) = evaluator.evaluate(target, |address, size| {
             if !mapping_cache
@@ -155,6 +157,7 @@ impl AnalysisPass<StructuredFunctionContext> for ThunkTargetRecovery {
             mapping_cache
                 .read_bytes_exact(segments, address, &mut buffer)
                 .ok()?;
+            slots.push(address);
             Some(match arch.endian() {
                 Endian::Big => BitVec::from_be_bytes(&buffer),
                 Endian::Little => BitVec::from_le_bytes(&buffer),
@@ -179,8 +182,15 @@ impl AnalysisPass<StructuredFunctionContext> for ThunkTargetRecovery {
         }
 
         tracing::debug!("resolved thunk target of {site} to {target}");
-        state
-            .function_mut()
+        let function = state.function_mut();
+        for slot in slots {
+            function.add_reference(Reference::data(
+                site,
+                slot,
+                ReferenceProperties::READ | ReferenceProperties::INDIRECT,
+            ));
+        }
+        function
             .insn_mut(id)
             .expect("the thunk branch exists")
             .set_indirect_target(AddressWithContext::new(target, context));

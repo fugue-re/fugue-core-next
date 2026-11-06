@@ -3,11 +3,12 @@ use crate::il::common::IlArtefact;
 use crate::il::pcode::PCodeIr;
 use crate::ir::{Address, AddressRange, ProblemKind, RawAddress};
 use crate::project::{ChangeRecord, ProjectError};
+use crate::storage::segments::SegmentProperties;
 use crate::storage::segments::mapping::{
     SegmentMappingBuilder, SegmentMappingFlags, SegmentMappingId, SegmentMappingKind,
     SegmentMappingProvenance,
 };
-use crate::storage::segments::space::AddressSpaceId;
+use crate::storage::segments::space::{AddressSpaceId, AddressSpaceKind};
 
 impl ProjectTransaction<'_> {
     pub fn create_mapping(
@@ -22,12 +23,64 @@ impl ProjectTransaction<'_> {
         Ok(mapping)
     }
 
+    pub fn create_synthetic_mapping(
+        &mut self,
+        start: impl Into<Address>,
+        bytes: &[u8],
+        properties: SegmentProperties,
+    ) -> Result<SegmentMappingId, ProjectError> {
+        let start = start.into();
+        let mapping = self.segment_staging.create_synthetic_mapping(
+            self.project.storage.segments(),
+            start,
+            bytes,
+            properties,
+        )?;
+        self.changes
+            .push(ChangeRecord::SegmentMappingCreated { mapping });
+        self.add_mapping_to_space(start.space(), mapping)?;
+        Ok(mapping)
+    }
+
     pub fn create_space(&mut self) -> Result<AddressSpaceId, ProjectError> {
         let space = self
             .segment_staging
             .create_space(self.project.storage.segments())?;
-        self.changes.push(ChangeRecord::SpaceCreated { space });
+        self.changes
+            .push(ChangeRecord::AddressSpaceCreated { space });
         Ok(space)
+    }
+
+    pub fn create_space_with(
+        &mut self,
+        name: impl Into<String>,
+        kind: AddressSpaceKind,
+    ) -> Result<AddressSpaceId, ProjectError> {
+        let space = self.segment_staging.create_space_with(
+            self.project.storage.segments(),
+            name.into(),
+            kind,
+        )?;
+        self.changes
+            .push(ChangeRecord::AddressSpaceCreated { space });
+        Ok(space)
+    }
+
+    pub(crate) fn create_space_with_id(
+        &mut self,
+        space: AddressSpaceId,
+        name: impl Into<Option<String>>,
+        kind: AddressSpaceKind,
+    ) -> Result<(), ProjectError> {
+        self.segment_staging.create_space_with_id(
+            self.project.storage.segments(),
+            space,
+            name,
+            kind,
+        )?;
+        self.changes
+            .push(ChangeRecord::AddressSpaceCreated { space });
+        Ok(())
     }
 
     pub fn add_mapping_to_space(
@@ -174,9 +227,10 @@ impl ProjectTransaction<'_> {
         else {
             return Ok(());
         };
-        let range = writes.range();
-        self.invalidate_functions_in_range(&range)?;
-        self.changes.push(ChangeRecord::BytesWritten { range });
+        for &range in writes.ranges() {
+            self.invalidate_functions_in_range(&range)?;
+            self.changes.push(ChangeRecord::BytesWritten { range });
+        }
         self.segment_staging.stage_writes(writes);
         Ok(())
     }
@@ -233,11 +287,25 @@ impl ProjectTransaction<'_> {
         &mut self,
         range: &AddressRange,
     ) -> Result<usize, ProjectError> {
-        let functions = self.project.functions.staged_overlaps(
+        let mut functions = self.project.functions.staged_overlaps(
             &self.project.blocks,
             &self.function_staging,
             range,
         )?;
+        for switch in self
+            .project
+            .switches
+            .staged_overlaps(&self.switch_staging, range)?
+        {
+            functions.extend(
+                self.project
+                    .functions
+                    .staged_by_switch_id(&self.function_staging, switch)
+                    .iter(),
+            );
+        }
+        functions.sort_unstable();
+        functions.dedup();
         let mut invalidated = 0usize;
 
         for id in functions {

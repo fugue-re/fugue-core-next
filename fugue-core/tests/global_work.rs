@@ -11,35 +11,35 @@ use fugue_core::project::{ChangeKinds, Project};
 use fugue_core::storage::TransientStorageProvider;
 use fugue_core::types::AttributeMap;
 
-const ADDRESSLESS_ANALYSER_ATTRIBUTE: &str = "fugue.test.addressless-analyser";
+const GLOBAL_ANALYSER_ATTRIBUTE: &str = "fugue.test.global-analyser";
 
-static ADDRESSLESS_CAUSE_OBSERVED: AtomicBool = AtomicBool::new(false);
-static ADDRESSLESS_RUNS: AtomicUsize = AtomicUsize::new(0);
+static GLOBAL_CAUSE_OBSERVED: AtomicBool = AtomicBool::new(false);
+static GLOBAL_RUNS: AtomicUsize = AtomicUsize::new(0);
 
-struct AddresslessAnalyser;
+struct GlobalAnalyser;
 
-impl Analyser for AddresslessAnalyser {
+impl Analyser for GlobalAnalyser {
     fn name(&self) -> &'static str {
-        "addressless-test"
+        "global-test"
     }
 
     fn triggers(&self) -> ChangeKinds {
-        ChangeKinds::SPACE_CREATED
+        ChangeKinds::ADDRESS_SPACE_CREATED
     }
 
     fn can_analyse(&self, project: &Project) -> bool {
         project
             .attributes()
-            .get_attr::<bool>(ADDRESSLESS_ANALYSER_ATTRIBUTE)
+            .get_attr::<bool>(GLOBAL_ANALYSER_ATTRIBUTE)
             .unwrap_or(false)
     }
 
     fn analyse(&mut self, context: &mut AnalysisContext<'_, '_>) -> Result<(), AnalysisError> {
-        ADDRESSLESS_RUNS.fetch_add(1, Ordering::SeqCst);
-        ADDRESSLESS_CAUSE_OBSERVED.store(
+        GLOBAL_RUNS.fetch_add(1, Ordering::SeqCst);
+        GLOBAL_CAUSE_OBSERVED.store(
             context.regions().is_empty()
                 && context.causes().iter().any(|cause| {
-                    cause.kind() == ChangeKinds::SPACE_CREATED && cause.range().is_none()
+                    cause.kind() == ChangeKinds::ADDRESS_SPACE_CREATED && cause.range().is_none()
                 }),
             Ordering::SeqCst,
         );
@@ -47,25 +47,25 @@ impl Analyser for AddresslessAnalyser {
     }
 }
 
-fn build_addressless_analyser(
+fn build_global_analyser(
     _project: &Project,
     _config: &AnalysisEngineConfig,
 ) -> Result<Box<dyn Analyser>, AnalysisError> {
-    Ok(Box::new(AddresslessAnalyser))
+    Ok(Box::new(GlobalAnalyser))
 }
 
 extension::submit! {
-    AnalyserProvider::new::<AddresslessAnalyser>("addressless-test", build_addressless_analyser)
+    AnalyserProvider::new::<GlobalAnalyser>("global-test", build_global_analyser)
 }
 
 #[test]
-fn addressless_change_runs_declared_analyser() -> Result<(), Box<dyn Error>> {
-    ADDRESSLESS_CAUSE_OBSERVED.store(false, Ordering::SeqCst);
-    ADDRESSLESS_RUNS.store(0, Ordering::SeqCst);
+fn global_change_runs_declared_analyser() -> Result<(), Box<dyn Error>> {
+    GLOBAL_CAUSE_OBSERVED.store(false, Ordering::SeqCst);
+    GLOBAL_RUNS.store(0, Ordering::SeqCst);
 
     let loader = Loader::from_file("tests/ls.elf")?;
     let mut attributes = AttributeMap::new();
-    attributes.set_attr(ADDRESSLESS_ANALYSER_ATTRIBUTE, true);
+    attributes.set_attr(GLOBAL_ANALYSER_ATTRIBUTE, true);
     let project = Project::new_with_provider::<TransientStorageProvider>(&loader, attributes)?;
     let engine = AnalysisEngine::new(project)?;
     engine.analyse()?;
@@ -73,8 +73,8 @@ fn addressless_change_runs_declared_analyser() -> Result<(), Box<dyn Error>> {
     engine.create_space()?;
     engine.analyse()?;
 
-    assert_eq!(ADDRESSLESS_RUNS.load(Ordering::SeqCst), 1);
-    assert!(ADDRESSLESS_CAUSE_OBSERVED.load(Ordering::SeqCst));
+    assert_eq!(GLOBAL_RUNS.load(Ordering::SeqCst), 1);
+    assert!(GLOBAL_CAUSE_OBSERVED.load(Ordering::SeqCst));
 
     Ok(())
 }

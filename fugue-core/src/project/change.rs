@@ -137,28 +137,28 @@ pub enum FunctionChangeKind {
 bitflags::bitflags! {
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct ChangeKinds: u32 {
-        const BYTES_WRITTEN           = 0x0000_0001;
-        const FUNCTION_ADDED          = 0x0000_0002;
-        const FUNCTION_CHANGED        = 0x0000_0004;
-        const FUNCTION_PROPERTIES     = 0x0004_0000;
-        const FUNCTION_REMOVED        = 0x0000_0008;
-        const LIFTED_MATERIALISED     = 0x0000_0010;
-        const LIFTED_REMOVED          = 0x0000_0020;
-        const PROBLEM_RECORDED        = 0x0010_0000;
-        const PROBLEM_RESOLVED        = 0x0020_0000;
-        const REFERENCE_ADDED         = 0x0000_0040;
-        const REFERENCE_REMOVED       = 0x0000_0080;
-        const RESYNCHRONISE           = 0x0000_0100;
-        const SEGMENT_MAPPED          = 0x0000_0200;
-        const SEGMENT_MAPPING_CHANGED = 0x0000_0400;
-        const SEGMENT_MAPPING_CREATED = 0x0000_0800;
-        const SEGMENT_UNMAPPED        = 0x0000_1000;
-        const SPACE_CREATED           = 0x0000_2000;
-        const SWITCH_ADDED            = 0x0000_4000;
-        const SWITCH_REMOVED          = 0x0000_8000;
-        const SYMBOL_ADDED            = 0x0001_0000;
-        const SYMBOL_CHANGED          = 0x0008_0000;
-        const SYMBOL_REMOVED          = 0x0002_0000;
+        const ADDRESS_SPACE_CREATED   = 0x0000_0001;
+        const BYTES_WRITTEN           = 0x0000_0002;
+        const FUNCTION_ADDED          = 0x0000_0004;
+        const FUNCTION_CHANGED        = 0x0000_0008;
+        const FUNCTION_PROPERTIES     = 0x0000_0010;
+        const FUNCTION_REMOVED        = 0x0000_0020;
+        const LIFTED_MATERIALISED     = 0x0000_0040;
+        const LIFTED_REMOVED          = 0x0000_0080;
+        const PROBLEM_RECORDED        = 0x0000_0100;
+        const PROBLEM_RESOLVED        = 0x0000_0200;
+        const REFERENCE_ADDED         = 0x0000_0400;
+        const REFERENCE_REMOVED       = 0x0000_0800;
+        const RESYNCHRONISE           = 0x0000_1000;
+        const SEGMENT_MAPPED          = 0x0000_2000;
+        const SEGMENT_MAPPING_CHANGED = 0x0000_4000;
+        const SEGMENT_MAPPING_CREATED = 0x0000_8000;
+        const SEGMENT_UNMAPPED        = 0x0001_0000;
+        const SWITCH_ADDED            = 0x0002_0000;
+        const SWITCH_REMOVED          = 0x0004_0000;
+        const SYMBOL_ADDED            = 0x0008_0000;
+        const SYMBOL_CHANGED          = 0x0010_0000;
+        const SYMBOL_REMOVED          = 0x0020_0000;
 
         const FUNCTIONS = Self::FUNCTION_ADDED.bits()
             | Self::FUNCTION_CHANGED.bits()
@@ -169,9 +169,9 @@ bitflags::bitflags! {
         const PROBLEMS = Self::PROBLEM_RECORDED.bits() | Self::PROBLEM_RESOLVED.bits();
         const REFERENCES = Self::REFERENCE_ADDED.bits() | Self::REFERENCE_REMOVED.bits();
         const SEGMENTS = Self::SEGMENT_MAPPED.bits()
-            | Self::SEGMENT_UNMAPPED.bits()
+            | Self::SEGMENT_MAPPING_CHANGED.bits()
             | Self::SEGMENT_MAPPING_CREATED.bits()
-            | Self::SEGMENT_MAPPING_CHANGED.bits();
+            | Self::SEGMENT_UNMAPPED.bits();
         const SWITCHES = Self::SWITCH_ADDED.bits() | Self::SWITCH_REMOVED.bits();
         const SYMBOLS = Self::SYMBOL_ADDED.bits()
             | Self::SYMBOL_CHANGED.bits()
@@ -207,6 +207,9 @@ impl ChangeKinds {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChangeRecord {
+    AddressSpaceCreated {
+        space: AddressSpaceId,
+    },
     BytesWritten {
         range: AddressRange,
     },
@@ -270,9 +273,6 @@ pub enum ChangeRecord {
         mapping: SegmentMappingId,
         range: AddressRange,
     },
-    SpaceCreated {
-        space: AddressSpaceId,
-    },
     SwitchAdded {
         branch: Address,
     },
@@ -296,6 +296,7 @@ pub enum ChangeRecord {
 impl ChangeRecord {
     pub fn kind(&self) -> ChangeKinds {
         match self {
+            Self::AddressSpaceCreated { .. } => ChangeKinds::ADDRESS_SPACE_CREATED,
             Self::BytesWritten { .. } => ChangeKinds::BYTES_WRITTEN,
             Self::FunctionAdded { .. } => ChangeKinds::FUNCTION_ADDED,
             Self::FunctionChanged {
@@ -316,7 +317,6 @@ impl ChangeRecord {
             Self::SegmentMappingChanged { .. } => ChangeKinds::SEGMENT_MAPPING_CHANGED,
             Self::SegmentMappingCreated { .. } => ChangeKinds::SEGMENT_MAPPING_CREATED,
             Self::SegmentUnmapped { .. } => ChangeKinds::SEGMENT_UNMAPPED,
-            Self::SpaceCreated { .. } => ChangeKinds::SPACE_CREATED,
             Self::SwitchAdded { .. } => ChangeKinds::SWITCH_ADDED,
             Self::SwitchRemoved { .. } => ChangeKinds::SWITCH_REMOVED,
             Self::SymbolAdded { .. } => ChangeKinds::SYMBOL_ADDED,
@@ -344,6 +344,16 @@ impl ChangeRecord {
                     kind: FunctionChangeKind::Properties,
                     ..
                 }
+        )
+    }
+
+    pub fn requires_retraction(&self) -> bool {
+        matches!(
+            self,
+            Self::BytesWritten { .. }
+                | Self::SegmentMapped { .. }
+                | Self::SegmentMappingChanged { .. }
+                | Self::SegmentUnmapped { .. }
         )
     }
 
@@ -381,7 +391,7 @@ impl ChangeRecord {
             | Self::LiftedMaterialised { .. }
             | Self::LiftedRemoved { .. }
             | Self::SegmentMappingCreated { .. }
-            | Self::SpaceCreated { .. } => SmallVec::new(),
+            | Self::AddressSpaceCreated { .. } => SmallVec::new(),
         }
     }
 }

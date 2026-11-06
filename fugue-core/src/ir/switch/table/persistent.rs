@@ -2,9 +2,9 @@ use std::ops::Bound;
 use std::sync::Arc;
 
 use super::{SwitchIndex, SwitchTableError};
-use crate::ir::Address;
 use crate::ir::persistent::{PersistentIdAllocator, PersistentIndexRebuilder, PersistentTable};
 use crate::ir::switch::{Switch, SwitchId};
+use crate::ir::{Address, AddressRange, AddressRangeSet};
 use crate::storage::entities::{
     CachedRef, Entity, EntityCache, EntityWrite, EntityWriteBatch, WriteBackWorker,
 };
@@ -41,7 +41,7 @@ impl SwitchTable {
 
         for entry in entries.try_iter_range(Bound::Unbounded)? {
             let (id, switch) = entry?;
-            index.insert(id, switch.branch());
+            index.insert(switch.as_ref());
             if let Some(rebuilder) = &mut rebuilder {
                 rebuilder.append(id, |_| Ok(()))?;
             }
@@ -59,10 +59,6 @@ impl SwitchTable {
             entries,
             storage,
         })
-    }
-
-    pub(crate) fn flush(&self) -> Result<(), EntityStorageError> {
-        self.entries.flush()
     }
 
     pub(crate) fn pending_id(&self, offset: usize) -> SwitchId {
@@ -112,6 +108,13 @@ impl SwitchTable {
             .filter_map(|(_, id)| self.entries.get(&id))
     }
 
+    pub(crate) fn overlaps(&self, range: &AddressRange) -> impl Iterator<Item = Ref<'_>> + '_ {
+        self.index
+            .overlaps(range)
+            .into_iter()
+            .filter_map(|id| self.entries.get(&id))
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.index.is_empty()
     }
@@ -132,6 +135,10 @@ impl SwitchTable {
             .append_transition(reservations, releases, added, removed, writes)
     }
 
+    pub(crate) fn flush(&self) -> Result<(), EntityStorageError> {
+        self.entries.flush()
+    }
+
     pub(crate) fn insert<F>(&mut self, branch: Address, f: F) -> Result<SwitchId, SwitchTableError>
     where
         F: FnOnce(SwitchId, Address) -> Result<Switch, SwitchTableError>,
@@ -141,6 +148,7 @@ impl SwitchTable {
             if switch.branch() != branch {
                 return Err(SwitchTableError::AddressMismatch);
             }
+            self.reindex(&switch);
             self.entries.try_insert(existing, switch)?;
             return Ok(existing);
         }
@@ -169,16 +177,16 @@ impl SwitchTable {
         )?;
         self.entries.flush()?;
         self.storage.write_batch(&writes)?;
+        self.index.insert(&switch);
         self.entries.publish_insert(id, switch, encoded_size);
         self.allocator
             .publish_transition(&reservations, reservations.len(), releases.len());
-        self.index.insert(id, branch);
 
         Ok(id)
     }
 
     pub(crate) fn try_modify_by_id<R>(
-        &self,
+        &mut self,
         id: SwitchId,
         f: impl FnOnce(&mut Switch) -> R,
     ) -> Result<Option<R>, EntityStorageError> {
@@ -188,6 +196,7 @@ impl SwitchTable {
         let mut switch = previous.as_ref().clone();
         drop(previous);
         let result = f(&mut switch);
+        self.reindex(&switch);
         self.entries.try_insert(id, switch)?;
 
         Ok(Some(result))
@@ -205,9 +214,8 @@ impl SwitchTable {
     }
 
     pub(crate) fn try_remove_by_id(&mut self, id: SwitchId) -> Result<bool, EntityStorageError> {
-        let branch = match self.entries.try_get(&id)? {
-            Some(switch) => switch.branch(),
-            None => return Ok(false),
+        let Some(switch) = self.entries.try_get(&id)? else {
+            return Ok(false);
         };
 
         let mut writes = EntityWriteBatch::new();
@@ -216,9 +224,9 @@ impl SwitchTable {
             .append_transition(&[], &[id], 0, 1, &mut writes)?;
         self.entries.flush()?;
         self.storage.write_batch(&writes)?;
+        self.index.remove(id, switch.branch(), &switch.coverage());
         self.entries.publish_remove(&id);
         self.allocator.publish_transition(&[], 0, 1);
-        self.index.remove(branch);
 
         Ok(true)
     }
@@ -243,15 +251,37 @@ impl SwitchTable {
             .publish_transition(reservations, added, removed);
     }
 
-    pub(crate) fn publish_upsert(&mut self, switch: Switch, encoded_size: usize) {
+    pub(crate) fn publish_upsert(
+        &mut self,
+        switch: Switch,
+        encoded_size: usize,
+        previous: Option<SwitchId>,
+        previous_coverage: &AddressRangeSet,
+    ) {
         let id = switch.id();
-        let branch = switch.branch();
+        if let Some(previous) = previous {
+            self.index
+                .remove(previous, switch.branch(), previous_coverage);
+        }
+        self.index.insert(&switch);
         self.entries.publish_insert(id, switch, encoded_size);
-        self.index.insert(id, branch);
     }
 
-    pub(crate) fn publish_remove(&mut self, id: SwitchId, branch: Address) {
+    pub(crate) fn publish_remove(
+        &mut self,
+        id: SwitchId,
+        branch: Address,
+        previous_coverage: &AddressRangeSet,
+    ) {
+        self.index.remove(id, branch, previous_coverage);
         self.entries.publish_remove(&id);
-        self.index.remove(branch);
+    }
+
+    fn reindex(&mut self, switch: &Switch) {
+        if let Some(previous) = self.entries.get(&switch.id()) {
+            self.index
+                .remove(previous.id(), previous.branch(), &previous.coverage());
+        }
+        self.index.insert(switch);
     }
 }

@@ -867,11 +867,8 @@ impl AddressRange {
         self.end
     }
 
-    pub fn size(&self) -> u64 {
-        self.end
-            .offset()
-            .saturating_sub(self.start.offset())
-            .saturating_add(1)
+    pub fn size(&self) -> Option<u64> {
+        self.raw_range().size()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1126,6 +1123,15 @@ where
         self.0.len()
     }
 
+    pub fn ranges(&self) -> impl Iterator<Item = (RangeInclusive<RawAddress>, &V)> {
+        self.0.iter().map(|(range, value)| {
+            (
+                RawAddress::from(*range.start())..=RawAddress::from(*range.end()),
+                value,
+            )
+        })
+    }
+
     pub fn overlapping_ranges(
         &self,
         range: impl RangeBounds<RawAddress>,
@@ -1192,6 +1198,11 @@ where
         let previous = self.0.get(&address).cloned();
         self.0.remove(address..=address);
         previous
+    }
+
+    pub fn remove_range(&mut self, range: impl Into<RangeInclusive<RawAddress>>) {
+        let range = range.into();
+        self.0.remove(range.start().offset()..=range.end().offset());
     }
 
     pub fn clear(&mut self) {
@@ -1387,14 +1398,32 @@ where
     S: rkyv::rancor::Fallible + rkyv::ser::Writer + rkyv::ser::Allocator + ?Sized,
 {
     fn serialize(&self, serialiser: &mut S) -> Result<Self::Resolver, S::Error> {
-        rkyv::vec::ArchivedVec::<ArchivedRawAddressRun<V>>::serialize_from_unknown_length_iter(
-            &mut self.0.iter().map(|(range, value)| RawAddressRunRef {
+        let runs = || {
+            self.0.iter().map(|(range, value)| RawAddressRunRef {
                 start: RawAddress::from(*range.start()),
                 last: RawAddress::from(*range.end()),
                 value,
-            }),
+            })
+        };
+
+        rkyv::util::SerVec::with_capacity(
             serialiser,
-        )
+            self.range_count(),
+            |resolvers, serialiser| {
+                for run in runs() {
+                    resolvers.push(rkyv::Serialize::serialize(&run, serialiser)?);
+                }
+
+                let pos = rkyv::ser::WriterExt::align_for::<ArchivedRawAddressRun<V>>(serialiser)?;
+                for (run, resolver) in runs().zip(resolvers.drain()) {
+                    unsafe {
+                        rkyv::ser::WriterExt::resolve_aligned(serialiser, &run, resolver)?;
+                    }
+                }
+
+                Ok(rkyv::vec::VecResolver::from_pos(pos))
+            },
+        )?
     }
 }
 
@@ -1734,6 +1763,10 @@ impl From<&Address> for usize {
 
 impl Address {
     pub const MINIMUM: Self = Self::zero(AddressSpaceId::new(0));
+    pub const MAXIMUM: Self = Self {
+        space: AddressSpaceId::new(u16::MAX as usize),
+        address: RawAddress::MAX,
+    };
 
     pub fn new(space: AddressSpaceId, address: impl Into<RawAddress>) -> Self {
         Self {
@@ -2228,7 +2261,7 @@ mod test {
         assert!(span.contains(RawAddress::from(0x1fffu64)));
         assert!(!span.contains(RawAddress::from(0xfffu64)));
         assert!(!span.contains(RawAddress::from(0x2000u64)));
-        assert_eq!(span.size(), 0x1000);
+        assert_eq!(span.size(), Some(0x1000));
         assert!(!span.is_empty());
     }
 

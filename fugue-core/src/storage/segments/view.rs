@@ -69,7 +69,9 @@ impl<'a> SegmentMappingView<'a> {
     }
 
     pub fn size(&self) -> u64 {
-        self.range.size()
+        self.range
+            .size()
+            .expect("mapping view is bounded by a validated mapping")
     }
 
     pub fn contains(&self, addr: impl Into<Address>) -> bool {

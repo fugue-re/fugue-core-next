@@ -29,6 +29,16 @@ impl ProjectTransaction<'_> {
             .map_err(ProjectError::from)
     }
 
+    pub(crate) fn merge_derived_references(
+        &mut self,
+        provenance: ReferenceProvenance,
+        references: impl IntoIterator<Item = Reference>,
+    ) -> Result<bool, ProjectError> {
+        self.reference_staging
+            .merge_derived_references(&self.project.references, provenance, references)
+            .map_err(ProjectError::from)
+    }
+
     pub fn add_reference(&mut self, reference: Reference) -> Result<bool, ProjectError> {
         self.reference_staging
             .insert(
@@ -380,9 +390,10 @@ mod test {
         assert!(reference.is_read());
         assert!(reference.origin().is_derived());
 
+        let reference_target = ReferenceTarget::from(target);
         let incoming = project
             .references
-            .references_to(ReferenceTarget::from(target), None)?
+            .references_to(reference_target..=reference_target, None)?
             .collect::<Result<Vec<_>, _>>()?;
         assert!(
             incoming

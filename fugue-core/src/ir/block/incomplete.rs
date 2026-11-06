@@ -58,6 +58,11 @@ impl IncompleteCodeBlock {
         self.size as usize
     }
 
+    pub fn address_range(&self) -> AddressRange {
+        AddressRange::from_size(self.start, u64::from(self.size))
+            .expect("code block range must fit within its address space")
+    }
+
     pub fn is_empty(&self) -> bool {
         self.size == 0
     }

@@ -7,8 +7,7 @@ use crate::extension;
 use crate::il::common::{IlAnalyser, IlSourceSpan};
 use crate::il::pcode::{PCodeIr, PCodeLocation, PCodeLocationId, PCodeOpcode};
 use crate::ir::{
-    Address, AddressRangeSet, FunctionId, Reference, ReferenceKind, ReferenceOrigin,
-    ReferenceProperties, ReferenceProvenance,
+    Address, FunctionId, Reference, ReferenceOrigin, ReferenceProperties, ReferenceProvenance,
 };
 use crate::project::{AnalysisPhase, ChangeKinds, Project};
 use crate::storage::{SegmentMappingCache, SegmentMappingProvenance};
@@ -206,9 +205,6 @@ impl IlAnalyser for PCodeReferenceAnalyser {
         pcode: &PCodeIr,
     ) -> Result<(), AnalysisError> {
         let project = &context.project;
-        let mut coverage = AddressRangeSet::new();
-        pcode.reference_coverage_into(&mut coverage);
-
         let segments = project.segments();
         let mut mapping_cache = SegmentMappingCache::new();
         let references = self
@@ -239,12 +235,9 @@ impl IlAnalyser for PCodeReferenceAnalyser {
             })
             .collect();
 
-        context.updates.replace_derived_references(
-            coverage,
-            ReferenceKind::Data,
-            ReferenceProvenance::Function(function),
-            references,
-        );
+        context
+            .updates
+            .merge_derived_references(ReferenceProvenance::Function(function), references);
         Ok(())
     }
 

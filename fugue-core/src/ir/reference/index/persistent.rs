@@ -4,10 +4,12 @@ use std::sync::Arc;
 use bytes::Bytes;
 use rustc_hash::FxHashSet;
 
-use super::{InverseReferenceKey, PreparedReferenceIndexRecord, ReferenceEntry};
-use crate::ir::persistent::{cursor_bound, cursor_bound_or_minimum};
-use crate::ir::reference::{Reference, ReferenceKey, ReferenceKind, ReferenceTarget};
-use crate::ir::{Address, IndexMetadata};
+use crate::ir::IndexMetadata;
+use crate::ir::persistent::cursor_bound;
+use crate::ir::reference::index::{
+    InverseReferenceKey, PreparedReferenceIndexRecord, ReferenceEntry,
+};
+use crate::ir::reference::{Reference, ReferenceKey};
 use crate::storage::EntityStorage;
 use crate::storage::entities::{
     Entity, EntityCache, EntityStorageError, EntityWrite, EntityWriteBatch, ProjectEntity,
@@ -49,18 +51,20 @@ impl ReferenceIndex {
 
     pub(crate) fn references_from(
         &self,
-        from: Address,
-        after: Option<ReferenceKey>,
+        bounds: (Bound<ReferenceKey>, Bound<ReferenceKey>),
     ) -> Result<impl Iterator<Item = Result<Reference, EntityStorageError>> + '_, EntityStorageError>
     {
-        let start = cursor_bound_or_minimum(
-            after,
-            ReferenceKey::new(from, ReferenceTarget::minimum(), ReferenceKind::Flow),
-        );
+        let (start, end) = bounds;
         Ok(self
             .forward
             .try_iter_range(start.as_ref())?
-            .take_while(move |result| result.as_ref().map_or(true, |(key, _)| key.from() == from))
+            .take_while(move |result| {
+                result.as_ref().map_or(true, |(key, _)| match end {
+                    Bound::Included(end) => *key <= end,
+                    Bound::Excluded(end) => *key < end,
+                    Bound::Unbounded => true,
+                })
+            })
             .map(move |result| {
                 result.map(|(key, cached)| {
                     cached
@@ -73,23 +77,19 @@ impl ReferenceIndex {
 
     pub(crate) fn references_to(
         &self,
-        target: ReferenceTarget,
-        after: Option<ReferenceKey>,
+        bounds: (Bound<InverseReferenceKey>, Bound<InverseReferenceKey>),
     ) -> Result<impl Iterator<Item = Result<Reference, EntityStorageError>> + '_, EntityStorageError>
     {
-        let after =
-            after.map(|after| InverseReferenceKey::new(after.target(), after.from(), after.kind()));
-        let start = cursor_bound_or_minimum(
-            after,
-            InverseReferenceKey::new(target, Address::MINIMUM, ReferenceKind::Flow),
-        );
+        let (start, end) = bounds;
         Ok(self
             .inverse
             .try_iter_range(start.as_ref())?
             .take_while(move |result| {
-                result
-                    .as_ref()
-                    .map_or(true, |(key, _)| key.target() == target)
+                result.as_ref().map_or(true, |(key, _)| match end {
+                    Bound::Included(end) => *key <= end,
+                    Bound::Excluded(end) => *key < end,
+                    Bound::Unbounded => true,
+                })
             })
             .map(move |result| {
                 result.map(|(key, cached)| {
@@ -99,27 +99,6 @@ impl ReferenceIndex {
                         .expect("stored reference entry must contain a visible reference")
                 })
             }))
-    }
-
-    pub(crate) fn collect_range(
-        &self,
-        start: &ReferenceKey,
-        end: Address,
-        references: &mut Vec<Reference>,
-    ) -> Result<(), EntityStorageError> {
-        for result in self.forward.try_iter_range(Bound::Included(start))? {
-            let (key, cached) = result?;
-            if key.from() > end {
-                break;
-            }
-            references.push(
-                cached
-                    .as_ref()
-                    .materialise(key)
-                    .expect("stored reference entry must contain a visible reference"),
-            );
-        }
-        Ok(())
     }
 
     pub(crate) fn mark_current(&self, revision: Revision) -> Result<(), EntityStorageError> {

@@ -3,6 +3,7 @@ use std::collections::hash_map::Entry;
 use std::sync::Arc;
 
 use iset::IntervalMap;
+use itertools::Either;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
@@ -297,6 +298,16 @@ impl CodeBlockTable {
         match self {
             Self::Persistent(table) => Box::new(table.overlaps(range).map(EntityRef::cached)),
             Self::Transient(table) => Box::new(table.overlaps(range).map(EntityRef::borrowed)),
+        }
+    }
+
+    pub(crate) fn ids_overlapping<'a>(
+        &'a self,
+        range: &'a AddressRange,
+    ) -> impl Iterator<Item = CodeBlockId> + 'a {
+        match self {
+            Self::Persistent(table) => Either::Left(table.ids_overlapping(range).into_iter()),
+            Self::Transient(table) => Either::Right(table.ids_overlapping(range)),
         }
     }
 

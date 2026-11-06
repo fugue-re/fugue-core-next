@@ -38,13 +38,13 @@ use fugue_core::loader::{
 use fugue_core::project::{ChangeCategory, ChangeKinds, ChangeRecord, ChangeSource, Project};
 use fugue_core::queries::{CallEdge, MappingEntity, QueryError, QueryPage, SymbolEntity};
 use fugue_core::storage::{
-    BufferedEntityWriter, DEFAULT_SPACE_ID, ENTITY_PROJECT_REVISION_ID, EntityBytesReadTransaction,
-    EntityBytesWriteTransaction, EntityStorage, EntityStorageError, EntityStorageProvider,
-    EntityStorageProviderFromLoadable, EntityStorageWriteTransaction, InMemoryEntityStorage,
-    InMemorySegmentStorage, PERSISTENT, ProjectEntity, SegmentMappingBuilder, SegmentMappingFlags,
-    SegmentMappingKind, SegmentMappingProvenance, SegmentProperties, SegmentStorage,
-    StorageContainer, StoragePersistence, StorageProvider, StorageProviderError,
-    TransientStorageProvider,
+    AddressSpace, AddressSpaceKind, BufferedEntityWriter, DEFAULT_SPACE_ID,
+    ENTITY_PROJECT_REVISION_ID, EntityBytesReadTransaction, EntityBytesWriteTransaction,
+    EntityStorage, EntityStorageError, EntityStorageProvider, EntityStorageProviderFromLoadable,
+    EntityStorageWriteTransaction, InMemoryEntityStorage, InMemorySegmentStorage, PERSISTENT,
+    ProjectEntity, SegmentMappingBuilder, SegmentMappingFlags, SegmentMappingKind,
+    SegmentMappingProvenance, SegmentProperties, SegmentStorage, StorageContainer,
+    StoragePersistence, StorageProvider, StorageProviderError, TransientStorageProvider,
 };
 #[cfg(feature = "sqlite")]
 use fugue_core::storage::{
@@ -2302,7 +2302,7 @@ fn test_engine_mapping_edits_materialise_changes() -> Result<(), Box<dyn Error>>
         created_space
             .changes()
             .records()
-            .contains(&ChangeRecord::SpaceCreated { space: extra_space })
+            .contains(&ChangeRecord::AddressSpaceCreated { space: extra_space })
     );
 
     let placed = engine.add_mapping_to_space(extra_space, created_id)?;
@@ -2419,6 +2419,101 @@ fn test_engine_mapping_edits_materialise_changes() -> Result<(), Box<dyn Error>>
             .iter()
             .any(|record| record.mapping() == mapping_id)
     );
+
+    Ok(())
+}
+
+#[test]
+fn test_synthetic_mapping_in_named_overlay() -> Result<(), Box<dyn Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let project = Project::new_transient(&loader)?;
+    let site = project.entry_point().expect("fixture has an entry point");
+    let engine = AnalysisEngine::new(project)?;
+
+    let created = engine.create_space_with(
+        "stack-strings",
+        AddressSpaceKind::Overlay { base: site.space() },
+    )?;
+    let space = created.space();
+    assert!(
+        created
+            .changes()
+            .records()
+            .contains(&ChangeRecord::AddressSpaceCreated { space })
+    );
+
+    let start = Address::new(space, site.offset());
+    let bytes = b"stack string";
+    let created =
+        engine.create_synthetic_mapping(start, &bytes[..], SegmentProperties::PERM_READ)?;
+    let mapping = created.mapping();
+    let range = AddressRange::from_size(start, bytes.len() as u64).expect("range is valid");
+    assert!(
+        created
+            .changes()
+            .records()
+            .contains(&ChangeRecord::SegmentMappingCreated { mapping })
+    );
+    assert!(
+        created
+            .changes()
+            .records()
+            .contains(&ChangeRecord::SegmentMapped { mapping, range })
+    );
+
+    let project = engine.into_project()?;
+    assert_eq!(
+        project
+            .segments()
+            .address_space_by_name("stack-strings")
+            .map(AddressSpace::id),
+        Some(space)
+    );
+    let mut read = [0u8; 12];
+    project.segments().read_bytes_exact(start, &mut read)?;
+    assert_eq!(&read, bytes);
+
+    Ok(())
+}
+
+#[test]
+fn test_synthetic_mapping_after_removal_keeps_live_bytes() -> Result<(), Box<dyn Error>> {
+    let loader = Loader::from_file("tests/ls.elf")?;
+    let engine = AnalysisEngine::new(Project::new_transient(&loader)?)?;
+    let space = engine
+        .create_space_with("synthetic", AddressSpaceKind::Base)?
+        .space();
+
+    let first = engine
+        .create_synthetic_mapping(
+            Address::new(space, 0x1000u64),
+            &b"first"[..],
+            SegmentProperties::PERM_READ,
+        )?
+        .mapping();
+    engine.create_synthetic_mapping(
+        Address::new(space, 0x2000u64),
+        &b"second"[..],
+        SegmentProperties::PERM_READ,
+    )?;
+    engine.remove_mapping(first)?;
+    engine.create_synthetic_mapping(
+        Address::new(space, 0x3000u64),
+        &b"third"[..],
+        SegmentProperties::PERM_READ,
+    )?;
+
+    let project = engine.into_project()?;
+    let mut second = [0u8; 6];
+    project
+        .segments()
+        .read_bytes_exact(Address::new(space, 0x2000u64), &mut second)?;
+    assert_eq!(&second, b"second");
+    let mut third = [0u8; 5];
+    project
+        .segments()
+        .read_bytes_exact(Address::new(space, 0x3000u64), &mut third)?;
+    assert_eq!(&third, b"third");
 
     Ok(())
 }
@@ -3228,7 +3323,7 @@ fn test_subscription_region_filter_wakes_only_inside_region() -> Result<(), Box<
 
     let inside_region = engine
         .subscribe()
-        .with_kinds(ChangeKinds::BYTES_WRITTEN | ChangeKinds::SPACE_CREATED)
+        .with_kinds(ChangeKinds::BYTES_WRITTEN | ChangeKinds::ADDRESS_SPACE_CREATED)
         .with_region(region)
         .with_capacity(16)
         .build()?;
@@ -3247,7 +3342,7 @@ fn test_subscription_region_filter_wakes_only_inside_region() -> Result<(), Box<
 
     engine.create_space()?;
     let global = inside_region.recv_timeout(Duration::from_secs(1))?;
-    assert!(global.contains(ChangeKinds::SPACE_CREATED));
+    assert!(global.contains(ChangeKinds::ADDRESS_SPACE_CREATED));
 
     Ok(())
 }

@@ -1,8 +1,8 @@
 use smallvec::SmallVec;
 
 use crate::ir::{
-    Address, AddressTable, AddressWithContext, Id, RawAddress, Reference, ReferenceOrigin,
-    ReferenceProperties,
+    Address, AddressRangeSet, AddressTable, AddressWithContext, Id, RawAddress, Reference,
+    ReferenceOrigin, ReferenceProperties,
 };
 use crate::storage::entities::schema::{ENTITY_KEY_SWITCH_ID, ENTITY_SWITCH_ID};
 use crate::storage::entities::{Entity, EntityId, EntityKey, EntityKeyId, MutableEntity};
@@ -89,6 +89,19 @@ impl Switch {
 
     pub fn model(&self) -> &SwitchModel {
         &self.model
+    }
+
+    pub fn coverage(&self) -> AddressRangeSet {
+        let mut covered = AddressRangeSet::new();
+        self.coverage_into(&mut covered);
+        covered
+    }
+
+    pub fn coverage_into(&self, covered: &mut AddressRangeSet) {
+        covered.insert(self.branch);
+        for range in self.model.data_tables().filter_map(AddressTable::range) {
+            covered.insert_range(range);
+        }
     }
 
     pub fn cases(&self) -> &[SwitchCase] {

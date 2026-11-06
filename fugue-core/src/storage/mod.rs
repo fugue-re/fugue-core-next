@@ -46,9 +46,10 @@ pub use project::{FundamentalProjectEntity, PersistableProjectEntity, ProjectEnt
 
 pub(crate) mod segments;
 pub use segments::{
-    AddressSpace, AddressSpaceError, AddressSpaceId, AddressSpaceKind, DEFAULT_SPACE_ID,
-    DefaultPersistentSegmentStorage, DefaultTransientSegmentStorage, InMemorySegmentStorage,
-    MemoryMappedSegmentStorage, OverlayChunk, OverlayTree, SegmentChunk, SegmentMapping,
+    ATTRIBUTE_SEGMENT_STORAGE_SYNTHETIC_PROVIDER, AddressSpace, AddressSpaceError, AddressSpaceId,
+    AddressSpaceKind, DEFAULT_SPACE_ID, DefaultPersistentSegmentStorage,
+    DefaultTransientSegmentStorage, InMemorySegmentStorage, MemoryMappedSegmentStorage,
+    OverlayChunk, OverlayTree, PackedMemoryMappedSegmentStorage, SegmentChunk, SegmentMapping,
     SegmentMappingBuilder, SegmentMappingCache, SegmentMappingFlags, SegmentMappingHints,
     SegmentMappingId, SegmentMappingKind, SegmentMappingProvenance, SegmentMappingRef,
     SegmentMappingView, SegmentProperties, SegmentStorage, SegmentStorageDescriptor,

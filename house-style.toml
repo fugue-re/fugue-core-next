@@ -215,6 +215,20 @@ modules = ["crate::ir", "crate::storage::entities::cache"]
 reason = "worker-backed construction uses the agreed constructor vocabulary"
 
 [[vocabulary.term]]
+reject = "unowned"
+prefer = "orphaned"
+roles = ["field", "function", "local", "method", "type", "variant"]
+modules = ["crate::ir"]
+reason = "IR entities left without an owning function are orphaned"
+
+[[vocabulary.term]]
+reject = "unused"
+prefer = "orphaned"
+roles = ["field", "function", "local", "method", "type", "variant"]
+modules = ["crate::ir"]
+reason = "IR entities left without an owning function are orphaned"
+
+[[vocabulary.term]]
 reject = "from_sink"
 prefer = "new"
 roles = ["function", "method"]

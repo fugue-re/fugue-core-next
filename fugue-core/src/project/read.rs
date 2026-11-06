@@ -1,6 +1,6 @@
 use smallvec::SmallVec;
 
-use crate::ir::{AddressRange, AddressRangeSet};
+use crate::ir::{AddressRange, AddressRangeSet, RawAddress};
 use crate::project::{ChangeKinds, ChangeSet};
 
 pub(crate) const MAX_READ_RANGES: usize = 1024;
@@ -33,7 +33,15 @@ impl ReadSet {
         {
             ranges.insert_range(range);
             if ranges.range_count() > MAX_READ_RANGES {
-                self.record_unbounded(kinds);
+                let mut spaces = AddressRangeSet::new();
+                for (space, _) in ranges.spaces() {
+                    spaces.insert_range(AddressRange::new(
+                        space,
+                        RawAddress::zero(),
+                        RawAddress::MAX,
+                    ));
+                }
+                *ranges = spaces;
                 return true;
             }
             return false;
@@ -63,10 +71,10 @@ impl ReadSet {
             .any(|(observed, ranges)| observed.intersects(kinds) && ranges.intersects(regions))
     }
 
-    pub(crate) fn conflicts_with(&self, changes: &ChangeSet) -> bool {
+    pub(crate) fn conflicts_with(&self, changes: &ChangeSet, kinds: ChangeKinds) -> bool {
         changes.records().iter().any(|record| {
             let kind = record.kind();
-            if !self.observes(kind) {
+            if !kinds.contains(kind) || !self.observes(kind) {
                 return false;
             }
 

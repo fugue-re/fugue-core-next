@@ -546,8 +546,8 @@ impl FunctionTable {
         range: &'a AddressRange,
     ) -> impl Iterator<Item = Id<Function>> + 'a {
         let mut functions = SmallVec::<[FunctionId; 8]>::new();
-        for block in blocks.overlaps(range) {
-            for function in self.get_by_block_id(block.id()).iter() {
+        for block in blocks.ids_overlapping(range) {
+            for function in self.get_by_block_id(block).iter() {
                 if let Err(index) = functions.binary_search(&function) {
                     functions.insert(index, function);
                 }
@@ -624,6 +624,14 @@ impl FunctionTable {
         id: FunctionId,
     ) -> Result<Option<ReferenceOrigin>, IncompleteFunctionError> {
         staging.function_origin(self, id)
+    }
+
+    pub(crate) fn staged_by_switch_id(
+        &self,
+        staging: &FunctionTableStaging,
+        switch: SwitchId,
+    ) -> IdSet<Function> {
+        staging.by_switch(self, switch)
     }
 
     pub(crate) fn staged_overlaps(
@@ -860,10 +868,17 @@ impl FunctionTableStaging {
         })
     }
 
-    pub(crate) fn switches_without_membership(&self) -> impl Iterator<Item = SwitchId> + '_ {
+    pub(crate) fn orphaned_switches(&self) -> impl Iterator<Item = SwitchId> + '_ {
         self.by_switch
             .iter()
             .filter_map(|(&switch, functions)| functions.is_empty().then_some(switch))
+    }
+
+    fn by_switch(&self, functions: &FunctionTable, switch: SwitchId) -> IdSet<Function> {
+        self.by_switch
+            .get(&switch)
+            .cloned()
+            .unwrap_or_else(|| functions.get_by_switch_id(switch))
     }
 
     fn by_switch_mut<'a>(

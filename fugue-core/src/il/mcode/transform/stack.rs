@@ -793,10 +793,7 @@ mod test {
         let count = 256;
         let mut sites = Vec::with_capacity(count);
         for slot in 1..=count {
-            let size = push_constant(
-                &mut builder,
-                u64::try_from(slot).expect("slot is representable") * 8,
-            );
+            let size = push_constant(&mut builder, slot as u64 * 8);
             let address = push_binary(&mut builder, ECodeOpcode::Sub, stack_pointer, size);
             let value = push_wide_constant(&mut builder, 64);
             sites.push(push_store(&mut builder, space, address, value, memory));

@@ -72,7 +72,7 @@ impl<'analysis> SwitchIntervalRecovery<'analysis> {
         resolver: &mut SwitchResolver<'_, '_>,
     ) -> Option<RecoveredSwitch> {
         let (interval, guard, label_offset) = self.case_enumeration(layout.index(), branch)?;
-        let expected_count = interval.count().and_then(|count| u64::try_from(count).ok());
+        let expected_count = interval.count().map(|count| count as u64);
         let mut cases = mem::take(&mut self.cases);
         let mut evaluator = SwitchTargetEvaluator::new(self, branch.space());
         let case_enumerator = SwitchCaseEnumerator::new(self.config.max_cases());

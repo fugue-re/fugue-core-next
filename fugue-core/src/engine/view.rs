@@ -1,9 +1,10 @@
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::iter;
+use std::ops::Deref;
 use std::sync::Arc;
 
-use rangemap::RangeInclusiveMap;
+use smallvec::SmallVec;
 
 use crate::arch::Arch;
 use crate::engine::scheduler::{AnalyserId, IlAnalysisInputs};
@@ -12,7 +13,7 @@ use crate::il::registry::{IlGenerationSession, IlRegistry};
 use crate::ir::{
     Address, AddressRange, AddressRangeSet, CodeBlockId, CodeBlockRef, CodeBlockTable, FunctionId,
     FunctionRef, FunctionTable, IncompleteFunction, ProblemKind, ProblemRef, ProblemTable,
-    ReferenceIndex, SwitchRef, SwitchTable, SymbolTable,
+    RawAddressRangeMap, ReferenceIndex, SwitchRef, SwitchTable, SymbolTable,
 };
 use crate::lifter::Language;
 use crate::platform::Platform;
@@ -20,28 +21,50 @@ use crate::project::{ChangeKinds, Project, ProjectError, ReadSet};
 use crate::storage::segments::{AddressSpaceId, SegmentStorage, SegmentStorageError};
 use crate::types::Revision;
 
-struct AnalyserDependencies {
-    addressless: Option<Arc<ReadSet>>,
-    regional: BTreeMap<AddressSpaceId, RangeInclusiveMap<u64, Arc<ReadSet>>>,
-}
+#[derive(Clone)]
+struct DependencyReadSet(Arc<ReadSet>);
 
-impl AnalyserDependencies {
-    fn new() -> Self {
-        Self {
-            addressless: None,
-            regional: BTreeMap::new(),
-        }
+impl DependencyReadSet {
+    fn new(reads: ReadSet) -> Self {
+        Self(Arc::new(reads))
     }
 }
 
+impl Deref for DependencyReadSet {
+    type Target = ReadSet;
+
+    fn deref(&self) -> &ReadSet {
+        &self.0
+    }
+}
+
+impl PartialEq for DependencyReadSet {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for DependencyReadSet {}
+
+#[derive(Default)]
+struct AnalyserDependencies {
+    global: Option<DependencyReadSet>,
+    regional: BTreeMap<AddressSpaceId, RawAddressRangeMap<DependencyReadSet>>,
+}
+
+#[derive(Default)]
 pub(crate) struct DependencyInvalidation {
-    addressless: bool,
+    global: bool,
     regions: AddressRangeSet,
 }
 
 impl DependencyInvalidation {
-    pub(crate) fn has_addressless(&self) -> bool {
-        self.addressless
+    pub(crate) fn new(global: bool, regions: AddressRangeSet) -> Self {
+        Self { global, regions }
+    }
+
+    pub(crate) fn is_global(&self) -> bool {
+        self.global
     }
 
     pub(crate) fn regions(&self) -> &AddressRangeSet {
@@ -49,7 +72,7 @@ impl DependencyInvalidation {
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        !self.addressless && self.regions.is_empty()
+        !self.global && self.regions.is_empty()
     }
 }
 
@@ -58,9 +81,9 @@ pub(crate) struct DependencyIndex {
 }
 
 impl DependencyIndex {
-    pub(crate) fn with_analysers(count: usize) -> Self {
+    pub(crate) fn new(count: usize) -> Self {
         let mut entries = Vec::with_capacity(count);
-        entries.resize_with(count, AnalyserDependencies::new);
+        entries.resize_with(count, AnalyserDependencies::default);
         Self { entries }
     }
 
@@ -68,7 +91,8 @@ impl DependencyIndex {
         &mut self,
         analyser: AnalyserId,
         regions: &AddressRangeSet,
-        reads: ReadSet,
+        mut reads: ReadSet,
+        continuation: bool,
     ) {
         let entries = self
             .entries
@@ -76,19 +100,39 @@ impl DependencyIndex {
             .expect("scheduled analyser must have a dependency index");
 
         if regions.is_empty() {
-            entries.addressless = (!reads.is_empty()).then(|| Arc::new(reads));
+            if continuation && let Some(previous) = &entries.global {
+                reads.merge(previous);
+            }
+            entries.global = (!reads.is_empty()).then(|| DependencyReadSet::new(reads));
             return;
         }
 
-        let reads = (!reads.is_empty()).then(|| Arc::new(reads));
+        if continuation {
+            let mut previous = SmallVec::<[&DependencyReadSet; 4]>::new();
+            for region in regions.ranges() {
+                let Some(regional) = entries.regional.get(&region.space()) else {
+                    continue;
+                };
+                for (_, reads) in regional.overlapping_ranges(region.start()..=region.end()) {
+                    if !previous.contains(&reads) {
+                        previous.push(reads);
+                    }
+                }
+            }
+            for previous in previous {
+                reads.merge(previous);
+            }
+        }
+
+        let reads = (!reads.is_empty()).then(|| DependencyReadSet::new(reads));
         for region in regions.ranges() {
             let regional = entries.regional.entry(region.space()).or_default();
-            let replacement = region.start().offset()..=region.end().offset();
+            let replacement = region.start()..=region.end();
 
             if let Some(reads) = reads.as_ref() {
-                regional.insert(replacement, reads.clone());
+                regional.insert_range(replacement, reads.clone());
             } else {
-                regional.remove(replacement);
+                regional.remove_range(replacement);
             }
         }
     }
@@ -100,34 +144,33 @@ impl DependencyIndex {
         changed: Option<&AddressRangeSet>,
     ) -> DependencyInvalidation {
         let Some(entries) = self.entries.get(analyser.index()) else {
-            return DependencyInvalidation {
-                addressless: false,
-                regions: AddressRangeSet::new(),
-            };
+            return DependencyInvalidation::default();
         };
 
         let affected = |reads: &ReadSet| match changed {
             Some(changed) => reads.intersects(kinds, changed),
             None => reads.observes(kinds),
         };
-        let addressless = entries.addressless.as_deref().is_some_and(&affected);
+        let global = entries.global.as_ref().is_some_and(|reads| affected(reads));
         let mut regions = AddressRangeSet::new();
+        let mut evaluated = SmallVec::<[(&DependencyReadSet, bool); 4]>::new();
         for (&space, regional) in &entries.regional {
-            for (range, reads) in regional.iter() {
-                if affected(reads) {
-                    regions.insert_range(AddressRange::new(
-                        space,
-                        (*range.start()).into(),
-                        (*range.end()).into(),
-                    ));
+            for (range, reads) in regional.ranges() {
+                let hit = match evaluated.iter().find(|(known, _)| *known == reads) {
+                    Some((_, hit)) => *hit,
+                    None => {
+                        let hit = affected(reads);
+                        evaluated.push((reads, hit));
+                        hit
+                    }
+                };
+                if hit {
+                    regions.insert_range(AddressRange::new(space, *range.start(), *range.end()));
                 }
             }
         }
 
-        DependencyInvalidation {
-            addressless,
-            regions,
-        }
+        DependencyInvalidation::new(global, regions)
     }
 }
 
@@ -185,7 +228,7 @@ impl<'a> ProjectView<'a> {
             .set(self.collapsed.get() || fork.collapsed.get() || collapsed);
     }
 
-    fn record(&self, kinds: ChangeKinds, range: AddressRange) {
+    pub fn add_dependency(&self, kinds: ChangeKinds, range: AddressRange) {
         if self.reads.borrow_mut().record(kinds, range) {
             self.collapsed.set(true);
         }
@@ -212,7 +255,7 @@ impl<'a> ProjectView<'a> {
     }
 
     pub fn is_non_returning_at(&self, address: Address) -> bool {
-        self.record(
+        self.add_dependency(
             ChangeKinds::SYMBOLS | ChangeKinds::FUNCTIONS,
             AddressRange::point(address),
         );
@@ -229,12 +272,12 @@ impl<'a> ProjectView<'a> {
     }
 
     pub fn function_at(&self, address: Address) -> Option<FunctionRef<'_>> {
-        self.record(ChangeKinds::FUNCTIONS, AddressRange::point(address));
+        self.add_dependency(ChangeKinds::FUNCTIONS, AddressRange::point(address));
         self.project.functions().get_by_address(address)
     }
 
     pub fn contains_function_at(&self, address: Address) -> bool {
-        self.record(ChangeKinds::FUNCTIONS, AddressRange::point(address));
+        self.add_dependency(ChangeKinds::FUNCTIONS, AddressRange::point(address));
         self.project.functions().contains(address)
     }
 
@@ -246,7 +289,7 @@ impl<'a> ProjectView<'a> {
     pub(crate) fn function_ids_overlapping(&self, regions: &AddressRangeSet) -> Vec<FunctionId> {
         let mut functions = Vec::new();
         for range in regions.ranges() {
-            self.record(ChangeKinds::FUNCTIONS, range);
+            self.add_dependency(ChangeKinds::FUNCTIONS, range);
             functions.extend(
                 self.project
                     .functions()
@@ -263,7 +306,7 @@ impl<'a> ProjectView<'a> {
             self.record_unbounded(ChangeKinds::FUNCTIONS);
             return None;
         };
-        self.record(
+        self.add_dependency(
             ChangeKinds::FUNCTIONS,
             AddressRange::new(
                 block.address().space(),
@@ -275,24 +318,24 @@ impl<'a> ProjectView<'a> {
     }
 
     pub fn switch_at(&self, branch: Address) -> Option<SwitchRef<'_>> {
-        self.record(ChangeKinds::SWITCHES, AddressRange::point(branch));
+        self.add_dependency(ChangeKinds::SWITCHES, AddressRange::point(branch));
         self.project.switches().get_by_branch(branch)
     }
 
     pub fn contains_problem(&self, address: Address) -> bool {
-        self.record(ChangeKinds::PROBLEMS, AddressRange::point(address));
+        self.add_dependency(ChangeKinds::PROBLEMS, AddressRange::point(address));
         self.project.problems().contains(address)
     }
 
     pub fn contains_problem_kind(&self, address: Address, kinds: &[ProblemKind]) -> bool {
-        self.record(ChangeKinds::PROBLEMS, AddressRange::point(address));
+        self.add_dependency(ChangeKinds::PROBLEMS, AddressRange::point(address));
         kinds
             .iter()
             .any(|kind| self.project.problems().get(address, *kind).is_some())
     }
 
     pub fn problem_at(&self, address: Address, kind: ProblemKind) -> Option<ProblemRef<'_>> {
-        self.record(ChangeKinds::PROBLEMS, AddressRange::point(address));
+        self.add_dependency(ChangeKinds::PROBLEMS, AddressRange::point(address));
         self.project.problems().get(address, kind)
     }
 
@@ -301,7 +344,7 @@ impl<'a> ProjectView<'a> {
         address: Address,
         kinds: &[ProblemKind],
     ) -> Option<ProblemRef<'_>> {
-        self.record(ChangeKinds::PROBLEMS, AddressRange::point(address));
+        self.add_dependency(ChangeKinds::PROBLEMS, AddressRange::point(address));
         kinds
             .iter()
             .find_map(|kind| self.project.problems().get(address, *kind))
@@ -314,8 +357,8 @@ impl<'a> ProjectView<'a> {
     ) -> Result<usize, SegmentStorageError> {
         let read = self.project.segments().read_bytes(address, bytes)?;
         if !bytes.is_empty() {
-            self.record(
-                ChangeKinds::BYTES_WRITTEN | ChangeKinds::SEGMENTS,
+            self.add_dependency(
+                ChangeKinds::BYTES_WRITTEN,
                 if read == 0 {
                     AddressRange::point(address)
                 } else {
@@ -437,7 +480,7 @@ impl<'a> ProjectView<'a> {
     }
 
     pub fn segments(&self) -> &SegmentStorage {
-        self.record_unbounded(ChangeKinds::SEGMENTS | ChangeKinds::SPACE_CREATED);
+        self.record_unbounded(ChangeKinds::SEGMENTS | ChangeKinds::ADDRESS_SPACE_CREATED);
         self.project.segments()
     }
 
@@ -449,6 +492,9 @@ impl<'a> ProjectView<'a> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::engine::TRACKED_DEPENDENCY_KINDS;
+    use crate::il::common::IlArtefact;
+    use crate::il::pcode::PCodeIr;
     use crate::ir::Address;
     use crate::project::read::MAX_READ_RANGES;
     use crate::project::{ChangeRecord, ChangeSet};
@@ -516,6 +562,16 @@ mod test {
             "an unbounded number of distinct reads must collapse, not grow without limit"
         );
         assert!(reads.intersects(ChangeKinds::PROBLEMS, &regions(u64::MAX - 8, u64::MAX - 1)));
+        let mut other_space = AddressRangeSet::new();
+        other_space.insert_range(AddressRange::new(
+            AddressSpaceId::from(7u8),
+            0x1000u64.into(),
+            0x1fffu64.into(),
+        ));
+        assert!(
+            !reads.intersects(ChangeKinds::PROBLEMS, &other_space),
+            "collapsing must stay within the spaces that were read"
+        );
     }
 
     #[test]
@@ -542,40 +598,48 @@ mod test {
             }],
         );
 
-        assert!(reads.conflicts_with(&overlapping));
-        assert!(!reads.conflicts_with(&elsewhere));
-        assert!(!reads.conflicts_with(&other_kind));
+        assert!(reads.conflicts_with(&overlapping, ChangeKinds::all()));
+        assert!(!reads.conflicts_with(&elsewhere, ChangeKinds::all()));
+        assert!(!reads.conflicts_with(&other_kind, ChangeKinds::all()));
     }
 
     #[test]
-    fn addressless_changes_conflict_with_unbounded_reads() {
+    fn global_changes_conflict_with_unbounded_reads_of_tracked_kinds() {
         let mut reads = ReadSet::new();
-        reads.record_unbounded(ChangeKinds::SPACE_CREATED);
-        let changes = ChangeSet::with_records(
+        reads.record_unbounded(ChangeKinds::LIFTED | ChangeKinds::ADDRESS_SPACE_CREATED);
+        let lifted = ChangeSet::with_records(
             1u64.into(),
-            [ChangeRecord::SpaceCreated {
+            [ChangeRecord::LiftedRemoved {
+                function: FunctionId::default(),
+                form: PCodeIr::FORM,
+            }],
+        );
+        let space = ChangeSet::with_records(
+            2u64.into(),
+            [ChangeRecord::AddressSpaceCreated {
                 space: AddressSpaceId::from(7u8),
             }],
         );
 
-        assert!(reads.conflicts_with(&changes));
+        assert!(reads.conflicts_with(&lifted, TRACKED_DEPENDENCY_KINDS));
+        assert!(!reads.conflicts_with(&space, TRACKED_DEPENDENCY_KINDS));
     }
 
     #[test]
     fn the_index_reports_only_regions_whose_reads_intersect() {
-        let mut index = DependencyIndex::with_analysers(1);
+        let mut index = DependencyIndex::new(1);
 
         let mut first = AddressRangeSet::new();
         first.insert_range(range(0x1000, 0x1fff));
         let mut first_reads = ReadSet::new();
         first_reads.record(ChangeKinds::SYMBOLS, range(0x8000, 0x80ff));
-        index.record(AnalyserId::new(0), &first, first_reads);
+        index.record(AnalyserId::new(0), &first, first_reads, false);
 
         let mut second = AddressRangeSet::new();
         second.insert_range(range(0x3000, 0x3fff));
         let mut second_reads = ReadSet::new();
         second_reads.record(ChangeKinds::SYMBOLS, range(0x9000, 0x90ff));
-        index.record(AnalyserId::new(0), &second, second_reads);
+        index.record(AnalyserId::new(0), &second, second_reads, false);
 
         let invalidated = index.invalidated(
             AnalyserId::new(0),
@@ -599,14 +663,24 @@ mod test {
 
     #[test]
     fn replacing_a_production_removes_superseded_dependencies() {
-        let mut index = DependencyIndex::with_analysers(1);
+        let mut index = DependencyIndex::new(1);
         let mut old_reads = ReadSet::new();
         old_reads.record(ChangeKinds::SYMBOLS, range(0x8000, 0x80ff));
-        index.record(AnalyserId::new(0), &regions(0x1000, 0x1fff), old_reads);
+        index.record(
+            AnalyserId::new(0),
+            &regions(0x1000, 0x1fff),
+            old_reads,
+            false,
+        );
 
         let mut new_reads = ReadSet::new();
         new_reads.record(ChangeKinds::SWITCHES, range(0x9000, 0x90ff));
-        index.record(AnalyserId::new(0), &regions(0x1400, 0x17ff), new_reads);
+        index.record(
+            AnalyserId::new(0),
+            &regions(0x1400, 0x17ff),
+            new_reads,
+            false,
+        );
 
         let stale_old = index.invalidated(
             AnalyserId::new(0),
@@ -629,7 +703,7 @@ mod test {
 
     #[test]
     fn replacing_a_production_preserves_other_address_spaces() {
-        let mut index = DependencyIndex::with_analysers(1);
+        let mut index = DependencyIndex::new(1);
         let other_space = AddressSpaceId::from(7u8);
         let mut produced = regions(0x1000, 0x1fff);
         produced.insert_range(AddressRange::new(
@@ -639,11 +713,16 @@ mod test {
         ));
         let mut old_reads = ReadSet::new();
         old_reads.record_unbounded(ChangeKinds::SYMBOLS);
-        index.record(AnalyserId::new(0), &produced, old_reads);
+        index.record(AnalyserId::new(0), &produced, old_reads, false);
 
         let mut new_reads = ReadSet::new();
         new_reads.record_unbounded(ChangeKinds::SWITCHES);
-        index.record(AnalyserId::new(0), &regions(0x1000, 0x1fff), new_reads);
+        index.record(
+            AnalyserId::new(0),
+            &regions(0x1000, 0x1fff),
+            new_reads,
+            false,
+        );
 
         let stale_old = index.invalidated(AnalyserId::new(0), ChangeKinds::SYMBOLS, None);
         assert!(!stale_old.regions().contains(Address::from(0x1800u64)));
@@ -664,12 +743,17 @@ mod test {
 
     #[test]
     fn an_empty_replacement_removes_only_superseded_dependencies() {
-        let mut index = DependencyIndex::with_analysers(1);
+        let mut index = DependencyIndex::new(1);
         let mut reads = ReadSet::new();
         reads.record_unbounded(ChangeKinds::SYMBOLS);
-        index.record(AnalyserId::new(0), &regions(0x1000, 0x1fff), reads);
+        index.record(AnalyserId::new(0), &regions(0x1000, 0x1fff), reads, false);
 
-        index.record(AnalyserId::new(0), &regions(0x1400, 0x17ff), ReadSet::new());
+        index.record(
+            AnalyserId::new(0),
+            &regions(0x1400, 0x17ff),
+            ReadSet::new(),
+            false,
+        );
 
         let invalidated = index.invalidated(AnalyserId::new(0), ChangeKinds::SYMBOLS, None);
         assert!(invalidated.regions().contains(Address::from(0x1200u64)));
@@ -678,15 +762,16 @@ mod test {
     }
 
     #[test]
-    fn addressless_productions_retain_observed_dependencies() {
-        let mut index = DependencyIndex::with_analysers(1);
+    fn global_productions_retain_observed_dependencies() {
+        let mut index = DependencyIndex::new(1);
         let mut reads = ReadSet::new();
-        reads.record_unbounded(ChangeKinds::SPACE_CREATED);
-        index.record(AnalyserId::new(0), &AddressRangeSet::new(), reads);
+        reads.record_unbounded(ChangeKinds::ADDRESS_SPACE_CREATED);
+        index.record(AnalyserId::new(0), &AddressRangeSet::new(), reads, false);
 
-        let invalidated = index.invalidated(AnalyserId::new(0), ChangeKinds::SPACE_CREATED, None);
+        let invalidated =
+            index.invalidated(AnalyserId::new(0), ChangeKinds::ADDRESS_SPACE_CREATED, None);
 
-        assert!(invalidated.has_addressless());
+        assert!(invalidated.is_global());
         assert!(invalidated.regions().is_empty());
     }
 

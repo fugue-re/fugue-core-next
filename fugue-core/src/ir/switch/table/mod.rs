@@ -4,16 +4,19 @@ use std::fmt;
 use std::ops::Bound;
 use std::sync::Arc;
 
+use iset::{Entry, IntervalMap};
+use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::ir::persistent::cursor_bound;
 use crate::ir::switch::{Switch, SwitchId};
-use crate::ir::{Address, IdSet};
+use crate::ir::{Address, AddressRange, AddressRangeSet, IdSet, RawAddress};
 use crate::storage::entities::schema::ENTITY_SWITCH_TABLE_ID;
 use crate::storage::entities::{
     Entity, EntityId, EntityRef, EntityWrite, EntityWriteBatch, ProjectEntity, WriteBackWorker,
 };
 use crate::storage::project::PersistableProjectEntity;
+use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::{EntityStorage, EntityStorageError};
 
 pub(crate) const ATTRIBUTE_SWITCH_CACHE_SIZE: &str = "storage.entities.switch.cache_size";
@@ -40,12 +43,14 @@ impl Entity for SwitchTableHeader {
 
 struct SwitchIndex {
     branches: BTreeMap<Address, SwitchId>,
+    coverage: BTreeMap<AddressSpaceId, IntervalMap<RawAddress, IdSet<Switch>>>,
 }
 
 impl SwitchIndex {
     fn new() -> Self {
         Self {
             branches: BTreeMap::new(),
+            coverage: BTreeMap::new(),
         }
     }
 
@@ -79,12 +84,45 @@ impl SwitchIndex {
             .map(|(&address, &id)| (address, id))
     }
 
-    fn insert(&mut self, id: SwitchId, branch: Address) {
-        self.branches.insert(branch, id);
+    fn overlaps(&self, range: &AddressRange) -> SmallVec<[SwitchId; 4]> {
+        let mut overlapping = self
+            .coverage
+            .get(&range.space())
+            .into_iter()
+            .flat_map(|coverage| coverage.values(range.start()..=range.end()))
+            .flat_map(IdSet::iter)
+            .collect::<SmallVec<_>>();
+        overlapping.sort_unstable();
+        overlapping.dedup();
+        overlapping
     }
 
-    fn remove(&mut self, branch: Address) {
+    fn insert(&mut self, switch: &Switch) {
+        self.branches.insert(switch.branch(), switch.id());
+        for range in switch.coverage().ranges() {
+            self.coverage
+                .entry(range.space())
+                .or_default()
+                .entry(range.start()..=range.end())
+                .or_default()
+                .insert(switch.id());
+        }
+    }
+
+    fn remove(&mut self, id: SwitchId, branch: Address, covered: &AddressRangeSet) {
         self.branches.remove(&branch);
+        for range in covered.ranges() {
+            if let Some(Entry::Occupied(mut entry)) = self
+                .coverage
+                .get_mut(&range.space())
+                .map(|coverage| coverage.entry(range.start()..=range.end()))
+            {
+                entry.get_mut().remove(id);
+                if entry.get().is_empty() {
+                    entry.remove();
+                }
+            }
+        }
     }
 }
 
@@ -105,6 +143,7 @@ struct PreparedSwitchRecord {
     branch: Address,
     encoded_size: usize,
     previous: Option<SwitchId>,
+    previous_coverage: AddressRangeSet,
     switch: Option<Switch>,
 }
 
@@ -221,6 +260,13 @@ impl SwitchTable {
         }
     }
 
+    pub fn overlaps(&self, range: &AddressRange) -> Box<dyn Iterator<Item = SwitchRef<'_>> + '_> {
+        match self {
+            Self::Persistent(table) => Box::new(table.overlaps(range).map(EntityRef::cached)),
+            Self::Transient(table) => Box::new(table.overlaps(range).map(EntityRef::borrowed)),
+        }
+    }
+
     pub fn iter(&self) -> Box<dyn Iterator<Item = SwitchRef<'_>> + '_> {
         match self {
             Self::Persistent(table) => Box::new(table.iter().map(EntityRef::cached)),
@@ -230,6 +276,14 @@ impl SwitchTable {
 
     pub(crate) fn is_persistent(&self) -> bool {
         matches!(self, Self::Persistent(_))
+    }
+
+    pub(crate) fn staged_overlaps(
+        &self,
+        staging: &SwitchTableStaging,
+        range: &AddressRange,
+    ) -> Result<SmallVec<[SwitchId; 4]>, EntityStorageError> {
+        staging.switches_overlapping(self, range)
     }
 
     pub(crate) fn pending_id(&self, offset: usize) -> SwitchId {
@@ -352,17 +406,30 @@ impl SwitchTable {
         }
     }
 
-    pub(crate) fn publish_upsert(&mut self, switch: Switch, encoded_size: usize) {
+    pub(crate) fn publish_upsert(
+        &mut self,
+        switch: Switch,
+        encoded_size: usize,
+        previous: Option<SwitchId>,
+        previous_coverage: &AddressRangeSet,
+    ) {
         match self {
-            Self::Persistent(table) => table.publish_upsert(switch, encoded_size),
+            Self::Persistent(table) => {
+                table.publish_upsert(switch, encoded_size, previous, previous_coverage)
+            }
             Self::Transient(table) => table.publish_upsert(switch),
         }
     }
 
-    pub(crate) fn publish_remove(&mut self, id: SwitchId, branch: Address) {
+    pub(crate) fn publish_remove(
+        &mut self,
+        id: SwitchId,
+        branch: Address,
+        previous_coverage: &AddressRangeSet,
+    ) {
         match self {
-            Self::Persistent(table) => table.publish_remove(id, branch),
-            Self::Transient(table) => table.publish_remove(id, branch),
+            Self::Persistent(table) => table.publish_remove(id, branch, previous_coverage),
+            Self::Transient(table) => table.publish_remove(id),
         }
     }
 }
@@ -397,6 +464,39 @@ impl SwitchTableStaging {
             return Ok(None);
         };
         Ok((!self.staged_switches.contains_key(&switch.branch())).then_some(switch))
+    }
+
+    fn switches_overlapping(
+        &self,
+        switches: &SwitchTable,
+        range: &AddressRange,
+    ) -> Result<SmallVec<[SwitchId; 4]>, EntityStorageError> {
+        let mut overlapping = switches
+            .overlaps(range)
+            .map(|switch| switch.id())
+            .collect::<SmallVec<_>>();
+
+        for (&branch, staged) in &self.staged_switches {
+            let id = match staged {
+                Some(switch) => switch.id(),
+                None => match switches.try_get_by_branch(branch)? {
+                    Some(previous) => previous.id(),
+                    None => continue,
+                },
+            };
+            let intersects = staged
+                .as_ref()
+                .is_some_and(|switch| switch.coverage().intersects_range(range));
+            match overlapping.binary_search(&id) {
+                Ok(index) if !intersects => {
+                    overlapping.remove(index);
+                }
+                Err(index) if intersects => overlapping.insert(index, id),
+                _ => {}
+            }
+        }
+
+        Ok(overlapping)
     }
 
     pub(crate) fn insert(&mut self, switch: Switch) {
@@ -458,6 +558,14 @@ impl SwitchTableStaging {
             if switch.is_none() && previous.is_none() {
                 continue;
             }
+            let previous_coverage = if persistent {
+                previous
+                    .as_deref()
+                    .map(Switch::coverage)
+                    .unwrap_or_default()
+            } else {
+                AddressRangeSet::new()
+            };
             let previous = previous.map(|switch| switch.id());
             match &switch {
                 Some(entry) => {
@@ -477,6 +585,7 @@ impl SwitchTableStaging {
                         branch,
                         encoded_size,
                         previous,
+                        previous_coverage,
                         switch,
                     });
                 }
@@ -491,6 +600,7 @@ impl SwitchTableStaging {
                         branch,
                         encoded_size: 0,
                         previous,
+                        previous_coverage,
                         switch: None,
                     });
                 }
@@ -541,12 +651,17 @@ impl PreparedSwitchBatch {
         switches.publish_allocations(&switch_reservations, &cancelled_switches, added, removed);
         for record in records {
             match record.switch {
-                Some(switch) => switches.publish_upsert(switch, record.encoded_size),
+                Some(switch) => switches.publish_upsert(
+                    switch,
+                    record.encoded_size,
+                    record.previous,
+                    &record.previous_coverage,
+                ),
                 None => {
                     let previous = record
                         .previous
                         .expect("prepared switch removal has a previous switch");
-                    switches.publish_remove(previous, record.branch);
+                    switches.publish_remove(previous, record.branch, &record.previous_coverage);
                 }
             }
         }

@@ -162,6 +162,10 @@ impl ReferenceTarget {
         Self::Address(Address::MINIMUM)
     }
 
+    fn maximum() -> Self {
+        Self::Address(Address::MAXIMUM)
+    }
+
     pub fn address(&self) -> Option<Address> {
         match self {
             Self::Address(address) => Some(*address),
@@ -613,7 +617,7 @@ mod test {
         index.insert(&flow_reference(c, b))?;
 
         let from_a = index
-            .references_from(a, None)?
+            .references_from(a..=a, None)?
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(from_a.len(), 3);
         assert_eq!(from_a[0].target().address(), Some(b));
@@ -623,8 +627,9 @@ mod test {
         assert_eq!(from_a[2].target().address(), Some(c));
         assert!(from_a[2].is_read());
 
+        let target = ReferenceTarget::from(b);
         let to_b = index
-            .references_to(b.into(), None)?
+            .references_to(target..=target, None)?
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(to_b.len(), 3);
         assert_eq!(to_b[0].from(), a);
@@ -644,13 +649,14 @@ mod test {
         index.insert(&flow_reference(base_from, overlay_to))?;
 
         let from_side = index
-            .references_from(base_from, None)?
+            .references_from(base_from..=base_from, None)?
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(from_side.len(), 1);
         assert_eq!(from_side[0].target().address(), Some(overlay_to));
 
+        let target = ReferenceTarget::from(overlay_to);
         let to_side = index
-            .references_to(overlay_to.into(), None)?
+            .references_to(target..=target, None)?
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(to_side.len(), 1);
         assert_eq!(to_side[0].from(), base_from);
@@ -690,13 +696,14 @@ mod test {
         index.remove(ReferenceKey::new(a, b.into(), ReferenceKind::Flow))?;
 
         let outgoing = index
-            .references_from(a, None)?
+            .references_from(a..=a, None)?
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(outgoing.len(), 1);
         assert!(outgoing[0].is_data());
 
+        let target = ReferenceTarget::from(b);
         let incoming = index
-            .references_to(b.into(), None)?
+            .references_to(target..=target, None)?
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(incoming.len(), 1);
         assert!(incoming[0].is_data());
@@ -715,7 +722,10 @@ mod test {
         let mut cursor = None;
         loop {
             let page = index
-                .references_from(from, cursor.map(|reference: Reference| reference.key()))?
+                .references_from(
+                    from..=from,
+                    cursor.map(|reference: Reference| reference.key()),
+                )?
                 .take(3)
                 .collect::<Result<Vec<_>, _>>()?;
             if page.is_empty() {
@@ -726,7 +736,7 @@ mod test {
         }
 
         let full = index
-            .references_from(from, None)?
+            .references_from(from..=from, None)?
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(walked, full);
         assert_eq!(walked.len(), 8);
@@ -755,7 +765,7 @@ mod test {
             worker,
         );
         let from_a = reader
-            .references_from(a, None)?
+            .references_from(a..=a, None)?
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(from_a.len(), 2);
         assert_eq!(from_a[0].target().address(), Some(b));
@@ -780,7 +790,7 @@ mod test {
         index.ensure_current(functions.iter(), &blocks, Revision::new(1))?;
 
         let derived = index
-            .references_from(entry, None)?
+            .references_from(entry..=entry, None)?
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(derived.len(), 1);
         assert_eq!(derived[0].target().address(), Some(callee));
@@ -860,7 +870,7 @@ mod test {
         assert!(survived.is_some_and(|reference| reference.origin().is_asserted()));
 
         let derived = index
-            .references_from(entry, None)?
+            .references_from(entry..=entry, None)?
             .collect::<Result<Vec<_>, _>>()?;
         assert!(derived.iter().any(|reference| {
             reference.target().address() == Some(callee) && reference.origin().is_derived()

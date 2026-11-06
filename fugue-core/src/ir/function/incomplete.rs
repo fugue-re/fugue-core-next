@@ -315,6 +315,7 @@ pub struct IncompleteFunction {
     confidence: Confidence,
     input_revision: Revision,
     pending_switches: Vec<Switch>,
+    references: SmallVec<[Reference; 1]>,
     tail_call_sites: SmallVec<[Address; 1]>,
 }
 
@@ -346,6 +347,13 @@ impl EstimateSize for IncompleteFunction {
                     .capacity()
                     .saturating_mul(size_of::<Switch>()),
             );
+        if self.references.spilled() {
+            size = size.saturating_add(
+                self.references
+                    .capacity()
+                    .saturating_mul(size_of::<Reference>()),
+            );
+        }
         if self.tail_call_sites.spilled() {
             size = size.saturating_add(
                 self.tail_call_sites
@@ -386,6 +394,7 @@ impl IncompleteFunction {
             confidence: Confidence::certain(),
             input_revision: Revision::default(),
             pending_switches: Vec::new(),
+            references: SmallVec::new(),
             tail_call_sites: SmallVec::new(),
         }
     }
@@ -669,6 +678,14 @@ impl IncompleteFunction {
         }
     }
 
+    pub fn add_reference(&mut self, reference: Reference) {
+        self.references.push(reference);
+    }
+
+    pub fn references(&self) -> &[Reference] {
+        &self.references
+    }
+
     pub fn clear_name(&mut self) {
         self.name = None;
     }
@@ -950,6 +967,7 @@ impl IncompleteFunction {
             coverage.insert_range(range);
         }
 
+        references.extend(self.references.drain(..));
         references.sort_unstable();
         let mut output = 0usize;
         for input in 0..references.len() {

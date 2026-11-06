@@ -59,7 +59,7 @@ impl ProjectTransaction<'_> {
     pub(crate) fn stage_switch_removals(&mut self) -> Result<(), ProjectError> {
         let removals = self
             .function_staging
-            .switches_without_membership()
+            .orphaned_switches()
             .collect::<SmallVec<[_; 4]>>();
         for switch in removals {
             let branch = self

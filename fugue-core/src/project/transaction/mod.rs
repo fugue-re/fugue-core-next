@@ -366,7 +366,7 @@ impl ProjectTransaction<'_> {
     }
 
     pub fn segments(&mut self) -> &SegmentStorage {
-        self.record_unbounded_read(ChangeKinds::SEGMENTS | ChangeKinds::SPACE_CREATED);
+        self.record_unbounded_read(ChangeKinds::SEGMENTS | ChangeKinds::ADDRESS_SPACE_CREATED);
         self.project.segments()
     }
 

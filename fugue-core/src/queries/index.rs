@@ -161,7 +161,7 @@ impl GlobalWatermarks {
         if kind.intersects(ChangeKinds::LIFTED) {
             self.lifted = self.lifted.max(revision);
         }
-        if kind.intersects(ChangeKinds::SPACE_CREATED) {
+        if kind.intersects(ChangeKinds::ADDRESS_SPACE_CREATED) {
             self.space_created = self.space_created.max(revision);
         }
         if kind.intersects(ChangeKinds::SEGMENT_MAPPING_CREATED) {
@@ -180,7 +180,7 @@ impl GlobalWatermarks {
         if kinds.intersects(ChangeKinds::RESYNCHRONISE) {
             latest = latest.max(self.resynchronised);
         }
-        if kinds.intersects(ChangeKinds::SPACE_CREATED) {
+        if kinds.intersects(ChangeKinds::ADDRESS_SPACE_CREATED) {
             latest = latest.max(self.space_created);
         }
         if kinds.intersects(ChangeKinds::SEGMENT_MAPPING_CREATED) {

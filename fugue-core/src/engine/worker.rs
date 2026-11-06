@@ -17,24 +17,26 @@ use crate::engine::scheduler::{
     ScheduledAnalyser, WORK_SLICE_BYTES, WorkBatch,
 };
 use crate::engine::subscription::Subscriber;
-use crate::engine::update::{MappingCreationResult, ProjectUpdates, SpaceCreationResult};
+use crate::engine::update::{AddressSpaceCreationResult, MappingCreationResult, ProjectUpdates};
 use crate::engine::view::DependencyIndex;
 use crate::engine::{
     AnalyserProvider, AnalysisContext, AnalysisData, AnalysisDataStore, AnalysisEngineConfig,
-    EngineError, EngineMetrics, MAX_COMPLETION_ROUNDS, ProjectView, RETRACTED_BY_BYTE_CHANGE,
-    WORK_BATCH_ITEMS, WorkCause, WorkTrigger,
+    EngineError, EngineMetrics, MAX_COMPLETION_ROUNDS, PHASES_CANCELLED_BY_RETRACTION, ProjectView,
+    TRACKED_DEPENDENCY_KINDS, WORK_BATCH_ITEMS, WorkCause, WorkTrigger,
 };
 use crate::extension;
 use crate::il::common::{IlError, IlFormId, IlGenerationContext, IlSubject};
 use crate::il::registry::{GeneratedArtefact, IlGenerationSession, IlRegistry};
-use crate::ir::{AddressRangeSet, FunctionId, ProblemKind, ProblemScope};
+use crate::ir::{Address, AddressRangeSet, FunctionId, ProblemKind, ProblemScope};
 use crate::project::{
     AnalysisPhase, ChangeKinds, ChangeProvenance, ChangeRecord, ChangeSet, ChangeSource,
     CoverageReconfiguration, MAX_DETAILED_CHANGE_RECORDS, Project, ProjectError,
     ProjectTransaction, ReadSet,
 };
 use crate::queries::{IlLookup, QueryEngine};
+use crate::storage::segments::SegmentProperties;
 use crate::storage::segments::mapping::SegmentMappingBuilder;
+use crate::storage::segments::space::AddressSpaceKind;
 use crate::types::Revision;
 
 type IntakeReply<T> = Sender<Result<T, EngineError>>;
@@ -45,10 +47,17 @@ pub(crate) enum Intake {
         builder: SegmentMappingBuilder,
         reply: IntakeReply<MappingCreationResult>,
     },
-    CreateSpace(IntakeReply<SpaceCreationResult>),
-    Direct {
-        kind: ChangeKinds,
-        regions: AddressRangeSet,
+    CreateSpace(IntakeReply<AddressSpaceCreationResult>),
+    CreateSpaceWith {
+        name: String,
+        kind: AddressSpaceKind,
+        reply: IntakeReply<AddressSpaceCreationResult>,
+    },
+    CreateSyntheticMapping {
+        start: Address,
+        bytes: Arc<[u8]>,
+        properties: SegmentProperties,
+        reply: IntakeReply<MappingCreationResult>,
     },
     EnsureLifted {
         function: FunctionId,
@@ -64,6 +73,10 @@ pub(crate) enum Intake {
         functions: Vec<FunctionId>,
         form: IlFormId,
         reply: IntakeReply<Vec<Option<Arc<dyn Any + Send + Sync>>>>,
+    },
+    ScheduleRanges {
+        kind: ChangeKinds,
+        regions: AddressRangeSet,
     },
     SetData {
         data: Box<dyn AnalysisData>,
@@ -124,8 +137,13 @@ struct AnalysisAdmission {
 
 enum AnalysisAdmissionResult {
     Committed(AnalysisAdmission),
-    Conflict,
-    Rejected(AnalysisError),
+    Conflict {
+        regions: AddressRangeSet,
+    },
+    Rejected {
+        error: AnalysisError,
+        regions: AddressRangeSet,
+    },
 }
 
 pub(crate) struct Worker {
@@ -202,7 +220,7 @@ impl RecentChanges {
         self.changes
             .iter()
             .filter(|changes| changes.revision() > base)
-            .any(|changes| reads.conflicts_with(changes))
+            .any(|changes| reads.conflicts_with(changes, TRACKED_DEPENDENCY_KINDS))
             .then_some(AdmissionConflict::InputsChanged)
     }
 }
@@ -318,7 +336,7 @@ impl Worker {
             registry,
             project,
             queue: AnalysisWorkQueue::with_analysers(analyser_count),
-            dependencies: DependencyIndex::with_analysers(analyser_count),
+            dependencies: DependencyIndex::new(analyser_count),
             recent_changes: RecentChanges::new(revision),
             metrics,
             subscribers: Vec::new(),
@@ -373,6 +391,12 @@ impl Worker {
                 Ok(Intake::CreateSpace(reply)) => {
                     let _ = reply.send(Err(EngineError::Poisoned(message.to_owned())));
                 }
+                Ok(Intake::CreateSpaceWith { reply, .. }) => {
+                    let _ = reply.send(Err(EngineError::Poisoned(message.to_owned())));
+                }
+                Ok(Intake::CreateSyntheticMapping { reply, .. }) => {
+                    let _ = reply.send(Err(EngineError::Poisoned(message.to_owned())));
+                }
                 Ok(Intake::Updates { reply, .. }) => {
                     let _ = reply.send(Err(EngineError::Poisoned(message.to_owned())));
                 }
@@ -391,7 +415,7 @@ impl Worker {
                 Ok(Intake::Analyse(reply)) => {
                     let _ = reply.send(Err(EngineError::Poisoned(message.to_owned())));
                 }
-                Ok(Intake::Direct { .. } | Intake::Shutdown | Intake::Subscribe(_)) => {}
+                Ok(Intake::ScheduleRanges { .. } | Intake::Shutdown | Intake::Subscribe(_)) => {}
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => return,
             }
         }
@@ -418,11 +442,28 @@ impl Worker {
                     let result = self.drain().and_then(|()| self.create_space());
                     let _ = reply.send(result);
                 }
-                Intake::Direct { kind, regions } => {
+                Intake::CreateSpaceWith { name, kind, reply } => {
+                    let result = self
+                        .drain()
+                        .and_then(|()| self.create_space_with(name, kind));
+                    let _ = reply.send(result);
+                }
+                Intake::CreateSyntheticMapping {
+                    start,
+                    bytes,
+                    properties,
+                    reply,
+                } => {
+                    let result = self
+                        .drain()
+                        .and_then(|()| self.create_synthetic_mapping(start, &bytes, properties));
+                    let _ = reply.send(result);
+                }
+                Intake::ScheduleRanges { kind, regions } => {
                     self.route_requested(kind, &regions);
                     loop {
                         match rx.try_recv() {
-                            Ok(Intake::Direct { kind, regions }) => {
+                            Ok(Intake::ScheduleRanges { kind, regions }) => {
                                 self.route_requested(kind, &regions);
                             }
                             Ok(message) => {
@@ -578,7 +619,7 @@ impl Worker {
             let kind = record.kind();
             let affected = record.ranges();
 
-            if Self::invalidates_bytes(record) {
+            if record.requires_retraction() {
                 for range in &affected {
                     retract.insert_range(*range);
                 }
@@ -588,9 +629,11 @@ impl Worker {
                 continue;
             }
 
-            let regions = by_kind.entry(kind).or_default();
-            for range in &affected {
-                regions.insert_range(*range);
+            if TRACKED_DEPENDENCY_KINDS.contains(kind) {
+                let regions = by_kind.entry(kind).or_default();
+                for range in &affected {
+                    regions.insert_range(*range);
+                }
             }
 
             let regions = triggered.entry(kind).or_default();
@@ -609,8 +652,9 @@ impl Worker {
         }
 
         if !retract.is_empty() {
-            self.cancel_phases(&retract, RETRACTED_BY_BYTE_CHANGE);
+            self.cancel_phases(&retract, PHASES_CANCELLED_BY_RETRACTION);
             self.retract_coverage(&retract);
+            self.retract_overlapping(&retract);
         }
 
         for (kind, regions) in triggered {
@@ -648,7 +692,7 @@ impl Worker {
                 continue;
             }
 
-            if invalidated.has_addressless() {
+            if invalidated.is_global() {
                 self.metrics.record_dependency_reschedule();
                 self.schedule_analyser(
                     id,
@@ -791,11 +835,10 @@ impl Worker {
         }
     }
 
-    fn invalidates_bytes(record: &ChangeRecord) -> bool {
-        matches!(
-            record,
-            ChangeRecord::BytesWritten { .. } | ChangeRecord::SegmentUnmapped { .. }
-        )
+    fn retract_overlapping(&mut self, regions: &AddressRangeSet) {
+        for state in &mut self.analysers {
+            state.analyser_mut().retract(regions);
+        }
     }
 
     fn schedule_analyser(
@@ -1016,7 +1059,9 @@ impl Worker {
                     self.metrics.record_admission_resynchronisation();
                 }
             }
-            return Ok(AnalysisAdmissionResult::Conflict);
+            return Ok(AnalysisAdmissionResult::Conflict {
+                regions: production.regions,
+            });
         }
 
         let AnalysisProduction {
@@ -1045,7 +1090,9 @@ impl Worker {
                 reads_collapsed: reads_collapsed || admission_reads_collapsed,
                 regions,
             }),
-            TransactionResult::Rejected(error) => AnalysisAdmissionResult::Rejected(error),
+            TransactionResult::Rejected(error) => {
+                AnalysisAdmissionResult::Rejected { error, regions }
+            }
         })
     }
 
@@ -1084,12 +1131,18 @@ impl Worker {
                     .analyse(&mut context);
                 (result, context.project, context.updates)
             };
-            result.map(|_| AnalysisProduction::new(base, project, regions, updates))
+            (
+                result,
+                AnalysisProduction::new(base, project, regions, updates),
+            )
         };
         let production = match production {
-            Ok(production) => production,
-            Err(error @ AnalysisError::AnalysisData(_)) => return Err(error.into()),
-            Err(error) => {
+            (Ok(()), production) => production,
+            (Err(error @ AnalysisError::AnalysisData(_)), _) => return Err(error.into()),
+            (Err(error), production) => {
+                self.analysers[id.index()]
+                    .analyser_mut()
+                    .retract(&production.regions);
                 self.handle_dispatch_failure(id, batch, error);
                 return Ok(());
             }
@@ -1100,24 +1153,26 @@ impl Worker {
                 reads_collapsed,
                 regions,
             }) => {
-                self.dependencies.record(id, &regions, reads);
                 if reads_collapsed {
                     self.defer_read_set_collapse(&regions);
                 }
                 if phase != AnalysisPhase::Retract {
                     self.mark_covered(id, phase, &regions);
                 }
+                self.dependencies.record(id, &regions, reads, continuation);
                 if self.analysers[id.index()].analyser().has_pending_work() {
                     let degradations = self.queue.requeue_continuation(batch);
                     self.defer_degradations(degradations);
                 }
                 Ok(())
             }
-            AnalysisAdmissionResult::Conflict => {
+            AnalysisAdmissionResult::Conflict { regions } => {
+                self.analysers[id.index()].analyser_mut().retract(&regions);
                 self.handle_admission_conflict(batch);
                 Ok(())
             }
-            AnalysisAdmissionResult::Rejected(error) => {
+            AnalysisAdmissionResult::Rejected { error, regions } => {
+                self.analysers[id.index()].analyser_mut().retract(&regions);
                 self.handle_dispatch_failure(id, batch, error);
                 Ok(())
             }
@@ -1213,8 +1268,8 @@ impl Worker {
                     }
                     Ok(())
                 }
-                AnalysisAdmissionResult::Conflict => continue,
-                AnalysisAdmissionResult::Rejected(error) => {
+                AnalysisAdmissionResult::Conflict { .. } => continue,
+                AnalysisAdmissionResult::Rejected { error, .. } => {
                     tracing::warn!("analyser {name} completion failed: {error}");
                     Err(error.into())
                 }
@@ -1516,7 +1571,7 @@ impl Worker {
         }
     }
 
-    fn create_space(&mut self) -> Result<SpaceCreationResult, EngineError> {
+    fn create_space(&mut self) -> Result<AddressSpaceCreationResult, EngineError> {
         match self.with_transaction(ChangeSource::engine("update"), |_, transaction| {
             transaction.create_space()
         })? {
@@ -1524,7 +1579,42 @@ impl Worker {
                 value: space,
                 changes,
                 ..
-            } => Ok(SpaceCreationResult::new(space, changes)),
+            } => Ok(AddressSpaceCreationResult::new(space, changes)),
+            TransactionResult::Rejected(error) => Err(error.into()),
+        }
+    }
+
+    fn create_synthetic_mapping(
+        &mut self,
+        start: Address,
+        bytes: &[u8],
+        properties: SegmentProperties,
+    ) -> Result<MappingCreationResult, EngineError> {
+        match self.with_transaction(ChangeSource::engine("update"), |_, transaction| {
+            transaction.create_synthetic_mapping(start, bytes, properties)
+        })? {
+            TransactionResult::Committed {
+                value: mapping,
+                changes,
+                ..
+            } => Ok(MappingCreationResult::new(mapping, changes)),
+            TransactionResult::Rejected(error) => Err(error.into()),
+        }
+    }
+
+    fn create_space_with(
+        &mut self,
+        name: String,
+        kind: AddressSpaceKind,
+    ) -> Result<AddressSpaceCreationResult, EngineError> {
+        match self.with_transaction(ChangeSource::engine("update"), |_, transaction| {
+            transaction.create_space_with(name, kind)
+        })? {
+            TransactionResult::Committed {
+                value: space,
+                changes,
+                ..
+            } => Ok(AddressSpaceCreationResult::new(space, changes)),
             TransactionResult::Rejected(error) => Err(error.into()),
         }
     }

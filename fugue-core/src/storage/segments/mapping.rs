@@ -255,7 +255,7 @@ impl SegmentMapping {
         provider_id: SegmentStorageProviderId,
         properties: SegmentProperties,
     ) -> Result<Self, SegmentStorageError> {
-        if AddressRange::from_size(range.start_address(), range.size()) != Some(range) {
+        if range.size().is_none_or(|size| size == 0) {
             return Err(SegmentStorageError::InvalidAddressRange);
         }
 
@@ -305,7 +305,9 @@ impl SegmentMapping {
     }
 
     pub fn size(&self) -> u64 {
-        self.range.size()
+        self.range
+            .size()
+            .expect("mapping size is representable after validation")
     }
 
     pub fn last(&self) -> Address {
@@ -482,7 +484,7 @@ impl SegmentSubMapping {
         self.range.start_address()
     }
 
-    pub fn size(&self) -> u64 {
+    pub fn size(&self) -> Option<u64> {
         self.range.size()
     }
 

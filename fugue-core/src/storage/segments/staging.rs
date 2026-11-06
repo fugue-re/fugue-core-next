@@ -7,11 +7,11 @@ use smallvec::SmallVec;
 
 use crate::ir::{Address, AddressRange, RawAddress};
 use crate::storage::segments::mapping::{
-    SegmentMappingBuilder, SegmentMappingFlags, SegmentMappingId, SegmentMappingKind,
-    SegmentMappingProvenance,
+    SegmentMapping, SegmentMappingBuilder, SegmentMappingFlags, SegmentMappingId,
+    SegmentMappingKind, SegmentMappingProvenance,
 };
 use crate::storage::segments::provider::SegmentStorageProviderId;
-use crate::storage::segments::space::AddressSpaceId;
+use crate::storage::segments::space::{AddressSpaceId, AddressSpaceKind};
 use crate::storage::segments::{SegmentProperties, SegmentStorage, SegmentStorageError};
 
 #[derive(Clone, Copy)]
@@ -83,8 +83,12 @@ impl StagedMappingRecord {
     }
 
     fn set_start(&mut self, start: Address) -> Result<(), SegmentStorageError> {
-        self.range = AddressRange::from_size(start, self.range.size())
+        let size = self
+            .range
+            .size()
             .ok_or(SegmentStorageError::InvalidAddressRange)?;
+        self.range =
+            AddressRange::from_size(start, size).ok_or(SegmentStorageError::InvalidAddressRange)?;
         Ok(())
     }
 
@@ -118,6 +122,16 @@ impl StagedMappingRecord {
         self.kind = kind;
         self.provenance = provenance;
     }
+}
+
+struct StagedAddressSpace {
+    name: Option<String>,
+    kind: AddressSpaceKind,
+}
+
+struct StagedSyntheticProvider {
+    id: SegmentStorageProviderId,
+    size: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -163,39 +177,44 @@ impl PreparedSegmentWriteRecord {
 }
 
 pub(crate) struct PreparedSegmentWriteRecords {
-    range: AddressRange,
+    ranges: SmallVec<[AddressRange; 4]>,
     records: SmallVec<[PreparedSegmentWriteRecord; 4]>,
 }
 
 impl PreparedSegmentWriteRecords {
-    fn new(range: AddressRange, records: SmallVec<[PreparedSegmentWriteRecord; 4]>) -> Self {
-        Self { range, records }
+    fn new(
+        ranges: SmallVec<[AddressRange; 4]>,
+        records: SmallVec<[PreparedSegmentWriteRecord; 4]>,
+    ) -> Self {
+        Self { ranges, records }
     }
 
-    pub(crate) fn range(&self) -> AddressRange {
-        self.range
+    pub(crate) fn ranges(&self) -> &[AddressRange] {
+        &self.ranges
     }
 }
 
 pub(crate) struct PreparedSegmentBatch {
     created_mappings: BTreeMap<SegmentMappingId, SegmentMappingBuilder>,
-    created_spaces: BTreeSet<AddressSpaceId>,
+    created_spaces: BTreeMap<AddressSpaceId, StagedAddressSpace>,
     placements: BTreeMap<u64, StagedMappingPlacementRecord>,
     removed_mappings: BTreeSet<SegmentMappingId>,
     staged_mappings: BTreeMap<SegmentMappingId, StagedMappingRecord>,
+    synthetic_provider: Option<StagedSyntheticProvider>,
     writes: Vec<PreparedSegmentWriteRecord>,
 }
 
 #[derive(Default)]
 pub(crate) struct SegmentStorageStaging {
     created_mappings: BTreeMap<SegmentMappingId, SegmentMappingBuilder>,
-    created_spaces: BTreeSet<AddressSpaceId>,
+    created_spaces: BTreeMap<AddressSpaceId, StagedAddressSpace>,
     mapping_reservations: usize,
     placement_order: BTreeMap<(AddressSpaceId, SegmentMappingId), u64>,
     placements: BTreeMap<u64, StagedMappingPlacementRecord>,
     removed_mappings: BTreeSet<SegmentMappingId>,
     sequence: u64,
     staged_mappings: BTreeMap<SegmentMappingId, StagedMappingRecord>,
+    synthetic_provider: Option<StagedSyntheticProvider>,
     writes: Vec<PreparedSegmentWriteRecord>,
 }
 
@@ -270,7 +289,7 @@ impl SegmentStorageStaging {
                 .map(|mapping| mapping.mapping_id())
                 .filter(|mapping| !self.removed_mappings.contains(mapping))
                 .collect::<Vec<_>>(),
-            None if self.created_spaces.contains(&space) => Vec::new(),
+            None if self.created_spaces.contains_key(&space) => Vec::new(),
             None => return Err(SegmentStorageError::UnknownSpace(space)),
         };
 
@@ -314,13 +333,162 @@ impl SegmentStorageStaging {
         Ok(id)
     }
 
+    pub(crate) fn create_synthetic_mapping(
+        &mut self,
+        storage: &SegmentStorage,
+        start: Address,
+        bytes: &[u8],
+        properties: SegmentProperties,
+    ) -> Result<SegmentMappingId, SegmentStorageError> {
+        if !self.created_spaces.contains_key(&start.space())
+            && !storage
+                .spaces()
+                .any(|candidate| candidate.id() == start.space())
+        {
+            return Err(SegmentStorageError::UnknownSpace(start.space()));
+        }
+
+        let size = bytes.len() as u64;
+        if size == 0 || start.checked_add(size - 1).is_none() {
+            return Err(SegmentStorageError::InvalidAddressRange);
+        }
+
+        let provider = match &self.synthetic_provider {
+            Some(staged) => staged.id,
+            None => match storage.synthetic_provider() {
+                Some(provider) => provider.id(),
+                None => storage.pending_provider_id()?,
+            },
+        };
+        let mut offset = match &self.synthetic_provider {
+            Some(staged) => staged.size,
+            None => {
+                let mut offset = 0;
+                for mapping in storage
+                    .mappings()
+                    .filter(|mapping| mapping.provider_id() == provider)
+                {
+                    let end = mapping
+                        .offset()
+                        .checked_add(mapping.size())
+                        .ok_or(SegmentStorageError::InvalidAddressRange)?;
+                    offset = offset.max(end);
+                }
+                offset
+            }
+        };
+        for mapping in self
+            .created_mappings
+            .values()
+            .filter(|mapping| mapping.provider_id() == provider)
+        {
+            let end = mapping
+                .offset()
+                .checked_add(mapping.size())
+                .ok_or(SegmentStorageError::InvalidAddressRange)?;
+            offset = offset.max(end);
+        }
+        for mapping in self
+            .staged_mappings
+            .values()
+            .filter(|mapping| mapping.provider() == provider)
+        {
+            let size = mapping
+                .range()
+                .size()
+                .ok_or(SegmentStorageError::InvalidAddressRange)?;
+            let end = mapping
+                .offset
+                .checked_add(size)
+                .ok_or(SegmentStorageError::InvalidAddressRange)?;
+            offset = offset.max(end);
+        }
+        let builder = SegmentMappingBuilder::new(start, size, offset, provider)
+            .with_properties(properties)
+            .with_provenance(SegmentMappingProvenance::Synthetic);
+        let end = offset
+            .checked_add(size)
+            .ok_or(SegmentStorageError::InvalidAddressRange)?;
+        self.synthetic_provider = Some(StagedSyntheticProvider {
+            id: provider,
+            size: end,
+        });
+
+        let id = storage.pending_mapping_id(self.mapping_reservations)?;
+        self.mapping_reservations = self
+            .mapping_reservations
+            .checked_add(1)
+            .expect("mapping reservation count exhausted");
+        self.created_mappings.insert(id, builder);
+        self.writes.push(PreparedSegmentWriteRecord::new(
+            provider,
+            offset,
+            Bytes::copy_from_slice(bytes),
+        ));
+        Ok(id)
+    }
+
     pub(crate) fn create_space(
         &mut self,
         storage: &SegmentStorage,
     ) -> Result<AddressSpaceId, SegmentStorageError> {
         let id = storage.pending_space_id(self.created_spaces.len())?;
-        self.created_spaces.insert(id);
+        self.create_space_with_id(storage, id, None, AddressSpaceKind::Base)?;
         Ok(id)
+    }
+
+    pub(crate) fn create_space_with(
+        &mut self,
+        storage: &SegmentStorage,
+        name: String,
+        kind: AddressSpaceKind,
+    ) -> Result<AddressSpaceId, SegmentStorageError> {
+        let id = storage.pending_space_id(self.created_spaces.len())?;
+        self.create_space_with_id(storage, id, Some(name), kind)?;
+        Ok(id)
+    }
+
+    pub(crate) fn create_space_with_id(
+        &mut self,
+        storage: &SegmentStorage,
+        id: AddressSpaceId,
+        name: impl Into<Option<String>>,
+        kind: AddressSpaceKind,
+    ) -> Result<(), SegmentStorageError> {
+        if self.created_spaces.contains_key(&id) || storage.spaces().any(|space| space.id() == id) {
+            return Err(SegmentStorageError::DuplicateAddressSpace(id));
+        }
+        let name = name.into();
+        if let Some(name) = name.as_deref()
+            && (self
+                .created_spaces
+                .values()
+                .any(|space| space.name.as_deref() == Some(name))
+                || storage.address_space_by_name(name).is_some())
+        {
+            return Err(SegmentStorageError::DuplicateAddressSpaceName(
+                name.to_owned(),
+            ));
+        }
+        if let AddressSpaceKind::Overlay { base } = kind {
+            match self.created_spaces.get(&base) {
+                Some(space) if matches!(space.kind, AddressSpaceKind::Overlay { .. }) => {
+                    return Err(SegmentStorageError::InvalidOverlayBase(base));
+                }
+                Some(_) => {}
+                None => match storage.spaces.get(&base) {
+                    None => return Err(SegmentStorageError::UnknownSpace(base)),
+                    Some(space) if space.is_overlay() => {
+                        return Err(SegmentStorageError::InvalidOverlayBase(base));
+                    }
+                    Some(_) => {}
+                },
+            }
+        }
+
+        self.created_spaces
+            .insert(id, StagedAddressSpace { name, kind });
+        Ok(())
     }
 
     pub(crate) fn add_mapping(
@@ -389,10 +557,14 @@ impl SegmentStorageStaging {
         start: Address,
     ) -> Result<(), SegmentStorageError> {
         let range = self.staged_mapping(storage, id)?.range();
-        let range = AddressRange::from_size(start, range.size())
+        let size = range
+            .size()
             .ok_or(SegmentStorageError::InvalidAddressRange)?;
+        if size == 0 || start.checked_add(size - 1).is_none() {
+            return Err(SegmentStorageError::InvalidAddressRange);
+        }
         if let Some(builder) = self.created_mappings.get_mut(&id) {
-            builder.set_start(range.start_address());
+            builder.set_start(start);
         } else {
             self.staged_mapping_mut(storage, id)?.set_start(start)?;
         }
@@ -406,10 +578,11 @@ impl SegmentStorageStaging {
         size: u64,
     ) -> Result<(), SegmentStorageError> {
         let range = self.staged_mapping(storage, id)?.range();
-        let range = AddressRange::from_size(range.start_address(), size)
-            .ok_or(SegmentStorageError::InvalidAddressRange)?;
+        if size == 0 || range.start_address().checked_add(size - 1).is_none() {
+            return Err(SegmentStorageError::InvalidAddressRange);
+        }
         if let Some(builder) = self.created_mappings.get_mut(&id) {
-            builder.set_size(range.size());
+            builder.set_size(size);
         } else {
             self.staged_mapping_mut(storage, id)?.set_size(size)?;
         }
@@ -508,10 +681,11 @@ impl SegmentStorageStaging {
             return Ok(None);
         }
 
-        let size =
-            u64::try_from(bytes.len()).map_err(|_| SegmentStorageError::InvalidAddressRange)?;
-        let range = AddressRange::from_size(address, size)
-            .ok_or(SegmentStorageError::InvalidAddressRange)?;
+        let size = bytes.len() as u64;
+        if address.checked_add(size - 1).is_none() {
+            return Err(SegmentStorageError::InvalidAddressRange);
+        }
+
         let mappings = self.staged_mappings_in_space(storage, address.space())?;
         let mut current = address.raw_address();
         let mut remaining = bytes.len();
@@ -531,7 +705,7 @@ impl SegmentStorageStaging {
                 return Err(SegmentStorageError::InvalidAddressRange);
             }
 
-            let mut write_size_u64 = mapping
+            let mut write_size = mapping
                 .remaining_from(current)
                 .ok_or(SegmentStorageError::InvalidAddressRange)?;
             for higher in &mappings[index + 1..] {
@@ -542,27 +716,30 @@ impl SegmentStorageStaging {
                         .offset()
                         .checked_sub(current.offset())
                         .ok_or(SegmentStorageError::InvalidAddressRange)?;
-                    write_size_u64 = write_size_u64.min(distance);
+                    write_size = write_size.min(distance);
                 }
             }
 
-            let write_size = usize::try_from(write_size_u64)
-                .unwrap_or(usize::MAX)
-                .min(remaining);
+            let write_size = write_size.min(remaining as u64) as usize;
+
             if write_size == 0 {
                 return Err(SegmentStorageError::InvalidAddressRange);
             }
             let physical_offset = mapping
                 .physical_offset(current)
                 .ok_or(SegmentStorageError::InvalidAddressRange)?;
-            let write_size_u64 =
-                u64::try_from(write_size).map_err(|_| SegmentStorageError::InvalidAddressRange)?;
+            let write_size_u64 = write_size as u64;
             let physical_end = physical_offset
                 .checked_add(write_size_u64)
                 .ok_or(SegmentStorageError::InvalidAddressRange)?;
             let provider = mapping.provider();
-            let provider_size = storage
-                .provider_size(provider)
+            let committed_size = storage.provider_size(provider);
+            let provider_size = self
+                .synthetic_provider
+                .as_ref()
+                .filter(|staged| staged.id == provider)
+                .map(|staged| staged.size.max(committed_size.unwrap_or(0)))
+                .or(committed_size)
                 .ok_or(SegmentStorageError::UnknownProvider(provider))?;
             if physical_end > provider_size {
                 return Err(SegmentStorageError::InvalidAddressRange);
@@ -582,6 +759,20 @@ impl SegmentStorageStaging {
             }
         }
 
+        let mut ranges = SmallVec::new();
+        for &(provider, offset, ref source) in &targets {
+            self.pending_write_ranges_into(
+                storage,
+                provider,
+                offset,
+                source.len() as _,
+                &mut ranges,
+            )?;
+        }
+
+        ranges.sort_unstable();
+        ranges.dedup();
+
         let bytes = Bytes::copy_from_slice(bytes);
         let writes = targets
             .into_iter()
@@ -589,7 +780,55 @@ impl SegmentStorageStaging {
                 PreparedSegmentWriteRecord::new(provider, offset, bytes.slice(source))
             })
             .collect();
-        Ok(Some(PreparedSegmentWriteRecords::new(range, writes)))
+        Ok(Some(PreparedSegmentWriteRecords::new(ranges, writes)))
+    }
+
+    fn pending_write_ranges_into(
+        &self,
+        storage: &SegmentStorage,
+        provider: SegmentStorageProviderId,
+        offset: u64,
+        size: u64,
+        ranges: &mut SmallVec<[AddressRange; 4]>,
+    ) -> Result<(), SegmentStorageError> {
+        let written_end = offset
+            .checked_add(size)
+            .ok_or(SegmentStorageError::InvalidAddressRange)?;
+        let mappings = storage
+            .mappings()
+            .map(SegmentMapping::id)
+            .filter(|id| !self.removed_mappings.contains(id))
+            .chain(self.created_mappings.keys().copied());
+
+        for id in mappings {
+            let mapping = self.staged_mapping(storage, id)?;
+            if mapping.provider() != provider {
+                continue;
+            }
+            let mapping_size = mapping
+                .range()
+                .size()
+                .ok_or(SegmentStorageError::InvalidAddressRange)?;
+            let mapping_end = mapping
+                .offset
+                .checked_add(mapping_size)
+                .ok_or(SegmentStorageError::InvalidAddressRange)?;
+            let start = offset.max(mapping.offset);
+            let end = written_end.min(mapping_end);
+            if start >= end {
+                continue;
+            }
+            let first = mapping.range().start().offset() + (start - mapping.offset);
+            let last = first + (end - start - 1);
+            for placement in self.mapping_placements(storage, id)? {
+                ranges.push(AddressRange::new(
+                    placement.space(),
+                    first.into(),
+                    last.into(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn stage_writes(&mut self, writes: PreparedSegmentWriteRecords) {
@@ -603,6 +842,7 @@ impl SegmentStorageStaging {
             placements: self.placements,
             removed_mappings: self.removed_mappings,
             staged_mappings: self.staged_mappings,
+            synthetic_provider: self.synthetic_provider,
             writes: self.writes,
         }
     }
@@ -643,7 +883,7 @@ impl SegmentStorageStaging {
         space: AddressSpaceId,
         mapping: SegmentMappingId,
     ) -> Result<(), SegmentStorageError> {
-        if !self.created_spaces.contains(&space)
+        if !self.created_spaces.contains_key(&space)
             && !storage.spaces().any(|candidate| candidate.id() == space)
         {
             return Err(SegmentStorageError::UnknownSpace(space));
@@ -655,6 +895,11 @@ impl SegmentStorageStaging {
 
 impl PreparedSegmentBatch {
     pub(crate) fn publish(self, storage: &mut SegmentStorage) {
+        if let Some(provider) = self.synthetic_provider {
+            storage
+                .open_synthetic_provider(provider.id, provider.size)
+                .expect("synthetic segment backing failed");
+        }
         for write in self.writes {
             let written = storage
                 .write_bytes_direct(write.provider, write.offset, &write.bytes)
@@ -665,9 +910,9 @@ impl PreparedSegmentBatch {
                 "staged segment write was admitted before publication"
             );
         }
-        for space in self.created_spaces {
+        for (id, space) in self.created_spaces {
             storage
-                .create_space_with_id(space)
+                .create_space_with_id(id, space.name, space.kind)
                 .expect("staged address space was validated before publication");
         }
         for (id, builder) in self.created_mappings {
@@ -680,6 +925,9 @@ impl PreparedSegmentBatch {
                 .mapping(id)
                 .expect("staged mapping exists during publication");
             let range = mapping.range();
+            let range_size = range
+                .size()
+                .expect("staged mapping size was validated before publication");
             let start = current.start();
             let size = current.size();
             let kind = current.kind();
@@ -691,9 +939,9 @@ impl PreparedSegmentBatch {
                     .remap_mapping(id, range.start_address())
                     .expect("staged mapping start was validated before publication");
             }
-            if size != range.size() {
+            if size != range_size {
                 storage
-                    .resize_mapping(id, range.size())
+                    .resize_mapping(id, range_size)
                     .expect("staged mapping size was validated before publication");
             }
             if kind != mapping.kind()

@@ -32,12 +32,15 @@ use fugue_core::il::pcode::{
 use fugue_core::ir::{Address as CoreAddress, FunctionId as CoreFunctionId};
 use fugue_core::project::{ChangeRecord, Project as CoreProject};
 use fugue_core::queries::QueryReader;
+use fugue_core::storage::AddressSpaceKind as CoreAddressSpaceKind;
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
 use crate::address::Address;
 use crate::binary::Binary;
+use crate::convert::{address_from_any, bytes_from_any};
 use crate::errors::{BindingError, project_error};
+use crate::segments::{AddressSpaceKind, SegmentProperties};
 
 mod common;
 mod ecode;
@@ -101,6 +104,38 @@ impl Project {
             .iter()
             .map(|function| Function::from_core(function.id(), function.entry()))
             .collect())
+    }
+
+    fn address_space_by_name(&self, name: &str) -> PyResult<Option<usize>> {
+        let project = self.reader.project().map_err(project_error)?;
+        Ok(project
+            .segments()
+            .address_space_by_name(name)
+            .map(|space| space.id().index()))
+    }
+
+    fn create_space_with(&mut self, name: String, kind: &AddressSpaceKind) -> PyResult<usize> {
+        let kind = CoreAddressSpaceKind::try_from(kind)?;
+        self.engine
+            .create_space_with(name, kind)
+            .map(|created| created.space().index())
+            .map_err(project_error)
+    }
+
+    #[pyo3(signature = (address, data, properties, space = 0))]
+    fn create_synthetic_mapping(
+        &mut self,
+        address: &Bound<'_, PyAny>,
+        data: &Bound<'_, PyAny>,
+        properties: &SegmentProperties,
+        space: usize,
+    ) -> PyResult<()> {
+        let start = address_from_any(address, space)?;
+        let bytes = bytes_from_any(data)?;
+        self.engine
+            .create_synthetic_mapping(start, bytes, properties.inner)
+            .map_err(project_error)?;
+        Ok(())
     }
 
     fn recover_functions(&mut self) -> PyResult<usize> {

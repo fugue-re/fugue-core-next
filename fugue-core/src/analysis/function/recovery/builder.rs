@@ -18,7 +18,7 @@ use crate::engine::{AnalysisContext, ProjectView};
 use crate::ir::function::FunctionInsnIndex;
 use crate::ir::{
     Address, AddressRangeSet, AddressWithContext, FlowKind, FlowTarget, IncompleteCodeBlockId,
-    IncompleteFunction, InsnEntry, ProblemKind,
+    IncompleteFunction, InsnEntry, ProblemKind, Reference, ReferenceProperties,
 };
 use crate::lifter::{ContextSet, InsnResolver};
 use crate::storage::SegmentMappingCache;
@@ -786,24 +786,37 @@ impl FunctionBuilderContext {
                 match resolver.resolve(address, bytes) {
                     Ok(resolved) => {
                         let insn = resolved.as_ref();
+                        let mut slot = None;
                         let indirect_target = (insn.is_indirect()
                             && (insn.is_branch() || insn.is_call()))
                         .then(|| {
-                            resolved.resolve_indirect_target(|address, bytes| {
-                                self.mapping_cache
-                                    .view_containing(segments, address)
+                            resolved.resolve_indirect_target(|pointer, bytes| {
+                                let readable = self
+                                    .mapping_cache
+                                    .view_containing(segments, pointer)
                                     .is_some_and(|view| {
                                         !view.properties().is_writable()
-                                            || view.mapping_hints().contains_symbol_pointer(address)
+                                            || view.mapping_hints().contains_symbol_pointer(pointer)
                                     })
                                     && self
                                         .mapping_cache
-                                        .read_bytes_exact(segments, address, bytes)
-                                        .is_ok()
+                                        .read_bytes_exact(segments, pointer, bytes)
+                                        .is_ok();
+                                if readable {
+                                    slot = Some(pointer);
+                                }
+                                readable
                             })
                         })
                         .flatten();
                         let insn_id = entry.insert(resolved.into_insn());
+                        if let Some(slot) = slot {
+                            f.add_reference(Reference::data(
+                                address,
+                                slot,
+                                ReferenceProperties::READ | ReferenceProperties::INDIRECT,
+                            ));
+                        }
                         let num_insns = f.insns().len();
                         let max_insns = config.max_function_insns();
                         if num_insns > max_insns {

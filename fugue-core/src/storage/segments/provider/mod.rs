@@ -13,6 +13,7 @@ use crate::types::AttributeMap;
 
 pub(crate) mod memmap;
 pub use memmap::MemoryMappedSegmentStorage;
+pub use memmap::packed::PackedMemoryMappedSegmentStorage;
 
 pub(crate) mod memory;
 pub use memory::InMemorySegmentStorage;

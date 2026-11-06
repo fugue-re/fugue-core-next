@@ -37,8 +37,9 @@ pub use mapping::{
 pub use overlay::{OverlayChunk, OverlayTree};
 pub use properties::SegmentProperties;
 pub use provider::{
-    InMemorySegmentStorage, MemoryMappedSegmentStorage, SegmentChunk, SegmentStorageDescriptor,
-    SegmentStorageProvider, SegmentStorageProviderDescriptor, SegmentStorageProviderEntry,
+    InMemorySegmentStorage, MemoryMappedSegmentStorage, PackedMemoryMappedSegmentStorage,
+    SegmentChunk, SegmentStorageDescriptor, SegmentStorageProvider,
+    SegmentStorageProviderDescriptor, SegmentStorageProviderEntry,
     SegmentStorageProviderFromLoadable, SegmentStorageProviderFromSegmentRange,
     SegmentStorageProviderFromStorage, SegmentStorageProviderId, SegmentStorageProviderRegistry,
     SegmentView,
@@ -49,6 +50,9 @@ pub use view::SegmentMappingView;
 pub type DefaultPersistentSegmentStorage = MemoryMappedSegmentStorage<{ super::PERSISTENT }>;
 pub type DefaultTransientSegmentStorage = InMemorySegmentStorage;
 
+pub const ATTRIBUTE_SEGMENT_STORAGE_SYNTHETIC_PROVIDER: &str =
+    "storage.segments.synthetic_provider";
+
 pub const DEFAULT_SPACE_ID: AddressSpaceId = AddressSpaceId::new(0);
 const DEFAULT_FILL_BYTE: u8 = 0;
 
@@ -57,21 +61,31 @@ const SEGMENT_STORAGE_FILE: &str = "segment.storage.bin";
 #[derive(Debug, Error)]
 pub enum SegmentStorageError {
     #[error("address space overflow: {0}")]
-    AddressSpaceOverflow(#[from] space::AddressSpaceError),
+    AddressSpaceOverflow(#[from] AddressSpaceError),
     #[error("storage error: {0}")]
     Backing(anyhow::Error),
+    #[error("address space {0} already exists")]
+    DuplicateAddressSpace(AddressSpaceId),
+    #[error("address space name `{0}` is already in use")]
+    DuplicateAddressSpaceName(String),
+    #[error("mapping {0} already exists")]
+    DuplicateMapping(SegmentMappingId),
     #[error("invalid address")]
     InvalidAddress,
     #[error("invalid address range")]
     InvalidAddressRange,
     #[error("bank {0} has an empty or inverted address range")]
     InvalidBankRange(ImageBankHandle),
+    #[error("address space {0} is an overlay and cannot be an overlay base")]
+    InvalidOverlayBase(AddressSpaceId),
     #[error("invalid size")]
     InvalidSize,
     #[error(transparent)]
     Loader(#[from] LoaderError),
     #[error("mapping {0} is already in address space {1}")]
     MappingAlreadyInSpace(SegmentMappingId, AddressSpaceId),
+    #[error("reached maximum number of mappings")]
+    MappingIdsExhausted,
     #[error("mapping {0} is not in address space {1}")]
     MappingNotInSpace(SegmentMappingId, AddressSpaceId),
     #[error("persisted overlay references unknown base space {0}")]
@@ -80,6 +94,10 @@ pub enum SegmentStorageError {
     NoProjectPath,
     #[error("failed to load project data from `{0}`: {1}")]
     ProjectData(PathBuf, io::ErrorKind),
+    #[error("reached maximum number of providers")]
+    ProviderIdsExhausted,
+    #[error("reached maximum number of address spaces")]
+    SpaceIdsExhausted,
     #[error("image segment at {0} has no backing")]
     UnbackedSegment(ImageAddress),
     #[error("image references undeclared bank {0}")]
@@ -125,6 +143,7 @@ struct ProviderMetadata {
 struct AddressSpaceMetadata {
     id: AddressSpaceId,
     kind: AddressSpaceKind,
+    name: Option<String>,
     mapping_ids: Vec<SegmentMappingId>,
 }
 
@@ -148,6 +167,8 @@ struct SegmentStorageMetadata {
     spaces: Vec<AddressSpaceMetadata>,
     mappings: Vec<MappingMetadata>,
     fill_byte: u8,
+    synthetic_provider_tag: String,
+    synthetic_provider: Option<SegmentStorageProviderId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +182,8 @@ pub struct SegmentStorage {
     mappings: BTreeMap<SegmentMappingId, SegmentMapping>,
     spaces: BTreeMap<AddressSpaceId, AddressSpace>,
     fill_byte: u8,
+    synthetic_provider_tag: Cow<'static, str>,
+    synthetic_provider: Option<SegmentStorageProviderId>,
     provider_ctr: usize,
     mapping_ctr: usize,
     space_ctr: usize,
@@ -211,6 +234,8 @@ impl SegmentStorage {
             mappings: BTreeMap::new(),
             spaces,
             fill_byte: DEFAULT_FILL_BYTE,
+            synthetic_provider_tag: Cow::Borrowed(DefaultTransientSegmentStorage::STABLE_TAG),
+            synthetic_provider: None,
             provider_ctr: 0,
             mapping_ctr: 0,
             space_ctr: 1,
@@ -246,6 +271,22 @@ impl SegmentStorage {
         }
 
         let mut storage = Self::empty();
+        storage.synthetic_provider_tag = attributes
+            .get_attr::<String>(ATTRIBUTE_SEGMENT_STORAGE_SYNTHETIC_PROVIDER)
+            .map(Cow::Owned)
+            .unwrap_or_else(|| {
+                Cow::Borrowed(if S::PERSISTENCE == PERSISTENT {
+                    PackedMemoryMappedSegmentStorage::<PERSISTENT>::STABLE_TAG
+                } else {
+                    InMemorySegmentStorage::STABLE_TAG
+                })
+            });
+        let tag = storage.synthetic_provider_tag.as_ref();
+        if !SegmentStorageProviderRegistry::get().contains_tag(tag) {
+            return Err(SegmentStorageError::backing_with(format!(
+                "unknown provider tag: {tag}"
+            )));
+        }
         let layout = loader.image_layout();
         let mut resolution = ImageResolution::default();
 
@@ -378,10 +419,8 @@ impl SegmentStorage {
             storage.add_mapping_to_space(address.space(), mapping_id)?;
         }
 
-        if let Some(project_path) = attributes.get_attr::<PathBuf>(ATTRIBUTE_PROJECT_PATH)
-            && storage.is_persistable()
-        {
-            storage.path = Some(project_path);
+        storage.path = attributes.get_attr(ATTRIBUTE_PROJECT_PATH);
+        if storage.is_persistable() {
             storage.persist_storage()?;
         }
 
@@ -410,6 +449,12 @@ impl SegmentStorage {
         attributes: &mut AttributeMap,
     ) -> Result<Self, SegmentStorageError> {
         let mut metadata = Self::read_metadata(path)?;
+        let tag = &metadata.synthetic_provider_tag;
+        if !SegmentStorageProviderRegistry::get().contains_tag(tag) {
+            return Err(SegmentStorageError::backing_with(format!(
+                "unknown provider tag: {tag}"
+            )));
+        }
         let mut storage = Self::empty();
 
         for prov_meta in mem::take(&mut metadata.providers) {
@@ -438,6 +483,8 @@ impl SegmentStorage {
         }
 
         storage.fill_byte = metadata.fill_byte;
+        storage.synthetic_provider_tag = Cow::Owned(metadata.synthetic_provider_tag);
+        storage.synthetic_provider = metadata.synthetic_provider;
         storage.spaces.clear();
 
         if !metadata
@@ -463,9 +510,11 @@ impl SegmentStorage {
                 AddressSpaceKind::Overlay { base } => AddressSpaceKind::Overlay { base },
             };
 
-            storage
-                .spaces
-                .insert(space_meta.id, AddressSpace::new_with(space_meta.id, kind));
+            let mut space = AddressSpace::new_with(space_meta.id, kind);
+            if let Some(name) = space_meta.name.as_deref() {
+                space.set_name(name);
+            }
+            storage.spaces.insert(space_meta.id, space);
             storage.space_ctr = storage.space_ctr.max(space_meta.id.index() + 1);
         }
 
@@ -491,10 +540,11 @@ impl SegmentStorage {
 
         let mut mapping_map = BTreeMap::new();
         for mapping_meta in &metadata.mappings {
-            let mapping_size = mapping_meta.range.size();
-            if AddressRange::from_size(mapping_meta.range.start_address(), mapping_size)
-                != Some(mapping_meta.range)
-            {
+            let mapping_size = mapping_meta
+                .range
+                .size()
+                .ok_or(SegmentStorageError::InvalidAddressRange)?;
+            if mapping_size == 0 {
                 return Err(SegmentStorageError::InvalidAddressRange);
             }
             let provider_id = mapping_meta.provider_id;
@@ -553,6 +603,11 @@ impl SegmentStorage {
         self.providers.get(&id).map(SegmentStorageDescriptor::size)
     }
 
+    pub(crate) fn synthetic_provider(&self) -> Option<&SegmentStorageDescriptor> {
+        self.synthetic_provider
+            .and_then(|id| self.providers.get(&id))
+    }
+
     pub fn fill_byte(&self) -> u8 {
         self.fill_byte
     }
@@ -564,6 +619,10 @@ impl SegmentStorage {
 
     pub fn mapping(&self, id: SegmentMappingId) -> Option<&SegmentMapping> {
         self.mappings.get(&id)
+    }
+
+    pub(crate) fn mappings(&self) -> impl Iterator<Item = &SegmentMapping> {
+        self.mappings.values()
     }
 
     fn is_mapping_in_space(&self, space: AddressSpaceId, mapping: SegmentMappingId) -> bool {
@@ -600,6 +659,13 @@ impl SegmentStorage {
             .values()
             .filter(move |space| space.base() == Some(base_space_id))
             .map(AddressSpace::id)
+    }
+
+    pub fn address_space_by_name(&self, name: impl AsRef<str>) -> Option<&AddressSpace> {
+        let name = name.as_ref();
+        self.spaces
+            .values()
+            .find(|space| space.name() == Some(name))
     }
 
     pub fn is_overlay_space(&self, space_id: AddressSpaceId) -> bool {
@@ -850,6 +916,7 @@ impl SegmentStorage {
             .map(|b| AddressSpaceMetadata {
                 id: b.id(),
                 kind: b.kind(),
+                name: b.name().map(str::to_owned),
                 mapping_ids: b.priority_list().map(|r| r.mapping_id()).collect(),
             })
             .collect::<Vec<_>>();
@@ -876,6 +943,8 @@ impl SegmentStorage {
             spaces,
             mappings,
             fill_byte: self.fill_byte,
+            synthetic_provider_tag: self.synthetic_provider_tag.clone().into_owned(),
+            synthetic_provider: self.synthetic_provider,
         };
 
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&metadata).map_err(|e| {
@@ -1044,7 +1113,7 @@ impl SegmentStorage {
             return Err(SegmentStorageError::UnknownProvider(builder.provider_id()));
         }
         if self.mappings.contains_key(&id) {
-            return Err(SegmentStorageError::backing_with("mapping already exists"));
+            return Err(SegmentStorageError::DuplicateMapping(id));
         }
 
         let mapping = SegmentMapping::from_builder(id, builder)?;
@@ -1054,16 +1123,101 @@ impl SegmentStorage {
         Ok(())
     }
 
+    pub fn create_synthetic_mapping(
+        &mut self,
+        start: impl Into<Address>,
+        bytes: &[u8],
+        properties: SegmentProperties,
+    ) -> Result<SegmentMappingId, SegmentStorageError> {
+        let start = start.into();
+        if !self.spaces.contains_key(&start.space()) {
+            return Err(SegmentStorageError::UnknownSpace(start.space()));
+        }
+
+        let size = bytes.len() as u64;
+        if size == 0 || start.checked_add(size - 1).is_none() {
+            return Err(SegmentStorageError::InvalidAddressRange);
+        }
+
+        let provider = match self.synthetic_provider() {
+            Some(provider) => provider.id(),
+            None => self.pending_provider_id()?,
+        };
+        let mut offset = 0;
+        for mapping in self
+            .mappings()
+            .filter(|mapping| mapping.provider_id() == provider)
+        {
+            let end = mapping
+                .offset()
+                .checked_add(mapping.size())
+                .ok_or(SegmentStorageError::InvalidAddressRange)?;
+            offset = offset.max(end);
+        }
+        let builder = SegmentMappingBuilder::new(start, size, offset, provider)
+            .with_properties(properties)
+            .with_provenance(SegmentMappingProvenance::Synthetic);
+        let end = offset
+            .checked_add(size)
+            .ok_or(SegmentStorageError::InvalidAddressRange)?;
+        self.open_synthetic_provider(provider, end)?;
+        self.write_bytes_direct(provider, offset, bytes)?;
+
+        let mapping = self.create_mapping_from_builder(builder)?;
+        self.add_mapping_to_space(start.space(), mapping)?;
+        Ok(mapping)
+    }
+
+    pub(crate) fn open_synthetic_provider(
+        &mut self,
+        id: SegmentStorageProviderId,
+        size: u64,
+    ) -> Result<(), SegmentStorageError> {
+        if let Some(descriptor) = self.providers.get_mut(&id) {
+            if descriptor.size() < size {
+                descriptor.resize(size)?;
+            }
+            return Ok(());
+        }
+
+        let mut attributes = AttributeMap::new();
+        if let Some(path) = &self.path {
+            attributes.set_attr(ATTRIBUTE_PROJECT_PATH, path.clone());
+        }
+        let last = size
+            .checked_sub(1)
+            .ok_or(SegmentStorageError::InvalidSize)?;
+        let provider = SegmentStorageProviderRegistry::get().from_segment_range(
+            &self.synthetic_provider_tag,
+            id,
+            Address::new(DEFAULT_SPACE_ID, 0u64)..=Address::new(DEFAULT_SPACE_ID, last),
+            &mut attributes,
+        )?;
+        self.open_boxed_provider(
+            id,
+            provider,
+            SegmentProperties::PERM_ALL,
+            self.synthetic_provider_tag.clone(),
+        );
+        self.synthetic_provider = Some(id);
+        Ok(())
+    }
+
+    pub(crate) fn pending_provider_id(
+        &self,
+    ) -> Result<SegmentStorageProviderId, SegmentStorageError> {
+        SegmentStorageProviderId::try_from(self.provider_ctr)
+            .map_err(|_| SegmentStorageError::ProviderIdsExhausted)
+    }
+
     pub(crate) fn pending_mapping_id(
         &self,
         offset: usize,
     ) -> Result<SegmentMappingId, SegmentStorageError> {
-        let index = self
-            .mapping_ctr
+        self.mapping_ctr
             .checked_add(offset)
-            .ok_or_else(|| SegmentStorageError::backing_with("mapping id exhausted"))?;
-        SegmentMappingId::try_from(index)
-            .map_err(|_| SegmentStorageError::backing_with("mapping id exhausted"))
+            .and_then(|index| SegmentMappingId::try_from(index).ok())
+            .ok_or(SegmentStorageError::MappingIdsExhausted)
     }
 
     pub fn remove_mapping(&mut self, id: SegmentMappingId) -> Result<(), SegmentStorageError> {
@@ -1169,18 +1323,50 @@ impl SegmentStorage {
         Ok(id)
     }
 
+    pub fn create_space_with(
+        &mut self,
+        name: impl Into<String>,
+        kind: AddressSpaceKind,
+    ) -> Result<AddressSpaceId, SegmentStorageError> {
+        let name = name.into();
+        if self.address_space_by_name(&name).is_some() {
+            return Err(SegmentStorageError::DuplicateAddressSpaceName(name));
+        }
+        if let AddressSpaceKind::Overlay { base } = kind {
+            match self.spaces.get(&base) {
+                None => return Err(SegmentStorageError::UnknownSpace(base)),
+                Some(space) if space.is_overlay() => {
+                    return Err(SegmentStorageError::InvalidOverlayBase(base));
+                }
+                Some(_) => {}
+            }
+        }
+
+        let id = AddressSpaceId::try_from(self.space_ctr)?;
+        self.space_ctr += 1;
+        self.spaces
+            .insert(id, AddressSpace::new_with(id, kind).with_name(name));
+        self.touch();
+        Ok(id)
+    }
+
     pub(crate) fn create_space_with_id(
         &mut self,
         id: AddressSpaceId,
+        name: Option<String>,
+        kind: AddressSpaceKind,
     ) -> Result<(), SegmentStorageError> {
         if self.spaces.contains_key(&id) {
-            return Err(SegmentStorageError::backing_with(
-                "address space already exists",
-            ));
+            return Err(SegmentStorageError::DuplicateAddressSpace(id));
+        }
+
+        let mut space = AddressSpace::new_with(id, kind);
+        if let Some(name) = name {
+            space.set_name(name);
         }
 
         self.space_ctr = self.space_ctr.max(id.index() + 1);
-        self.spaces.insert(id, AddressSpace::new(id));
+        self.spaces.insert(id, space);
         self.touch();
         Ok(())
     }
@@ -1189,11 +1375,10 @@ impl SegmentStorage {
         &self,
         offset: usize,
     ) -> Result<AddressSpaceId, SegmentStorageError> {
-        let index = self
-            .space_ctr
+        self.space_ctr
             .checked_add(offset)
-            .ok_or_else(|| SegmentStorageError::backing_with("address space id exhausted"))?;
-        AddressSpaceId::try_from(index).map_err(Into::into)
+            .and_then(|index| AddressSpaceId::try_from(index).ok())
+            .ok_or(SegmentStorageError::SpaceIdsExhausted)
     }
 
     pub fn add_mapping_to_space(
@@ -1417,9 +1602,10 @@ impl SegmentStorage {
         }
 
         let addr = Address::new(space_id, addr.into());
-        let size =
-            u64::try_from(bytes.len()).map_err(|_| SegmentStorageError::InvalidAddressRange)?;
-        AddressRange::from_size(addr, size).ok_or(SegmentStorageError::InvalidAddressRange)?;
+        let size = bytes.len() as u64;
+        if addr.checked_add(size - 1).is_none() {
+            return Err(SegmentStorageError::InvalidAddressRange);
+        }
 
         let space = self
             .spaces
@@ -1528,9 +1714,10 @@ impl SegmentStorage {
         }
 
         let addr = Address::new(space_id, addr.into());
-        let size =
-            u64::try_from(bytes.len()).map_err(|_| SegmentStorageError::InvalidAddressRange)?;
-        AddressRange::from_size(addr, size).ok_or(SegmentStorageError::InvalidAddressRange)?;
+        let size = bytes.len() as u64;
+        if addr.checked_add(size - 1).is_none() {
+            return Err(SegmentStorageError::InvalidAddressRange);
+        }
 
         let mut current_addr = addr;
         let mut remaining = bytes.len();
@@ -2245,7 +2432,7 @@ mod test {
         let project = tempfile::tempdir().map_err(SegmentStorageError::backing)?;
         let sparse = AddressSpaceId::new(7);
         let mut storage = SegmentStorage::empty();
-        storage.create_space_with_id(sparse)?;
+        storage.create_space_with_id(sparse, None, AddressSpaceKind::Base)?;
         storage.path = Some(project.path().to_owned());
         storage.persist_storage()?;
 

@@ -356,7 +356,9 @@ impl FunctionRecoveryLinearSweep {
                 break;
             };
             let region_size = AddressRange::new(range.space(), cursor, region_end).size();
-            let region_size = usize::try_from(region_size).unwrap_or(usize::MAX);
+            let region_size = region_size
+                .and_then(|size| usize::try_from(size).ok())
+                .unwrap_or(all_bytes.len());
             let bytes = &all_bytes[..all_bytes.len().min(region_size)];
             if bytes.is_empty() {
                 break;

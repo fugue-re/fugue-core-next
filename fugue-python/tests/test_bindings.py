@@ -88,6 +88,22 @@ def test_project_recovers_functions_from_binary():
     assert isinstance(after[0].entry, fugue.Address)
 
 
+def test_synthetic_mapping_in_named_overlay():
+    project = fugue.Project.from_file(LS_ELF)
+    space = project.create_space_with("stack-strings", fugue.AddressSpaceKind.Overlay(base=0))
+    revision = project.revision
+    project.create_synthetic_mapping(
+        0x1000,
+        b"stack string",
+        fugue.SegmentProperties(write=False, execute=False),
+        space=space,
+    )
+
+    assert project.revision > revision
+    assert project.address_space_by_name("stack-strings") == space
+    assert project.address_space_by_name("missing") is None
+
+
 def test_project_ensure_lifted_error_rolls_back_transaction():
     project = fugue.Project.from_file(LS_ELF)
     project.recover_functions()

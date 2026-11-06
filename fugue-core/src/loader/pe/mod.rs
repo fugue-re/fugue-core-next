@@ -1602,7 +1602,7 @@ mod test {
 
     impl<'a> ReadRef<'a> for HeaderReadFailure<'a> {
         fn len(self) -> Result<u64, ()> {
-            u64::try_from(<[u8]>::len(self.data)).map_err(|_| ())
+            Ok(<[u8]>::len(self.data) as u64)
         }
 
         fn read_bytes_at(self, offset: u64, size: u64) -> Result<&'a [u8], ()> {

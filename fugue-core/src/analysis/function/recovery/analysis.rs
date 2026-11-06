@@ -25,6 +25,7 @@ use crate::extension::{self, Registration};
 use crate::ir::{
     Address, AddressRange, AddressRangeExt, AddressRangeSet, AddressWithContext, CodeBlockTable,
     FunctionProperties, FunctionTable, IncompleteFunction, ProblemKind, RawAddressRangeSet,
+    ReferenceTarget,
 };
 use crate::lifter::InsnResolver;
 use crate::project::{AnalysisPhase, ChangeKinds, Project};
@@ -905,7 +906,7 @@ impl FunctionRecovery {
         self.project_candidates_added = true;
     }
 
-    fn add_region_candidates(&mut self, context: &AnalysisContext) {
+    fn add_region_candidates(&mut self, context: &AnalysisContext) -> Result<(), AnalysisError> {
         let project = &context.project;
         let regions = context.regions();
         for address in context
@@ -925,6 +926,14 @@ impl FunctionRecovery {
 
         let functions = project.functions();
         let blocks = project.blocks();
+        let add_reanalysis = |this: &mut Self, function| {
+            if let Some(entry) = functions
+                .get_by_id(function)
+                .and_then(|function| function.entry_with_context(blocks))
+            {
+                this.add_reanalysis_candidate(entry);
+            }
+        };
         for branch in context
             .causes()
             .iter()
@@ -932,12 +941,54 @@ impl FunctionRecovery {
             .filter_map(|cause| cause.range().map(|range| range.start_address()))
         {
             for function in functions.functions_containing(blocks, branch) {
-                if let Some(entry) = functions
-                    .get_by_id(function)
-                    .and_then(|function| function.entry_with_context(blocks))
-                {
-                    self.add_reanalysis_candidate(entry);
-                }
+                add_reanalysis(self, function);
+            }
+        }
+
+        for written in context
+            .causes()
+            .iter()
+            .filter(|cause| cause.trigger() == WorkTrigger::Change)
+            .filter(|cause| cause.kind().intersects(ChangeKinds::BYTES_WRITTEN))
+            .filter_map(|cause| cause.range())
+        {
+            project
+                .references()
+                .for_each_reference_to(
+                    ReferenceTarget::from(written.start_address())
+                        ..=ReferenceTarget::from(written.end_address()),
+                    None,
+                    |reference| {
+                        if !(reference.is_read() && reference.is_indirect()) {
+                            return;
+                        }
+                        for function in functions.functions_containing(blocks, reference.from()) {
+                            add_reanalysis(self, function);
+                        }
+                    },
+                )
+                .map_err(|error| AnalysisError::pass_failed(FUNCTION_RECOVERY_ANALYSER, error))?;
+
+            let stale = self
+                .pending_functions
+                .iter()
+                .filter(|(_, function)| {
+                    function.references().iter().any(|reference| {
+                        reference.is_read()
+                            && reference.is_indirect()
+                            && reference
+                                .target()
+                                .address()
+                                .is_some_and(|slot| written.contains_address(slot))
+                    })
+                })
+                .map(|(&entry, function)| {
+                    AddressWithContext::new(entry, function.entry_block().context().clone())
+                })
+                .collect::<Vec<_>>();
+            for entry in stale {
+                self.pending_functions.remove(&entry.address());
+                self.add_reanalysis_candidate(entry);
             }
         }
 
@@ -968,9 +1019,10 @@ impl FunctionRecovery {
                 self.add_candidate(hint);
             }
         }
+        Ok(())
     }
 
-    fn add_analysis_candidates(&mut self, context: &AnalysisContext) {
+    fn add_analysis_candidates(&mut self, context: &AnalysisContext) -> Result<(), AnalysisError> {
         let project = &context.project;
         let functions_empty = project.functions().is_empty();
         let first_project_scan = !self.project_candidates_added;
@@ -978,8 +1030,9 @@ impl FunctionRecovery {
             self.add_project_candidates(project);
         }
         if !functions_empty || !first_project_scan {
-            self.add_region_candidates(context);
+            self.add_region_candidates(context)?;
         }
+        Ok(())
     }
 
     fn stage_pending_functions(
@@ -1435,9 +1488,10 @@ impl FunctionRecovery {
             .into_iter()
             .chain(rejected_function_hints.iter().copied())
         {
+            let target = ReferenceTarget::from(boundary);
             let references = project
                 .references()
-                .references_to(boundary.into(), None)
+                .references_to(target..=target, None)
                 .map_err(|error| AnalysisError::pass_failed(FUNCTION_RECOVERY_ANALYSER, error))?;
             for reference in references {
                 let reference = reference.map_err(|error| {
@@ -1536,7 +1590,7 @@ impl Analyser for FunctionRecovery {
             self.continuation_coverage = None;
             self.context = None;
             self.update_function_boundaries(&context.project)?;
-            self.add_analysis_candidates(context);
+            self.add_analysis_candidates(context)?;
         } else if self.boundary_update_pending {
             self.update_function_boundaries(&context.project)?;
             self.boundary_update_pending = false;
@@ -1656,6 +1710,27 @@ impl Analyser for FunctionRecovery {
         );
 
         Ok(())
+    }
+
+    fn retract(&mut self, regions: &AddressRangeSet) {
+        self.pending_functions.retain(|entry, function| {
+            !regions.contains(*entry)
+                && !function
+                    .blocks()
+                    .iter()
+                    .any(|block| regions.intersects_range(&block.address_range()))
+        });
+        self.candidates.retain(|candidate| {
+            let entry = candidate.entry().address();
+            if regions.contains(entry) {
+                self.reanalysis_candidates.remove(&entry);
+                false
+            } else {
+                true
+            }
+        });
+        self.continuation_coverage = None;
+        self.context = None;
     }
 
     fn has_pending_work(&self) -> bool {

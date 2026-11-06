@@ -3,8 +3,8 @@ use fugue_core::ir::Address as CoreAddress;
 use fugue_core::lifter::{ContextHint as CoreContextHint, ContextHintKind};
 use fugue_core::loader::{Loadable, Loader as CoreLoader};
 use fugue_core::storage::{
-    InMemorySegmentStorage, SegmentMappingBuilder, SegmentProperties as CoreSegmentProperties,
-    SegmentStorage as CoreSegmentStorage,
+    AddressSpaceKind as CoreAddressSpaceKind, InMemorySegmentStorage, SegmentMappingBuilder,
+    SegmentProperties as CoreSegmentProperties, SegmentStorage as CoreSegmentStorage,
 };
 use fugue_core::types::AttributeMap;
 use pyo3::exceptions::PyOverflowError;
@@ -14,7 +14,7 @@ use pyo3::types::{PyBytes, PyModule};
 use crate::address::Address;
 use crate::attributes::attribute_map_from_py;
 use crate::binary::Binary;
-use crate::convert::{address_from_any, bytes_from_any};
+use crate::convert::{address_from_any, address_space_id, bytes_from_any};
 use crate::errors::{BindingError, loader_error, storage_error};
 
 fn properties_from_bits(bits: u8) -> CoreSegmentProperties {
@@ -160,6 +160,26 @@ impl MappingHint {
         let address = self.address.display_text();
         let hint = self.hint.__str__();
         format!("MappingHint(address={address}, hint={hint:?})")
+    }
+}
+
+#[pyclass(frozen, skip_from_py_object)]
+#[derive(Clone)]
+pub(crate) enum AddressSpaceKind {
+    Base(),
+    Overlay { base: usize },
+}
+
+impl TryFrom<&AddressSpaceKind> for CoreAddressSpaceKind {
+    type Error = PyErr;
+
+    fn try_from(kind: &AddressSpaceKind) -> PyResult<Self> {
+        match kind {
+            AddressSpaceKind::Base() => Ok(Self::Base),
+            AddressSpaceKind::Overlay { base } => Ok(Self::Overlay {
+                base: address_space_id(*base)?,
+            }),
+        }
     }
 }
 
@@ -423,6 +443,7 @@ impl SegmentStorage {
 }
 
 pub(crate) fn add_classes(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<AddressSpaceKind>()?;
     module.add_class::<ContextHint>()?;
     module.add_class::<MappingHint>()?;
     module.add_class::<SegmentProperties>()?;
