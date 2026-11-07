@@ -38,11 +38,12 @@ where
             return;
         }
 
-        let Some(value) = (if value >= target {
+        let displacement = if value >= target {
             addend.checked_add_unsigned(value - target)
         } else {
             addend.checked_sub_unsigned(target - value)
-        }) else {
+        };
+        let Some(value) = displacement else {
             tracing::warn!("relocation {reloc_type:#x} at {offset:#x} overflow");
             return;
         };
