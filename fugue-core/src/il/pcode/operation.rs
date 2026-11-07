@@ -1,6 +1,9 @@
+use std::borrow::Borrow;
 use std::num::NonZeroU32;
 
-use crate::il::common::{IlIndexRange, il_id};
+use fugue_bv::BitVec;
+
+use crate::il::common::{IlIndexRange, IlScalarOp, il_id};
 use crate::lifter::{Language, Op, Varnode};
 use crate::storage::schema::bitflags::archived_bitflags;
 use crate::storage::segments::space::AddressSpaceId;
@@ -61,6 +64,7 @@ bitflags::bitflags! {
         const CONSTANT = 0x0001;
         const REGISTER = 0x0002;
         const UNIQUE   = 0x0004;
+        const MEMORY   = 0x0008;
     }
 }
 
@@ -93,6 +97,8 @@ impl PCodeLocation {
             PCodeLocationProperties::REGISTER
         } else if varnode.space() == language.unique_space() {
             PCodeLocationProperties::UNIQUE
+        } else if varnode.space() == language.default_space() {
+            PCodeLocationProperties::MEMORY
         } else {
             PCodeLocationProperties::empty()
         };
@@ -135,6 +141,16 @@ impl PCodeLocation {
 
     pub const fn is_unique(&self) -> bool {
         self.properties.contains(PCodeLocationProperties::UNIQUE)
+    }
+
+    pub const fn is_memory(&self) -> bool {
+        self.properties.contains(PCodeLocationProperties::MEMORY)
+    }
+
+    pub fn overlaps(&self, other: &Self) -> bool {
+        self.lifter_space == other.lifter_space
+            && self.offset < other.offset.saturating_add(u64::from(other.size))
+            && other.offset < self.offset.saturating_add(u64::from(self.size))
     }
 }
 
@@ -496,6 +512,49 @@ impl PCodeOpcode {
                 | Self::FloatLess
                 | Self::FloatLessEq
         )
+    }
+
+    pub(crate) fn evaluate<T>(self, width: u32, operands: &[T]) -> Option<BitVec>
+    where
+        T: Borrow<BitVec>,
+    {
+        let operation = match self {
+            Self::BoolAnd => IlScalarOp::BoolAnd,
+            Self::BoolNot => IlScalarOp::BoolNot,
+            Self::BoolOr => IlScalarOp::BoolOr,
+            Self::BoolXor => IlScalarOp::BoolXor,
+            Self::Copy => IlScalarOp::Copy,
+            Self::CountLeadingZeros => IlScalarOp::CountLeadingZeros,
+            Self::CountOnes => IlScalarOp::CountOnes,
+            Self::IntAdd => IlScalarOp::Add,
+            Self::IntAnd => IlScalarOp::And,
+            Self::IntCarry => IlScalarOp::Carry,
+            Self::IntDiv => IlScalarOp::UnsignedDiv,
+            Self::IntEq => IlScalarOp::IntEqual,
+            Self::IntLeftShift => IlScalarOp::LeftShift,
+            Self::IntLess => IlScalarOp::IntLess,
+            Self::IntLessEq => IlScalarOp::IntLessEqual,
+            Self::IntMul => IlScalarOp::Mul,
+            Self::IntNeg => IlScalarOp::Negate,
+            Self::IntNot => IlScalarOp::Not,
+            Self::IntNotEq => IlScalarOp::IntNotEqual,
+            Self::IntOr => IlScalarOp::Or,
+            Self::IntRem => IlScalarOp::UnsignedRem,
+            Self::IntRightShift => IlScalarOp::LogicalRightShift,
+            Self::IntSignedBorrow => IlScalarOp::SignedBorrow,
+            Self::IntSignedCarry => IlScalarOp::SignedCarry,
+            Self::IntSignedDiv => IlScalarOp::SignedDiv,
+            Self::IntSignedLess => IlScalarOp::IntSignedLess,
+            Self::IntSignedLessEq => IlScalarOp::IntSignedLessEqual,
+            Self::IntSignedRem => IlScalarOp::SignedRem,
+            Self::IntSignedRightShift => IlScalarOp::ArithmeticRightShift,
+            Self::IntSub => IlScalarOp::Sub,
+            Self::IntXor => IlScalarOp::Xor,
+            Self::SignExt => IlScalarOp::SignExtend,
+            Self::ZeroExt => IlScalarOp::ZeroExtend,
+            _ => return None,
+        };
+        operation.evaluate(width, operands)
     }
 }
 

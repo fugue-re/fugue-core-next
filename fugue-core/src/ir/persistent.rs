@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::mem::size_of;
-use std::ops::Bound;
+use std::ops::{Bound, RangeBounds};
 use std::sync::Mutex;
 
 use super::Id;
@@ -23,6 +23,37 @@ pub(crate) fn cursor_bound<T>(after: Option<T>) -> Bound<T> {
 
 pub(crate) fn cursor_bound_or_minimum<T>(after: Option<T>, minimum: T) -> Bound<T> {
     after.map_or(Bound::Included(minimum), Bound::Excluded)
+}
+
+pub(crate) fn cursor_bounds<C, K>(
+    range: impl RangeBounds<C>,
+    after: Option<K>,
+    minimum: impl Fn(C) -> K,
+    maximum: impl Fn(C) -> K,
+) -> (Bound<K>, Bound<K>)
+where
+    C: Copy,
+    K: Ord,
+{
+    let mut start = match range.start_bound() {
+        Bound::Included(&component) => Bound::Included(minimum(component)),
+        Bound::Excluded(&component) => Bound::Excluded(maximum(component)),
+        Bound::Unbounded => Bound::Unbounded,
+    };
+    let end = match range.end_bound() {
+        Bound::Included(&component) => Bound::Included(maximum(component)),
+        Bound::Excluded(&component) => Bound::Excluded(minimum(component)),
+        Bound::Unbounded => Bound::Unbounded,
+    };
+    if let Some(after) = after
+        && match &start {
+            Bound::Included(start) | Bound::Excluded(start) => after >= *start,
+            Bound::Unbounded => true,
+        }
+    {
+        start = Bound::Excluded(after);
+    }
+    (start, end)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

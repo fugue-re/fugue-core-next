@@ -163,7 +163,9 @@ impl WorkItem {
     }
 
     fn cost(&self) -> u64 {
-        self.range.map_or(1, |range| range.size())
+        self.range.map_or(1, |range| {
+            range.size().expect("popped work fits in a u64 budget")
+        })
     }
 
     fn scope(&self) -> ProblemScope {
@@ -481,7 +483,10 @@ impl AnalysisWorkQueue {
         let mut item = self.items.remove(&key)?;
         self.keys_by_analyser_and_range[item.analyser.index()].remove(&(item.range, item.kind));
 
-        if item.range.is_some_and(|range| range.size() > budget) {
+        if item
+            .range
+            .is_some_and(|range| range.size().is_none_or(|size| size > budget))
+        {
             let range = item.range.expect("checked as present");
             let space = range.space();
             let start = range.start();
@@ -692,7 +697,7 @@ mod test {
     }
 
     #[test]
-    fn addressless_work_is_ordered_by_analyser_name() {
+    fn global_work_is_ordered_by_analyser_name() {
         let mut queue = queue_with(2);
         let regions = AddressRangeSet::new();
 
@@ -702,7 +707,7 @@ mod test {
             AnalysisPhase::Decode,
             Priority::DISCOVERY,
             &regions,
-            |range| WorkCause::new(range, ChangeKinds::SPACE_CREATED, Revision::new(1)),
+            |range| WorkCause::new(range, ChangeKinds::ADDRESS_SPACE_CREATED, Revision::new(1)),
         );
         queue.schedule(
             AnalyserId::new(1),
@@ -710,7 +715,7 @@ mod test {
             AnalysisPhase::Decode,
             Priority::DISCOVERY,
             &regions,
-            |range| WorkCause::new(range, ChangeKinds::SPACE_CREATED, Revision::new(1)),
+            |range| WorkCause::new(range, ChangeKinds::ADDRESS_SPACE_CREATED, Revision::new(1)),
         );
 
         let first = queue.pop(WORK_SLICE_BYTES).expect("global work is queued");
@@ -820,7 +825,7 @@ mod test {
         let first = queue.pop(WORK_SLICE_BYTES).expect("an item is queued");
         assert_eq!(
             first.range().expect("regional work").size(),
-            WORK_SLICE_BYTES
+            Some(WORK_SLICE_BYTES)
         );
         assert!(!queue.is_empty(), "the remainder stays queued");
 
@@ -829,7 +834,7 @@ mod test {
             .expect("the remainder is queued");
         assert_eq!(
             second.range().expect("regional work").size(),
-            WORK_SLICE_BYTES
+            Some(WORK_SLICE_BYTES)
         );
         assert!(queue.is_empty());
     }

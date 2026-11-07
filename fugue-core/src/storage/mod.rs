@@ -46,16 +46,17 @@ pub use project::{FundamentalProjectEntity, PersistableProjectEntity, ProjectEnt
 
 pub(crate) mod segments;
 pub use segments::{
-    AddressSpace, AddressSpaceError, AddressSpaceId, AddressSpaceKind, DEFAULT_SPACE_ID,
-    DefaultPersistentSegmentStorage, DefaultTransientSegmentStorage, InMemorySegmentStorage,
-    MemoryMappedSegmentStorage, SegmentMapping, SegmentMappingBuilder, SegmentMappingCache,
-    SegmentMappingFlags, SegmentMappingId, SegmentMappingKind, SegmentMappingProvenance,
-    SegmentMappingRef, SegmentMappingView, SegmentProperties, SegmentStorage,
-    SegmentStorageDescriptor, SegmentStorageError, SegmentStorageProvider,
-    SegmentStorageProviderDescriptor, SegmentStorageProviderEntry,
-    SegmentStorageProviderFromLoadable, SegmentStorageProviderFromSegmentRange,
-    SegmentStorageProviderFromStorage, SegmentStorageProviderId, SegmentStorageProviderRegistry,
-    SegmentSubMapping,
+    ATTRIBUTE_SEGMENT_STORAGE_SYNTHETIC_PROVIDER, AddressSpace, AddressSpaceError, AddressSpaceId,
+    AddressSpaceKind, DEFAULT_SPACE_ID, DefaultPersistentSegmentStorage,
+    DefaultTransientSegmentStorage, InMemorySegmentStorage, MemoryMappedSegmentStorage,
+    OverlayChunk, OverlayTree, PackedMemoryMappedSegmentStorage, SegmentChunk, SegmentMapping,
+    SegmentMappingBuilder, SegmentMappingCache, SegmentMappingFlags, SegmentMappingHints,
+    SegmentMappingId, SegmentMappingKind, SegmentMappingProvenance, SegmentMappingRef,
+    SegmentMappingView, SegmentProperties, SegmentStorage, SegmentStorageDescriptor,
+    SegmentStorageError, SegmentStorageProvider, SegmentStorageProviderDescriptor,
+    SegmentStorageProviderEntry, SegmentStorageProviderFromLoadable,
+    SegmentStorageProviderFromSegmentRange, SegmentStorageProviderFromStorage,
+    SegmentStorageProviderId, SegmentStorageProviderRegistry, SegmentSubMapping, SegmentView,
 };
 
 pub const FUGUE_STORAGE_MAGIC: &[u8] = b"FDBZ";

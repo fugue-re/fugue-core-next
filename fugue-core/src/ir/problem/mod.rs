@@ -35,6 +35,7 @@ pub enum ProblemKind {
     AnalysisCoverageInvalidated,
     AvoidedBytes,
     CannotCreateFunction,
+    CannotCreateFunctionFromHint,
     ChangeIndexCollapsed,
     DecodeFailed,
     FunctionTooLarge,

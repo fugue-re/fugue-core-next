@@ -2,8 +2,8 @@ use std::fmt::Debug;
 use std::ops::Deref;
 use std::sync::Arc;
 
-use fugue_sleigh_marshal::sla::*;
 use fugue_sleigh_marshal::Decoder;
+use fugue_sleigh_marshal::sla::*;
 
 use crate::deserialise::DeserialiseError;
 
@@ -125,7 +125,7 @@ impl AddressSpaces {
             let index = spaces.len();
 
             if space.index() != index {
-                return Err(DeserialiseError::Invariant("space index mismatch"));
+                return Err(DeserialiseError::invariant("space index mismatch"));
             }
 
             if space.name() == default_name {
@@ -148,17 +148,17 @@ impl AddressSpaces {
         input.close_element(id)?;
 
         if default_space == 0 {
-            return Err(DeserialiseError::Invariant(
+            return Err(DeserialiseError::invariant(
                 "non-constant default space not defined",
             ));
         }
 
         if register_space == 0 {
-            return Err(DeserialiseError::Invariant("register space not defined"));
+            return Err(DeserialiseError::invariant("register space not defined"));
         }
 
         if unique_space == 0 {
-            return Err(DeserialiseError::Invariant("unique space not defined"));
+            return Err(DeserialiseError::invariant("unique space not defined"));
         }
 
         Ok(Self {
@@ -172,9 +172,7 @@ impl AddressSpaces {
 
     pub fn from_xml(input: xml::Node) -> Result<Self, DeserialiseError> {
         if input.tag_name().name() != "spaces" {
-            return Err(DeserialiseError::TagUnexpected(
-                input.tag_name().name().to_owned(),
-            ));
+            return Err(DeserialiseError::tag_unexpected(input.tag_name().name()));
         }
 
         let mut spaces = vec![Arc::new(AddressSpace::constant("const", 0))];
@@ -184,7 +182,7 @@ impl AddressSpaces {
 
         let default_name = input
             .attribute("defaultspace")
-            .ok_or(DeserialiseError::AttributeExpected("defaultspace"))?;
+            .ok_or(DeserialiseError::attribute_expected("defaultspace"))?;
 
         for (index, child) in input
             .children()
@@ -195,7 +193,7 @@ impl AddressSpaces {
             let mut space = AddressSpace::from_xml(child)?;
 
             if space.index() != index {
-                return Err(DeserialiseError::Invariant("space index mismatch"));
+                return Err(DeserialiseError::invariant("space index mismatch"));
             }
 
             if space.name() == default_name {
@@ -216,17 +214,17 @@ impl AddressSpaces {
         }
 
         if default_space == 0 {
-            return Err(DeserialiseError::Invariant(
+            return Err(DeserialiseError::invariant(
                 "non-constant default space not defined",
             ));
         }
 
         if register_space == 0 {
-            return Err(DeserialiseError::Invariant("register space not defined"));
+            return Err(DeserialiseError::invariant("register space not defined"));
         }
 
         if unique_space == 0 {
-            return Err(DeserialiseError::Invariant("unique space not defined"));
+            return Err(DeserialiseError::invariant("unique space not defined"));
         }
 
         Ok(Self {

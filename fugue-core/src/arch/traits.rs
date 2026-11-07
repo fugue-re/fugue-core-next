@@ -96,11 +96,11 @@ pub trait Arch: Send + Sync + 'static {
     fn lifter(&self) -> Lifter;
 
     fn endian(&self) -> Endian {
-        if self.language().is_big_endian() {
-            Endian::Big
-        } else {
-            Endian::Little
-        }
+        self.language().endian()
+    }
+
+    fn insn_endian(&self) -> Endian {
+        self.language().insn_endian()
     }
 
     fn canonicalise_address(&self, addr: RawAddress) -> Option<(RawAddress, ContextSet)> {

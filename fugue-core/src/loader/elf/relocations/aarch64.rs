@@ -1,6 +1,7 @@
 use object::elf::{
-    R_AARCH64_CALL26, R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT, R_AARCH64_JUMP26,
-    R_AARCH64_P32_GLOB_DAT, R_AARCH64_P32_JUMP_SLOT, R_AARCH64_P32_RELATIVE, R_AARCH64_RELATIVE,
+    R_AARCH64_CALL26, R_AARCH64_GLOB_DAT, R_AARCH64_IRELATIVE, R_AARCH64_JUMP_SLOT,
+    R_AARCH64_JUMP26, R_AARCH64_P32_GLOB_DAT, R_AARCH64_P32_IRELATIVE, R_AARCH64_P32_JUMP_SLOT,
+    R_AARCH64_P32_RELATIVE, R_AARCH64_RELATIVE,
 };
 use object::read::elf::FileHeader;
 use object::{ReadRef, Relocation, RelocationEncoding, RelocationKind};
@@ -31,22 +32,30 @@ where
 
         self.mark_function_symbol(value, bytes);
 
-        let value = i128::from(value) + i128::from(reloc.addend()) - i128::from(target);
-
-        if (value & 0x3) != 0 {
+        let addend = reloc.addend();
+        if value.wrapping_add_signed(addend).wrapping_sub(target) & 3 != 0 {
             tracing::warn!("relocation {reloc_type:#x} at {offset:#x} is not word aligned");
             return;
         }
 
+        let Some(value) = (if value >= target {
+            addend.checked_add_unsigned(value - target)
+        } else {
+            addend.checked_sub_unsigned(target - value)
+        }) else {
+            tracing::warn!("relocation {reloc_type:#x} at {offset:#x} overflow");
+            return;
+        };
+
         let shifted = value >> 2;
-        if !((-(1i128 << 25))..(1i128 << 25)).contains(&shifted) {
+        if !((-(1i64 << 25))..(1i64 << 25)).contains(&shifted) {
             tracing::warn!("relocation {reloc_type:#x} at {offset:#x} overflow");
             return;
         }
 
         tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");
 
-        let imm26 = (shifted as i64 as u32) & 0x03ff_ffff;
+        let imm26 = (shifted as u32) & 0x03ff_ffff;
         bytes.update_value::<u32>(offset, |insn| (insn & !0x03ff_ffff) | imm26);
     }
 
@@ -80,14 +89,14 @@ where
         };
 
         match reloc_type {
-            R_AARCH64_RELATIVE => {
+            R_AARCH64_RELATIVE | R_AARCH64_IRELATIVE => {
                 let value = self.base.offset().wrapping_add_signed(reloc.addend());
 
                 tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");
 
                 bytes.write_value(offset, value);
             }
-            R_AARCH64_P32_RELATIVE => {
+            R_AARCH64_P32_RELATIVE | R_AARCH64_P32_IRELATIVE => {
                 let value = self.base.offset().wrapping_add_signed(reloc.addend());
 
                 if value > u32::MAX as u64 {
@@ -104,6 +113,9 @@ where
                     tracing::warn!("failed to resolve relocation {reloc_type:#x} at {offset:#x}");
                     return;
                 };
+
+                let slot = bytes.address() + offset;
+                bytes.mapping_hints_mut().insert_symbol_pointer(slot);
 
                 if reloc_type == R_AARCH64_JUMP_SLOT {
                     self.mark_function_symbol(value, bytes);
@@ -128,6 +140,9 @@ where
                     tracing::warn!("relocation {reloc_type:#x} at {offset:#x} overflow");
                     return;
                 }
+
+                let slot = bytes.address() + offset;
+                bytes.mapping_hints_mut().insert_symbol_pointer(slot);
 
                 if reloc_type == R_AARCH64_P32_JUMP_SLOT {
                     self.mark_function_symbol(value, bytes);

@@ -386,9 +386,24 @@ impl IRBuilder {
 
         let mut emitted = take(&mut self.emitted);
 
-        for (i, emitted) in emitted.stmts.iter_mut().enumerate() {
+        let mut positions = Vec::with_capacity(emitted.stmts.len() + 1);
+        let mut position = 0;
+        for stmt in emitted.stmts.iter() {
+            positions.push(position);
+            position += match stmt.op {
+                Op::UserOp(_, n) => n.div_ceil(2).max(1) as usize,
+                _ => 1,
+            };
+        }
+        positions.push(position);
+
+        for label_position in self.labels.values_mut() {
+            *label_position = positions[*label_position];
+        }
+
+        for (emitted, position) in emitted.stmts.iter_mut().zip(positions) {
             // attempt to resolve labels into relatives
-            self.update_varnode_labels(i, &mut emitted.inputs)?;
+            self.update_varnode_labels(position, &mut emitted.inputs)?;
             // attempt to infer missing sizes with fallback to default size
             self.update_varnodes(
                 emitted.op,

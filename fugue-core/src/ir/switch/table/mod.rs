@@ -1,19 +1,22 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::ops::Bound;
 use std::sync::Arc;
 
+use iset::{Entry, IntervalMap};
+use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::ir::persistent::cursor_bound;
 use crate::ir::switch::{Switch, SwitchId};
-use crate::ir::{Address, FunctionId, IdSet};
+use crate::ir::{Address, AddressRange, AddressRangeSet, IdSet, RawAddress};
 use crate::storage::entities::schema::ENTITY_SWITCH_TABLE_ID;
 use crate::storage::entities::{
     Entity, EntityId, EntityRef, EntityWrite, EntityWriteBatch, ProjectEntity, WriteBackWorker,
 };
 use crate::storage::project::PersistableProjectEntity;
+use crate::storage::segments::space::AddressSpaceId;
 use crate::storage::{EntityStorage, EntityStorageError};
 
 pub(crate) const ATTRIBUTE_SWITCH_CACHE_SIZE: &str = "storage.entities.switch.cache_size";
@@ -40,14 +43,14 @@ impl Entity for SwitchTableHeader {
 
 struct SwitchIndex {
     branches: BTreeMap<Address, SwitchId>,
-    by_function: BTreeMap<FunctionId, BTreeSet<Address>>,
+    coverage: BTreeMap<AddressSpaceId, IntervalMap<RawAddress, IdSet<Switch>>>,
 }
 
 impl SwitchIndex {
     fn new() -> Self {
         Self {
             branches: BTreeMap::new(),
-            by_function: BTreeMap::new(),
+            coverage: BTreeMap::new(),
         }
     }
 
@@ -57,14 +60,6 @@ impl SwitchIndex {
 
     fn contains(&self, branch: Address) -> bool {
         self.branches.contains_key(&branch)
-    }
-
-    fn branches_for_function(&self, function: FunctionId) -> impl Iterator<Item = Address> + '_ {
-        self.by_function
-            .get(&function)
-            .into_iter()
-            .flatten()
-            .copied()
     }
 
     fn branches(&self) -> impl Iterator<Item = Address> + '_ {
@@ -89,25 +84,43 @@ impl SwitchIndex {
             .map(|(&address, &id)| (address, id))
     }
 
-    fn link(&mut self, function: FunctionId, branch: Address) {
-        self.by_function.entry(function).or_default().insert(branch);
+    fn overlaps(&self, range: &AddressRange) -> SmallVec<[SwitchId; 4]> {
+        let mut overlapping = self
+            .coverage
+            .get(&range.space())
+            .into_iter()
+            .flat_map(|coverage| coverage.values(range.start()..=range.end()))
+            .flat_map(IdSet::iter)
+            .collect::<SmallVec<_>>();
+        overlapping.sort_unstable();
+        overlapping.dedup();
+        overlapping
     }
 
-    fn insert(&mut self, id: SwitchId, function: FunctionId, branch: Address) {
-        self.branches.insert(branch, id);
-        self.link(function, branch);
+    fn insert(&mut self, switch: &Switch) {
+        self.branches.insert(switch.branch(), switch.id());
+        for range in switch.coverage().ranges() {
+            self.coverage
+                .entry(range.space())
+                .or_default()
+                .entry(range.start()..=range.end())
+                .or_default()
+                .insert(switch.id());
+        }
     }
 
-    fn remove(&mut self, function: FunctionId, branch: Address) {
+    fn remove(&mut self, id: SwitchId, branch: Address, covered: &AddressRangeSet) {
         self.branches.remove(&branch);
-        self.unlink(function, branch);
-    }
-
-    fn unlink(&mut self, function: FunctionId, branch: Address) {
-        if let Some(branches) = self.by_function.get_mut(&function) {
-            branches.remove(&branch);
-            if branches.is_empty() {
-                self.by_function.remove(&function);
+        for range in covered.ranges() {
+            if let Some(Entry::Occupied(mut entry)) = self
+                .coverage
+                .get_mut(&range.space())
+                .map(|coverage| coverage.entry(range.start()..=range.end()))
+            {
+                entry.get_mut().remove(id);
+                if entry.get().is_empty() {
+                    entry.remove();
+                }
             }
         }
     }
@@ -129,14 +142,9 @@ pub(crate) struct PreparedSwitchBatch {
 struct PreparedSwitchRecord {
     branch: Address,
     encoded_size: usize,
-    previous: Option<PreviousSwitch>,
+    previous: Option<SwitchId>,
+    previous_coverage: AddressRangeSet,
     switch: Option<Switch>,
-}
-
-#[derive(Clone, Copy)]
-struct PreviousSwitch {
-    function: FunctionId,
-    id: SwitchId,
 }
 
 pub enum SwitchTable {
@@ -235,16 +243,6 @@ impl SwitchTable {
         }
     }
 
-    pub fn branches_for_function(
-        &self,
-        function: FunctionId,
-    ) -> Box<dyn Iterator<Item = Address> + '_> {
-        match self {
-            Self::Persistent(table) => Box::new(table.branches_for_function(function)),
-            Self::Transient(table) => Box::new(table.branches_for_function(function)),
-        }
-    }
-
     pub fn branches(&self) -> Box<dyn Iterator<Item = Address> + '_> {
         match self {
             Self::Persistent(table) => Box::new(table.branches()),
@@ -262,6 +260,13 @@ impl SwitchTable {
         }
     }
 
+    pub fn overlaps(&self, range: &AddressRange) -> Box<dyn Iterator<Item = SwitchRef<'_>> + '_> {
+        match self {
+            Self::Persistent(table) => Box::new(table.overlaps(range).map(EntityRef::cached)),
+            Self::Transient(table) => Box::new(table.overlaps(range).map(EntityRef::borrowed)),
+        }
+    }
+
     pub fn iter(&self) -> Box<dyn Iterator<Item = SwitchRef<'_>> + '_> {
         match self {
             Self::Persistent(table) => Box::new(table.iter().map(EntityRef::cached)),
@@ -271,6 +276,14 @@ impl SwitchTable {
 
     pub(crate) fn is_persistent(&self) -> bool {
         matches!(self, Self::Persistent(_))
+    }
+
+    pub(crate) fn staged_overlaps(
+        &self,
+        staging: &SwitchTableStaging,
+        range: &AddressRange,
+    ) -> Result<SmallVec<[SwitchId; 4]>, EntityStorageError> {
+        staging.switches_overlapping(self, range)
     }
 
     pub(crate) fn pending_id(&self, offset: usize) -> SwitchId {
@@ -396,21 +409,27 @@ impl SwitchTable {
     pub(crate) fn publish_upsert(
         &mut self,
         switch: Switch,
-        previous_function: Option<FunctionId>,
         encoded_size: usize,
+        previous: Option<SwitchId>,
+        previous_coverage: &AddressRangeSet,
     ) {
         match self {
             Self::Persistent(table) => {
-                table.publish_upsert(switch, previous_function, encoded_size)
+                table.publish_upsert(switch, encoded_size, previous, previous_coverage)
             }
-            Self::Transient(table) => table.publish_upsert(switch, previous_function),
+            Self::Transient(table) => table.publish_upsert(switch),
         }
     }
 
-    pub(crate) fn publish_remove(&mut self, id: SwitchId, function: FunctionId, branch: Address) {
+    pub(crate) fn publish_remove(
+        &mut self,
+        id: SwitchId,
+        branch: Address,
+        previous_coverage: &AddressRangeSet,
+    ) {
         match self {
-            Self::Persistent(table) => table.publish_remove(id, function, branch),
-            Self::Transient(table) => table.publish_remove(id, function, branch),
+            Self::Persistent(table) => table.publish_remove(id, branch, previous_coverage),
+            Self::Transient(table) => table.publish_remove(id),
         }
     }
 }
@@ -428,25 +447,56 @@ impl SwitchTableStaging {
         }
     }
 
-    pub(crate) fn branches_for_function(
+    pub(crate) fn get_by_id<'a>(
+        &'a self,
+        switches: &'a SwitchTable,
+        id: SwitchId,
+    ) -> Result<Option<SwitchRef<'a>>, EntityStorageError> {
+        if let Some(switch) = self
+            .staged_switches
+            .values()
+            .flatten()
+            .find(|switch| switch.id() == id)
+        {
+            return Ok(Some(EntityRef::borrowed(switch)));
+        }
+        let Some(switch) = switches.try_get_by_id(id)? else {
+            return Ok(None);
+        };
+        Ok((!self.staged_switches.contains_key(&switch.branch())).then_some(switch))
+    }
+
+    fn switches_overlapping(
         &self,
         switches: &SwitchTable,
-        function: FunctionId,
-    ) -> BTreeSet<Address> {
-        let mut branches = switches
-            .branches_for_function(function)
-            .collect::<BTreeSet<_>>();
-        for (&branch, switch) in &self.staged_switches {
-            match switch {
-                Some(switch) if switch.function() == function => {
-                    branches.insert(branch);
+        range: &AddressRange,
+    ) -> Result<SmallVec<[SwitchId; 4]>, EntityStorageError> {
+        let mut overlapping = switches
+            .overlaps(range)
+            .map(|switch| switch.id())
+            .collect::<SmallVec<_>>();
+
+        for (&branch, staged) in &self.staged_switches {
+            let id = match staged {
+                Some(switch) => switch.id(),
+                None => match switches.try_get_by_branch(branch)? {
+                    Some(previous) => previous.id(),
+                    None => continue,
+                },
+            };
+            let intersects = staged
+                .as_ref()
+                .is_some_and(|switch| switch.coverage().intersects_range(range));
+            match overlapping.binary_search(&id) {
+                Ok(index) if !intersects => {
+                    overlapping.remove(index);
                 }
-                Some(_) | None => {
-                    branches.remove(&branch);
-                }
+                Err(index) if intersects => overlapping.insert(index, id),
+                _ => {}
             }
         }
-        branches
+
+        Ok(overlapping)
     }
 
     pub(crate) fn insert(&mut self, switch: Switch) {
@@ -508,10 +558,15 @@ impl SwitchTableStaging {
             if switch.is_none() && previous.is_none() {
                 continue;
             }
-            let previous = previous.map(|switch| PreviousSwitch {
-                function: switch.function(),
-                id: switch.id(),
-            });
+            let previous_coverage = if persistent {
+                previous
+                    .as_deref()
+                    .map(Switch::coverage)
+                    .unwrap_or_default()
+            } else {
+                AddressRangeSet::new()
+            };
+            let previous = previous.map(|switch| switch.id());
             match &switch {
                 Some(entry) => {
                     if previous.is_none() {
@@ -530,13 +585,12 @@ impl SwitchTableStaging {
                         branch,
                         encoded_size,
                         previous,
+                        previous_coverage,
                         switch,
                     });
                 }
                 None => {
-                    let id = previous
-                        .expect("prepared switch removal has a previous switch")
-                        .id;
+                    let id = previous.expect("prepared switch removal has a previous switch");
                     removed += 1;
                     releases.push(id);
                     if persistent {
@@ -546,6 +600,7 @@ impl SwitchTableStaging {
                         branch,
                         encoded_size: 0,
                         previous,
+                        previous_coverage,
                         switch: None,
                     });
                 }
@@ -598,14 +653,15 @@ impl PreparedSwitchBatch {
             match record.switch {
                 Some(switch) => switches.publish_upsert(
                     switch,
-                    record.previous.map(|previous| previous.function),
                     record.encoded_size,
+                    record.previous,
+                    &record.previous_coverage,
                 ),
                 None => {
                     let previous = record
                         .previous
                         .expect("prepared switch removal has a previous switch");
-                    switches.publish_remove(previous.id, previous.function, record.branch);
+                    switches.publish_remove(previous, record.branch, &record.previous_coverage);
                 }
             }
         }
@@ -632,10 +688,6 @@ mod test {
     use crate::ir::SwitchModel;
     use crate::storage::entities::InMemoryEntityStorage;
 
-    fn function(index: usize) -> FunctionId {
-        FunctionId::from_index(index)
-    }
-
     fn tables() -> [SwitchTable; 2] {
         let storage = EntityStorage::new(InMemoryEntityStorage::new());
         let worker = WriteBackWorker::new(storage.clone()).unwrap();
@@ -643,53 +695,6 @@ mod test {
             SwitchTable::new_transient(),
             SwitchTable::new_persistent(storage, 64 * 1024, worker).unwrap(),
         ]
-    }
-
-    #[test]
-    fn indexes_switches_by_owning_function() {
-        let owner = function(0);
-        let other = function(1);
-        let placements = [
-            (Address::from(0x1000u64), owner),
-            (Address::from(0x2000u64), owner),
-            (Address::from(0x3000u64), other),
-        ];
-
-        for mut table in tables() {
-            for (branch, owning) in placements {
-                table
-                    .insert(branch, |id, branch| {
-                        Ok(Switch::new(id, branch, SwitchModel::Explicit).with_function(owning))
-                    })
-                    .unwrap();
-            }
-
-            let mut owned = table.branches_for_function(owner).collect::<Vec<_>>();
-            owned.sort();
-            assert_eq!(
-                owned,
-                vec![Address::from(0x1000u64), Address::from(0x2000u64)]
-            );
-            assert_eq!(
-                table.branches_for_function(other).collect::<Vec<_>>(),
-                vec![Address::from(0x3000u64)]
-            );
-
-            table.remove_by_branch(Address::from(0x1000u64));
-            assert_eq!(
-                table.branches_for_function(owner).collect::<Vec<_>>(),
-                vec![Address::from(0x2000u64)]
-            );
-
-            table.modify_by_branch(Address::from(0x2000u64), |switch| {
-                switch.set_function(other);
-            });
-            assert!(table.branches_for_function(owner).next().is_none());
-            assert_eq!(
-                table.branches_for_function(other).collect::<Vec<_>>(),
-                vec![Address::from(0x2000u64), Address::from(0x3000u64)]
-            );
-        }
     }
 
     #[test]

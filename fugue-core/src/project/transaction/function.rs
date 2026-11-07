@@ -1,3 +1,5 @@
+use std::iter;
+
 use super::ProjectTransaction;
 use crate::il::common::IlArtefact;
 use crate::il::pcode::PCodeIr;
@@ -14,19 +16,40 @@ struct StagedFunctionReferenceRecord {
     references: Vec<Reference>,
 }
 
+impl StagedFunctionReferenceRecord {
+    fn into_batches(self) -> impl Iterator<Item = DerivedReferenceBatch> {
+        let provenance = ReferenceProvenance::Function(self.id);
+        let data = self
+            .references
+            .iter()
+            .any(|reference| !reference.is_flow())
+            .then(|| {
+                DerivedReferenceBatch::new(
+                    self.coverage.clone(),
+                    ReferenceKind::Data,
+                    provenance,
+                    self.references.iter().copied().filter(|r| !r.is_flow()),
+                )
+            });
+        iter::once(DerivedReferenceBatch::new(
+            self.coverage,
+            ReferenceKind::Flow,
+            provenance,
+            self.references.into_iter().filter(Reference::is_flow),
+        ))
+        .chain(data)
+    }
+}
+
 impl ProjectTransaction<'_> {
     pub fn add_function(
         &mut self,
         function: IncompleteFunction,
     ) -> Result<FunctionId, ProjectError> {
         let record = self.stage_incomplete_function(function)?;
-        self.replace_derived_references(
-            record.coverage,
-            ReferenceKind::Flow,
-            ReferenceProvenance::Function(record.id),
-            record.references,
-        )?;
-        Ok(record.id)
+        let id = record.id;
+        self.replace_derived_reference_batches(record.into_batches())?;
+        Ok(id)
     }
 
     pub(crate) fn add_functions(
@@ -49,16 +72,11 @@ impl ProjectTransaction<'_> {
         let expected = functions.size_hint().0;
         self.function_staging.reserve_functions(expected);
         self.changes.reserve(expected);
-        let mut batches = Vec::with_capacity(expected);
+        let mut batches = Vec::with_capacity(expected.saturating_mul(2));
         for function in functions {
             let function = function?;
             let record = self.stage_normalised_function(function)?;
-            batches.push(DerivedReferenceBatch::new(
-                record.coverage,
-                ReferenceKind::Flow,
-                ReferenceProvenance::Function(record.id),
-                record.references,
-            ));
+            batches.extend(record.into_batches());
         }
         self.replace_derived_reference_batches(batches)?;
         Ok(())
@@ -74,8 +92,13 @@ impl ProjectTransaction<'_> {
 
     fn stage_normalised_function(
         &mut self,
-        function: FunctionRecord,
+        mut function: FunctionRecord,
     ) -> Result<StagedFunctionReferenceRecord, ProjectError> {
+        for switch in function.switches_mut() {
+            let staged = switch.clone();
+            let id = self.add_switch(staged.branch(), |id, _| staged.with_id(id))?;
+            switch.set_id(id);
+        }
         let entry = function.entry();
         let record = self.function_staging.stage_materialisation(
             &self.project.functions,
@@ -118,6 +141,12 @@ impl ProjectTransaction<'_> {
             .set_callees(entry, record.take_call_targets(), !replaces_existing);
         if replaces_existing {
             self.remove_lifted_descendants(id, &PCodeIr::FORM)?;
+            self.replace_derived_references(
+                reference_coverage.clone(),
+                ReferenceKind::Data,
+                ReferenceProvenance::Function(id),
+                [],
+            )?;
         }
 
         let references = record.take_references();
@@ -308,14 +337,16 @@ impl ProjectTransaction<'_> {
         let entry = function.entry();
         self.call_graph_staging.clear_callees(entry);
 
-        self.replace_derived_references(
-            covered.clone(),
-            ReferenceKind::Flow,
-            ReferenceProvenance::Function(id),
-            [],
-        )?;
-
-        self.remove_switches_of_function(id)?;
+        self.replace_derived_reference_batches([ReferenceKind::Flow, ReferenceKind::Data].map(
+            |kind| {
+                DerivedReferenceBatch::new(
+                    covered.clone(),
+                    kind,
+                    ReferenceProvenance::Function(id),
+                    [],
+                )
+            },
+        ))?;
 
         self.remove_lifted_descendants(id, &PCodeIr::FORM)?;
         self.il_staging
@@ -462,7 +493,9 @@ mod test {
         assert_eq!(
             parent
                 .flow_targets(project.blocks())
-                .filter(|target| target.from() == left && target.to() == split)
+                .filter(|target| {
+                    target.from().address() == left && target.to().address() == split
+                })
                 .map(|target| target.kind())
                 .collect::<Vec<_>>(),
             vec![FlowKind::TailCallBranch],
@@ -525,7 +558,9 @@ mod test {
         assert_eq!(
             merged
                 .flow_targets(project.blocks())
-                .filter(|target| target.from() == left && target.to() == split)
+                .filter(|target| {
+                    target.from().address() == left && target.to().address() == split
+                })
                 .map(|target| target.kind())
                 .collect::<Vec<_>>(),
             vec![FlowKind::Branch],
@@ -621,7 +656,9 @@ mod test {
         assert_eq!(
             parent
                 .flow_targets(project.blocks())
-                .filter(|target| target.from() == entry && target.to() == shared)
+                .filter(|target| {
+                    target.from().address() == entry && target.to().address() == shared
+                })
                 .map(|target| target.kind())
                 .collect::<Vec<_>>(),
             vec![FlowKind::Branch],

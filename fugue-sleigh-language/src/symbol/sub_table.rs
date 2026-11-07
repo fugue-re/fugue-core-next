@@ -1,7 +1,7 @@
 use std::mem::size_of;
 
-use fugue_sleigh_marshal::sla::*;
 use fugue_sleigh_marshal::Decoder;
+use fugue_sleigh_marshal::sla::*;
 
 use crate::construct::ConstructTpl;
 use crate::deserialise::{DeserialiseError, XmlExt};
@@ -56,7 +56,7 @@ impl Context {
                 }
             }
             _ => {
-                return Err(DeserialiseError::ElementUnexpected(kind));
+                return Err(DeserialiseError::element_unexpected(kind));
             }
         })
     }
@@ -71,7 +71,7 @@ impl Context {
                     .children()
                     .find(xml::Node::is_element)
                     .map(PatternExpression::from_xml)
-                    .ok_or(DeserialiseError::Invariant(
+                    .ok_or(DeserialiseError::invariant(
                         "missing pattern for context_op",
                     ))??,
             },
@@ -81,7 +81,7 @@ impl Context {
                 mask: input.attribute_int("mask")?,
                 flow: input.attribute_bool("flow")?,
             },
-            name => return Err(DeserialiseError::TagUnexpected(name.to_owned())),
+            name => return Err(DeserialiseError::tag_unexpected(name)),
         })
     }
 }
@@ -165,7 +165,7 @@ impl Constructor {
     ///
     /// Called from generated code which ensures validity of arguments and state.
     pub unsafe fn unchecked_named_template(&self, index: usize) -> &ConstructTpl {
-        if let Some(ref named) = self.named_template.get_unchecked(index) {
+        if let Some(named) = unsafe { self.named_template.get_unchecked(index) } {
             named
         } else {
             unreachable!()
@@ -218,18 +218,18 @@ impl Constructor {
                         }
 
                         if named_template[section_id].is_some() {
-                            return Err(DeserialiseError::Invariant("duplicate named section"));
+                            return Err(DeserialiseError::invariant("duplicate named section"));
                         }
 
                         named_template[section_id] = Some(cur);
                     } else if template.is_none() {
                         template = Some(cur);
                     } else {
-                        return Err(DeserialiseError::Invariant("duplicate main section"));
+                        return Err(DeserialiseError::invariant("duplicate main section"));
                     }
                 }
                 _ => {
-                    return Err(DeserialiseError::ElementUnexpected(elem));
+                    return Err(DeserialiseError::element_unexpected(elem));
                 }
             }
 
@@ -297,14 +297,14 @@ impl Constructor {
                         }
 
                         if named_template[section_id].is_some() {
-                            return Err(DeserialiseError::Invariant("duplicate named section"));
+                            return Err(DeserialiseError::invariant("duplicate named section"));
                         }
 
                         named_template[section_id] = Some(cur);
                     } else if template.is_none() {
                         template = Some(cur);
                     } else {
-                        return Err(DeserialiseError::Invariant("duplicate main section"));
+                        return Err(DeserialiseError::invariant("duplicate main section"));
                     }
                 }
             }
@@ -326,13 +326,9 @@ impl Constructor {
         Ok(Self {
             id,
             parent_id: input.attribute_int("parent")?,
-            first_whitespace: input.attribute_int::<i64>("first").map(|i| {
-                if i < 0 {
-                    None
-                } else {
-                    Some(i as usize)
-                }
-            })?,
+            first_whitespace: input
+                .attribute_int::<i64>("first")
+                .map(|i| if i < 0 { None } else { Some(i as usize) })?,
             min_length: input.attribute_int("length")?,
             source_file_index,
             line_number,
@@ -439,7 +435,7 @@ impl DecisionNode {
                     let id = input.attribute_int("id")?;
                     let pattern = DisjointPattern::from_xml(
                         input.children().find(xml::Node::is_element).ok_or({
-                            DeserialiseError::Invariant("no pattern for disjoint pattern")
+                            DeserialiseError::invariant("no pattern for disjoint pattern")
                         })?,
                     )?;
                     patterns.push(DecisionPair { id, pattern });
@@ -521,12 +517,12 @@ impl DisjointPattern {
                     context: ContextPattern::from_xml(
                         children
                             .next()
-                            .ok_or(DeserialiseError::Invariant("missing context pattern"))?,
+                            .ok_or(DeserialiseError::invariant("missing context pattern"))?,
                     )?,
                     instruction: InstructionPattern::from_xml(
                         children
                             .next()
-                            .ok_or(DeserialiseError::Invariant("missing instruction pattern"))?,
+                            .ok_or(DeserialiseError::invariant("missing instruction pattern"))?,
                     )?,
                 }
             }
@@ -563,7 +559,7 @@ impl InstructionPattern {
                 input
                     .children()
                     .find(xml::Node::is_element)
-                    .ok_or(DeserialiseError::Invariant("missing pattern block"))?,
+                    .ok_or(DeserialiseError::invariant("missing pattern block"))?,
             )?,
         })
     }
@@ -598,7 +594,7 @@ impl ContextPattern {
                 input
                     .children()
                     .find(xml::Node::is_element)
-                    .ok_or(DeserialiseError::Invariant("missing pattern block"))?,
+                    .ok_or(DeserialiseError::invariant("missing pattern block"))?,
             )?,
         })
     }

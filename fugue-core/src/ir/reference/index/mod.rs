@@ -1,10 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::{Bound, RangeBounds};
 use std::sync::Arc;
 
+use itertools::Either;
 use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 use thiserror::Error;
 
+use crate::ir::persistent::cursor_bounds;
 use crate::ir::reference::{
     Reference, ReferenceKey, ReferenceKind, ReferenceOrigin, ReferenceProperties,
     ReferenceProvenance, ReferenceTarget,
@@ -31,7 +34,7 @@ pub(crate) const ATTRIBUTE_REFERENCE_INDEX_CACHE_SIZE: &str =
 pub(crate) const DEFAULT_REFERENCE_INDEX_CACHE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct InverseReferenceKey {
+pub(crate) struct InverseReferenceKey {
     target: ReferenceTarget,
     from: Address,
     kind: ReferenceKind,
@@ -52,6 +55,12 @@ impl InverseReferenceKey {
 
     fn kind(&self) -> ReferenceKind {
         self.kind
+    }
+}
+
+impl From<ReferenceKey> for InverseReferenceKey {
+    fn from(key: ReferenceKey) -> Self {
+        Self::new(key.target(), key.from(), key.kind())
     }
 }
 
@@ -388,6 +397,30 @@ impl ReferenceStaging {
         Ok(changed)
     }
 
+    pub(crate) fn merge_derived_references(
+        &mut self,
+        index: &ReferenceIndex,
+        provenance: ReferenceProvenance,
+        references: impl IntoIterator<Item = Reference>,
+    ) -> Result<bool, EntityStorageError> {
+        let mut changed = false;
+        for reference in references {
+            let key = reference.key();
+            let existing = self.entry(index, key)?;
+            let mut entry = existing
+                .clone()
+                .unwrap_or_else(|| ReferenceEntry::new(provenance, reference.properties()));
+            entry.merge_provenance(provenance, reference.properties());
+            if existing.as_ref() == Some(&entry) {
+                continue;
+            }
+            self.stage_change(key, existing, Some(entry));
+            self.derived_coverage.insert(key.from());
+            changed = true;
+        }
+        Ok(changed)
+    }
+
     pub(crate) fn prepare(
         self,
         index: &ReferenceIndex,
@@ -482,6 +515,30 @@ impl ReferenceStaging {
     }
 }
 
+fn forward_bounds(
+    from: impl RangeBounds<Address>,
+    after: Option<ReferenceKey>,
+) -> (Bound<ReferenceKey>, Bound<ReferenceKey>) {
+    cursor_bounds(
+        from,
+        after,
+        |from| ReferenceKey::new(from, ReferenceTarget::minimum(), ReferenceKind::Flow),
+        |from| ReferenceKey::new(from, ReferenceTarget::maximum(), ReferenceKind::Data),
+    )
+}
+
+fn inverse_bounds(
+    target: impl RangeBounds<ReferenceTarget>,
+    after: Option<ReferenceKey>,
+) -> (Bound<InverseReferenceKey>, Bound<InverseReferenceKey>) {
+    cursor_bounds(
+        target,
+        after.map(Into::into),
+        |target| InverseReferenceKey::new(target, Address::MINIMUM, ReferenceKind::Flow),
+        |target| InverseReferenceKey::new(target, Address::MAXIMUM, ReferenceKind::Data),
+    )
+}
+
 impl ReferenceIndex {
     pub fn new_transient() -> Self {
         Self::Transient(TransientReferenceIndex::new())
@@ -505,23 +562,25 @@ impl ReferenceIndex {
 
     pub fn references_from(
         &self,
-        from: Address,
+        from: impl RangeBounds<Address>,
         after: Option<ReferenceKey>,
     ) -> Result<ReferenceIterator<'_>, EntityStorageError> {
+        let bounds = forward_bounds(from, after);
         match self {
-            Self::Persistent(index) => Ok(Box::new(index.references_from(from, after)?)),
-            Self::Transient(index) => Ok(Box::new(index.references_from(from, after))),
+            Self::Persistent(index) => Ok(Box::new(index.references_from(bounds)?)),
+            Self::Transient(index) => Ok(Box::new(index.references_from(bounds))),
         }
     }
 
     pub fn references_to(
         &self,
-        target: ReferenceTarget,
+        target: impl RangeBounds<ReferenceTarget>,
         after: Option<ReferenceKey>,
     ) -> Result<ReferenceIterator<'_>, EntityStorageError> {
+        let bounds = inverse_bounds(target, after);
         match self {
-            Self::Persistent(index) => Ok(Box::new(index.references_to(target, after)?)),
-            Self::Transient(index) => Ok(Box::new(index.references_to(target, after))),
+            Self::Persistent(index) => Ok(Box::new(index.references_to(bounds)?)),
+            Self::Transient(index) => Ok(Box::new(index.references_to(bounds))),
         }
     }
 
@@ -530,10 +589,57 @@ impl ReferenceIndex {
         coverage: &AddressRangeSet,
     ) -> Result<Vec<Reference>, EntityStorageError> {
         let mut references = Vec::new();
-        for range in coverage.ranges() {
-            self.collect_range(range, &mut references)?;
-        }
+        self.for_each_reference_in(coverage, |reference| references.push(reference))?;
         Ok(references)
+    }
+
+    pub fn for_each_reference_from(
+        &self,
+        from: impl RangeBounds<Address>,
+        after: Option<ReferenceKey>,
+        mut f: impl FnMut(Reference),
+    ) -> Result<(), EntityStorageError> {
+        let bounds = forward_bounds(from, after);
+        let references = match self {
+            Self::Persistent(index) => Either::Left(index.references_from(bounds)?),
+            Self::Transient(index) => Either::Right(index.references_from(bounds)),
+        };
+        for reference in references {
+            f(reference?);
+        }
+        Ok(())
+    }
+
+    pub fn for_each_reference_to(
+        &self,
+        target: impl RangeBounds<ReferenceTarget>,
+        after: Option<ReferenceKey>,
+        mut f: impl FnMut(Reference),
+    ) -> Result<(), EntityStorageError> {
+        let bounds = inverse_bounds(target, after);
+        let references = match self {
+            Self::Persistent(index) => Either::Left(index.references_to(bounds)?),
+            Self::Transient(index) => Either::Right(index.references_to(bounds)),
+        };
+        for reference in references {
+            f(reference?);
+        }
+        Ok(())
+    }
+
+    pub fn for_each_reference_in(
+        &self,
+        coverage: &AddressRangeSet,
+        mut f: impl FnMut(Reference),
+    ) -> Result<(), EntityStorageError> {
+        for range in coverage.ranges() {
+            self.for_each_reference_from(
+                range.start_address()..=range.end_address(),
+                None,
+                &mut f,
+            )?;
+        }
+        Ok(())
     }
 
     pub fn insert(&mut self, reference: &Reference) -> Result<(), ReferenceIndexError> {
@@ -627,26 +733,6 @@ impl ReferenceIndex {
                     .unwrap_or_else(|| ReferenceEntry::new(provenance, reference.properties()));
                 entry.merge_provenance(provenance, reference.properties());
                 index.insert(key, entry);
-                Ok(())
-            }
-        }
-    }
-
-    fn collect_range(
-        &self,
-        range: AddressRange,
-        references: &mut Vec<Reference>,
-    ) -> Result<(), EntityStorageError> {
-        let end = range.end_address();
-        let start = ReferenceKey::new(
-            range.start_address(),
-            ReferenceTarget::minimum(),
-            ReferenceKind::Flow,
-        );
-        match self {
-            Self::Persistent(index) => index.collect_range(&start, end, references),
-            Self::Transient(index) => {
-                index.collect_range(&start, end, references);
                 Ok(())
             }
         }

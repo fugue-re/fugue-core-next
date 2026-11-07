@@ -34,14 +34,23 @@ use crate::loader::{
 };
 use crate::platform::{Format, OperatingSystem, Platform};
 use crate::storage::segments::SegmentProperties;
-use crate::storage::segments::mapping::SegmentMappingProvenance;
+use crate::storage::segments::mapping::{SegmentMappingHints, SegmentMappingProvenance};
 use crate::types::attributes::{ATTRIBUTE_ENTRY_POINT, ATTRIBUTE_IMAGE_BASE};
 use crate::types::{AttributeMap, BytesOrMapping};
 
+mod exceptions;
+use exceptions::MachOExceptionResolver;
+
 pub mod extensions;
+
+mod read;
+use read::read_entry;
 
 mod relocations;
 pub use relocations::MachOSegmentRelocator;
+
+mod tracked;
+use tracked::MachOTrackedSetResolver;
 
 pub const MACHO_SYMTAB_SELECTOR: SymbolTableSelector = SymbolTableSelector::new(0);
 
@@ -71,20 +80,18 @@ macro_rules! with_macho {
 
 impl<'data> MachOFileRepr<'data> {
     fn parse(data: &'data [u8], attributes: &AttributeMap) -> Result<Self, LoaderError> {
-        let data = match FileKind::parse(data).map_err(LoaderError::format)? {
+        match FileKind::parse(data).map_err(LoaderError::format)? {
             FileKind::MachOFat32 => {
                 let fat = MachOFatFile32::parse(data).map_err(LoaderError::format)?;
-                select_fat_data(&fat, data, attributes)?
+                select_fat_view(&fat, data, attributes)
             }
             FileKind::MachOFat64 => {
                 let fat = MachOFatFile64::parse(data).map_err(LoaderError::format)?;
-                select_fat_data(&fat, data, attributes)?
+                select_fat_view(&fat, data, attributes)
             }
-            FileKind::MachO32 | FileKind::MachO64 => data,
-            _ => return Err(LoaderError::format_with("input is not a Mach-O image")),
-        };
-
-        Self::parse_thin(data)
+            FileKind::MachO32 | FileKind::MachO64 => Self::parse_thin(data),
+            _ => Err(LoaderError::format_with("input is not a Mach-O image")),
+        }
     }
 
     fn parse_thin(data: &'data [u8]) -> Result<Self, LoaderError> {
@@ -145,19 +152,19 @@ impl<'data> MachOFileRepr<'data> {
             _ => return None,
         };
 
-        Some(LanguageId::new(processor, self.endian().is_big(), bits))
+        Some(LanguageId::new(processor, self.endian(), bits))
     }
 
     fn entry(&self) -> Result<Option<RawAddress>, LoaderError> {
-        with_macho!(self, macho | macho_entry(macho))
+        with_macho!(self, macho | read_entry(macho))
     }
 }
 
-fn select_fat_data<'data, Fat>(
+fn select_fat_view<'data, Fat>(
     fat: &MachOFatFile<'data, Fat>,
     data: &'data [u8],
     attributes: &AttributeMap,
-) -> Result<&'data [u8], LoaderError>
+) -> Result<MachOFileRepr<'data>, LoaderError>
 where
     Fat: FatArch,
 {
@@ -166,7 +173,7 @@ where
             .arches()
             .first()
             .ok_or_else(|| LoaderError::format_with("Mach-O universal image has no members"))?;
-        return arch.data(data).map_err(LoaderError::format);
+        return MachOFileRepr::parse_thin(arch.data(data).map_err(LoaderError::format)?);
     };
 
     let requested = requested
@@ -179,51 +186,16 @@ where
             continue;
         };
         if id.processor() == requested.processor()
-            && id.is_big_endian() == requested.is_big_endian()
+            && id.endian() == requested.endian()
             && id.bits() == requested.bits()
         {
-            return Ok(candidate);
+            return Ok(view);
         }
     }
 
     Err(LoaderError::other_with(format!(
         "Mach-O universal variant `{requested}` is not present"
     )))
-}
-
-fn macho_entry<'data, Mach, R>(
-    macho: &MachOFile<'data, Mach, R>,
-) -> Result<Option<RawAddress>, LoaderError>
-where
-    Mach: MachHeader,
-    R: ReadRef<'data>,
-{
-    let mut commands = macho.macho_load_commands().map_err(LoaderError::format)?;
-    while let Some(command) = commands.next().map_err(LoaderError::format)? {
-        let Some(entry) = command.entry_point().map_err(LoaderError::format)? else {
-            continue;
-        };
-        let file_offset = entry.entryoff.get(macho.endian());
-        for segment in macho.segments() {
-            let (offset, size) = segment.file_range();
-            let Some(last) = offset.checked_add(size) else {
-                continue;
-            };
-            if file_offset >= offset && file_offset < last {
-                let address = segment
-                    .address()
-                    .checked_add(file_offset - offset)
-                    .ok_or_else(|| LoaderError::address_overflow(segment.address()))?;
-                return Ok(Some(RawAddress::from(address)));
-            }
-        }
-        return Err(LoaderError::format_with(
-            "Mach-O entry point is outside every segment",
-        ));
-    }
-
-    let entry = macho.entry();
-    Ok((entry != 0).then(|| RawAddress::from(entry)))
 }
 
 struct MachOLoadedRepr<'data> {
@@ -289,7 +261,7 @@ impl<'a> MachO<'a> {
         &self.object.borrow_loaded().view
     }
 
-    pub fn mapping_hints(&self) -> &BTreeMap<RawAddress, ContextHint> {
+    pub fn mapping_hints(&self) -> &SegmentMappingHints {
         &self.object.borrow_loaded().state.mapping_hints
     }
 
@@ -328,9 +300,10 @@ struct MachOLoadState {
     preferred_base: RawAddress,
     entry: Option<ImageAddress>,
     layout: ImageLayout,
-    mapping_hints: BTreeMap<RawAddress, ContextHint>,
+    mapping_hints: SegmentMappingHints,
     symbols: TransientSymbolTable<ImageAddress>,
     segments: Vec<MachOImageSegment>,
+    sections: MachOSectionMap,
     external_thunks: ExternalThunkLayout,
     is_object: bool,
 }
@@ -373,6 +346,7 @@ impl MachOLoadState {
 
         let MachOSymbolLayout {
             bounds,
+            mut mapping_hints,
             symbols,
             sections,
             external_thunks,
@@ -380,6 +354,40 @@ impl MachOLoadState {
             view,
             macho | MachOSymbolLayout::from_macho(macho, &architecture, base, preferred_base,)?
         );
+
+        with_macho!(
+            view,
+            macho
+                | MachOTrackedSetResolver::new(
+                    view,
+                    macho,
+                    &architecture,
+                    base - preferred_base,
+                    &mut mapping_hints,
+                )
+                .apply()
+        )?;
+
+        with_macho!(
+            view,
+            macho | MachOExceptionResolver::new(
+                view,
+                macho,
+                &architecture,
+                base,
+                &mut mapping_hints,
+            )
+            .apply()
+        )?;
+
+        let entry = entry.map(|entry| match architecture.canonicalise_address(entry) {
+            Some((canonical, context)) if canonical != entry => {
+                mapping_hints
+                    .insert_context_hint(canonical, ContextHint::code().with_context(context));
+                canonical
+            }
+            _ => entry,
+        });
 
         let default_bank = ImageBank::new_in_default(bounds.clone());
         let (segments, spaces, bank_layout) = with_macho!(
@@ -430,9 +438,10 @@ impl MachOLoadState {
             preferred_base,
             entry: entry.map(ImageAddress::in_default_space),
             layout,
-            mapping_hints: BTreeMap::new(),
+            mapping_hints,
             symbols: image_symbols,
             segments,
+            sections,
             external_thunks,
             is_object,
         })
@@ -467,6 +476,7 @@ struct RawMachOSymbol {
 
 struct MachOSymbolLayout {
     bounds: RangeInclusive<RawAddress>,
+    mapping_hints: SegmentMappingHints,
     symbols: BTreeMap<SymbolIndex, RawMachOSymbol>,
     sections: MachOSectionMap,
     external_thunks: ExternalThunkLayout,
@@ -481,6 +491,7 @@ impl MachOSymbolLayout {
     ) -> Result<Self, LoaderError> {
         let is_object = macho.kind() == ObjectKind::Relocatable;
         let mut sections = MachOSectionMap::new();
+        let mut mapping_hints = SegmentMappingHints::default();
         let mut minimum = base;
         let mut next = base;
 
@@ -590,6 +601,18 @@ impl MachOSymbolLayout {
             } else {
                 continue;
             };
+            let address = match architecture.canonicalise_address(address) {
+                Some((canonical, context))
+                    if properties.is_function()
+                        && !properties.is_external()
+                        && canonical != address =>
+                {
+                    mapping_hints
+                        .insert_context_hint(canonical, ContextHint::code().with_context(context));
+                    canonical
+                }
+                _ => address,
+            };
 
             symbols.insert(
                 SymbolIndex::new(MACHO_SYMTAB_SELECTOR, symbol.index().0),
@@ -609,6 +632,7 @@ impl MachOSymbolLayout {
 
         Ok(Self {
             bounds: minimum..=last,
+            mapping_hints,
             symbols,
             sections,
             external_thunks,
@@ -623,7 +647,7 @@ fn macho_symbol_properties<'data>(symbol: &impl ObjectSymbol<'data>) -> SymbolPr
         _ => SymbolProperties::NONE,
     };
     let visibility = if symbol.is_undefined() && symbol.is_global() {
-        SymbolProperties::EXTERN
+        SymbolProperties::EXTERNAL
     } else if symbol.is_global() {
         SymbolProperties::LOCAL | SymbolProperties::EXPORT
     } else {
@@ -642,26 +666,6 @@ fn macho_section_is_loadable<'data>(section: &impl ObjectSection<'data>) -> bool
                 | SectionKind::Other
                 | SectionKind::OtherString
         )
-}
-
-pub(crate) fn macho_object_section_address<'data>(
-    macho: &'data impl Object<'data>,
-    base: RawAddress,
-    target: usize,
-) -> Option<RawAddress> {
-    let mut next = base;
-    for section in macho.sections().filter(macho_section_is_loadable) {
-        let alignment = usize::try_from(section.align().max(1)).ok()?;
-        let address = next.align(alignment);
-        if address < next {
-            return None;
-        }
-        if section.index().0 == target {
-            return Some(address);
-        }
-        next = address.checked_add(section.size())?;
-    }
-    None
 }
 
 fn macho_segment_is_loadable<'data>(segment: &impl ObjectSegment<'data>) -> bool {
@@ -707,9 +711,9 @@ fn macho_segment_properties<'data>(segment: &impl ObjectSegment<'data>) -> Segme
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum MachORegionSourceKind {
+    External,
     Section,
     Segment,
-    External,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -913,14 +917,14 @@ impl<'file> MachOSegmentWalk<'file> {
 struct MachOImageSegments<'a> {
     segments: slice::Iter<'a, MachOImageSegment>,
     symbols: &'a TransientSymbolTable<ImageAddress>,
-    mapping_hints: &'a BTreeMap<RawAddress, ContextHint>,
+    mapping_hints: &'a SegmentMappingHints,
 }
 
 impl<'a> MachOImageSegments<'a> {
     fn new(
         segments: &'a [MachOImageSegment],
         symbols: &'a TransientSymbolTable<ImageAddress>,
-        mapping_hints: &'a BTreeMap<RawAddress, ContextHint>,
+        mapping_hints: &'a SegmentMappingHints,
     ) -> Self {
         Self {
             segments: segments.iter(),
@@ -931,15 +935,11 @@ impl<'a> MachOImageSegments<'a> {
 
     fn image_segment(&self, segment: &'a MachOImageSegment) -> ImageSegment<'a> {
         let start = segment.address.offset();
-        let (mapping_hints, function_hints) = start
+        let mapping_hints = start
             .checked_add(segment.size.saturating_sub(1))
             .map(|last| {
-                let mapping_hints = self
-                    .mapping_hints
-                    .range(start..=last)
-                    .map(|(address, hint)| (*address, hint.clone()))
-                    .collect::<BTreeMap<RawAddress, ContextHint>>();
-                let function_hints = self
+                let mut mapping_hints = self.mapping_hints.clamp(start..=last);
+                for (_, symbol) in self
                     .symbols
                     .range_by_address(
                         segment.address..=ImageAddress::new(segment.address.space(), last),
@@ -947,11 +947,12 @@ impl<'a> MachOImageSegments<'a> {
                     .filter(|(_, symbol)| {
                         symbol
                             .properties()
-                            .contains(SymbolProperties::FUNCTION | SymbolProperties::EXTERN)
+                            .contains(SymbolProperties::FUNCTION | SymbolProperties::EXTERNAL)
                     })
-                    .map(|(_, symbol)| symbol.address().offset())
-                    .collect::<BTreeSet<RawAddress>>();
-                (mapping_hints, function_hints)
+                {
+                    mapping_hints.insert_function(symbol.address().offset());
+                }
+                mapping_hints
             })
             .unwrap_or_default();
 
@@ -964,7 +965,6 @@ impl<'a> MachOImageSegments<'a> {
         .with_backing(ImageBacking::new(segment.bank, segment.backing_offset))
         .with_provenance(segment.provenance)
         .with_mapping_hints(mapping_hints)
-        .with_function_hints(function_hints)
     }
 }
 
@@ -989,6 +989,7 @@ where
     macho: &'file MachOFile<'data, Mach, R>,
     arch: &'file Arch,
     symbols: &'file TransientSymbolTable<ImageAddress>,
+    sections: &'file MachOSectionMap,
     external_thunks: &'file ExternalThunkLayout,
     is_object: bool,
 }
@@ -1003,6 +1004,7 @@ where
         macho: &'file MachOFile<'data, Mach, R>,
         arch: &'file Arch,
         symbols: &'file TransientSymbolTable<ImageAddress>,
+        sections: &'file MachOSectionMap,
         external_thunks: &'file ExternalThunkLayout,
         is_object: bool,
     ) -> Self {
@@ -1010,6 +1012,7 @@ where
             macho,
             arch,
             symbols,
+            sections,
             external_thunks,
             is_object,
         }
@@ -1025,6 +1028,10 @@ where
 
     fn symbols(&self) -> &'file TransientSymbolTable<ImageAddress> {
         self.symbols
+    }
+
+    fn sections(&self) -> &'file MachOSectionMap {
+        self.sections
     }
 
     fn external_thunks(&self) -> &'file ExternalThunkLayout {
@@ -1075,6 +1082,7 @@ where
             self.current_base,
             self.preferred_base,
             self.context.symbols(),
+            self.context.sections(),
             self.context.is_object(),
         )
     }
@@ -1089,7 +1097,7 @@ where
             .filter_map(|(_, symbol)| {
                 symbol
                     .properties()
-                    .contains(SymbolProperties::FUNCTION | SymbolProperties::EXTERN)
+                    .contains(SymbolProperties::FUNCTION | SymbolProperties::EXTERNAL)
                     .then_some(symbol.address().offset())
             })
             .collect::<BTreeSet<RawAddress>>();
@@ -1110,7 +1118,7 @@ where
             Cow::Owned(data),
         );
         for address in functions {
-            contents.add_function_hint(address);
+            contents.mapping_hints_mut().insert_function(address);
         }
         contents
     }
@@ -1185,7 +1193,9 @@ where
                 segment.address..=ImageAddress::new(segment.address.space(), last),
             ) {
                 if symbol.properties().contains(SymbolProperties::FUNCTION) {
-                    contents.add_function_hint(symbol.address().offset());
+                    contents
+                        .mapping_hints_mut()
+                        .insert_function(symbol.address().offset());
                 }
             }
         }
@@ -1282,6 +1292,7 @@ impl Loadable for MachO<'_> {
                     macho,
                     &state.architecture,
                     &state.symbols,
+                    &state.sections,
                     &state.external_thunks,
                     state.is_object,
                 );
@@ -1456,11 +1467,12 @@ mod test {
             file | {
                 file.sections()
                     .find_map(|section| {
-                        let address = macho_object_section_address(
-                            file,
-                            macho.base_address(),
-                            section.index().0,
-                        )?;
+                        let address = macho
+                            .object
+                            .borrow_loaded()
+                            .state
+                            .sections
+                            .get(section.index().0)?;
                         section.relocations().find_map(|(offset, relocation)| {
                             if relocation.kind() != RelocationKind::Absolute
                                 || relocation.size() != 64
@@ -1502,11 +1514,12 @@ mod test {
             file | {
                 file.sections()
                     .find_map(|section| {
-                        let address = macho_object_section_address(
-                            file,
-                            macho.base_address(),
-                            section.index().0,
-                        )?;
+                        let address = macho
+                            .object
+                            .borrow_loaded()
+                            .state
+                            .sections
+                            .get(section.index().0)?;
                         section
                             .relocations()
                             .find(|(_, relocation)| {

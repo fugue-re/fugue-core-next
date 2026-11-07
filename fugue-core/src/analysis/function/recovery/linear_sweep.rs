@@ -1,7 +1,11 @@
+use std::ops::Bound;
+
 use arrayvec::ArrayVec;
 
 use crate::analysis::function::recovery::analysis::FunctionDiscoveryContext;
-use crate::analysis::function::recovery::{FunctionRecovery, FunctionRecoveryExtension};
+use crate::analysis::function::recovery::{
+    FunctionCandidate, FunctionRecovery, FunctionRecoveryExtension,
+};
 use crate::analysis::{AnalysisError, AnalysisPass};
 use crate::arch::Arch;
 use crate::engine::{AnalysisContext, ProjectView};
@@ -14,7 +18,7 @@ use crate::storage::{
 };
 use crate::types::Confidence;
 
-const LINEAR_SWEEP_ANALYSER: &str = "linear-sweep";
+pub(crate) const LINEAR_SWEEP_ANALYSER: &str = "linear-sweep";
 
 const DEFAULT_MIN_ZERO_FILL_BYTES: usize = 16;
 const DEFAULT_MAX_TRIAL_INSNS: usize = 16;
@@ -34,7 +38,7 @@ pub struct LinearSweepConfig {
 }
 
 struct FunctionRecoveryLinearSweep {
-    candidates: Vec<AddressWithContext>,
+    candidates: Vec<FunctionCandidate>,
     config: LinearSweepConfig,
     use_mapping_hints: bool,
     scan: LinearSweepResolver,
@@ -193,7 +197,7 @@ impl LinearSweepResolver {
     }
 
     fn reset_context(&mut self) {
-        self.resolver.context_mut().reset();
+        self.resolver.reset();
     }
 
     fn apply_context(&mut self, address: Address, context: &ContextSet) {
@@ -248,17 +252,17 @@ impl FunctionRecoveryLinearSweep {
         bytes: &[u8],
     ) -> LinearSweepProperties {
         if self.use_mapping_hints
-            && let Some(hint) = view
-                .mapping_hints()
-                .take_while(|(hint_address, _)| *hint_address <= address)
-                .last()
-                .map(|(_, hint)| hint)
+            && let Some(hint) = view.mapping_hints().context_hint_at(address)
         {
             if hint.is_data() {
                 let size = view
                     .mapping_hints()
+                    .context_hints_in_range((
+                        Bound::Excluded(address.raw_address()),
+                        Bound::Unbounded,
+                    ))
                     .map(|(hint_address, _)| hint_address)
-                    .find(|hint_address| *hint_address > address)
+                    .next()
                     .map_or_else(
                         || {
                             view.range()
@@ -269,7 +273,6 @@ impl FunctionRecoveryLinearSweep {
                         |boundary| {
                             usize::try_from(
                                 boundary
-                                    .raw_address()
                                     .checked_offset_from(address.raw_address())
                                     .expect("mapping hint follows the current address"),
                             )
@@ -313,10 +316,13 @@ impl FunctionRecoveryLinearSweep {
             let mut scan = LinearSweepScan::new_boundaries();
             self.scan_range(project, range, &mut scan);
             for candidate in self.candidates.drain(..) {
-                if ranges.is_avoided(candidate.address()) {
+                if ranges.is_avoided(candidate.entry().address()) {
                     continue;
                 }
-                tracing::debug!("adding linear sweep candidate at {}", candidate.address(),);
+                tracing::debug!(
+                    "adding linear sweep candidate at {}",
+                    candidate.entry().address(),
+                );
                 ranges.add_candidate(candidate);
                 found += 1;
             }
@@ -350,7 +356,9 @@ impl FunctionRecoveryLinearSweep {
                 break;
             };
             let region_size = AddressRange::new(range.space(), cursor, region_end).size();
-            let region_size = usize::try_from(region_size).unwrap_or(usize::MAX);
+            let region_size = region_size
+                .and_then(|size| usize::try_from(size).ok())
+                .unwrap_or(all_bytes.len());
             let bytes = &all_bytes[..all_bytes.len().min(region_size)];
             if bytes.is_empty() {
                 break;
@@ -408,12 +416,15 @@ impl FunctionRecoveryLinearSweep {
         }
 
         for candidate in self.candidates.drain(..) {
-            if discovery.covered().contains(candidate.address())
-                || discovery.avoids().contains(candidate.address())
+            if discovery.covered().contains(candidate.entry().address())
+                || discovery.avoids().contains(candidate.entry().address())
             {
                 continue;
             }
-            tracing::debug!("adding linear sweep candidate at {}", candidate.address(),);
+            tracing::debug!(
+                "adding linear sweep candidate at {}",
+                candidate.entry().address(),
+            );
             discovery.add_candidate(candidate);
         }
     }
@@ -501,16 +512,15 @@ impl FunctionRecoveryLinearSweep {
 
         if !insn.is_indirect()
             && let Some(target) = insn.call_target()
-            && let Some((canonical, _)) = arch.canonicalise_address(target.raw_address())
         {
-            let target = Address::new(target.space(), canonical);
-            if target.space() == address.space() {
+            if target.address().space() == address.space() {
                 let evidence = if *consecutive_insns >= self.config.min_call_site_insns() {
                     LinearSweepEvidence::EstablishedCallSite
                 } else {
                     LinearSweepEvidence::CallTarget
                 };
-                if let Some(candidate) = self.validate_candidate(project, target, evidence) {
+                if let Some(candidate) = self.validate_candidate(project, target.clone(), evidence)
+                {
                     self.candidates.push(candidate);
                 }
             }
@@ -525,14 +535,13 @@ impl FunctionRecoveryLinearSweep {
     fn validate_candidate(
         &mut self,
         project: &ProjectView<'_>,
-        address: Address,
+        candidate: impl Into<AddressWithContext>,
         evidence: LinearSweepEvidence,
-    ) -> Option<AddressWithContext> {
-        let arch = project.arch();
-        let (canonical, derived) = arch.canonicalise_address(address.raw_address())?;
-        let address = Address::new(address.space(), canonical);
+    ) -> Option<FunctionCandidate> {
+        let candidate = candidate.into();
+        let (address, supplied) = candidate.into_parts();
         let mut contexts = ArrayVec::<ContextSet, 3>::new();
-        contexts.push(derived);
+        contexts.push(supplied);
 
         if let Some(previous) = address.raw_address().checked_sub(1usize)
             && let Some(block) = project
@@ -554,7 +563,10 @@ impl FunctionRecoveryLinearSweep {
         contexts.into_iter().find_map(|context| {
             self.validate_with_context(project, address, context, minimum_insns)
                 .map(|(address, context)| {
-                    AddressWithContext::new_with(address, context, evidence.confidence())
+                    FunctionCandidate::new_with(
+                        AddressWithContext::new(address, context),
+                        evidence.confidence(),
+                    )
                 })
         })
     }
@@ -569,33 +581,45 @@ impl FunctionRecoveryLinearSweep {
         let arch = project.arch();
         let segments = project.segments();
         self.validation.reset_context();
-        self.validation.apply_context(address, &context);
-        let (canonical, derived) =
-            arch.canonicalise_address_with(address.raw_address(), self.validation.context())?;
-        let address = Address::new(address.space(), canonical);
-        context.merge(&derived);
-        self.validation.apply_context(address, &context);
 
-        let view = self.validation.view_containing(segments, address)?;
-        if !view.properties().is_executable() {
+        let candidate_address = address;
+        let candidate_view = self
+            .validation
+            .view_containing(segments, candidate_address)?;
+        if !candidate_view.properties().is_executable() {
             return None;
         }
-
         if self.use_mapping_hints
-            && let Some(hint) = view
+            && let Some(hint) = candidate_view
                 .mapping_hints()
-                .take_while(|(hint_address, _)| *hint_address <= address)
-                .last()
-                .map(|(_, hint)| hint)
+                .context_hint_at(candidate_address)
         {
             if hint.is_data() {
                 return None;
             }
             if let Some(hinted) = hint.context() {
                 context.merge(hinted);
-                self.validation.apply_context(address, &context);
             }
         }
+
+        self.validation.apply_context(candidate_address, &context);
+        let (canonical, derived) = arch.canonicalise_address_with(
+            candidate_address.raw_address(),
+            self.validation.context(),
+        )?;
+        let address = Address::new(candidate_address.space(), canonical);
+        context.merge(&derived);
+        context.apply_with(address, self.validation.resolver.context_mut(), true);
+
+        let view = if address == candidate_address {
+            candidate_view
+        } else {
+            let view = self.validation.view_containing(segments, address)?;
+            if !view.properties().is_executable() {
+                return None;
+            }
+            view
+        };
 
         let bytes_view = view.bytes_from(address)?;
         let all_bytes = bytes_view
@@ -607,7 +631,7 @@ impl FunctionRecoveryLinearSweep {
 
         let mut mapping_hints = view
             .mapping_hints()
-            .filter(|(hint_address, _)| *hint_address > address)
+            .context_hints_in_range((Bound::Excluded(address.raw_address()), Bound::Unbounded))
             .peekable();
 
         let mut offset = 0usize;
@@ -619,7 +643,7 @@ impl FunctionRecoveryLinearSweep {
 
             if self.use_mapping_hints
                 && let Some((hint_address, hint)) = mapping_hints.peek().copied()
-                && hint_address == insn_address
+                && hint_address == insn_address.raw_address()
             {
                 if hint.is_data() {
                     break;
@@ -650,7 +674,7 @@ impl FunctionRecoveryLinearSweep {
 
             if self.use_mapping_hints
                 && mapping_hints.peek().is_some_and(|(hint_address, hint)| {
-                    hint.is_data() && *hint_address < insn.next_address()
+                    hint.is_data() && *hint_address < insn.next_address().raw_address()
                 })
             {
                 break;
@@ -661,12 +685,7 @@ impl FunctionRecoveryLinearSweep {
                     if target.is_fall_through() {
                         return false;
                     }
-                    let Some((canonical, _)) =
-                        arch.canonicalise_address(target_address.raw_address())
-                    else {
-                        return true;
-                    };
-                    let target_address = Address::new(target_address.space(), canonical);
+                    let target_address = target_address.address();
                     self.validation
                         .view_containing(segments, target_address)
                         .is_none_or(|view| {
@@ -716,7 +735,7 @@ impl AnalysisPass<FunctionDiscoveryContext> for FunctionRecoveryLinearSweep {
 
 #[fugue_core::extension]
 impl FunctionRecoveryExtension {
-    const NAME: &str = "linear-sweep";
+    const NAME: &str = LINEAR_SWEEP_ANALYSER;
 
     fn configure(project: &Project, recovery: &mut FunctionRecovery) -> Result<(), AnalysisError> {
         let Some(config) = recovery.config().linear_sweep().copied() else {

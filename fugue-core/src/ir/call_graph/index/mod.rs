@@ -271,7 +271,7 @@ impl CallGraphIndex {
             let callees = function
                 .flow_targets(blocks)
                 .filter(|target| target.kind().is_call())
-                .map(|target| target.to());
+                .map(|target| target.to().address());
             self.set_callees(function.entry(), callees)?;
         }
 

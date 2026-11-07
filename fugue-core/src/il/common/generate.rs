@@ -119,8 +119,10 @@ impl IlSubject<'_> {
     }
 }
 
-pub trait IlProducer: Default + Send + 'static {
+pub trait IlProducer: Send + 'static {
     type Output: IlArtefact;
+
+    fn new(language: &'static Language) -> Self;
 
     fn produce(
         &mut self,

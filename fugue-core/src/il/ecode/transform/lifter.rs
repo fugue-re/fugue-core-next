@@ -355,15 +355,8 @@ impl<'a, 'b> PCodeToECodeLifter<'a, 'b> {
         };
 
         self.register_reads.clear();
-        let write_start = u128::from(location.offset());
-        let write_end = write_start + u128::from(location.size());
         for (flag_location, flag) in &self.flags {
-            if flag_location.lifter_space() != location.lifter_space() {
-                continue;
-            }
-            let flag_start = u128::from(flag_location.offset());
-            let flag_end = flag_start + u128::from(flag_location.size());
-            if write_start < flag_end && flag_start < write_end {
+            if location.overlaps(flag_location) {
                 self.flag_values.remove(flag);
             }
         }

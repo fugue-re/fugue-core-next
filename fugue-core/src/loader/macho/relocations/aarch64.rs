@@ -25,7 +25,10 @@ where
             tracing::warn!("invalid AArch64 Mach-O relocation at {offset:#x}");
             return;
         };
-        let Some(target) = self.resolve_relocation_value(relocation) else {
+        let Some(target) = self
+            .resolve_relocation_target(relocation.target())
+            .and_then(|target| self.resolve_relocation_value(relocation, target))
+        else {
             tracing::warn!("failed to resolve AArch64 Mach-O relocation at {offset:#x}");
             return;
         };

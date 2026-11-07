@@ -3,6 +3,7 @@ use fugue_sleigh_language::construct::{
 };
 use fugue_sleigh_language::opcode::Opcode;
 use fugue_sleigh_language::Language;
+use proc_macro2::TokenStream;
 use quote::quote;
 
 use crate::core::Tables;
@@ -131,79 +132,95 @@ impl<'a, 'b> TplAdaptor<'a, 'b, OpTpl> {
     pub(crate) fn tokens(&mut self) -> u16 {
         use Opcode as O;
 
+        let issue = |op: TokenStream| {
+            quote! { fugue_lifter_runtime::template::Op::Issue(fugue_lifter_runtime::pcode::Op::#op) }
+        };
+        let space = || match self.tpl.inputs()[0].offset() {
+            ConstTpl::SpaceId(space) => space.index() as u8,
+            _ => unreachable!("load and store spaces are constant"),
+        };
         let op = match self.tpl.opcode() {
-            O::Copy => quote! { fugue_lifter_runtime::template::Op::Copy },
-            O::Load => quote! { fugue_lifter_runtime::template::Op::Load },
-            O::Store => quote! { fugue_lifter_runtime::template::Op::Store },
-            O::Branch => quote! { fugue_lifter_runtime::template::Op::Branch },
-            O::CBranch => quote! { fugue_lifter_runtime::template::Op::CBranch },
-            O::IBranch => quote! { fugue_lifter_runtime::template::Op::IBranch },
-            O::Call => quote! { fugue_lifter_runtime::template::Op::Call },
-            O::ICall => quote! { fugue_lifter_runtime::template::Op::ICall },
-            O::CallOther => quote! { fugue_lifter_runtime::template::Op::CallOther },
-            O::Return => quote! { fugue_lifter_runtime::template::Op::Return },
-            O::IntEq => quote! { fugue_lifter_runtime::template::Op::IntEq },
-            O::IntNotEq => quote! { fugue_lifter_runtime::template::Op::IntNotEq },
-            O::IntSLess => quote! { fugue_lifter_runtime::template::Op::IntSLess },
-            O::IntSLessEq => quote! { fugue_lifter_runtime::template::Op::IntSLessEq },
-            O::IntLess => quote! { fugue_lifter_runtime::template::Op::IntLess },
-            O::IntLessEq => quote! { fugue_lifter_runtime::template::Op::IntLessEq },
-            O::IntZExt => quote! { fugue_lifter_runtime::template::Op::IntZExt },
-            O::IntSExt => quote! { fugue_lifter_runtime::template::Op::IntSExt },
-            O::IntNeg => quote! { fugue_lifter_runtime::template::Op::IntNeg },
-            O::IntNot => quote! { fugue_lifter_runtime::template::Op::IntNot },
-            O::IntAdd => quote! { fugue_lifter_runtime::template::Op::IntAdd },
-            O::IntSub => quote! { fugue_lifter_runtime::template::Op::IntSub },
-            O::IntMul => quote! { fugue_lifter_runtime::template::Op::IntMul },
-            O::IntDiv => quote! { fugue_lifter_runtime::template::Op::IntDiv },
-            O::IntSDiv => quote! { fugue_lifter_runtime::template::Op::IntSDiv },
-            O::IntRem => quote! { fugue_lifter_runtime::template::Op::IntRem },
-            O::IntSRem => quote! { fugue_lifter_runtime::template::Op::IntSRem },
-            O::IntCarry => quote! { fugue_lifter_runtime::template::Op::IntCarry },
-            O::IntSCarry => quote! { fugue_lifter_runtime::template::Op::IntSCarry },
-            O::IntSBorrow => quote! { fugue_lifter_runtime::template::Op::IntSBorrow },
-            O::IntAnd => quote! { fugue_lifter_runtime::template::Op::IntAnd },
-            O::IntOr => quote! { fugue_lifter_runtime::template::Op::IntOr },
-            O::IntXor => quote! { fugue_lifter_runtime::template::Op::IntXor },
-            O::IntLShift => quote! { fugue_lifter_runtime::template::Op::IntLShift },
-            O::IntRShift => quote! { fugue_lifter_runtime::template::Op::IntRShift },
-            O::IntSRShift => quote! { fugue_lifter_runtime::template::Op::IntSRShift },
-            O::BoolNot => quote! { fugue_lifter_runtime::template::Op::BoolNot },
-            O::BoolAnd => quote! { fugue_lifter_runtime::template::Op::BoolAnd },
-            O::BoolOr => quote! { fugue_lifter_runtime::template::Op::BoolOr },
-            O::BoolXor => quote! { fugue_lifter_runtime::template::Op::BoolXor },
-            O::FloatEq => quote! { fugue_lifter_runtime::template::Op::FloatEq },
-            O::FloatNotEq => quote! { fugue_lifter_runtime::template::Op::FloatNotEq },
-            O::FloatLess => quote! { fugue_lifter_runtime::template::Op::FloatLess },
-            O::FloatLessEq => quote! { fugue_lifter_runtime::template::Op::FloatLessEq },
-            O::FloatIsNaN => quote! { fugue_lifter_runtime::template::Op::FloatIsNaN },
-            O::FloatAdd => quote! { fugue_lifter_runtime::template::Op::FloatAdd },
-            O::FloatSub => quote! { fugue_lifter_runtime::template::Op::FloatSub },
-            O::FloatMul => quote! { fugue_lifter_runtime::template::Op::FloatMul },
-            O::FloatDiv => quote! { fugue_lifter_runtime::template::Op::FloatDiv },
-            O::FloatNeg => quote! { fugue_lifter_runtime::template::Op::FloatNeg },
-            O::FloatAbs => quote! { fugue_lifter_runtime::template::Op::FloatAbs },
-            O::FloatSqrt => quote! { fugue_lifter_runtime::template::Op::FloatSqrt },
-            O::FloatOfInt => quote! { fugue_lifter_runtime::template::Op::FloatOfInt },
-            O::FloatOfFloat => quote! { fugue_lifter_runtime::template::Op::FloatOfFloat },
-            O::FloatTruncate => quote! { fugue_lifter_runtime::template::Op::FloatTruncate },
-            O::FloatCeiling => quote! { fugue_lifter_runtime::template::Op::FloatCeiling },
-            O::FloatFloor => quote! { fugue_lifter_runtime::template::Op::FloatFloor },
-            O::FloatRound => quote! { fugue_lifter_runtime::template::Op::FloatRound },
+            O::Load => {
+                let space = space();
+                issue(quote! { Load(#space) })
+            }
+            O::Store => {
+                let space = space();
+                issue(quote! { Store(#space) })
+            }
+            O::CallOther => {
+                let ConstTpl::Real(index) = self.tpl.inputs()[0].offset() else {
+                    unreachable!("user-defined operation indices are constant")
+                };
+                let index = *index as u16;
+                let count = self.tpl.inputs().len() as u8 - 1;
+                issue(quote! { UserOp(#index, #count) })
+            }
+            O::Copy => issue(quote! { Copy }),
+            O::Branch => issue(quote! { Branch }),
+            O::CBranch => issue(quote! { CBranch }),
+            O::IBranch => issue(quote! { IBranch }),
+            O::Call => issue(quote! { Call }),
+            O::ICall => issue(quote! { ICall }),
+            O::Return => issue(quote! { Return }),
+            O::IntEq => issue(quote! { IntEq }),
+            O::IntNotEq => issue(quote! { IntNotEq }),
+            O::IntSLess => issue(quote! { IntSignedLess }),
+            O::IntSLessEq => issue(quote! { IntSignedLessEq }),
+            O::IntLess => issue(quote! { IntLess }),
+            O::IntLessEq => issue(quote! { IntLessEq }),
+            O::IntZExt => issue(quote! { ZeroExt }),
+            O::IntSExt => issue(quote! { SignExt }),
+            O::IntNeg => issue(quote! { IntNeg }),
+            O::IntNot => issue(quote! { IntNot }),
+            O::IntAdd => issue(quote! { IntAdd }),
+            O::IntSub => issue(quote! { IntSub }),
+            O::IntMul => issue(quote! { IntMul }),
+            O::IntDiv => issue(quote! { IntDiv }),
+            O::IntSDiv => issue(quote! { IntSignedDiv }),
+            O::IntRem => issue(quote! { IntRem }),
+            O::IntSRem => issue(quote! { IntSignedRem }),
+            O::IntCarry => issue(quote! { IntCarry }),
+            O::IntSCarry => issue(quote! { IntSignedCarry }),
+            O::IntSBorrow => issue(quote! { IntSignedBorrow }),
+            O::IntAnd => issue(quote! { IntAnd }),
+            O::IntOr => issue(quote! { IntOr }),
+            O::IntXor => issue(quote! { IntXor }),
+            O::IntLShift => issue(quote! { IntLeftShift }),
+            O::IntRShift => issue(quote! { IntRightShift }),
+            O::IntSRShift => issue(quote! { IntSignedRightShift }),
+            O::BoolNot => issue(quote! { BoolNot }),
+            O::BoolAnd => issue(quote! { BoolAnd }),
+            O::BoolOr => issue(quote! { BoolOr }),
+            O::BoolXor => issue(quote! { BoolXor }),
+            O::FloatEq => issue(quote! { FloatEq }),
+            O::FloatNotEq => issue(quote! { FloatNotEq }),
+            O::FloatLess => issue(quote! { FloatLess }),
+            O::FloatLessEq => issue(quote! { FloatLessEq }),
+            O::FloatIsNaN => issue(quote! { FloatIsNaN }),
+            O::FloatAdd => issue(quote! { FloatAdd }),
+            O::FloatSub => issue(quote! { FloatSub }),
+            O::FloatMul => issue(quote! { FloatMul }),
+            O::FloatDiv => issue(quote! { FloatDiv }),
+            O::FloatNeg => issue(quote! { FloatNeg }),
+            O::FloatAbs => issue(quote! { FloatAbs }),
+            O::FloatSqrt => issue(quote! { FloatSqrt }),
+            O::FloatOfInt => issue(quote! { IntToFloat }),
+            O::FloatOfFloat => issue(quote! { FloatToFloat }),
+            O::FloatTruncate => issue(quote! { FloatToInt }),
+            O::FloatCeiling => issue(quote! { FloatCeiling }),
+            O::FloatFloor => issue(quote! { FloatFloor }),
+            O::FloatRound => issue(quote! { FloatRound }),
+            O::Subpiece => issue(quote! { Subpiece }),
+            O::PopCount => issue(quote! { CountOnes }),
+            O::LZCount => issue(quote! { CountLeadingZeros }),
             O::Build => quote! { fugue_lifter_runtime::template::Op::Build },
             O::DelaySlot => quote! { fugue_lifter_runtime::template::Op::DelaySlot },
-            O::Piece => quote! { fugue_lifter_runtime::template::Op::Piece },
-            O::Subpiece => quote! { fugue_lifter_runtime::template::Op::Subpiece },
-            O::Cast => quote! { fugue_lifter_runtime::template::Op::Cast },
             O::Label => quote! { fugue_lifter_runtime::template::Op::Label },
             O::CrossBuild => quote! { fugue_lifter_runtime::template::Op::CrossBuild },
-            O::SegmentOp => quote! { fugue_lifter_runtime::template::Op::SegmentOp },
-            O::CPoolRef => quote! { fugue_lifter_runtime::template::Op::CPoolRef },
-            O::New => quote! { fugue_lifter_runtime::template::Op::New },
-            O::Insert => quote! { fugue_lifter_runtime::template::Op::Insert },
-            O::Extract => quote! { fugue_lifter_runtime::template::Op::Extract },
-            O::PopCount => quote! { fugue_lifter_runtime::template::Op::PopCount },
-            O::LZCount => quote! { fugue_lifter_runtime::template::Op::LZCount },
+            O::Piece | O::Cast | O::SegmentOp | O::CPoolRef | O::New | O::Insert | O::Extract => {
+                unreachable!("opcode is not emitted by the SLEIGH compiler")
+            }
         };
 
         let output = self.tpl.output().map_or_else(
@@ -234,19 +251,32 @@ impl<'a, 'b> TplAdaptor<'a, 'b, OpTpl> {
 
 impl<'a, 'b> TplAdaptor<'a, 'b, VarnodeTpl> {
     pub(crate) fn tokens(&mut self) -> u16 {
-        let space = TplAdaptor::new(&self.language, self.tpl.space(), &mut self.tables).tokens();
-        let offset = TplAdaptor::new(&self.language, self.tpl.offset(), &mut self.tables).tokens();
-        let size = TplAdaptor::new(&self.language, self.tpl.size(), &mut self.tables).tokens();
-
-        self.tables.push_varnode_tpl(
-            self.tpl,
-            quote! {
-                fugue_lifter_runtime::template::VarnodeTpl {
-                    space: #space,
-                    offset: #offset,
-                    size: #size,
+        let tpl = match (self.tpl.space(), self.tpl.offset(), self.tpl.size()) {
+            (ConstTpl::SpaceId(space), ConstTpl::Real(offset), ConstTpl::Real(size)) => {
+                let space = space.index() as u8;
+                let size = *size as u16;
+                quote! {
+                    fugue_lifter_runtime::template::VarnodeTpl::Fixed {
+                        space: #space,
+                        offset: #offset,
+                        size: #size,
+                    }
                 }
-            },
-        )
+            }
+            (space, offset, size) => {
+                let space = TplAdaptor::new(&self.language, space, &mut self.tables).tokens();
+                let offset = TplAdaptor::new(&self.language, offset, &mut self.tables).tokens();
+                let size = TplAdaptor::new(&self.language, size, &mut self.tables).tokens();
+                quote! {
+                    fugue_lifter_runtime::template::VarnodeTpl::Computed {
+                        space: #space,
+                        offset: #offset,
+                        size: #size,
+                    }
+                }
+            }
+        };
+
+        self.tables.push_varnode_tpl(self.tpl, tpl)
     }
 }

@@ -201,7 +201,7 @@ impl RegisterBank {
     }
 
     pub fn root_id(&self, byte_offset: u64, byte_size: usize) -> Option<RegisterId> {
-        let byte_size = u64::try_from(byte_size).ok()?;
+        let byte_size = byte_size as u64;
         let end = byte_offset.checked_add(byte_size)?;
         let index = self.roots.partition_point(|root| root.end <= byte_offset);
         self.roots
@@ -233,7 +233,7 @@ impl RegisterBank {
         else {
             return Ok(None);
         };
-        let offset_bytes = if self.language.is_little_endian() {
+        let offset_bytes = if self.language.endian().is_little() {
             range.start - root.start
         } else {
             root.end - range.end

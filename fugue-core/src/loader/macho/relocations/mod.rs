@@ -7,12 +7,11 @@ use crate::arch::Arch;
 use crate::ir::{RawAddress, SymbolIndex, TransientSymbolTable};
 use crate::lifter::ContextHint;
 use crate::loader::macho::extensions::RelocationContext;
-use crate::loader::macho::{MACHO_SYMTAB_SELECTOR, macho_object_section_address};
+use crate::loader::macho::{MACHO_SYMTAB_SELECTOR, MachOSectionMap};
 use crate::loader::{ImageAddress, ImageSegmentContents, LoaderError};
 
 mod aarch64;
 mod generic;
-mod x86_64;
 
 fn macho_relocation_type(relocation: &Relocation) -> Option<u8> {
     let RelocationFlags::MachO { r_type, .. } = relocation.flags() else {
@@ -33,6 +32,7 @@ where
     base: RawAddress,
     preferred_base: RawAddress,
     symbols: &'file TransientSymbolTable<ImageAddress>,
+    sections: &'file MachOSectionMap,
     is_object: bool,
 }
 
@@ -42,12 +42,13 @@ where
     R: ReadRef<'data>,
     'file: 'data,
 {
-    pub fn new(
+    pub(crate) fn new(
         macho: &'file MachOFile<'data, Mach, R>,
         arch: &'file Arch,
         base: RawAddress,
         preferred_base: RawAddress,
         symbols: &'file TransientSymbolTable<ImageAddress>,
+        sections: &'file MachOSectionMap,
         is_object: bool,
     ) -> Self {
         Self {
@@ -56,6 +57,7 @@ where
             base,
             preferred_base,
             symbols,
+            sections,
             is_object,
         }
     }
@@ -133,9 +135,6 @@ where
             Architecture::Aarch64 | Architecture::Aarch64_Ilp32 => {
                 self.apply_aarch64_relocation(context.segment_mut(), offset, relocation);
             }
-            Architecture::X86_64 => {
-                self.apply_x86_64_relocation(context.segment_mut(), offset, relocation);
-            }
             _ => {
                 self.apply_generic_relocation(context.segment_mut(), offset, relocation);
             }
@@ -146,7 +145,7 @@ where
 
     fn section_address(&self, section: &MachOSection<'data, 'file, Mach, R>) -> Option<RawAddress> {
         if self.is_object {
-            macho_object_section_address(self.macho, self.base, section.index().0)
+            self.sections.get(section.index().0)
         } else {
             self.base
                 .checked_sub(self.preferred_base)
@@ -159,8 +158,7 @@ where
             RelocationTarget::Absolute => Some(0),
             RelocationTarget::Section(index) => {
                 if self.is_object {
-                    macho_object_section_address(self.macho, self.base, index.0)
-                        .map(|address| address.offset())
+                    self.sections.get(index.0).map(|address| address.offset())
                 } else {
                     let section = self.macho.section_by_index(index).ok()?;
                     Some(
@@ -178,12 +176,11 @@ where
         }
     }
 
-    fn resolve_relocation_value(&self, relocation: &Relocation) -> Option<u64> {
-        let target = self.resolve_relocation_target(relocation.target())?;
-        let subtractor = relocation
-            .subtractor()
-            .and_then(|index| self.resolve_relocation_target(RelocationTarget::Symbol(index)))
-            .unwrap_or_default();
+    fn resolve_relocation_value(&self, relocation: &Relocation, target: u64) -> Option<u64> {
+        let subtractor = match relocation.subtractor() {
+            Some(index) => self.resolve_relocation_target(RelocationTarget::Symbol(index))?,
+            None => 0,
+        };
         Some(target.wrapping_sub(subtractor))
     }
 
@@ -195,10 +192,11 @@ where
         let address = address.into();
         match self.arch.canonicalise_address(address) {
             Some((entry, context)) if entry != address => {
-                bytes.add_function_hint(entry);
-                bytes.add_mapping_hint(entry, ContextHint::code().with_context(context));
+                let mapping_hints = bytes.mapping_hints_mut();
+                mapping_hints.insert_function(entry);
+                mapping_hints.insert_context_hint(entry, ContextHint::code().with_context(context));
             }
-            _ => bytes.add_function_hint(address),
+            _ => bytes.mapping_hints_mut().insert_function(address),
         }
     }
 }

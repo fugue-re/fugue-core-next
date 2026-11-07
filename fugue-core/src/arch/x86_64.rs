@@ -1,3 +1,4 @@
+use fugue_bytes::Endian;
 #[cfg(feature = "static-lifters")]
 pub use fugue_lifter::x86_64::*;
 use memchr::arch::all::is_prefix;
@@ -87,7 +88,7 @@ impl ArchT for X86_64 {
     }
 
     fn lifter(&self) -> Lifter {
-        Lifter::new(self.language)
+        Lifter::from(Arch::from(Box::new(self.clone()) as Box<dyn ArchT>))
     }
 
     fn external_thunk_template(&self) -> ExternalThunkTemplate {
@@ -264,7 +265,7 @@ impl X86_64 {
             Some("compat32") => return Ok(variants::COMPAT32),
             _ => {}
         }
-        let lid = LanguageId::new_with("x86", false, 64, variant);
+        let lid = LanguageId::new_with("x86", Endian::Little, 64, variant);
         loader.load(&lid)
     }
 }
@@ -290,7 +291,7 @@ impl LanguageProvider {
         id: &LanguageId,
         source: &LanguageSource<'_>,
     ) -> Result<Option<&'static Language>, LanguageError> {
-        if id.processor() != "x86" || id.bits() != 64 || id.is_big_endian() {
+        if id.processor() != "x86" || id.bits() != 64 || id.endian().is_big() {
             return Ok(None);
         }
 
@@ -452,7 +453,7 @@ mod test {
         let mut lifter = arch.lifter();
         let mut operations = Vec::new();
         let size = lifter.lift(address, bytes, &mut operations)?;
-        let lifted = Insn::from_resolved_flow(language, address, size, &operations)?;
+        let lifted = Insn::from_resolved_flow(&lifter, address, size, &operations)?;
 
         assert_eq!(
             direct.properties(),

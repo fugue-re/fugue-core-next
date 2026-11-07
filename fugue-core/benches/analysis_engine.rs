@@ -1,6 +1,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::error::Error;
 use std::hint::black_box;
+use std::io::Error as IoError;
 use std::ops::Bound;
 #[cfg(feature = "sqlite")]
 use std::path::Path;
@@ -12,7 +13,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use fugue_core::analysis::function::{FunctionRecoveryConfig, LinearSweepConfig};
-use fugue_core::analysis::non_returning::NonReturningExterns;
+use fugue_core::analysis::non_returning::NonReturningExternals;
+use fugue_core::arch::{Arch, Mips};
 #[cfg(feature = "sqlite")]
 use fugue_core::attributes;
 use fugue_core::engine::{AnalysisEngine, AnalysisEngineConfig, ProjectUpdates, ProjectView};
@@ -24,8 +26,9 @@ use fugue_core::il::ecode::{ECodeIr, ECodeOpcode, PCodeToECode};
 use fugue_core::il::mcode::{ECodeToMCode, MCodeIr};
 use fugue_core::il::pcode::PCodeIr;
 use fugue_core::ir::{
-    Address, AddressRange, AddressRangeSet, IncompleteCodeBlock, IncompleteFunction, Reference,
-    ReferenceProperties, SymbolEntry, SymbolIndex, SymbolProperties, SymbolTableSelector,
+    Address, AddressRange, AddressRangeSet, CodeBlock, Endian, IncompleteCodeBlock,
+    IncompleteFunction, Reference, ReferenceProperties, SymbolEntry, SymbolIndex, SymbolProperties,
+    SymbolTableSelector,
 };
 use fugue_core::loader::{Loadable, Loader};
 use fugue_core::project::{ChangeKinds, ChangeSource, Project};
@@ -52,6 +55,7 @@ use rayon::prelude::*;
 const SYNTHETIC_SYMBOLS: usize = 1024;
 const SYNTHETIC_FUNCTIONS: usize = 256;
 const LARGE_FUNCTION_BLOCKS: usize = 4096;
+const MIPS_MODE_RESOLUTIONS: usize = 65_536;
 const DOMINANCE_BRANCHES: usize = 512;
 const DOMINANCE_LIVE_DOMAINS: usize = 256;
 const PAGE_LIMIT: usize = 64;
@@ -714,6 +718,61 @@ fn bench_initial_analysis(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn 
     Ok(())
 }
 
+fn bench_mips_mode_resolution(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
+    let arch = Arch::new(Mips::resolve_default_variant(Endian::Big)?);
+    let mut disassembler = arch.disassembler();
+    let mut lifter = arch.lifter();
+
+    let (result, checksum) = measure("mips16_mode_resolution", || {
+        let mut checksum = 0usize;
+        for _ in 0..MIPS_MODE_RESOLUTIONS {
+            lifter.context_mut().reset();
+            let (address, context) = arch
+                .canonicalise_address_with(0x1001u64, lifter.context())
+                .ok_or_else(|| IoError::other("MIPS16 address is not canonical"))?;
+            let address = Address::in_default_space(address);
+            context.apply(address, lifter.context_mut());
+            let insn = disassembler.disassemble(address, [0x68, 0x01], lifter.context_mut())?;
+            checksum = checksum.wrapping_add(insn.size());
+        }
+        Ok((checksum, MIPS_MODE_RESOLUTIONS))
+    })?;
+    black_box(checksum);
+    results.push(result);
+    Ok(())
+}
+
+fn bench_context_storage(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
+    let loader = Loader::from_file(REPRESENTATIVE_FIXTURE)?;
+    let engine = AnalysisEngine::new(Project::new_transient(&loader)?)?;
+    engine.analyse()?;
+    let reader = engine.query_reader()?;
+    let project = reader.project()?;
+
+    let (archive, encoded) = measure("context_block_archive", || {
+        let encoded = project
+            .blocks()
+            .iter()
+            .map(|block| rkyv::to_bytes::<rkyv::rancor::Error>(block.as_ref()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let count = encoded.len();
+        Ok((encoded, count))
+    })?;
+    results.push(archive);
+
+    let (rehydration, blocks) = measure("context_block_rehydration", || {
+        let blocks = encoded
+            .iter()
+            .map(|bytes| rkyv::from_bytes::<CodeBlock, rkyv::rancor::Error>(bytes))
+            .collect::<Result<Vec<_>, _>>()?;
+        let count = blocks.len();
+        Ok((blocks, count))
+    })?;
+    black_box(blocks);
+    results.push(rehydration);
+    Ok(())
+}
+
 fn bench_representative_analysis(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
     let (load, project) = measure("representative_project_load", || {
         let loader = Loader::from_file(REPRESENTATIVE_FIXTURE)?;
@@ -739,10 +798,10 @@ fn bench_representative_analysis(results: &mut Vec<BenchResult>) -> Result<(), B
     let loader = Loader::from_file(REPRESENTATIVE_FIXTURE)?;
     let project_without_external_classification = Project::new_transient(&loader)?;
     let mut config = AnalysisEngineConfig::default();
-    config.disable_analyser::<NonReturningExterns>();
+    config.disable_analyser::<NonReturningExternals>();
     let comparison_function_count = {
         let (comparison, comparison_engine) = measure(
-            "representative_arm_analysis_without_non_returning_externs",
+            "representative_arm_analysis_without_non_returning_externals",
             || {
                 let engine =
                     AnalysisEngine::with_config(project_without_external_classification, config)?;
@@ -997,52 +1056,6 @@ fn bench_parallel_il_transforms(results: &mut Vec<BenchResult>) -> Result<(), Bo
     Ok(())
 }
 
-fn bench_repeated_flow_targets(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
-    let (engine, entry) = load_engine()?;
-    let reader = engine.query_reader()?;
-    let disjoint_entry = entry
-        .checked_add(0x30_000u64)
-        .ok_or_else(|| std::io::Error::other("disjoint function address overflow"))?;
-
-    black_box(reader.flow_targets(entry)?);
-    let (hit, _) = measure_repeated("repeated_flow_targets_query_hit", || {
-        black_box(reader.flow_targets(entry)?);
-        Ok(((), 1))
-    })?;
-    results.push(hit);
-
-    add_empty_function(&engine, entry)?;
-    engine.analyse()?;
-    let (after_same_entry, _) = measure("flow_targets_after_same_entry_edit", || {
-        black_box(reader.flow_targets(entry)?);
-        Ok(((), 1))
-    })?;
-    results.push(after_same_entry);
-
-    add_empty_function(&engine, disjoint_entry)?;
-    engine.analyse()?;
-    let (after_disjoint_range, _) =
-        measure_repeated("flow_targets_after_disjoint_range_edit", || {
-            black_box(reader.flow_targets(entry)?);
-            Ok(((), 1))
-        })?;
-    results.push(after_disjoint_range);
-
-    engine.add_symbol(
-        SymbolIndex::new(SymbolTableSelector::new(241), 0),
-        SymbolEntry::new(entry, "bench_unrelated_symbol", SymbolProperties::LOCAL),
-    )?;
-    engine.analyse()?;
-
-    let (after_unrelated_kind, _) =
-        measure_repeated("flow_targets_after_unrelated_kind_edit", || {
-            black_box(reader.flow_targets(entry)?);
-            Ok(((), 1))
-        })?;
-    results.push(after_unrelated_kind);
-    Ok(())
-}
-
 fn bench_page_scans(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
     let (engine, entry) = load_engine()?;
     add_symbols(&engine, entry, SYNTHETIC_SYMBOLS)?;
@@ -1110,7 +1123,7 @@ fn bench_single_function_edit(results: &mut Vec<BenchResult>) -> Result<(), Box<
     results.push(edit);
 
     let (related, _) = measure("single_function_edit_related_query", || {
-        black_box(reader.flow_targets(new_entry)?);
+        black_box(reader.function_at(new_entry)?);
         Ok(((), 1))
     })?;
     results.push(related);
@@ -1230,7 +1243,7 @@ fn bench_byte_writes(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error
 }
 
 fn bench_mapping_changes(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
-    let mapping_count = u64::try_from(SEGMENT_MAPPING_REMOVALS)?;
+    let mapping_count = SEGMENT_MAPPING_REMOVALS as u64;
     let provider_size = usize::try_from(mapping_count * SEGMENT_MAPPING_SIZE)?;
     let mut storage = SegmentStorage::empty();
     let provider = storage.open_provider(
@@ -1415,7 +1428,7 @@ fn bench_cached_derived(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Er
 fn bench_multi_client(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Error>> {
     let (engine, entry) = load_engine()?;
     let reader = engine.query_reader()?;
-    black_box(reader.flow_targets(entry)?);
+    black_box(reader.function_at(entry)?);
 
     let mut region = AddressRangeSet::new();
     region.insert_range(AddressRange::new(
@@ -1427,7 +1440,7 @@ fn bench_multi_client(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Erro
     let client_count = 8usize;
     let queries_per_client = 512usize;
 
-    let (result, _) = measure("multi_client_flow_targets_and_latest_change", || {
+    let (result, _) = measure("multi_client_function_at_and_latest_change", || {
         thread::scope(|scope| -> Result<(), Box<dyn Error>> {
             let mut clients = Vec::new();
             for _ in 0..client_count {
@@ -1438,7 +1451,7 @@ fn bench_multi_client(results: &mut Vec<BenchResult>) -> Result<(), Box<dyn Erro
                         for _ in 0..queries_per_client {
                             black_box(
                                 reader
-                                    .flow_targets(entry)
+                                    .function_at(entry)
                                     .map_err(|error| std::io::Error::other(error.to_string()))?,
                             );
                             black_box(
@@ -1619,8 +1632,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     if selected_group(selected.as_deref(), "analysis") {
         bench_initial_analysis(&mut results)?;
     }
+    if selected_group(selected.as_deref(), "mips") {
+        bench_mips_mode_resolution(&mut results)?;
+    }
     if selected_group(selected.as_deref(), "representative") {
         bench_representative_analysis(&mut results)?;
+    }
+    if selected_group(selected.as_deref(), "contexts") {
+        bench_context_storage(&mut results)?;
     }
     if selected_group(selected.as_deref(), "il") {
         bench_dominance_traversal(&mut results)?;
@@ -1628,7 +1647,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         bench_parallel_il_transforms(&mut results)?;
     }
     if selected_group(selected.as_deref(), "queries") {
-        bench_repeated_flow_targets(&mut results)?;
         bench_page_scans(&mut results)?;
         bench_call_graph_pages(&mut results)?;
         bench_cached_derived(&mut results)?;

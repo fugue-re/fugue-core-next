@@ -156,7 +156,7 @@ impl TryFrom<i64> for Opcode {
             71 => Self::Extract,
             72 => Self::PopCount,
             73 => Self::LZCount,
-            _ => return Err(DeserialiseError::Invariant("invalid opcode")),
+            _ => return Err(DeserialiseError::invariant("invalid opcode")),
         })
     }
 }
@@ -239,7 +239,7 @@ impl FromStr for Opcode {
             "EXTRACT" => Self::Extract,
             "POPCOUNT" => Self::PopCount,
             "LZCOUNT" => Self::LZCount,
-            _ => return Err(DeserialiseError::Invariant("invalid opcode name")),
+            _ => return Err(DeserialiseError::invariant("invalid opcode name")),
         })
     }
 }

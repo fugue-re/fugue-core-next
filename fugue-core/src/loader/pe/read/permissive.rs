@@ -232,8 +232,7 @@ where
             ));
         }
 
-        let input_len = u64::try_from(data.len())
-            .map_err(|_| LoaderError::format(SectionTableRepairError::InvalidSectionTable))?;
+        let input_len = data.len() as u64;
         let table_range = Self::section_table_range(offset, sections.len(), data.len())
             .ok_or_else(|| LoaderError::format(SectionTableRepairError::InvalidSectionTable))?;
 

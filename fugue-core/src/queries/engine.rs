@@ -120,11 +120,6 @@ impl QueryEngine {
 
         for record in changes.records() {
             match record {
-                ChangeRecord::FunctionAdded { entry, .. }
-                | ChangeRecord::FunctionChanged { entry, .. }
-                | ChangeRecord::FunctionRemoved { entry, .. } => {
-                    self.cache.remove_flow_targets(*entry);
-                }
                 ChangeRecord::LiftedMaterialised { function, form }
                 | ChangeRecord::LiftedRemoved { function, form } => {
                     self.cache.remove_lifted(*function, form);
@@ -170,7 +165,7 @@ mod test {
     use crate::il::pcode::{PCodeBuilder, PCodeIr};
     use crate::ir::{
         Address, AddressRange, AddressRangeSet, FunctionId, IncompleteCodeBlock,
-        IncompleteFunction, RawAddress, ReferenceKind, ReferenceOrigin, ReferenceTarget,
+        IncompleteFunction, RawAddress, ReferenceKind, ReferenceTarget,
     };
     use crate::loader::Loader;
     use crate::project::{
@@ -248,13 +243,6 @@ mod test {
             function: IncompleteFunction,
         ) -> Result<FunctionId, Box<dyn Error>> {
             self.commit_with(|transaction| transaction.add_function(function))
-        }
-
-        fn remove_function(&self, entry: Address) -> Result<(), Box<dyn Error>> {
-            self.commit_with(|transaction| {
-                transaction.remove_function(entry, ReferenceOrigin::Derived)
-            })
-            .map(drop)
         }
 
         fn replace_lifted<T>(&self, ir: &mut T) -> Result<(), Box<dyn Error>>
@@ -440,163 +428,6 @@ mod test {
     }
 
     #[test]
-    fn test_flow_graph_cache_is_exact_per_function() -> Result<(), Box<dyn Error>> {
-        let fixture = Fixture::new()?;
-        let edited = Address::from(0x1_0000_0000u64);
-        let same_window = Address::new(edited.space(), edited.offset() + 0x10);
-        let distant = Address::from(0x9_0000_0000u64);
-
-        fixture.commit_function(Fixture::function_at(edited))?;
-        fixture.commit_function(Fixture::function_at(same_window))?;
-        fixture.commit_function(Fixture::function_at(distant))?;
-
-        let reader = fixture.reader();
-        let edited_before = reader.flow_targets(edited)?.ok_or("edited missing")?;
-        let neighbour_before = reader
-            .flow_targets(same_window)?
-            .ok_or("neighbour missing")?;
-        let distant_before = reader.flow_targets(distant)?.ok_or("distant missing")?;
-
-        fixture.commit_function(Fixture::function_with_size(edited, 2))?;
-
-        let edited_after = reader.flow_targets(edited)?.ok_or("edited missing after")?;
-        let neighbour_after = reader
-            .flow_targets(same_window)?
-            .ok_or("neighbour missing after")?;
-        let distant_after = reader
-            .flow_targets(distant)?
-            .ok_or("distant missing after")?;
-
-        assert!(!Arc::ptr_eq(&edited_before, &edited_after));
-        assert!(Arc::ptr_eq(&neighbour_before, &neighbour_after));
-        assert!(Arc::ptr_eq(&distant_before, &distant_after));
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_flow_graph_cache_invalidation_property() -> Result<(), Box<dyn Error>> {
-        let fixture = Fixture::new()?;
-        let entries = (0..8u64)
-            .map(|index| Address::from(0x1_0000_0000u64 + index * 0x10))
-            .collect::<Vec<_>>();
-
-        for entry in &entries {
-            fixture.commit_function(Fixture::function_at(*entry))?;
-        }
-
-        let reader = fixture.reader();
-
-        for edited_index in 0..entries.len() {
-            let before = entries
-                .iter()
-                .map(|entry| Ok(reader.flow_targets(*entry)?.ok_or("function missing")?))
-                .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
-
-            fixture.commit_function(Fixture::function_with_size(
-                entries[edited_index],
-                2 + edited_index,
-            ))?;
-
-            for (index, entry) in entries.iter().enumerate() {
-                let after = reader
-                    .flow_targets(*entry)?
-                    .ok_or("function missing after")?;
-                let stable = Arc::ptr_eq(&before[index], &after);
-                assert_eq!(
-                    stable,
-                    index != edited_index,
-                    "only the edited function's cached graph may be invalidated"
-                );
-            }
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_function_removal_invalidates_cached_flow_graph() -> Result<(), Box<dyn Error>> {
-        let fixture = Fixture::new()?;
-        let entry = Address::from(0x1_0000_0000u64);
-
-        fixture.commit_function(Fixture::function_at(entry))?;
-
-        let reader = fixture.reader();
-        assert!(reader.flow_targets(entry)?.is_some());
-
-        fixture.remove_function(entry)?;
-
-        assert!(reader.flow_targets(entry)?.is_none());
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_function_add_invalidates_cached_absence() -> Result<(), Box<dyn Error>> {
-        let fixture = Fixture::new()?;
-        let entry = Address::from(0x1_0000_0000u64);
-
-        let reader = fixture.reader();
-        assert!(reader.flow_targets(entry)?.is_none());
-        assert!(reader.flow_targets(entry)?.is_none());
-
-        fixture.commit_function(Fixture::function_at(entry))?;
-
-        assert!(reader.flow_targets(entry)?.is_some());
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_byte_write_leaves_flow_graph_cached() -> Result<(), Box<dyn Error>> {
-        let fixture = Fixture::new()?;
-        let entry = Address::from(0x1_0000_0000u64);
-
-        fixture.commit_function(Fixture::function_at(entry))?;
-
-        let reader = fixture.reader();
-        let before = reader.flow_targets(entry)?.ok_or("function missing")?;
-
-        let revision = fixture.next_revision();
-        fixture.apply(&ChangeSet::with_records(
-            revision,
-            [ChangeRecord::BytesWritten {
-                range: AddressRange::new(entry.space(), entry.raw_address(), entry.raw_address()),
-            }],
-        ));
-
-        let after = reader
-            .flow_targets(entry)?
-            .ok_or("function missing after write")?;
-
-        assert!(Arc::ptr_eq(&before, &after));
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_cache_is_pure_derived_state() -> Result<(), Box<dyn Error>> {
-        let fixture = Fixture::new()?;
-        let entry = Address::from(0x1_0000_0000u64);
-
-        fixture.commit_function(Fixture::function_with_size(entry, 4))?;
-
-        let reader = fixture.reader();
-        let before = reader.flow_targets(entry)?.ok_or("function missing")?;
-
-        fixture.queries.cache.clear();
-
-        let after = reader
-            .flow_targets(entry)?
-            .ok_or("function missing after clear")?;
-
-        assert!(!Arc::ptr_eq(&before, &after));
-        assert_eq!(before.targets(), after.targets());
-
-        Ok(())
-    }
-
-    #[test]
     fn test_latest_change_tracks_region_and_kinds() -> Result<(), Box<dyn Error>> {
         let fixture = Fixture::new()?;
         let reader = fixture.reader();
@@ -749,11 +580,11 @@ mod test {
 
         fixture.apply(&ChangeSet::with_records(
             space,
-            [ChangeRecord::SpaceCreated {
+            [ChangeRecord::AddressSpaceCreated {
                 space: AddressSpaceId::from(7u8),
             }],
         ));
-        assert!(reader.changed_since(changed, ChangeKinds::SPACE_CREATED, &region)?);
+        assert!(reader.changed_since(changed, ChangeKinds::ADDRESS_SPACE_CREATED, &region)?);
 
         Ok(())
     }

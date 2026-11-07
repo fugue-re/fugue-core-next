@@ -258,7 +258,7 @@ mod test {
         1,
         PrototypeOperand::Register(PAIR_OUTPUT),
     )];
-    const PAIR_PROTOTYPE: Prototype = Prototype::new("pair", 0, 0)
+    const PAIR_PROTOTYPE: Prototype = Prototype::new("pair", Some(0), 0)
         .with_inputs(&PAIR_INPUTS)
         .with_outputs(&PAIR_OUTPUTS);
     const PAIR_PROTOTYPES: [Prototype; 1] = [PAIR_PROTOTYPE];

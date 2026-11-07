@@ -1,5 +1,6 @@
 use idiom::SwitchIdiomRecovery;
 use interval::SwitchIntervalRecovery;
+use overrides::{SWITCH_OVERRIDES_ANALYSER, SwitchOverrides};
 use recovered::{RecoveredSwitch, SwitchCaseEnumerator};
 use resolver::SwitchResolver;
 
@@ -15,6 +16,7 @@ use crate::project::Project;
 
 mod idiom;
 mod interval;
+mod overrides;
 mod recovered;
 mod resolver;
 
@@ -232,11 +234,10 @@ impl AnalysisPass<StructuredFunctionContext> for SwitchRecovery {
 
         for (block, site, recovered) in resolved {
             if let Some(existing) = project.switch_at(site)
-                && (existing.is_override()
-                    || (existing
-                        .properties()
-                        .contains(SwitchProperties::GUARD_FOUND)
-                        && !recovered.is_guarded()))
+                && existing
+                    .properties()
+                    .contains(SwitchProperties::GUARD_FOUND)
+                && !recovered.is_guarded()
             {
                 for case in existing.cases() {
                     state.context_mut().add_local_target_with_context(
@@ -245,6 +246,9 @@ impl AnalysisPass<StructuredFunctionContext> for SwitchRecovery {
                         FlowKind::SwitchBranch,
                     );
                 }
+                state
+                    .function_mut()
+                    .add_pending_switch(existing.as_ref().clone());
                 continue;
             }
 
@@ -258,7 +262,7 @@ impl AnalysisPass<StructuredFunctionContext> for SwitchRecovery {
                 );
             }
 
-            let switch = recovered.into_switch(SwitchId::INVALID, FunctionId::INVALID, site);
+            let switch = recovered.into_switch(SwitchId::INVALID, site);
             state.function_mut().add_pending_switch(switch);
         }
 
@@ -271,6 +275,7 @@ impl FunctionRecoveryExtension {
     const NAME: &str = "switch";
 
     fn configure(_: &Project, recovery: &mut FunctionRecovery) -> Result<(), AnalysisError> {
+        recovery.add_post_structuring_pass(SWITCH_OVERRIDES_ANALYSER, SwitchOverrides);
         if recovery.config().switch_analysis() {
             recovery.add_post_structuring_pass(SWITCH_RECOVERY_ANALYSER, SwitchRecovery::new());
         }

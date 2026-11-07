@@ -1,6 +1,6 @@
 use super::{SwitchIndex, SwitchTableError};
 use crate::ir::switch::{Switch, SwitchId};
-use crate::ir::{Address, FunctionId, IdAllocator};
+use crate::ir::{Address, AddressRange, IdAllocator};
 
 pub struct SwitchTable {
     allocator: IdAllocator<Switch>,
@@ -21,13 +21,6 @@ impl SwitchTable {
             index: SwitchIndex::new(),
             entries: Vec::new(),
         }
-    }
-
-    pub fn branches_for_function(
-        &self,
-        function: FunctionId,
-    ) -> impl Iterator<Item = Address> + '_ {
-        self.index.branches_for_function(function)
     }
 
     pub(crate) fn pending_id(&self, offset: usize) -> SwitchId {
@@ -64,6 +57,13 @@ impl SwitchTable {
             .filter_map(|(_, id)| self.get_by_id(id))
     }
 
+    pub fn overlaps(&self, range: &AddressRange) -> impl Iterator<Item = &Switch> + '_ {
+        self.index
+            .overlaps(range)
+            .into_iter()
+            .filter_map(|id| self.get_by_id(id))
+    }
+
     pub fn is_empty(&self) -> bool {
         self.index.is_empty()
     }
@@ -81,11 +81,7 @@ impl SwitchTable {
             if switch.branch() != branch {
                 return Err(SwitchTableError::AddressMismatch);
             }
-            if let Some(previous) = self.entries[existing.index()].as_ref() {
-                self.index.remove(previous.function(), branch);
-            }
-            self.index.insert(existing, switch.function(), branch);
-            self.entries[existing.index()] = Some(switch);
+            self.store(switch);
             return Ok(existing);
         }
 
@@ -97,13 +93,7 @@ impl SwitchTable {
             Ok(switch)
         })?;
 
-        self.index.insert(id, switch.function(), branch);
-
-        let slot = id.index();
-        if slot >= self.entries.len() {
-            self.entries.resize_with(slot + 1, || None);
-        }
-        self.entries[slot] = Some(switch);
+        self.store(switch);
 
         Ok(id)
     }
@@ -114,16 +104,10 @@ impl SwitchTable {
             .get_mut(id.index())?
             .as_mut()
             .filter(|switch| switch.id() == id)?;
-        let previous_function = switch.function();
-        let branch = switch.branch();
+        self.index
+            .remove(switch.id(), switch.branch(), &switch.coverage());
         let result = f(switch);
-        let function = switch.function();
-
-        if function != previous_function {
-            self.index.remove(previous_function, branch);
-            self.index.insert(id, function, branch);
-        }
-
+        self.index.insert(switch);
         Some(result)
     }
 
@@ -144,7 +128,7 @@ impl SwitchTable {
         else {
             return false;
         };
-        self.index.remove(switch.function(), switch.branch());
+        self.index.remove(id, switch.branch(), &switch.coverage());
         self.allocator.release(id);
         true
     }
@@ -165,23 +149,27 @@ impl SwitchTable {
         self.allocator.release(id);
     }
 
-    pub(crate) fn publish_upsert(&mut self, switch: Switch, previous_function: Option<FunctionId>) {
-        let id = switch.id();
-        let branch = switch.branch();
-        if let Some(previous_function) = previous_function {
-            self.index.remove(previous_function, branch);
+    pub(crate) fn publish_upsert(&mut self, switch: Switch) {
+        self.store(switch);
+    }
+
+    pub(crate) fn publish_remove(&mut self, id: SwitchId) {
+        if let Some(switch) = self.entries[id.index()].take() {
+            self.index.remove(id, switch.branch(), &switch.coverage());
         }
-        self.index.insert(id, switch.function(), branch);
-        let slot = id.index();
+        self.allocator.release(id);
+    }
+
+    fn store(&mut self, switch: Switch) {
+        let slot = switch.id().index();
         if slot >= self.entries.len() {
             self.entries.resize_with(slot + 1, || None);
         }
+        if let Some(previous) = self.entries[slot].take() {
+            self.index
+                .remove(previous.id(), previous.branch(), &previous.coverage());
+        }
+        self.index.insert(&switch);
         self.entries[slot] = Some(switch);
-    }
-
-    pub(crate) fn publish_remove(&mut self, id: SwitchId, function: FunctionId, branch: Address) {
-        self.entries[id.index()] = None;
-        self.index.remove(function, branch);
-        self.allocator.release(id);
     }
 }

@@ -95,6 +95,12 @@ impl MCodeCallingConvention {
     ) -> Result<Self, IlError> {
         let build = |entry: &PrototypeEntry| -> Result<MCodeCallingConventionEntry, IlError> {
             let location = match entry.operand() {
+                PrototypeOperand::Address { .. } | PrototypeOperand::Join { .. } => {
+                    Err(IlError::missing_component(
+                        ECodeIr::FORM,
+                        "supported calling-convention storage",
+                    ))
+                }
                 PrototypeOperand::Register(varnode) => {
                     Ok(MCodeStorageLocation::Register(root_of(varnode)?))
                 }
@@ -104,7 +110,7 @@ impl MCodeCallingConvention {
                         low: root_of(low)?,
                     })
                 }
-                PrototypeOperand::StackRelative(offset) => {
+                PrototypeOperand::StackRelative { offset, .. } => {
                     let shift = u64::BITS - address_bits;
                     Ok(MCodeStorageLocation::Stack {
                         offset: (*offset << shift).cast_signed() >> shift,
@@ -113,8 +119,8 @@ impl MCodeCallingConvention {
             }?;
             Ok(MCodeCallingConventionEntry::new(
                 location,
-                entry.min_size(),
-                entry.max_size(),
+                entry.min_size() as _,
+                entry.max_size() as _,
             ))
         };
         let inputs = prototype
@@ -776,10 +782,13 @@ mod test {
             1,
             8,
             1,
-            PrototypeOperand::StackRelative(0xffff_fff0),
+            PrototypeOperand::StackRelative {
+                offset: 0xffff_fff0,
+                size: None,
+            },
         )];
         let convention = MCodeCallingConvention::from_prototype(
-            &Prototype::new("test", 0, 0).with_inputs(ENTRIES),
+            &Prototype::new("test", Some(0), 0).with_inputs(ENTRIES),
             32,
             |_| unreachable!(),
         )
@@ -1559,7 +1568,7 @@ mod test {
             PrototypeOperand::RegisterJoin(HIGH, LOW),
         )];
 
-        let prototype = Prototype::new("joined", 0, 0).with_outputs(&OUTPUTS);
+        let prototype = Prototype::new("joined", Some(0), 0).with_outputs(&OUTPUTS);
         let convention = MCodeCallingConvention::from_prototype(&prototype, 64, |varnode| {
             Ok(RegisterId::new(varnode.offset()))
         })
@@ -1595,8 +1604,8 @@ mod test {
             PrototypeOperand::RegisterJoin(HIGH, LOW),
         )];
 
-        let input_prototype = Prototype::new("joined", 0, 0).with_inputs(&INPUTS);
-        let output_prototype = Prototype::new("joined", 0, 0).with_outputs(&OUTPUTS);
+        let input_prototype = Prototype::new("joined", Some(0), 0).with_inputs(&INPUTS);
+        let output_prototype = Prototype::new("joined", Some(0), 0).with_outputs(&OUTPUTS);
         let missing_root =
             || IlError::missing_component(ECodeIr::FORM, "call-convention register root");
 

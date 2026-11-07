@@ -11,7 +11,8 @@ use crate::project::{ChangeSet, ProjectError, ProjectTransaction};
 use crate::storage::segments::mapping::{
     SegmentMappingFlags, SegmentMappingId, SegmentMappingKind, SegmentMappingProvenance,
 };
-use crate::storage::segments::space::AddressSpaceId;
+use crate::storage::segments::space::{AddressSpaceId, AddressSpaceKind};
+use crate::storage::segments::{SegmentProperties, SegmentStorage, SegmentStorageError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ByteWrite {
@@ -83,32 +84,6 @@ impl SymbolAddition {
 
     fn into_parts(self) -> (SymbolIndex, SymbolEntry) {
         (self.index, self.entry)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SwitchAddition {
-    asserted: bool,
-    switch: Switch,
-}
-
-impl SwitchAddition {
-    fn new(switch: Switch) -> Self {
-        Self {
-            asserted: true,
-            switch,
-        }
-    }
-
-    fn derived(switch: Switch) -> Self {
-        Self {
-            asserted: false,
-            switch,
-        }
-    }
-
-    fn into_parts(self) -> (Switch, bool) {
-        (self.switch, self.asserted)
     }
 }
 
@@ -251,6 +226,26 @@ impl DerivedReferenceReplacement {
             self.provenance,
             self.references,
         )?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DerivedReferenceMerge {
+    provenance: ReferenceProvenance,
+    references: Vec<Reference>,
+}
+
+impl DerivedReferenceMerge {
+    fn new(provenance: ReferenceProvenance, references: Vec<Reference>) -> Self {
+        Self {
+            provenance,
+            references,
+        }
+    }
+
+    fn apply(self, transaction: &mut ProjectTransaction<'_>) -> Result<(), ProjectError> {
+        transaction.merge_derived_references(self.provenance, self.references)?;
         Ok(())
     }
 }
@@ -442,6 +437,52 @@ impl MappingResize {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct ReservedAddressSpace {
+    id: AddressSpaceId,
+    name: String,
+    kind: AddressSpaceKind,
+}
+
+impl ReservedAddressSpace {
+    fn new(id: AddressSpaceId, name: String, kind: AddressSpaceKind) -> Self {
+        Self { id, name, kind }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SyntheticSegmentMapping {
+    start: Address,
+    bytes: Arc<[u8]>,
+    properties: SegmentProperties,
+}
+
+impl SyntheticSegmentMapping {
+    fn new(
+        start: impl Into<Address>,
+        bytes: impl Into<Arc<[u8]>>,
+        properties: SegmentProperties,
+    ) -> Self {
+        Self {
+            start: start.into(),
+            bytes: bytes.into(),
+            properties,
+        }
+    }
+
+    fn start(&self) -> Address {
+        self.start
+    }
+
+    fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    fn properties(&self) -> SegmentProperties {
+        self.properties
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MappingCreationResult {
     changes: ChangeSet,
     mapping: SegmentMappingId,
@@ -462,12 +503,12 @@ impl MappingCreationResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SpaceCreationResult {
+pub struct AddressSpaceCreationResult {
     changes: ChangeSet,
     space: AddressSpaceId,
 }
 
-impl SpaceCreationResult {
+impl AddressSpaceCreationResult {
     pub fn new(space: AddressSpaceId, changes: ChangeSet) -> Self {
         Self { changes, space }
     }
@@ -509,6 +550,14 @@ impl ProjectUpdates {
         self,
         transaction: &mut ProjectTransaction<'_>,
     ) -> Result<(), ProjectError> {
+        if self
+            .updates
+            .iter()
+            .all(|update| matches!(update.operation, ProjectOperation::CreateSpace(_)))
+        {
+            return Ok(());
+        }
+
         let mut functions = Vec::new();
 
         for update in self.updates {
@@ -537,11 +586,8 @@ impl ProjectUpdates {
         self.updates.reserve(additional);
     }
 
-    pub fn add_function(&mut self, mut function: IncompleteFunction) {
-        let switches = function.take_pending_switches();
+    pub fn add_function(&mut self, function: IncompleteFunction) {
         self.updates.push(ProjectUpdate::add_function(function));
-        self.updates
-            .extend(switches.into_iter().map(ProjectUpdate::add_derived_switch));
     }
 
     pub fn add_mapping_to_space(&mut self, space: AddressSpaceId, mapping: SegmentMappingId) {
@@ -618,6 +664,18 @@ impl ProjectUpdates {
         self.updates.push(ProjectUpdate::remove_symbol(index));
     }
 
+    pub fn merge_derived_references(
+        &mut self,
+        provenance: ReferenceProvenance,
+        references: Vec<Reference>,
+    ) {
+        self.updates.push(ProjectUpdate::new(
+            ProjectOperation::MergeDerivedReferences(DerivedReferenceMerge::new(
+                provenance, references,
+            )),
+        ));
+    }
+
     pub fn replace_derived_references(
         &mut self,
         coverage: AddressRangeSet,
@@ -660,6 +718,46 @@ impl ProjectUpdates {
         self.updates
             .push(ProjectUpdate::write_bytes(address, bytes));
     }
+
+    pub fn reserve_space(
+        &mut self,
+        segments: &SegmentStorage,
+        name: String,
+        kind: AddressSpaceKind,
+    ) -> Result<AddressSpaceId, SegmentStorageError> {
+        let mut reserved = 0;
+        for update in &self.updates {
+            if let ProjectOperation::CreateSpace(space) = &update.operation {
+                if space.name == name {
+                    if space.kind != kind {
+                        return Err(SegmentStorageError::DuplicateAddressSpaceName(name));
+                    }
+                    return Ok(space.id);
+                }
+                reserved += 1;
+            }
+        }
+
+        let id = segments.pending_space_id(reserved)?;
+        self.updates
+            .push(ProjectUpdate::new(ProjectOperation::CreateSpace(
+                ReservedAddressSpace::new(id, name, kind),
+            )));
+        Ok(id)
+    }
+
+    pub fn create_synthetic_mapping(
+        &mut self,
+        start: impl Into<Address>,
+        bytes: impl Into<Arc<[u8]>>,
+        properties: SegmentProperties,
+    ) {
+        self.updates.push(ProjectUpdate::new(
+            ProjectOperation::CreateSyntheticMapping(SyntheticSegmentMapping::new(
+                start, bytes, properties,
+            )),
+        ));
+    }
 }
 
 impl From<ProjectUpdate> for ProjectUpdates {
@@ -681,9 +779,12 @@ enum ProjectOperation {
     AddMappingToSpace(MappingPlacement),
     AddProblem(ProblemAddition),
     AddReference(Reference),
-    AddSwitch(SwitchAddition),
+    AddSwitch(Switch),
     AddSymbol(SymbolAddition),
+    CreateSpace(ReservedAddressSpace),
+    CreateSyntheticMapping(SyntheticSegmentMapping),
     DeprioritiseMapping(MappingPriorityUpdate),
+    MergeDerivedReferences(DerivedReferenceMerge),
     PrioritiseMapping(MappingPriorityUpdate),
     RemapMapping(MappingRemap),
     RemoveFunction(FunctionRemoval),
@@ -799,11 +900,7 @@ impl ProjectUpdate {
     }
 
     pub(crate) fn add_switch(switch: Switch) -> Self {
-        Self::new(ProjectOperation::AddSwitch(SwitchAddition::new(switch)))
-    }
-
-    pub(crate) fn add_derived_switch(switch: Switch) -> Self {
-        Self::new(ProjectOperation::AddSwitch(SwitchAddition::derived(switch)))
+        Self::new(ProjectOperation::AddSwitch(switch))
     }
 
     pub(crate) fn add_problem(address: impl Into<Address>, kind: ProblemKind) -> Self {
@@ -880,11 +977,8 @@ impl ProjectUpdate {
                 transaction.add_reference(reference)?;
                 Ok(())
             }
-            ProjectOperation::AddSwitch(addition) => {
-                let (mut switch, asserted) = addition.into_parts();
-                if asserted {
-                    switch.mark_override();
-                }
+            ProjectOperation::AddSwitch(mut switch) => {
+                switch.mark_override();
                 let branch = switch.branch();
                 transaction.add_switch(branch, move |id, _| switch.with_id(id))?;
                 Ok(())
@@ -919,6 +1013,7 @@ impl ProjectUpdate {
                 transaction.remove_symbol_by_index(removal.index())?;
                 Ok(())
             }
+            ProjectOperation::MergeDerivedReferences(merge) => merge.apply(transaction),
             ProjectOperation::ReplaceDerivedReferences(replacement) => {
                 replacement.apply(transaction)
             }
@@ -941,6 +1036,17 @@ impl ProjectUpdate {
             }
             ProjectOperation::WriteBytes(write) => {
                 transaction.write_bytes(write.address(), write.bytes())
+            }
+            ProjectOperation::CreateSpace(space) => {
+                transaction.create_space_with_id(space.id, Some(space.name), space.kind)
+            }
+            ProjectOperation::CreateSyntheticMapping(mapping) => {
+                transaction.create_synthetic_mapping(
+                    mapping.start(),
+                    mapping.bytes(),
+                    mapping.properties(),
+                )?;
+                Ok(())
             }
         }
     }

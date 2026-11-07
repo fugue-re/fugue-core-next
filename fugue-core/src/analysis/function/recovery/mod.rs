@@ -1,9 +1,12 @@
 use thiserror::Error;
 
 use crate::analysis::AnalysisError;
-use crate::ir::{Address, IncompleteCodeBlockId, InsnError, InsnId, ProblemKind};
+use crate::ir::{
+    Address, AddressWithContext, IncompleteCodeBlockId, InsnError, InsnId, ProblemKind,
+};
 use crate::lifter::{DisassemblerError, InsnResolverError, LifterError};
 use crate::storage::SegmentStorageError;
+use crate::types::Confidence;
 
 pub(crate) mod analysis;
 pub(crate) use analysis::FUNCTION_RECOVERY_ANALYSER;
@@ -35,6 +38,46 @@ const MAX_FUNCTION_INSN_COUNT: usize = u16::MAX as usize;
 const DEFAULT_INVOCATION_CANDIDATE_LIMIT: usize = 8192;
 const DEFAULT_INVOCATION_FUNCTION_LIMIT: usize = 8192;
 const DEFAULT_INVOCATION_OUTPUT_BYTE_LIMIT: usize = 32 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FunctionCandidate {
+    entry: AddressWithContext,
+    confidence: Confidence,
+}
+
+impl FunctionCandidate {
+    pub fn new(entry: impl Into<AddressWithContext>) -> Self {
+        Self::new_with(entry, Confidence::certain())
+    }
+
+    pub fn new_with(entry: impl Into<AddressWithContext>, confidence: Confidence) -> Self {
+        Self {
+            entry: entry.into(),
+            confidence,
+        }
+    }
+
+    pub fn entry(&self) -> &AddressWithContext {
+        &self.entry
+    }
+
+    pub fn confidence(&self) -> Confidence {
+        self.confidence
+    }
+
+    pub(crate) fn into_parts(self) -> (AddressWithContext, Confidence) {
+        (self.entry, self.confidence)
+    }
+}
+
+impl<A> From<A> for FunctionCandidate
+where
+    A: Into<AddressWithContext>,
+{
+    fn from(entry: A) -> Self {
+        Self::new(entry)
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum FunctionRecoveryError {

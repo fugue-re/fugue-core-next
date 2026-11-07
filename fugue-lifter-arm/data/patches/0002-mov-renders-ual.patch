@@ -1,0 +1,19 @@
+--- a/ARM/ARMinstructions.sinc
++++ b/ARM/ARMinstructions.sinc
+@@ -2685,14 +2685,14 @@
+   call [pc];
+ }
+ 
+-:cpy^COND lr,rm 	is $(AMODE) & ARMcond=1 & COND & c2027=0x1a & c1619=0 & c0411=0 & Rd=14 & lr & rm & Rm2=15
++:mov^COND lr,rm 	is $(AMODE) & ARMcond=1 & COND & c2027=0x1a & c1619=0 & c0411=0 & Rd=14 & lr & rm & Rm2=15
+                     [ LRset=1; globalset(inst_next,LRset); ]
+ {
+   build COND;
+   lr = rm;
+ }
+ 
+-:cpy^COND Rd,rm 	is $(AMODE) & ARMcond=1 & COND & c2027=0x1a & c1619=0 & c0411=0 & Rd & rm
++:mov^COND Rd,rm 	is $(AMODE) & ARMcond=1 & COND & c2027=0x1a & c1619=0 & c0411=0 & Rd & rm
+ {
+   build COND;
+   build rm;

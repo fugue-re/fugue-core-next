@@ -24,7 +24,7 @@ macro_rules! il_id {
                     .checked_add(1)
                     .and_then(|value| u32::try_from(value).ok())
                     .and_then(std::num::NonZeroU32::new)
-                    .ok_or($crate::il::common::IlError::id_exhausted($kind))?;
+                    .ok_or_else(|| $crate::il::common::IlError::id_exhausted($kind))?;
 
                 Ok(Self(value))
             }

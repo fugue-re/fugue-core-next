@@ -5,7 +5,6 @@ use std::mem;
 use std::sync::{Arc, OnceLock};
 use std::thread::{Builder, JoinHandle};
 
-use change::ChangeFilter;
 use downcast_rs::{Downcast, impl_downcast};
 use flume::{Receiver, RecvError, Selector, Sender, TryRecvError};
 use parking_lot::RwLock;
@@ -13,10 +12,11 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use smol_str::SmolStr;
 use thiserror::Error;
-use update::ProjectUpdate;
-use worker::Worker;
 
 use crate::analysis::AnalysisError;
+use crate::engine::change::ChangeFilter;
+use crate::engine::update::ProjectUpdate;
+use crate::engine::worker::Worker;
 use crate::extension::{self, Registration};
 use crate::il::common::{IlAnalyser, IlArtefact, IlError, IlFormId};
 use crate::il::registry::IlRegistry;
@@ -29,7 +29,8 @@ use crate::project::{
 };
 use crate::queries::{QueryEngine, QueryReader};
 use crate::storage::segments::mapping::{SegmentMappingBuilder, SegmentMappingId};
-use crate::storage::segments::space::AddressSpaceId;
+use crate::storage::segments::space::{AddressSpaceId, AddressSpaceKind};
+use crate::storage::segments::{SegmentProperties, SegmentStorageError};
 use crate::types::Revision;
 
 pub mod change;
@@ -44,7 +45,7 @@ pub use metrics::{EngineMetrics, EngineMetricsSnapshot};
 pub(crate) use subscription::Subscriber;
 pub use subscription::{Subscription, SubscriptionBuilder};
 pub use update::{
-    MappingCreationResult, MappingMetadataUpdate, ProjectUpdates, SpaceCreationResult,
+    AddressSpaceCreationResult, MappingCreationResult, MappingMetadataUpdate, ProjectUpdates,
 };
 pub use view::ProjectView;
 pub(crate) use worker::Intake;
@@ -55,8 +56,11 @@ const DEFAULT_LIFTED_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const DEFAULT_SUBSCRIPTION_CAPACITY: usize = 1024;
 pub(crate) const DEFAULT_WORK_ITEM_MAX_ATTEMPTS: usize = 3;
 const MAX_COMPLETION_ROUNDS: usize = 256;
-const RETRACTED_BY_BYTE_CHANGE: &[AnalysisPhase] =
+const PHASES_CANCELLED_BY_RETRACTION: &[AnalysisPhase] =
     &[AnalysisPhase::Decode, AnalysisPhase::Partition];
+const TRACKED_DEPENDENCY_KINDS: ChangeKinds = ChangeKinds::all()
+    .difference(ChangeKinds::SEGMENTS)
+    .difference(ChangeKinds::ADDRESS_SPACE_CREATED);
 const WORK_BATCH_ITEMS: usize = 1024;
 
 pub trait AnalysisData: Downcast + Send {
@@ -197,11 +201,18 @@ impl AnalysisDataStore {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkTrigger {
+    Change,
+    Dependency,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkCause {
     range: Option<AddressRange>,
     kind: ChangeKinds,
     provenance: ChangeProvenance,
+    trigger: WorkTrigger,
     revision: Revision,
 }
 
@@ -211,12 +222,31 @@ impl WorkCause {
         kind: ChangeKinds,
         revision: Revision,
     ) -> Self {
+        Self::new_with(range, kind, WorkTrigger::Change, revision)
+    }
+
+    pub fn new_with(
+        range: impl Into<Option<AddressRange>>,
+        kind: ChangeKinds,
+        trigger: WorkTrigger,
+        revision: Revision,
+    ) -> Self {
         Self {
             range: range.into(),
             kind,
             provenance: ChangeProvenance::empty(),
+            trigger,
             revision,
         }
+    }
+
+    pub fn with_trigger(mut self, trigger: WorkTrigger) -> Self {
+        self.set_trigger(trigger);
+        self
+    }
+
+    pub fn set_trigger(&mut self, trigger: WorkTrigger) {
+        self.trigger = trigger;
     }
 
     pub fn with_provenance(mut self, provenance: ChangeProvenance) -> Self {
@@ -240,6 +270,10 @@ impl WorkCause {
         &self.provenance
     }
 
+    pub fn trigger(&self) -> WorkTrigger {
+        self.trigger
+    }
+
     pub fn revision(&self) -> Revision {
         self.revision
     }
@@ -256,6 +290,9 @@ impl WorkCause {
         };
         self.kind |= other.kind;
         self.provenance.merge(&other.provenance);
+        if other.trigger == WorkTrigger::Dependency {
+            self.trigger = WorkTrigger::Dependency;
+        }
         if other.revision > self.revision {
             self.revision = other.revision;
         }
@@ -572,6 +609,19 @@ impl<'a, 'p> AnalysisContext<'a, 'p> {
         mem::swap(&mut self.project, project);
         result
     }
+
+    pub fn reserve_space(
+        &mut self,
+        name: impl Into<String>,
+        kind: AddressSpaceKind,
+    ) -> Result<AddressSpaceId, AnalysisError> {
+        let name = name.into();
+        let segments = self.project.segments();
+        if segments.address_space_by_name(&name).is_some() {
+            return Err(SegmentStorageError::DuplicateAddressSpaceName(name).into());
+        }
+        Ok(self.updates.reserve_space(segments, name, kind)?)
+    }
 }
 
 pub trait Analyser: Send {
@@ -601,6 +651,10 @@ pub trait Analyser: Send {
     ) -> Result<(), AnalysisError> {
         let _ = context;
         Ok(())
+    }
+
+    fn retract(&mut self, regions: &AddressRangeSet) {
+        let _ = regions;
     }
 
     fn has_pending_work(&self) -> bool {
@@ -830,7 +884,7 @@ impl AnalysisEngine {
     ) -> Result<(), EngineError> {
         self.poison_check()?;
         self.tx
-            .send(Intake::Direct { kind, regions })
+            .send(Intake::ScheduleRanges { kind, regions })
             .map_err(|_| EngineError::Stopped)
     }
 
@@ -968,12 +1022,52 @@ impl AnalysisEngine {
         self.receive_reply(reply_rx)
     }
 
-    pub fn create_space(&self) -> Result<SpaceCreationResult, EngineError> {
+    pub fn create_space(&self) -> Result<AddressSpaceCreationResult, EngineError> {
         self.poison_check()?;
 
         let (reply_tx, reply_rx) = flume::bounded(1);
         self.tx
             .send(Intake::CreateSpace(reply_tx))
+            .map_err(|_| EngineError::Stopped)?;
+
+        self.receive_reply(reply_rx)
+    }
+
+    pub fn create_synthetic_mapping(
+        &self,
+        start: impl Into<Address>,
+        bytes: impl Into<Arc<[u8]>>,
+        properties: SegmentProperties,
+    ) -> Result<MappingCreationResult, EngineError> {
+        self.poison_check()?;
+
+        let (reply_tx, reply_rx) = flume::bounded(1);
+        self.tx
+            .send(Intake::CreateSyntheticMapping {
+                start: start.into(),
+                bytes: bytes.into(),
+                properties,
+                reply: reply_tx,
+            })
+            .map_err(|_| EngineError::Stopped)?;
+
+        self.receive_reply(reply_rx)
+    }
+
+    pub fn create_space_with(
+        &self,
+        name: impl Into<String>,
+        kind: AddressSpaceKind,
+    ) -> Result<AddressSpaceCreationResult, EngineError> {
+        self.poison_check()?;
+
+        let (reply_tx, reply_rx) = flume::bounded(1);
+        self.tx
+            .send(Intake::CreateSpaceWith {
+                name: name.into(),
+                kind,
+                reply: reply_tx,
+            })
             .map_err(|_| EngineError::Stopped)?;
 
         self.receive_reply(reply_rx)

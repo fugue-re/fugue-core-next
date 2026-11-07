@@ -20,7 +20,7 @@ where
             tracing::warn!("failed to resolve Mach-O relocation at {offset:#x}");
             return;
         };
-        let Some(mut value) = self.resolve_relocation_value(relocation) else {
+        let Some(mut value) = self.resolve_relocation_value(relocation, target) else {
             tracing::warn!("failed to resolve Mach-O relocation at {offset:#x}");
             return;
         };
@@ -55,7 +55,7 @@ where
 
         if !write_relocation(bytes, offset, relocation.size(), value) {
             tracing::warn!(
-                "Mach-O relocation at {offset:#x} does not fit {} bits",
+                "invalid {}-bit Mach-O relocation width or write location at {offset:#x}",
                 relocation.size()
             );
         }

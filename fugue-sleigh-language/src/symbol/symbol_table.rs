@@ -1,7 +1,7 @@
 use std::mem::take;
 
-use fugue_sleigh_marshal::sla::*;
 use fugue_sleigh_marshal::Decoder;
+use fugue_sleigh_marshal::sla::*;
 use ustr::Ustr;
 
 use crate::deserialise::{DeserialiseError, XmlExt};
@@ -79,7 +79,7 @@ impl SymbolTable {
                 ELEM_END_SYM_HEAD_ID => SymbolKind::End,
                 ELEM_NEXT2_SYM_HEAD_ID => SymbolKind::Next2,
                 ELEM_SUBTABLE_SYM_HEAD_ID => SymbolKind::Subtable,
-                id => return Err(DeserialiseError::ElementUnexpected(id)),
+                id => return Err(DeserialiseError::element_unexpected(id)),
             };
 
             let id = input.read_unsigned_integer_with_id(&ATTRIB_ID)? as usize;
@@ -88,7 +88,7 @@ impl SymbolTable {
 
             let builder = builders[id]
                 .as_mut()
-                .ok_or(DeserialiseError::Invariant("inconsistent symbol ID"))?;
+                .ok_or(DeserialiseError::invariant("inconsistent symbol ID"))?;
 
             builder.kind = kind;
             builder.id = id;
@@ -124,9 +124,7 @@ impl SymbolTable {
 
     pub fn from_xml(spaces: &AddressSpaces, input: xml::Node) -> Result<Self, DeserialiseError> {
         if input.tag_name().name() != "symbol_table" {
-            return Err(DeserialiseError::TagUnexpected(
-                input.tag_name().name().to_owned(),
-            ));
+            return Err(DeserialiseError::tag_unexpected(input.tag_name().name()));
         }
 
         let scope_size = input.attribute_int("scopesize")?;
@@ -138,7 +136,7 @@ impl SymbolTable {
         for _ in 0..scope_size {
             let input = children
                 .next()
-                .ok_or(DeserialiseError::Invariant("incorrect number of scopes"))?;
+                .ok_or(DeserialiseError::invariant("incorrect number of scopes"))?;
 
             let id = input.attribute_int::<usize>("id")?;
             let parent = input.attribute_int::<usize>("parent")?;
@@ -151,7 +149,7 @@ impl SymbolTable {
         for _ in 0..symbol_size {
             let input = children
                 .next()
-                .ok_or(DeserialiseError::Invariant("incorrect number of scopes"))?;
+                .ok_or(DeserialiseError::invariant("incorrect number of scopes"))?;
 
             let kind = match input.tag_name().name() {
                 "userop_head" => SymbolKind::UserOp,
@@ -169,17 +167,17 @@ impl SymbolTable {
                 "subtable_sym_head" => SymbolKind::Subtable,
                 "flowdest_sym_head" => SymbolKind::FlowDest,
                 "flowref_sym_head" => SymbolKind::FlowRef,
-                name => return Err(DeserialiseError::TagUnexpected(name.to_owned())),
+                name => return Err(DeserialiseError::tag_unexpected(name)),
             };
             let id = input.attribute_int::<usize>("id")?;
             let scope = input.attribute_int("scope")?;
             let name = input
                 .attribute("name")
-                .ok_or(DeserialiseError::AttributeExpected("name"))?;
+                .ok_or(DeserialiseError::attribute_expected("name"))?;
 
             let builder = builders[id]
                 .as_mut()
-                .ok_or(DeserialiseError::Invariant("inconsistent symbol ID"))?;
+                .ok_or(DeserialiseError::invariant("inconsistent symbol ID"))?;
 
             builder.kind = kind;
             builder.id = id;

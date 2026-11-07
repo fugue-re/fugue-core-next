@@ -1,6 +1,8 @@
 #[cfg(feature = "static-lifters")]
 pub use fugue_lifter::riscv::*;
 
+use fugue_bytes::Endian;
+
 use crate::arch::registry::{ArchProvider, LanguageProvider};
 use crate::arch::traits::Arch as ArchT;
 use crate::arch::{Arch, ExternalThunkTemplate};
@@ -36,7 +38,7 @@ pub struct RiscV {
 
 impl ArchT for RiscV {
     fn lifter(&self) -> Lifter {
-        Lifter::new(self.language)
+        Lifter::from(Arch::from(Box::new(self.clone()) as Box<dyn ArchT>))
     }
 
     fn external_thunk_template(&self) -> ExternalThunkTemplate {
@@ -86,7 +88,7 @@ impl RiscV {
             None | Some("default") => return Ok(variants::DEFAULT),
             _ => {}
         }
-        let lid = LanguageId::new_with("RISCV", false, 32, variant);
+        let lid = LanguageId::new_with("RISCV", Endian::Little, 32, variant);
         loader.load(&lid)
     }
 }

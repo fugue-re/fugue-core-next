@@ -1,6 +1,6 @@
 use object::elf::{
-    R_PPC_ADDR16_HA, R_PPC_ADDR16_HI, R_PPC_ADDR16_LO, R_PPC_COPY, R_PPC_GLOB_DAT, R_PPC_JMP_SLOT,
-    R_PPC_REL24, R_PPC_REL32, R_PPC_RELATIVE,
+    R_PPC_ADDR16_HA, R_PPC_ADDR16_HI, R_PPC_ADDR16_LO, R_PPC_COPY, R_PPC_GLOB_DAT, R_PPC_IRELATIVE,
+    R_PPC_JMP_SLOT, R_PPC_REL24, R_PPC_REL32, R_PPC_RELATIVE,
 };
 use object::read::elf::FileHeader;
 use object::{ReadRef, Relocation, RelocationKind};
@@ -38,14 +38,22 @@ where
 
         self.mark_function_symbol(value, bytes);
 
-        let value = i128::from(value) + i128::from(reloc.addend()) - i128::from(target);
-
-        if (value & 0x3) != 0 {
+        let addend = reloc.addend();
+        if value.wrapping_add_signed(addend).wrapping_sub(target) & 3 != 0 {
             tracing::warn!("relocation {reloc_type:#x} at {offset:#x} is not word aligned");
             return;
         }
 
-        if !((-(1i128 << 25))..(1i128 << 25)).contains(&value) {
+        let Some(value) = (if value >= target {
+            addend.checked_add_unsigned(value - target)
+        } else {
+            addend.checked_sub_unsigned(target - value)
+        }) else {
+            tracing::warn!("relocation {reloc_type:#x} at {offset:#x} overflow");
+            return;
+        };
+
+        if !((-(1i64 << 25))..(1i64 << 25)).contains(&value) {
             tracing::warn!("relocation {reloc_type:#x} at {offset:#x} overflow");
             return;
         }
@@ -53,8 +61,7 @@ where
         tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");
 
         // LI occupies bits 2..26 of the I-form instruction; AA and LK are preserved.
-        let displacement = u32::try_from(value & i128::from(0x03ff_fffc))
-            .expect("masked PowerPC branch displacement must fit in u32");
+        let displacement = (value as u32) & 0x03ff_fffc;
         bytes.update_value::<u32>(offset, |insn| (insn & !0x03ff_fffc) | displacement);
     }
 
@@ -115,7 +122,7 @@ where
         };
 
         match reloc_type {
-            R_PPC_RELATIVE => {
+            R_PPC_RELATIVE | R_PPC_IRELATIVE => {
                 let Ok(value) =
                     u32::try_from(self.base.offset().wrapping_add_signed(reloc.addend()))
                 else {
@@ -137,6 +144,9 @@ where
                     tracing::warn!("relocation {reloc_type:#x} at {offset:#x} overflow");
                     return;
                 };
+
+                let slot = bytes.address() + offset;
+                bytes.mapping_hints_mut().insert_symbol_pointer(slot);
 
                 if reloc_type == R_PPC_JMP_SLOT {
                     self.mark_function_symbol(value, bytes);

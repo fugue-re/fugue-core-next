@@ -38,8 +38,9 @@ impl CodeBlockSizeBucket {
     const MAX: Self = Self(u16::BITS as u8);
 
     fn new(range: AddressRange) -> Self {
-        let size = u16::try_from(range.size())
-            .ok()
+        let size = range
+            .size()
+            .and_then(|size| u16::try_from(size).ok())
             .and_then(NonZeroU16::new)
             .expect("code block size must fit in u16");
         Self(
@@ -384,6 +385,11 @@ impl CodeBlockTable {
     }
 
     pub(crate) fn overlaps(&self, range: &AddressRange) -> Iter<'_> {
+        let ids = self.ids_overlapping(range);
+        Box::new(ids.into_iter().filter_map(move |id| self.entries.get(&id)))
+    }
+
+    pub(crate) fn ids_overlapping(&self, range: &AddressRange) -> SmallVec<[Id<CodeBlock>; 8]> {
         let mut ids = self
             .overlap_ids(range.start_address())
             .unwrap_or_else(|error| error.into_fatal());
@@ -401,7 +407,7 @@ impl CodeBlockTable {
                 ids.push(key.id);
             }
         }
-        Box::new(ids.into_iter().filter_map(move |id| self.entries.get(&id)))
+        ids
     }
 
     pub(crate) fn flush(&self) -> Result<(), EntityStorageError> {

@@ -44,7 +44,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         for (_, sym) in binary.symbols().iter() {
             if sym.is_local() {
                 tracing::info!("local symbol: {} at {:#x}", sym.symbol(), sym.address());
-            } else if sym.is_extern() {
+            } else if sym.is_external() {
                 tracing::info!("global symbol: {} at {:#x}", sym.symbol(), sym.address());
             }
         }

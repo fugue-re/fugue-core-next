@@ -7,6 +7,7 @@ use crate::ir::{Endian, RawAddress};
 use crate::lifter::{LanguageId, LanguageSource};
 use crate::loader::macho::MachOFileRepr;
 use crate::loader::{ImageSegmentContents, LanguageVariantOverride, LoaderError};
+use crate::storage::segments::mapping::SegmentMappingHints;
 use crate::types::{ATTRIBUTE_LANGUAGE_VARIANT, AttributeMap};
 
 pub struct ImageContext<'a> {
@@ -124,10 +125,11 @@ impl<'a> ImageContext<'a> {
 
         let id = LanguageId::new_with(
             language.processor(),
-            language.is_big_endian(),
+            language.endian(),
             language.bits(),
             Some(variant),
-        );
+        )
+        .with_insn_endian(language.insn_endian());
 
         Arch::try_new(source.load(&id)?).map_err(LoaderError::extension)
     }
@@ -169,16 +171,16 @@ impl ArchResolver {
         context: &ImageContext<'_>,
         source: &LanguageSource<'_>,
     ) -> Result<Option<Arch>, LoaderError> {
-        let is_big = context.endian().is_big();
+        let endian = context.endian();
         let id = match context.machine() {
-            macho::CPU_TYPE_ARM => LanguageId::new("ARM", is_big, 32),
-            macho::CPU_TYPE_ARM64 => LanguageId::new("AARCH64", is_big, 64),
-            macho::CPU_TYPE_ARM64_32 => LanguageId::new_with("AARCH64", is_big, 32, Some("ilp32")),
-            macho::CPU_TYPE_MIPS => LanguageId::new("MIPS", is_big, 32),
-            macho::CPU_TYPE_POWERPC => LanguageId::new("PowerPC", is_big, 32),
-            macho::CPU_TYPE_POWERPC64 => LanguageId::new("PowerPC", is_big, 64),
-            macho::CPU_TYPE_X86 => LanguageId::new("x86", is_big, 32),
-            macho::CPU_TYPE_X86_64 => LanguageId::new("x86", is_big, 64),
+            macho::CPU_TYPE_ARM => LanguageId::new("ARM", endian, 32),
+            macho::CPU_TYPE_ARM64 => LanguageId::new("AARCH64", endian, 64),
+            macho::CPU_TYPE_ARM64_32 => LanguageId::new_with("AARCH64", endian, 32, Some("ilp32")),
+            macho::CPU_TYPE_MIPS => LanguageId::new("MIPS", endian, 32),
+            macho::CPU_TYPE_POWERPC => LanguageId::new("PowerPC", endian, 32),
+            macho::CPU_TYPE_POWERPC64 => LanguageId::new("PowerPC", endian, 64),
+            macho::CPU_TYPE_X86 => LanguageId::new("x86", endian, 32),
+            macho::CPU_TYPE_X86_64 => LanguageId::new("x86", endian, 64),
             _ => return Ok(None),
         };
 
@@ -308,3 +310,159 @@ impl Registration for RelocationExtension {
 }
 
 extension::collect!(RelocationExtension);
+
+pub struct TrackedSetContext<'a, 'data> {
+    view: &'a MachOFileRepr<'data>,
+    arch: &'a Arch,
+    base: RawAddress,
+    mapping_hints: &'a mut SegmentMappingHints,
+}
+
+impl<'a, 'data> TrackedSetContext<'a, 'data> {
+    pub(crate) fn new(
+        view: &'a MachOFileRepr<'data>,
+        arch: &'a Arch,
+        base: RawAddress,
+        mapping_hints: &'a mut SegmentMappingHints,
+    ) -> Self {
+        Self {
+            view,
+            arch,
+            base,
+            mapping_hints,
+        }
+    }
+
+    pub fn view(&self) -> &MachOFileRepr<'data> {
+        self.view
+    }
+
+    pub fn arch(&self) -> &Arch {
+        self.arch
+    }
+
+    pub fn base(&self) -> RawAddress {
+        self.base
+    }
+
+    pub fn mapping_hints(&self) -> &SegmentMappingHints {
+        self.mapping_hints
+    }
+
+    pub fn mapping_hints_mut(&mut self) -> &mut SegmentMappingHints {
+        self.mapping_hints
+    }
+
+    pub fn apply_tracked_sets(&mut self) -> Result<bool, LoaderError> {
+        for extension in extension::iter::<TrackedSetExtension>() {
+            if extension.apply(self)? {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+}
+
+type TrackedSetExtensionFn = fn(&mut TrackedSetContext<'_, '_>) -> Result<bool, LoaderError>;
+
+pub struct TrackedSetExtension {
+    name: &'static str,
+    apply: TrackedSetExtensionFn,
+}
+
+impl TrackedSetExtension {
+    pub const fn new(name: &'static str, apply: TrackedSetExtensionFn) -> Self {
+        Self { name, apply }
+    }
+
+    pub fn apply(&self, context: &mut TrackedSetContext<'_, '_>) -> Result<bool, LoaderError> {
+        (self.apply)(context)
+    }
+}
+
+impl Registration for TrackedSetExtension {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+}
+
+extension::collect!(TrackedSetExtension);
+
+pub struct ExceptionContext<'a, 'data> {
+    view: &'a MachOFileRepr<'data>,
+    arch: &'a Arch,
+    base: RawAddress,
+    mapping_hints: &'a mut SegmentMappingHints,
+}
+
+impl<'a, 'data> ExceptionContext<'a, 'data> {
+    pub(crate) fn new(
+        view: &'a MachOFileRepr<'data>,
+        arch: &'a Arch,
+        base: RawAddress,
+        mapping_hints: &'a mut SegmentMappingHints,
+    ) -> Self {
+        Self {
+            view,
+            arch,
+            base,
+            mapping_hints,
+        }
+    }
+
+    pub fn view(&self) -> &MachOFileRepr<'data> {
+        self.view
+    }
+
+    pub fn arch(&self) -> &Arch {
+        self.arch
+    }
+
+    pub fn base(&self) -> RawAddress {
+        self.base
+    }
+
+    pub fn mapping_hints(&self) -> &SegmentMappingHints {
+        self.mapping_hints
+    }
+
+    pub fn mapping_hints_mut(&mut self) -> &mut SegmentMappingHints {
+        self.mapping_hints
+    }
+
+    pub fn apply_exceptions(&mut self) -> Result<bool, LoaderError> {
+        for extension in extension::iter::<ExceptionExtension>() {
+            if extension.apply(self)? {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+}
+
+type ExceptionExtensionFn = fn(&mut ExceptionContext<'_, '_>) -> Result<bool, LoaderError>;
+
+pub struct ExceptionExtension {
+    name: &'static str,
+    apply: ExceptionExtensionFn,
+}
+
+impl ExceptionExtension {
+    pub const fn new(name: &'static str, apply: ExceptionExtensionFn) -> Self {
+        Self { name, apply }
+    }
+
+    pub fn apply(&self, context: &mut ExceptionContext<'_, '_>) -> Result<bool, LoaderError> {
+        (self.apply)(context)
+    }
+}
+
+impl Registration for ExceptionExtension {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+}
+
+extension::collect!(ExceptionExtension);
