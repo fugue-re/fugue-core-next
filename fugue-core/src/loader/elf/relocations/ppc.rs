@@ -38,14 +38,23 @@ where
 
         self.mark_function_symbol(value, bytes);
 
-        let value = i128::from(value) + i128::from(reloc.addend()) - i128::from(target);
-
-        if (value & 0x3) != 0 {
+        let addend = reloc.addend();
+        if value.wrapping_add_signed(addend).wrapping_sub(target) & 3 != 0 {
             tracing::warn!("relocation {reloc_type:#x} at {offset:#x} is not word aligned");
             return;
         }
 
-        if !((-(1i128 << 25))..(1i128 << 25)).contains(&value) {
+        let displacement = if value >= target {
+            addend.checked_add_unsigned(value - target)
+        } else {
+            addend.checked_sub_unsigned(target - value)
+        };
+        let Some(value) = displacement else {
+            tracing::warn!("relocation {reloc_type:#x} at {offset:#x} overflow");
+            return;
+        };
+
+        if !((-(1i64 << 25))..(1i64 << 25)).contains(&value) {
             tracing::warn!("relocation {reloc_type:#x} at {offset:#x} overflow");
             return;
         }
@@ -53,8 +62,7 @@ where
         tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");
 
         // LI occupies bits 2..26 of the I-form instruction; AA and LK are preserved.
-        let displacement = u32::try_from(value & i128::from(0x03ff_fffc))
-            .expect("masked PowerPC branch displacement must fit in u32");
+        let displacement = (value as u32) & 0x03ff_fffc;
         bytes.update_value::<u32>(offset, |insn| (insn & !0x03ff_fffc) | displacement);
     }
 

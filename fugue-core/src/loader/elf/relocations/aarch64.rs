@@ -32,22 +32,31 @@ where
 
         self.mark_function_symbol(value, bytes);
 
-        let value = i128::from(value) + i128::from(reloc.addend()) - i128::from(target);
-
-        if (value & 0x3) != 0 {
+        let addend = reloc.addend();
+        if value.wrapping_add_signed(addend).wrapping_sub(target) & 3 != 0 {
             tracing::warn!("relocation {reloc_type:#x} at {offset:#x} is not word aligned");
             return;
         }
 
+        let displacement = if value >= target {
+            addend.checked_add_unsigned(value - target)
+        } else {
+            addend.checked_sub_unsigned(target - value)
+        };
+        let Some(value) = displacement else {
+            tracing::warn!("relocation {reloc_type:#x} at {offset:#x} overflow");
+            return;
+        };
+
         let shifted = value >> 2;
-        if !((-(1i128 << 25))..(1i128 << 25)).contains(&shifted) {
+        if !((-(1i64 << 25))..(1i64 << 25)).contains(&shifted) {
             tracing::warn!("relocation {reloc_type:#x} at {offset:#x} overflow");
             return;
         }
 
         tracing::trace!("applying relocation {reloc_type:#x} at {offset:#x}: {value:#x}");
 
-        let imm26 = (shifted as i64 as u32) & 0x03ff_ffff;
+        let imm26 = (shifted as u32) & 0x03ff_ffff;
         bytes.update_value::<u32>(offset, |insn| (insn & !0x03ff_ffff) | imm26);
     }
 

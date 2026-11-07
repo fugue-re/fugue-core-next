@@ -36,8 +36,17 @@ pub use image::{
 };
 pub(crate) use image::{ImageBankLayout, ImageCoveredRegions, ImageRegionBankMap};
 
-// pub mod macho
-// pub use macho::Macho;
+pub mod macho;
+pub use macho::extensions::{
+    ArchResolver as MachOArchResolver, ExceptionContext as MachOExceptionContext,
+    ExceptionExtension as MachOExceptionExtension, ImageContext as MachOImageContext,
+    RelocationContext as MachORelocationContext, RelocationExtension as MachORelocationExtension,
+    TrackedSetContext as MachOTrackedSetContext, TrackedSetExtension as MachOTrackedSetExtension,
+};
+pub use macho::{
+    ATTRIBUTE_VARIANT as ATTRIBUTE_MACHO_VARIANT, MACHO_SYMTAB_SELECTOR, MachO, MachOFileRepr,
+    MachOSegmentRelocator,
+};
 
 pub mod pe;
 pub use pe::extensions::{
@@ -326,6 +335,7 @@ pub trait Loadable {
 #[analysis_data(delegate)]
 pub enum Loader<'a> {
     Elf(elf::Elf<'a>),
+    MachO(macho::MachO<'a>),
     Pe(pe::Pe<'a>),
 }
 
@@ -345,6 +355,10 @@ impl<'a> Loader<'a> {
             FileKind::Elf32 | FileKind::Elf64 => {
                 let elf = Elf::new_with(data, attributes)?;
                 Self::Elf(elf)
+            }
+            FileKind::MachO32 | FileKind::MachO64 | FileKind::MachOFat32 | FileKind::MachOFat64 => {
+                let macho = MachO::new_with(data, attributes)?;
+                Self::MachO(macho)
             }
             FileKind::Pe32 | FileKind::Pe64 => {
                 let pe = Pe::new_with(data, attributes)?;
@@ -393,6 +407,7 @@ impl Loadable for Loader<'_> {
     fn architecture(&self) -> Arch {
         match self {
             Self::Elf(elf) => elf.architecture(),
+            Self::MachO(macho) => macho.architecture(),
             Self::Pe(pe) => pe.architecture(),
         }
     }
@@ -400,6 +415,7 @@ impl Loadable for Loader<'_> {
     fn platform(&self) -> Platform {
         match self {
             Self::Elf(elf) => elf.platform(),
+            Self::MachO(macho) => macho.platform(),
             Self::Pe(pe) => pe.platform(),
         }
     }
@@ -407,6 +423,7 @@ impl Loadable for Loader<'_> {
     fn metadata(&self) -> &LoadableMetadata {
         match self {
             Self::Elf(elf) => elf.metadata(),
+            Self::MachO(macho) => macho.metadata(),
             Self::Pe(pe) => pe.metadata(),
         }
     }
@@ -414,6 +431,7 @@ impl Loadable for Loader<'_> {
     fn image_symbols(&self) -> Option<&TransientSymbolTable<ImageAddress>> {
         match self {
             Self::Elf(elf) => Loadable::image_symbols(elf),
+            Self::MachO(macho) => Loadable::image_symbols(macho),
             Self::Pe(pe) => Loadable::image_symbols(pe),
         }
     }
@@ -421,6 +439,7 @@ impl Loadable for Loader<'_> {
     fn attributes(&self) -> &AttributeMap {
         match self {
             Self::Elf(elf) => elf.attributes(),
+            Self::MachO(macho) => macho.attributes(),
             Self::Pe(pe) => pe.attributes(),
         }
     }
@@ -428,6 +447,7 @@ impl Loadable for Loader<'_> {
     fn attributes_mut(&mut self) -> &mut AttributeMap {
         match self {
             Self::Elf(elf) => elf.attributes_mut(),
+            Self::MachO(macho) => macho.attributes_mut(),
             Self::Pe(pe) => pe.attributes_mut(),
         }
     }
@@ -435,6 +455,7 @@ impl Loadable for Loader<'_> {
     fn entry_point(&self) -> Option<ImageAddress> {
         match self {
             Self::Elf(elf) => elf.entry_point(),
+            Self::MachO(macho) => macho.entry_point(),
             Self::Pe(pe) => pe.entry_point(),
         }
     }
@@ -444,6 +465,7 @@ impl Loadable for Loader<'_> {
     ) -> impl FallibleIterator<Item = ImageSegment<'a>, Error = LoaderError> + 'a {
         match self {
             Self::Elf(elf) => Box::new(elf.image_segments()) as ImageSegmentIterator<'a>,
+            Self::MachO(macho) => Box::new(macho.image_segments()) as ImageSegmentIterator<'a>,
             Self::Pe(pe) => Box::new(pe.image_segments()) as ImageSegmentIterator<'a>,
         }
     }
@@ -451,6 +473,7 @@ impl Loadable for Loader<'_> {
     fn image_layout(&self) -> &ImageLayout {
         match self {
             Self::Elf(elf) => elf.image_layout(),
+            Self::MachO(macho) => macho.image_layout(),
             Self::Pe(pe) => pe.image_layout(),
         }
     }
@@ -460,6 +483,9 @@ impl Loadable for Loader<'_> {
     ) -> impl FallibleIterator<Item = ImageSegmentContents<'a>, Error = LoaderError> + 'a {
         match self {
             Self::Elf(elf) => Box::new(elf.image_contents()) as ImageSegmentContentsIterator<'a>,
+            Self::MachO(macho) => {
+                Box::new(macho.image_contents()) as ImageSegmentContentsIterator<'a>
+            }
             Self::Pe(pe) => Box::new(pe.image_contents()) as ImageSegmentContentsIterator<'a>,
         }
     }
